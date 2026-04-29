@@ -1,4 +1,8 @@
-"""Single-batch Claude analysis with 24h Mongo cache. Token-efficient."""
+"""Single-batch Claude analysis with 24h Mongo cache. Token-efficient.
+
+Uses the official `anthropic` SDK when ANTHROPIC_API_KEY is set; otherwise
+falls back to emergentintegrations LlmChat with EMERGENT_LLM_KEY.
+"""
 from __future__ import annotations
 import json
 import logging
@@ -7,8 +11,6 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 from .db import get_db
 
@@ -20,6 +22,48 @@ CACHE_TTL_HOURS = 24
 
 def _today_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _use_native() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+async def _call_claude(system: str, user: str) -> str | None:
+    """Call Claude via official SDK (if ANTHROPIC_API_KEY) or emergentintegrations."""
+    if _use_native():
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+            msg = await client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            parts = []
+            for block in msg.content:
+                if getattr(block, "type", None) == "text":
+                    parts.append(block.text)
+            return "".join(parts)
+        except Exception as e:
+            logger.exception("Anthropic SDK call failed: %s", e)
+            return None
+
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        logger.error("No ANTHROPIC_API_KEY or EMERGENT_LLM_KEY configured")
+        return None
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"claude-{uuid.uuid4()}",
+            system_message=system,
+        ).with_model("anthropic", CLAUDE_MODEL)
+        return await chat.send_message(UserMessage(text=user))
+    except Exception as e:
+        logger.exception("Emergent LlmChat call failed: %s", e)
+        return None
 
 
 async def get_cached(ticker: str) -> dict[str, Any] | None:
@@ -49,7 +93,6 @@ async def set_cached(ticker: str, analysis: dict[str, Any]):
 
 
 def _build_prompt(candidates: list[dict[str, Any]]) -> str:
-    """Build the structured input for Claude. Compact JSON to save tokens."""
     compact = []
     for c in candidates:
         compact.append({
@@ -77,12 +120,15 @@ def _build_prompt(candidates: list[dict[str, Any]]) -> str:
     )
 
 
-def _parse_json_array(text: str) -> list[dict[str, Any]]:
+def _strip_fences(text: str) -> str:
     text = text.strip()
-    # Strip markdown fences if Claude added them
     text = re.sub(r"^```(?:json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
-    # Find first [ ... ]
+    return text
+
+
+def _parse_json_array(text: str) -> list[dict[str, Any]]:
+    text = _strip_fences(text)
     m = re.search(r"\[.*\]", text, re.DOTALL)
     if m:
         text = m.group(0)
@@ -90,8 +136,6 @@ def _parse_json_array(text: str) -> list[dict[str, Any]]:
 
 
 async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Token-efficient: pulls cached analyses; calls Claude only for uncached
-    tickers in a SINGLE batch request. Returns merged list."""
     if not candidates:
         return []
 
@@ -106,22 +150,14 @@ async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
             to_analyze.append(c)
 
     if to_analyze:
-        api_key = os.environ.get("EMERGENT_LLM_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            logger.error("No EMERGENT_LLM_KEY / ANTHROPIC_API_KEY set")
-        else:
-            session_id = f"scan-{uuid.uuid4()}"
-            chat = LlmChat(
-                api_key=api_key,
-                session_id=session_id,
-                system_message=(
-                    "You are a senior small/mid-cap equity analyst. You output "
-                    "compact JSON only. No prose."
-                ),
-            ).with_model("anthropic", CLAUDE_MODEL)
-            prompt = _build_prompt(to_analyze)
+        system = (
+            "You are a senior small/mid-cap equity analyst. You output compact "
+            "JSON only. No prose."
+        )
+        prompt = _build_prompt(to_analyze)
+        resp = await _call_claude(system, prompt)
+        if resp:
             try:
-                resp = await chat.send_message(UserMessage(text=prompt))
                 parsed = _parse_json_array(resp)
                 for item in parsed:
                     t = str(item.get("ticker", "")).upper()
@@ -137,9 +173,8 @@ async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
                     await set_cached(t, analysis)
                     results[t] = {**analysis, "cached": False}
             except Exception as e:
-                logger.exception("Claude batch analyze failed: %s", e)
+                logger.exception("Failed to parse Claude batch JSON: %s", e)
 
-    # Preserve original input order, merge with signals
     merged: list[dict[str, Any]] = []
     for c in candidates:
         a = results.get(c["ticker"])
@@ -157,20 +192,9 @@ async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 async def analyze_single(ticker: str, context: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """For /analyze [ticker] command. Uses cache; otherwise single Claude call."""
     cached = await get_cached(ticker)
     if cached:
         return {**cached["analysis"], "cached": True}
-
-    api_key = os.environ.get("EMERGENT_LLM_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-
-    chat = LlmChat(
-        api_key=api_key,
-        session_id=f"analyze-{uuid.uuid4()}",
-        system_message="You output compact JSON only. No prose.",
-    ).with_model("anthropic", CLAUDE_MODEL)
 
     payload = {"ticker": ticker.upper(), "context": context or {}}
     prompt = (
@@ -180,11 +204,11 @@ async def analyze_single(ticker: str, context: dict[str, Any] | None = None) -> 
         "\"thesis\":\"one sentence\",\"entry_zone\":\"$X-$Y\","
         "\"catalyst_date\":\"YYYY-MM-DD or text\"}"
     )
+    resp = await _call_claude("You output compact JSON only. No prose.", prompt)
+    if not resp:
+        return None
     try:
-        resp = await chat.send_message(UserMessage(text=prompt))
-        text = resp.strip()
-        text = re.sub(r"^```(?:json)?", "", text).strip()
-        text = re.sub(r"```$", "", text).strip()
+        text = _strip_fences(resp)
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             text = m.group(0)
@@ -199,5 +223,5 @@ async def analyze_single(ticker: str, context: dict[str, Any] | None = None) -> 
         await set_cached(ticker, analysis)
         return {**analysis, "cached": False}
     except Exception as e:
-        logger.exception("analyze_single failed for %s: %s", ticker, e)
+        logger.exception("analyze_single parse failed for %s: %s", ticker, e)
         return None

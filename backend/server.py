@@ -55,8 +55,8 @@ async def status():
         "bot": {
             "online": True,
             "telegram_configured": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
-            "claude_configured": bool(os.environ.get("EMERGENT_LLM_KEY")
-                                       or os.environ.get("ANTHROPIC_API_KEY")),
+            "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")
+                                       or os.environ.get("EMERGENT_LLM_KEY")),
             "default_chat_id_set": bool(os.environ.get("TELEGRAM_CHAT_ID")),
         },
         "webhook_url": state.get("webhook_url"),
