@@ -1,0 +1,119 @@
+{
+  "theme_and_archetype": {
+    "domain": "Finance, Developer Tools, Admin Dashboard",
+    "theme": "Dark",
+    "archetype": "Archetype 4: Swiss & High-Contrast (Adapted to Retro-Futurism/Terminal)",
+    "description": "A serious, dense financial/trading terminal aesthetic. Think Bloomberg Terminal meets modern dashboard. High contrast, function-first, with exposed grid skeletons and raw data."
+  },
+  "colors": {
+    "background": {
+      "main": "bg-slate-950",
+      "hex": "#020617",
+      "description": "Deepest void black tinted with a tiny bit of blue to feel alive."
+    },
+    "surfaces": {
+      "primary": "bg-slate-900",
+      "secondary": "bg-slate-900/50",
+      "hover": "hover:bg-slate-800",
+      "border": "border-slate-800",
+      "description": "Solid, flat backgrounds with 1px technical borders. No soft shadows, no glassmorphism. Strict boundaries."
+    },
+    "text": {
+      "primary": "text-slate-50",
+      "secondary": "text-slate-400",
+      "muted": "text-slate-500",
+      "description": "High contrast data readability."
+    },
+    "accents": {
+      "terminal_green": "text-green-500",
+      "terminal_green_bg": "bg-green-500/10",
+      "terminal_green_border": "border-green-500/50",
+      "danger_red": "text-red-500",
+      "danger_red_bg": "bg-red-500/10",
+      "warning_amber": "text-amber-500",
+      "warning_amber_bg": "bg-amber-500/10",
+      "claude_purple": "text-indigo-400"
+    }
+  },
+  "typography": {
+    "headings": {
+      "family": "font-sans",
+      "tailwind_class": "font-sans tracking-tight",
+      "google_font": "IBM Plex Sans",
+      "weights": ["400", "500", "600"],
+      "description": "Used for main structural headings only. No expressive flairs."
+    },
+    "body": {
+      "family": "font-sans",
+      "tailwind_class": "font-sans",
+      "google_font": "IBM Plex Sans",
+      "description": "Clean, objective readability for narrative text like the Claude thesis."
+    },
+    "data_mono": {
+      "family": "font-mono",
+      "tailwind_class": "font-mono tracking-tighter",
+      "google_font": "JetBrains Mono",
+      "weights": ["400", "700"],
+      "description": "CRITICAL. Used heavily for tickers, timestamps, prices, signal scores, and tables. All numbers must be tabular/mono."
+    },
+    "scale": {
+      "h1": "text-3xl sm:text-4xl",
+      "h2": "text-2xl sm:text-3xl",
+      "h3": "text-xl",
+      "h4": "text-sm tracking-[0.2em] uppercase",
+      "body": "text-sm",
+      "small_data": "text-xs"
+    }
+  },
+  "layout_and_spacing": {
+    "strategy": "The Control Room Grid",
+    "description": "Density, Data Correlation, Scanability. Every pixel must be utilized. Use h-full on children. No jagged bottoms.",
+    "grid_classes": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+    "surface_strategy": "Grid Borders (The Technical Look). Expose the skeleton. border-collapse layouts.",
+    "spacing": "Tight padding for data (p-4), moderate for main containers (p-6).",
+    "radii": "rounded-none or max rounded-sm (2px-4px). No soft rounded edges."
+  },
+  "components_strategy": {
+    "cards": "Avoid Shadcn default floating soft cards. Use pure rectangular divs with 1px border-slate-800, flat bg-slate-900, sharp corners.",
+    "tables": "Dense rows. No large padding. Use text-sm and text-xs. Hover states row: bg-slate-800.",
+    "badges": "Square or very slightly rounded. High contrast text on 10% opacity backgrounds. E.g., Bot Online = text-green-500 bg-green-500/10.",
+    "buttons": "Technical triggers. border border-slate-700 bg-slate-900 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-widest text-xs font-mono.",
+    "status_indicator": "A pinging animation dot (bg-green-500 with animate-ping) next to 'BOT ONLINE'."
+  },
+  "animation_and_motion": {
+    "general": "Minimalist. No smooth scrolling, no bouncy framer-motion layers. Function over form.",
+    "interactions": "Instant or 150ms transitions for hovers. Focus states must have sharp 1px ring.",
+    "data_feed": "If new activity log comes in, flash background briefly (e.g., bg-slate-800 -> bg-slate-900)."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1760931969401-9bd6ee902798?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxyb2JvdCUyMGV5ZSUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3NzQ4NjI5OHww&ixlib=rb-4.1.0&q=85",
+        "category": "bot_avatar",
+        "description": "Futuristic red/dark robot eye to be used very small as the Telegram Bot avatar icon in the header."
+      },
+      {
+        "url": "https://images.pexels.com/photos/4065437/pexels-photo-4065437.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "category": "background_texture",
+        "description": "Monochromatic metallic honeycomb grid. Use ONLY at 5-10% opacity blended into the background for a subtle hardware/terminal texture if pure black is too flat."
+      }
+    ],
+    "icons": {
+      "library": "phosphor-icons or lucide-react",
+      "style": "Duotone or straight sharp line. Small sized (14-16px) inline with text."
+    }
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure text over pure dark backgrounds meets 4.5:1 ratio. No muddy grays for vital data.",
+    "testing": "All buttons, rows, and active indicators MUST use data-testid attributes (e.g., data-testid='run-scan-button')."
+  },
+  "page_sections_mapping": {
+    "header": "Contains Bot Avatar, 'STOCK_INTEL_BOT', 'ONLINE' pinging status, 'LAST SCAN: 08:00 AM ET', and 'RUN SCAN NOW' primary technical button.",
+    "top_stats": "Control Room top row: 4 widgets (Tickers Scanned, API Calls Saved, Signals Fired, Webhook Status).",
+    "main_content": {
+      "left_column": "col-span-1 md:col-span-2 lg:col-span-3. Contains the 'Latest Scan Results Table' (Ticker, Score, Thesis, Entry, Catalyst). Tickers in pure white mono. Thesis left-aligned. Score colored by range.",
+      "right_column": "col-span-1. Contains vertical feed of 'Active Watchlist' and 'Price Alerts'.",
+      "bottom_row": "Activity/Log Feed in pure terminal window style (Monospace, gray text on black). col-span-full."
+    }
+  }
+}
