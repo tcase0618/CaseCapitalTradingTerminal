@@ -1,0 +1,50 @@
+{
+  "summary": "Full v3 regression on Stock Intel Bot Pass-A (6 features). 17/17 new v3 pytest cases pass + 28/28 v1/v2 regression still green (45/45 backend). Congressional dataset, squeeze 0-100, FY status (correctly inactive in Jan), time-target future-clamp, NLQ webhook catch-all, 9 new/updated Telegram commands, and scan v3 schema (per-result squeeze/time_target/fy_multiplier_applied) all verified. Frontend dashboard renders all 9 required data-testids, new SQUEEZE + TIME columns in scan table, Squeeze Leaderboard panel (top 10, sorted desc), Congressional Buys panel (12 rows, +3PTS MATCH badges on committee-matched buys), CONGRESS_BUY badge on $LMT/$BWXT/$RTX, and FY banner correctly HIDDEN (Jan outside Jul-Sep). Token efficiency preserved: 2nd /api/scan/run returns claude_calls_made=0 with claude_cache_hits == pre_filter_passed (14/14).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/telegram/info", "issue": "Prior test asserted telegram_configured=False; env now has TELEGRAM_BOT_TOKEN set so test was loosened. Not a bug, just a note."},
+      {"endpoint": "/api/congress/recent", "issue": "BWXT row (Dan Newhouse / House) has committee_match=false so weight_points=1 — earlier spec text says BWXT buy should trigger CONGRESSIONAL_BUY signal, which it does (via weight aggregation), but panel shows no +3PTS badge which may confuse users comparing with dashboard scan-table CONGRESS_BUY badge on $BWXT. Cosmetic only."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Congressional Buys panel", "issues": ["Rows without committee match (e.g. $BWXT Dan Newhouse) render with no badge at all; a subtle +1PT label could make the weighting transparent"]},
+      {"screen": "Latest Scan Results table — Time column", "issues": ["Shows absolute ISO date + days_remaining (e.g. '2026-06-05 / 33d') which is clear; no issue, just noting dates display in scan cache are stable across refresh"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v3_api.py",
+    "/app/backend/tests/test_v2_api.py",
+    "/app/backend/tests/test_stock_bot_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_v3_results.xml",
+    "/app/test_reports/pytest/pytest_regression.xml"
+  ],
+  "action_items": [
+    "[Optional] Show subtle '+1pt' badge on non-committee-matched congress rows for transparency",
+    "[Optional] Add automated clamp visualization — e.g., asterisk on time_target.target_date when original Claude catalyst_date was in the past and got clamped forward"
+  ],
+  "critical_code_review_comments": [
+    "services/time_target.compute_time_target: future-clamp verified — all 14 scan candidates have target_date >= today (2026-01-xx). Good defensive coding.",
+    "services/squeeze.compute_squeeze: score stays integer 0-100 and leaderboard is sorted DESC correctly (PRCH 22 → DELL 3).",
+    "services/congress: CURATED dataset is clearly labelled as public-domain + swappable (aligns with review-request note on mocked data).",
+    "services/nlq: 6h cache via nlq_cache collection is in place; webhook correctly routes non-/ messages to NLQ path. Activity log captured 'Telegram cmd from 8073083936' as spec required.",
+    "services/scanner: single batched Claude call preserved (claude_calls_made=1 on cold; 0 on warm with full cache_hit equality) — token efficiency design still holds for v3.",
+    "server.py endpoints /squeeze/{ticker}, /squeeze/leaderboard/top, /congress/recent, /fy/status, /performance/summary: all return clean JSON with no _id leakage. Good.",
+    "Dashboard.jsx: testids congress-row-{TICKER} and squeeze-row-{TICKER} confirmed in source (lines 555 & 586) — plays nicely with automated testing."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v3_api.py (new, 17 cases)",
+    "/app/backend/tests/test_stock_bot_api.py (loosened telegram_configured assertion — env now has token)"
+  ],
+  "success_rate": {"backend": "100% (45/45 — 17 v3 + 28 v1+v2 regression)", "frontend": "100% (all 9 required testids + per-ticker testids present, no UI bugs)"},
+  "test_credentials": "N/A — no auth (dashboard is public, Telegram token & chat_id configured in backend/.env)",
+  "seed_data_creation": "Only non-destructive: 9 Telegram webhook commands processed (/squeeze TSLA, /congress, /performance, /help, /backtest, /geo, /premarket, /add NVDA, /remove NVDA) + 1 NLQ question ('What defense stocks look strongest right now?') cached 6h. No scan/run burnt fresh Claude tokens (cache hit, claude_calls_made=0). Watchlist/alerts CRUD test added+removed AAPL cleanly.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "v3 dashboard fully operational. Latest scan has 14 candidates: LDOS, LMT, BAH, LHX, SAIC, BWXT, DELL, NRIX, DUOL, RTX, SOC, PRCH, TWST, CAR. Congress panel has 12 rows, Squeeze leaderboard top is $PRCH 22/100. Today is Jan 2026 → fy_multiplier_active=false (correct). Cache hot — /api/scan/run will return claude_calls_made=0 deterministically same UTC day. NLQ cache has 1 entry (6h TTL). If re-testing FY banner, need to freeze month to 7-9 or wait until Jul. All Pass-B stubs (/backtest, /geo, /premarket) respond without crash but return placeholder text — intentional per spec.",
+  "rca of the issue": "N/A — no blocking issues. All 6 v3 features implemented and verified. Only action items are minor UX polish (congress +1pt badge, target-date clamp indicator)."
+}

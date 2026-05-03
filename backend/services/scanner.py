@@ -1,13 +1,14 @@
-"""Scanner: fetch all signals (market + gov) -> aggregate -> pre-filter (2+) ->
-compute risk + targets in Python -> single batched Claude call (only thesis/
-conviction/horizon/stop_loss). 24h cache."""
+"""Scanner: fetch all signals (market + gov + congress) -> aggregate ->
+pre-filter (2+) -> compute risk + targets + squeeze + time_target in Python ->
+single batched Claude call (only thesis/conviction/horizon/stop_loss). 24h cache."""
 from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from . import claude_service, risk_target, usaspending
+from . import claude_service, congress, risk_target, squeeze as squeeze_mod, \
+    time_target, usaspending
 from .db import get_db, log_activity
 from .scrapers import collect_all_signals
 
@@ -89,17 +90,34 @@ def _insider_buys(x: dict) -> int:
     return int((x.get("insider_summary") or {}).get("buy_count") or 0)
 
 
+def _merge_congress_signals(by_ticker: dict[str, dict[str, Any]],
+                              cong: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    for ticker, info in cong.get("by_ticker", {}).items():
+        x = by_ticker.setdefault(ticker, {"ticker": ticker, "signals": []})
+        if "CONGRESSIONAL_BUY" not in x["signals"]:
+            x["signals"].append("CONGRESSIONAL_BUY")
+        x["congress_summary"] = {
+            "buyer_count": len(info["buys"]),
+            "any_committee_match": info["any_match"],
+            "max_weight": info["max_weight"],
+            "buyers": [b["name"] for b in info["buys"][:3]],
+        }
+    return by_ticker
+
+
 async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     await log_activity(f"Scan started ({triggered_by})", "info")
 
-    raw, gov = await asyncio.gather(
+    raw, gov, cong = await asyncio.gather(
         collect_all_signals(),
         usaspending.detect_gov_signals(),
+        congress.detect_congress_signals(),
     )
 
     by_ticker = _aggregate_market_signals(raw)
     by_ticker = _merge_gov_signals(by_ticker, gov)
+    by_ticker = _merge_congress_signals(by_ticker, cong)
 
     # Determine which tickers need fundamentals: those with 2+ signals OR
     # those that have concentration_provisional (need mkt-cap to finalize).
@@ -137,31 +155,42 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         "info",
     )
 
-    # Compute risk + targets in pure Python (zero Claude tokens)
+    # Compute risk + targets + squeeze + time_target in pure Python (zero Claude tokens)
     enriched: list[dict[str, Any]] = []
     for c in candidates:
         ticker = c["ticker"]
         fund = fundamentals.get(ticker, {}) or {}
         gov_summary = c.get("gov_summary") or {}
+        short_pct_val = _short_pct(c)
+
+        # Persist short observation for squeeze rate-of-change tracking
+        await squeeze_mod.record_short_observation(ticker, short_pct_val)
+
         risk = risk_target.compute_risk(
             fund, c["signals"], gov_summary,
-            short_pct=_short_pct(c), insider_buys=_insider_buys(c),
+            short_pct=short_pct_val, insider_buys=_insider_buys(c),
         )
         targets = risk_target.compute_targets(fund, c["signals"], gov_summary)
+        sq = await squeeze_mod.compute_squeeze(ticker, short_pct_val, fund)
+        tt = time_target.compute_time_target(c["signals"], "")
+
         c["fundamentals"] = fund
         c["risk"] = risk
         c["targets"] = targets
+        c["squeeze"] = sq
+        c["time_target"] = tt
         c["price"] = fund.get("price")
         c["market_cap"] = fund.get("market_cap")
         c["sector"] = fund.get("sector")
         c["beta"] = fund.get("beta")
         c["rev_ttm"] = fund.get("trailing_revenue")
-        c["short_pct"] = _short_pct(c)
+        c["short_pct"] = short_pct_val
         c["insider_buys"] = _insider_buys(c)
         c["risk_score"] = risk["score"]
         c["target_low"] = targets.get("target_low")
         c["target_high"] = targets.get("target_high")
         c["target_blended"] = targets.get("target_blended")
+        c["squeeze_score"] = sq.get("score")
         c["contracts_brief"] = [
             {"agency": ct.get("agency"), "amount": ct.get("amount")}
             for ct in (c.get("contracts") or [])[:2]
@@ -176,22 +205,31 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     # Merge Claude output into enriched dicts (keyed by ticker)
     by_t = {a["ticker"]: a for a in analyses}
     final: list[dict[str, Any]] = []
+    fy_active = time_target.fiscal_year_multiplier_active()
+    _ = fy_active  # used for scan_doc below
     for c in enriched:
         a = by_t.get(c["ticker"])
         if not a:
             continue
+        # Apply FY seasonality multiplier on signal_score (gov signals only)
+        score = a.get("signal_score") or 0
+        score, fy_applied = time_target.apply_fy_multiplier(c["signals"], score)
+        # Re-compute time target now that we have catalyst
+        tt = time_target.compute_time_target(c["signals"], a.get("catalyst_date", ""))
         # Stop loss: Claude or computed fallback
         stop_loss = a.get("stop_loss") or risk_target.compute_stop_loss(c["fundamentals"], c["risk"])
         final.append({
             "ticker": c["ticker"],
             "signals": c["signals"],
-            "signal_score": a.get("signal_score") or 0,
+            "signal_score": score,
+            "fy_multiplier_applied": fy_applied,
             "thesis": a.get("thesis", ""),
             "entry_low": a.get("entry_low"),
             "entry_high": a.get("entry_high"),
             "catalyst_date": a.get("catalyst_date", ""),
             "conviction": a.get("conviction", "medium"),
             "time_horizon": a.get("time_horizon", "medium"),
+            "time_target": tt,
             "stop_loss": stop_loss,
             "cached": a.get("cached", False),
             "price": c["price"],
@@ -199,8 +237,10 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "sector": c["sector"],
             "risk": c["risk"],
             "targets": c["targets"],
+            "squeeze": c["squeeze"],
             "contracts": c.get("contracts") or [],
             "gov_summary": c.get("gov_summary") or {},
+            "congress_summary": c.get("congress_summary"),
             "insider_summary": c.get("insider_summary"),
             "short_summary": c.get("short_summary"),
             "earnings_summary": c.get("earnings_summary"),

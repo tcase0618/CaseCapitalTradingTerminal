@@ -63,6 +63,9 @@ def _yf_info(ticker: str) -> dict[str, Any]:
             "analyst_target_mean": info.get("targetMeanPrice"),
             "analyst_target_low": info.get("targetLowPrice"),
             "analyst_target_high": info.get("targetHighPrice"),
+            "avg_volume": info.get("averageDailyVolume10Day") or info.get("averageVolume"),
+            "float_shares": info.get("floatShares") or info.get("sharesOutstanding"),
+            "short_ratio": info.get("shortRatio"),
             "name": info.get("longName") or info.get("shortName"),
         }
     except Exception as e:

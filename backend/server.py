@@ -137,6 +137,43 @@ async def compare_two(t1: str, t2: str):
     }
 
 
+@api.get("/squeeze/{ticker}")
+async def squeeze_breakdown(ticker: str):
+    from services.squeeze import compute_squeeze
+    fund = await risk_target.fetch_fundamentals(ticker.upper())
+    sq = await compute_squeeze(ticker.upper(), None, fund or {})
+    return {"ticker": ticker.upper(), "squeeze": sq, "fundamentals": fund}
+
+
+@api.get("/squeeze/leaderboard/top")
+async def squeeze_leaderboard(limit: int = 10):
+    from services.squeeze import squeeze_leaderboard as _lb
+    return await _lb(limit=limit)
+
+
+@api.get("/congress/recent")
+async def congress_recent(days: int = 30):
+    from services.congress import fetch_recent_buys
+    return await fetch_recent_buys(days=days)
+
+
+@api.get("/performance/summary")
+async def performance_summary():
+    db = get_db()
+    rows = await db.signal_performance.find({}, {"_id": 0}).sort("ts", -1).to_list(500)
+    return {"count": len(rows), "rows": rows[:50]}
+
+
+@api.get("/fy/status")
+async def fy_status():
+    from services.time_target import fiscal_year_multiplier_active, fy_days_remaining
+    return {
+        "fy_multiplier_active": fiscal_year_multiplier_active(),
+        "days_to_fy_end": fy_days_remaining(),
+        "multiplier": 1.5 if fiscal_year_multiplier_active() else 1.0,
+    }
+
+
 @api.get("/scan/latest")
 async def scan_latest():
     s = await scanner.latest_scan()

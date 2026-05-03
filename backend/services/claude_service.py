@@ -113,6 +113,7 @@ def _build_prompt(candidates: list[dict[str, Any]]) -> str:
             "signals": c["signals"],
             "contracts": c.get("contracts_brief", []),
             "short_pct": c.get("short_pct"),
+            "squeeze": c.get("squeeze_score"),
             "insider_buys": c.get("insider_buys", 0),
             "sector": c.get("sector"),
             "beta": c.get("beta"),
@@ -124,11 +125,11 @@ def _build_prompt(candidates: list[dict[str, Any]]) -> str:
         })
     payload = {"stocks": stocks}
     return (
-        "Pre-filtered stocks below already have signals confirmed and risk/targets "
-        "computed. For each ticker, produce ONLY: signal_score(1-10), thesis(1 "
-        "sentence), entry_low, entry_high (suggested buy band), catalyst_date, "
-        "conviction(low/medium/high), time_horizon(swing/short/medium/long), "
-        "stop_loss(price).\n"
+        "Pre-filtered stocks below already have signals confirmed and risk/targets/"
+        "squeeze computed. For each ticker, produce ONLY: signal_score(1-10), "
+        "thesis(1 sentence), entry_low, entry_high (suggested buy band), "
+        "catalyst_date, conviction(low/medium/high), time_horizon(swing/short/"
+        "medium/long), stop_loss(price).\n"
         f"INPUT:{json.dumps(payload, separators=(',', ':'))}\n"
         "Return ONLY: {\"results\":[{\"ticker\":\"\",\"signal_score\":0,\"thesis\":\"\","
         "\"entry_low\":0,\"entry_high\":0,\"catalyst_date\":\"\",\"conviction\":\"\","

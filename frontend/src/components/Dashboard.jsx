@@ -40,6 +40,17 @@ const SIG_META = {
   CONCENTRATION_WIN: { label: "CONCENTRATION_WIN", color: "text-orange-300 bg-orange-500/10 border-orange-500/40" },
   MOMENTUM_STACK: { label: "MOMENTUM_STACK", color: "text-amber-400 bg-amber-500/10 border-amber-500/40" },
   BUDGET_SURGE: { label: "BUDGET_SURGE", color: "text-yellow-400 bg-yellow-500/10 border-yellow-500/40" },
+  CONGRESSIONAL_BUY: { label: "CONGRESS_BUY", color: "text-yellow-200 bg-yellow-500/15 border-yellow-400/50" },
+  PRE_AWARD: { label: "PRE_AWARD", color: "text-amber-200 bg-amber-500/10 border-amber-400/40" },
+  SUB_BENEFICIARY: { label: "SUB_BENEFICIARY", color: "text-orange-200 bg-orange-500/10 border-orange-400/40" },
+};
+
+const squeezeColor = (s) => {
+  if (s == null) return "text-slate-500 bg-slate-800 border-slate-700";
+  if (s >= 86) return "text-red-300 bg-red-500/15 border-red-500/50 animate-pulse";
+  if (s >= 66) return "text-orange-300 bg-orange-500/10 border-orange-500/40";
+  if (s >= 41) return "text-yellow-300 bg-yellow-500/10 border-yellow-500/40";
+  return "text-slate-400 bg-slate-800 border-slate-700";
 };
 
 const RISK_BG = {
@@ -85,6 +96,9 @@ export default function Dashboard() {
   const [watchlist, setWatchlist] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [contracts, setContracts] = useState([]);
+  const [congress, setCongress] = useState([]);
+  const [squeezeLb, setSqueezeLb] = useState([]);
+  const [fyStatus, setFyStatus] = useState({ fy_multiplier_active: false, days_to_fy_end: 0 });
   const [scanning, setScanning] = useState(false);
   const [govScanning, setGovScanning] = useState(false);
 
@@ -94,13 +108,16 @@ export default function Dashboard() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, sc, ac, wl, al, ct] = await Promise.all([
+      const [s, sc, ac, wl, al, ct, cg, sq, fy] = await Promise.all([
         axios.get(`${API}/status`),
         axios.get(`${API}/scan/latest`),
         axios.get(`${API}/activity?limit=30`),
         axios.get(`${API}/watchlist`),
         axios.get(`${API}/alerts`),
         axios.get(`${API}/contracts?limit=5`),
+        axios.get(`${API}/congress/recent?days=30`),
+        axios.get(`${API}/squeeze/leaderboard/top?limit=10`),
+        axios.get(`${API}/fy/status`),
       ]);
       setStatus(s.data);
       setScan(sc.data);
@@ -108,6 +125,9 @@ export default function Dashboard() {
       setWatchlist(wl.data);
       setAlerts(al.data);
       setContracts(ct.data);
+      setCongress(cg.data);
+      setSqueezeLb(sq.data);
+      setFyStatus(fy.data);
     } catch (e) {
       console.error(e);
     }
@@ -233,6 +253,21 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-[1600px] px-6 py-6 space-y-6">
+        {/* FY BANNER */}
+        {fyStatus.fy_multiplier_active && (
+          <div data-testid="fy-banner" className="border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Building2 className="h-4 w-4 text-amber-400" />
+              <span className="font-mono text-xs uppercase tracking-[0.25em] text-amber-300">
+                GOV FISCAL YEAR-END · GOV CONTRACT SIGNALS WEIGHTED 1.5x
+              </span>
+            </div>
+            <span className="font-mono text-[11px] text-amber-400">
+              {fyStatus.days_to_fy_end}d to FY end
+            </span>
+          </div>
+        )}
+
         {/* TOP STATS */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <StatTile
@@ -293,17 +328,20 @@ export default function Dashboard() {
                         <th className="px-4 py-2.5 text-left font-mono">Ticker</th>
                         <th className="px-3 py-2.5 text-left font-mono">Score</th>
                         <th className="px-3 py-2.5 text-left font-mono">Risk</th>
+                        <th className="px-3 py-2.5 text-left font-mono">Squeeze</th>
                         <th className="px-3 py-2.5 text-left font-mono">Signals</th>
                         <th className="px-3 py-2.5 text-left font-mono">Thesis</th>
                         <th className="px-3 py-2.5 text-left font-mono">Entry</th>
                         <th className="px-3 py-2.5 text-left font-mono">Target</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Catalyst</th>
+                        <th className="px-3 py-2.5 text-left font-mono">Time</th>
                       </tr>
                     </thead>
                     <tbody>
                       {scan.results.map((r, i) => {
                         const risk = r.risk || {};
                         const tg = r.targets || {};
+                        const sq = r.squeeze || {};
+                        const tt = r.time_target || {};
                         return (
                           <tr
                             key={r.ticker}
@@ -321,10 +359,18 @@ export default function Dashboard() {
                               <span className={cls("inline-flex items-center px-2 py-0.5 border font-mono text-xs", scoreColor(r.signal_score))}>
                                 {r.signal_score}/10
                               </span>
+                              {r.fy_multiplier_applied && (
+                                <div className="mt-1 font-mono text-[8px] text-amber-400">FY×1.5</div>
+                              )}
                             </td>
                             <td className="px-3 py-3 align-top">
                               <span className={cls("inline-flex items-center gap-1 px-2 py-0.5 border font-mono text-[10px]", RISK_BG[risk.level] || RISK_BG.MEDIUM)}>
                                 {risk.emoji} {risk.level || "?"}
+                              </span>
+                            </td>
+                            <td className="px-3 py-3 align-top">
+                              <span className={cls("inline-flex items-center px-2 py-0.5 border font-mono text-[10px] tabular-nums", squeezeColor(sq.score))}>
+                                {sq.score != null ? `${sq.score}/100` : "—"}
                               </span>
                             </td>
                             <td className="px-3 py-3 align-top">
@@ -370,8 +416,13 @@ export default function Dashboard() {
                                 </>
                               ) : "—"}
                             </td>
-                            <td className="px-3 py-3 font-mono text-xs text-amber-400 align-top">
-                              {r.catalyst_date || "—"}
+                            <td className="px-3 py-3 font-mono text-xs text-amber-400 align-top whitespace-nowrap">
+                              {tt.target_date ? (
+                                <>
+                                  <div>{tt.target_date}</div>
+                                  <div className="text-[10px] text-amber-500/70">{tt.days_remaining}d</div>
+                                </>
+                              ) : (r.catalyst_date || "—")}
                             </td>
                           </tr>
                         );
@@ -458,21 +509,20 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* GOV CONTRACTS PANEL */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* GOV CONTRACTS + CONGRESS + SQUEEZE PANELS */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <Section
             testid="contracts-section"
-            title={`GOVERNMENT CONTRACTS · TOP ${contracts.length}`}
+            title={`GOV CONTRACTS · TOP ${contracts.length}`}
             right={<Landmark className="h-3.5 w-3.5 text-amber-400" />}
           >
             {!contracts.length ? (
-              <div className="p-4 font-mono text-xs text-slate-600 text-center">no public-company gov contracts in last 14d</div>
+              <div className="p-4 font-mono text-xs text-slate-600 text-center">no contracts in last 14d</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-800 text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                      <th className="px-4 py-2 text-left font-mono">Company</th>
                       <th className="px-3 py-2 text-left font-mono">Ticker</th>
                       <th className="px-3 py-2 text-left font-mono">Agency</th>
                       <th className="px-3 py-2 text-right font-mono">Value</th>
@@ -481,10 +531,9 @@ export default function Dashboard() {
                   <tbody>
                     {contracts.map((c, i) => (
                       <tr key={i} data-testid={`contract-row-${c.ticker}`} className="border-b border-slate-900 hover:bg-slate-900">
-                        <td className="px-4 py-2.5 text-xs text-slate-300 max-w-[220px] truncate">{c.recipient}</td>
-                        <td className="px-3 py-2.5 font-mono text-sm font-semibold text-amber-300">${c.ticker}</td>
-                        <td className="px-3 py-2.5 text-xs text-slate-400 max-w-[200px] truncate">{c.agency}</td>
-                        <td className="px-3 py-2.5 font-mono text-xs text-right text-green-400 tabular-nums">{fmtAmt(c.amount)}</td>
+                        <td className="px-3 py-2 font-mono text-sm font-semibold text-amber-300">${c.ticker}</td>
+                        <td className="px-3 py-2 text-xs text-slate-400 max-w-[180px] truncate">{c.agency}</td>
+                        <td className="px-3 py-2 font-mono text-xs text-right text-green-400 tabular-nums">{fmtAmt(c.amount)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -494,31 +543,87 @@ export default function Dashboard() {
           </Section>
 
           <Section
-            testid="budget-surges-section"
-            title="AGENCY BUDGET TRACKER"
-            right={<Building2 className="h-3.5 w-3.5 text-amber-400" />}
+            testid="congress-section"
+            title={`CONGRESSIONAL BUYS · ${congress.length}`}
+            right={<Landmark className="h-3.5 w-3.5 text-yellow-400" />}
           >
-            {!budgetSurges.length ? (
-              <div className="p-4 font-mono text-xs text-slate-600 text-center">
-                no budget surges detected this scan
-              </div>
+            {!congress.length ? (
+              <div className="p-4 font-mono text-xs text-slate-600 text-center">no recent buys</div>
             ) : (
-              <div>
-                {budgetSurges.slice(0, 5).map((b, i) => (
-                  <div key={i} className="px-4 py-3 border-b border-slate-900 hover:bg-slate-900">
+              <div className="max-h-72 overflow-y-auto">
+                {congress.slice(0, 10).map((c, i) => (
+                  <div key={i} data-testid={`congress-row-${c.ticker}`} className="px-3 py-2 border-b border-slate-900 hover:bg-slate-900">
                     <div className="flex items-center justify-between">
-                      <div className="font-mono text-sm text-slate-200 truncate max-w-[260px]">{b.agency}</div>
-                      <div className="font-mono text-sm text-amber-400">+{b.pct_increase}%</div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-yellow-300">${c.ticker}</span>
+                        {c.committee_match && (
+                          <span className="font-mono text-[9px] uppercase tracking-wider text-amber-400 border border-amber-400/40 px-1">
+                            +3pts match
+                          </span>
+                        )}
+                      </div>
+                      <span className="font-mono text-[10px] text-slate-500">{c.tx_date}</span>
                     </div>
-                    <div className="mt-1 font-mono text-[10px] text-slate-500">
-                      Exposed: {(b.exposed_tickers || []).map(t => `$${t}`).join(" · ") || "—"}
+                    <div className="font-mono text-[11px] text-slate-400 mt-0.5">
+                      {c.name} <span className="text-slate-600">({c.chamber})</span>
                     </div>
                   </div>
                 ))}
               </div>
             )}
           </Section>
+
+          <Section
+            testid="squeeze-leaderboard-section"
+            title={`SQUEEZE LEADERBOARD · TOP ${squeezeLb.length}`}
+            right={<Target className="h-3.5 w-3.5 text-orange-400" />}
+          >
+            {!squeezeLb.length ? (
+              <div className="p-4 font-mono text-xs text-slate-600 text-center">no squeeze data</div>
+            ) : (
+              <div className="max-h-72 overflow-y-auto">
+                {squeezeLb.map((s, i) => (
+                  <div key={i} data-testid={`squeeze-row-${s.ticker}`} className="px-3 py-2 border-b border-slate-900 hover:bg-slate-900 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10px] text-slate-600">#{i + 1}</span>
+                      <span className="font-mono text-sm font-semibold text-slate-200">${s.ticker}</span>
+                    </div>
+                    <span className={cls("inline-flex items-center px-2 py-0.5 border font-mono text-xs tabular-nums", squeezeColor(s.score))}>
+                      {s.score}/100
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
         </div>
+
+        {/* AGENCY BUDGET TRACKER (full width) */}
+        <Section
+          testid="budget-surges-section"
+          title="AGENCY BUDGET TRACKER"
+          right={<Building2 className="h-3.5 w-3.5 text-amber-400" />}
+        >
+          {!budgetSurges.length ? (
+            <div className="p-4 font-mono text-xs text-slate-600 text-center">
+              no budget surges detected this scan
+            </div>
+          ) : (
+            <div>
+              {budgetSurges.slice(0, 5).map((b, i) => (
+                <div key={i} className="px-4 py-3 border-b border-slate-900 hover:bg-slate-900">
+                  <div className="flex items-center justify-between">
+                    <div className="font-mono text-sm text-slate-200 truncate max-w-[400px]">{b.agency}</div>
+                    <div className="font-mono text-sm text-amber-400">+{b.pct_increase}%</div>
+                  </div>
+                  <div className="mt-1 font-mono text-[10px] text-slate-500">
+                    Exposed: {(b.exposed_tickers || []).map(t => `$${t}`).join(" · ") || "—"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
 
         {/* ACTIVITY LOG */}
         <Section testid="activity-section" title="ACTIVITY LOG" right={<Activity className="h-3.5 w-3.5 text-slate-500" />}>
@@ -541,7 +646,7 @@ export default function Dashboard() {
         </Section>
 
         <footer className="pt-4 pb-8 font-mono text-[10px] uppercase tracking-[0.25em] text-slate-600 flex items-center justify-between">
-          <span>STOCK_INTEL_BOT · v2.0 · USASpending integrated</span>
+          <span>STOCK_INTEL_BOT · v3.0 · USASpending + Congress + Squeeze</span>
           <span>{status?.bot?.claude_configured ? "CLAUDE ✓" : "CLAUDE ✗"} · {status?.bot?.telegram_configured ? "TG ✓" : "TG ✗"}</span>
         </footer>
       </main>
