@@ -355,8 +355,18 @@ export default function Dashboard() {
                             <td className="px-3 py-3 font-mono text-xs align-top whitespace-nowrap">
                               {tg.target_blended != null ? (
                                 <>
-                                  <div className="text-green-400">{fmtMoney(tg.target_blended)}</div>
-                                  <div className="text-[10px] text-green-500/70">{fmtPct(tg.upside_blended)}</div>
+                                  <div className={cls(
+                                    Math.abs(tg.upside_blended || 0) > 100 ? "text-amber-400" : "text-green-400"
+                                  )}>{fmtMoney(tg.target_blended)}</div>
+                                  <div className={cls(
+                                    "text-[10px]",
+                                    Math.abs(tg.upside_blended || 0) > 100 ? "text-amber-500/70" : "text-green-500/70"
+                                  )}>
+                                    {fmtPct(tg.upside_blended)}
+                                    {Math.abs(tg.upside_blended || 0) > 100 && (
+                                      <AlertTriangle className="h-2.5 w-2.5 inline ml-1" />
+                                    )}
+                                  </div>
                                 </>
                               ) : "—"}
                             </td>

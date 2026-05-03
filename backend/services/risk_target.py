@@ -121,6 +121,10 @@ def compute_risk(fund: dict[str, Any], signals: list[str], gov: dict[str, Any] |
         score -= 1
         factors.append(f"{len(agencies)}+ agencies winning [-]")
 
+    # Clamp score to non-negative for display sanity (negative just means
+    # offsetting positive factors dominate; semantically still LOW risk).
+    score = max(0, score)
+
     if score <= 1:
         level, emoji = "LOW", "🟢"
     elif score <= 3:
@@ -200,8 +204,20 @@ def compute_targets(fund: dict[str, Any], signals: list[str],
             "match": label,
         }
 
-    # Blend
-    values = [m["value"] for m in methods.values() if m and m.get("value")]
+    # Blend (with divergence guard: if contract_revenue method is more than
+    # 2× the analyst consensus, drop it from the blend — it's likely amplified
+    # by a giant lifetime IDIQ contract and shouldn't dominate).
+    method_values: dict[str, float] = {}
+    for k, m in methods.items():
+        if m and m.get("value"):
+            method_values[k] = float(m["value"])
+    ac = method_values.get("analyst_consensus")
+    cr = method_values.get("contract_revenue_multiple")
+    if ac and cr and (cr > 2 * ac or cr < 0.5 * ac):
+        method_values.pop("contract_revenue_multiple", None)
+        if methods["contract_revenue_multiple"]:
+            methods["contract_revenue_multiple"]["excluded_from_blend"] = True
+    values = list(method_values.values())
     blended = round(sum(values) / len(values), 2) if values else None
 
     # Bear / bull from analyst range; fallback to blended +/- 10%

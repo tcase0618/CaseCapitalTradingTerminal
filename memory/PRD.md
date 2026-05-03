@@ -1,47 +1,63 @@
 # Stock Intelligence Telegram Bot — PRD
 
 ## Original Problem Statement
-Build a stock intelligence Telegram bot. Backend-first full-stack app — only UI is Telegram. Simple admin status page.
+Build a stock intelligence Telegram bot. Backend-first full-stack app — only UI is Telegram + a simple admin status page. Daily 8 AM ET scan from OpenInsider (insider cluster buys), Finviz (high short interest), Yahoo Finance (upcoming earnings). Pre-filter in code; only stocks with 2+ signals go to Claude (claude-sonnet-4-5). Single batched Claude call. 24h MongoDB cache. Telegram bot commands /scan /analyze /watchlist /alert.
 
-Core features:
-1. Daily 8 AM ET scheduled scan from OpenInsider (cluster buys), Finviz (high short interest), Yahoo Finance (upcoming earnings). Pre-filter in code; only stocks with 2+ signals go to Claude.
-2. Claude API analysis (claude-sonnet-4-5) — receives pre-filtered tickers, returns structured JSON {ticker, signal_score 1-10, thesis, entry_zone, catalyst_date}. Single batch call.
-3. Telegram bot webhook with commands /scan, /analyze, /watchlist, /alert.
-4. Telegram delivery — clean formatted messages with emoji.
-5. Token efficiency: prefilter in code, batch Claude calls, 24h cache, never call Claude twice for same ticker/day.
+### v2 (Apr 30, 2026)
+Added USASpending.gov government contract intelligence as a 4th signal source — 5 new signal types, pure-Python risk score, 3-method price target, expanded Telegram message format, 7 new commands, dashboard updates.
 
-User chose: FastAPI + MongoDB + React (env constraint). Emergent Universal LLM key as ANTHROPIC.
-
-## Architecture
-- Backend (FastAPI): `server.py` + `services/{db,scrapers,claude_service,scanner,telegram_service,scheduler}.py`
-- Frontend (React): single-page Dashboard at `/` (terminal/Bloomberg aesthetic)
-- MongoDB collections: `scan_results`, `claude_cache`, `watchlist`, `alerts`, `activity_log`, `bot_state`
-- Scheduler: APScheduler — 8AM ET cron daily scan + 5min interval alert checks
+## Stack
+- Backend: FastAPI + MongoDB + APScheduler
+- Frontend: React (Bloomberg/terminal-style admin dashboard)
+- LLM: claude-sonnet-4-5 via Emergent Universal Key (`EMERGENT_LLM_KEY`)
+- Telegram: webhook auto-registered at startup
+- Data sources: OpenInsider, Finviz, Yahoo Finance, USASpending.gov, yfinance
 
 ## Env vars
-- `MONGO_URL`, `DB_NAME` (preset)
-- `EMERGENT_LLM_KEY` (set; used for Claude)
-- `TELEGRAM_BOT_TOKEN` (placeholder — user provides)
-- `TELEGRAM_CHAT_ID` (placeholder — user provides)
-- `PUBLIC_BASE_URL` (preview URL — used to register webhook)
+- `MONGO_URL`, `DB_NAME`
+- `EMERGENT_LLM_KEY` (active)
+- `ANTHROPIC_API_KEY` (empty — fallback path; user keys hit credit limit)
+- `TELEGRAM_BOT_TOKEN` = 8423505655:AAHSAlZvKRrHpc_1I1TtPRStkPGXdIZqVms (Quantninjabot)
+- `TELEGRAM_CHAT_ID` = 8073083936
+- `PUBLIC_BASE_URL` = preview URL
 
-## Implemented (Apr 29, 2026)
-- ✅ All 3 scrapers (OpenInsider, Finviz short, Yahoo + Finviz earnings) — paginated, deduped
-- ✅ 2+ signal pre-filter in code; only candidates go to Claude
-- ✅ Single batched Claude call (claude-sonnet-4-5-20250929) returning JSON array
-- ✅ 24h cache by (ticker, date) — verified zero re-calls within window
-- ✅ Telegram webhook handler + commands: /start /help /scan /analyze /watch /unwatch /watchlist /alert /alerts
-- ✅ Auto webhook registration at startup if TELEGRAM_BOT_TOKEN present
-- ✅ Daily 8AM ET cron scan + 5min alert price-cross detection
-- ✅ Admin dashboard: status, run-scan-now, latest results table, watchlist + alerts CRUD, activity log
-- ✅ End-to-end tested: scan→pre-filter→Claude batch→cache works (7 candidates, 7 fresh first run, 7 cached second run)
+## Implemented
+### v1 (Apr 29)
+- 3 scrapers (OpenInsider, Finviz, Yahoo + Finviz earnings) with 2+ signal pre-filter
+- Single batched Claude call with 24h cache
+- Telegram bot + 7 v1 commands, 8 AM ET cron, 5-min alert checks
+- Admin dashboard (terminal aesthetic) with status, results, watchlist, alerts, activity log
 
-## Backlog (P1)
-- Twitter / Reddit social sentiment as 4th signal source
-- More Telegram commands: /history, /top, /clearcache
-- Price chart screenshots in Telegram
+### v2 (Apr 30)
+- USASpending integration (`services/usaspending.py`): 5 signal types
+  - CONTRACT_SURGE (+2): 30d total ≥ 1.4× prior 90d avg, awards >$10M
+  - NEW_WINNER (+2): first award from agency in 12 months, >$5M
+  - CONCENTRATION_WIN (+3): single contract >$20M to mkt-cap <$2B
+  - MOMENTUM_STACK (+2): ≥3 distinct agencies in 30d, cum >$20M
+  - BUDGET_SURGE (+2): agency monthly obligations ≥1.5× 3mo avg, attribute to exposed public contractors
+- Static recipient → ticker map (~120 public contractors)
+- Pure-Python risk scoring (`risk_target.py`): 6+ factors → score → LOW/MEDIUM/HIGH/EXTREME with emoji 🟢🟡🔴☠️ (clamped ≥0)
+- 3-method price target: contract revenue multiple (capped at 25% TTM rev), analyst consensus, signal-adjusted uplift; blended with divergence guard (drops contract method if >2× analyst consensus)
+- Updated Claude prompt: receives pre-computed risk + targets, generates only thesis/conviction/horizon/stop_loss/score/entry band
+- New Telegram message format with ━━━ separators, risk emoji, 3 targets, risk factors, gov contract line
+- 7 new commands: /contracts /scan_gov /agency /watchlist_contracts /risk /target /compare
+- New API endpoints: /contracts, /agency/{name}, /risk/{ticker}, /target/{ticker}, /compare/{a}/{b}, /scan/gov
+- Dashboard: Risk column, Target column with divergence color-warn, gov signal badges (gold/amber), Government Contracts panel, Agency Budget Tracker panel, GOV SCAN button
 
-## Backlog (P2)
-- Multi-user support (per chat_id watchlists are already isolated)
+## Verified
+- 16/16 v2 tests pass + 12/12 v1 tests pass
+- Token efficiency: 1 batched Claude call for 11 candidates; 2nd run: 0 fresh, 11 cached ✅
+- Real Telegram delivery confirmed (msg_id returned, Quantninjabot online)
+- Gov signals firing on real tickers (LDOS, BAH, SAIC, LHX, DELL, HON, etc.)
+
+## Backlog
+### P1
+- Reddit/StockTwits sentiment as a 5th signal source (free)
+- /history command — show prior scan deltas
+- Persist scheduler state across restarts
+
+### P2
+- Twitter/X integration (paid Basic tier)
 - Backtesting historical signal accuracy
-- Sector/industry breakdowns
+- Multi-user RBAC for shared deployments
+- Active short-seller report detector (currently no free feed)
