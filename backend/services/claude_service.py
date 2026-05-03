@@ -20,6 +20,15 @@ CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
 CACHE_TTL_HOURS = 24
 
 
+def _num(v):
+    try:
+        if v is None or v == "":
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _today_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -93,30 +102,37 @@ async def set_cached(ticker: str, analysis: dict[str, Any]):
 
 
 def _build_prompt(candidates: list[dict[str, Any]]) -> str:
-    compact = []
+    """New schema: pre-computed values are passed in. Claude only generates
+    thesis, conviction, time_horizon, stop_loss. Entry zone too (price band)."""
+    stocks = []
     for c in candidates:
-        compact.append({
+        stocks.append({
             "ticker": c["ticker"],
+            "price": c.get("price"),
+            "mktcap": c.get("market_cap"),
             "signals": c["signals"],
-            "insider": c.get("insider_summary"),
-            "short": c.get("short_summary"),
-            "earnings": c.get("earnings_summary"),
+            "contracts": c.get("contracts_brief", []),
+            "short_pct": c.get("short_pct"),
+            "insider_buys": c.get("insider_buys", 0),
+            "sector": c.get("sector"),
+            "beta": c.get("beta"),
+            "rev_ttm": c.get("rev_ttm"),
+            "risk_score": c.get("risk_score"),
+            "target_low": c.get("target_low"),
+            "target_high": c.get("target_high"),
+            "target_blended": c.get("target_blended"),
         })
+    payload = {"stocks": stocks}
     return (
-        "You are a sharp stock-trading analyst. Below is a JSON array of "
-        "pre-filtered tickers, each having 2+ confirmed signals (insider cluster "
-        "buys, high short interest, upcoming earnings catalyst). Analyze ALL "
-        "tickers in this single call.\n\n"
-        f"INPUT:\n{json.dumps(compact, separators=(',', ':'))}\n\n"
-        "Return ONLY a valid JSON array (no prose, no markdown fences) with one "
-        "object per ticker exactly in this shape:\n"
-        "[{\"ticker\":\"XYZ\",\"signal_score\":1-10,\"thesis\":\"one sentence\","
-        "\"entry_zone\":\"$X.XX-$Y.YY\",\"catalyst_date\":\"YYYY-MM-DD or text\"}]\n"
-        "signal_score: 1-10 integer reflecting setup quality (10=highest conviction). "
-        "thesis: ONE punchy sentence tying signals together. "
-        "entry_zone: a price band you'd buy. "
-        "catalyst_date: nearest meaningful catalyst (earnings or filing). "
-        "Be concise. Output JSON only."
+        "Pre-filtered stocks below already have signals confirmed and risk/targets "
+        "computed. For each ticker, produce ONLY: signal_score(1-10), thesis(1 "
+        "sentence), entry_low, entry_high (suggested buy band), catalyst_date, "
+        "conviction(low/medium/high), time_horizon(swing/short/medium/long), "
+        "stop_loss(price).\n"
+        f"INPUT:{json.dumps(payload, separators=(',', ':'))}\n"
+        "Return ONLY: {\"results\":[{\"ticker\":\"\",\"signal_score\":0,\"thesis\":\"\","
+        "\"entry_low\":0,\"entry_high\":0,\"catalyst_date\":\"\",\"conviction\":\"\","
+        "\"time_horizon\":\"\",\"stop_loss\":0}]} — no prose, no fences."
     )
 
 
@@ -125,6 +141,25 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```(?:json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
     return text
+
+
+def _parse_response_results(text: str) -> list[dict[str, Any]]:
+    """Parse new schema: {\"results\":[{...}]} or fallback to bare array."""
+    text = _strip_fences(text)
+    # Try object envelope first
+    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if obj_match:
+        try:
+            obj = json.loads(obj_match.group(0))
+            if isinstance(obj, dict) and "results" in obj:
+                return obj["results"]
+        except Exception:
+            pass
+    # Fallback to bare array
+    arr_match = re.search(r"\[.*\]", text, re.DOTALL)
+    if arr_match:
+        return json.loads(arr_match.group(0))
+    return []
 
 
 def _parse_json_array(text: str) -> list[dict[str, Any]]:
@@ -158,7 +193,7 @@ async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
         resp = await _call_claude(system, prompt)
         if resp:
             try:
-                parsed = _parse_json_array(resp)
+                parsed = _parse_response_results(resp)
                 for item in parsed:
                     t = str(item.get("ticker", "")).upper()
                     if not t:
@@ -167,8 +202,12 @@ async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
                         "ticker": t,
                         "signal_score": int(item.get("signal_score", 0) or 0),
                         "thesis": str(item.get("thesis", "")).strip(),
-                        "entry_zone": str(item.get("entry_zone", "")).strip(),
+                        "entry_low": _num(item.get("entry_low")),
+                        "entry_high": _num(item.get("entry_high")),
                         "catalyst_date": str(item.get("catalyst_date", "")).strip(),
+                        "conviction": str(item.get("conviction", "")).strip().lower() or "medium",
+                        "time_horizon": str(item.get("time_horizon", "")).strip().lower() or "medium",
+                        "stop_loss": _num(item.get("stop_loss")),
                     }
                     await set_cached(t, analysis)
                     results[t] = {**analysis, "cached": False}
@@ -198,11 +237,11 @@ async def analyze_single(ticker: str, context: dict[str, Any] | None = None) -> 
 
     payload = {"ticker": ticker.upper(), "context": context or {}}
     prompt = (
-        f"Analyze this single stock and respond with ONLY a JSON object: "
+        f"Analyze single stock and respond ONLY with JSON: "
         f"{json.dumps(payload, separators=(',', ':'))}\n"
-        "Schema: {\"ticker\":\"XYZ\",\"signal_score\":1-10,"
-        "\"thesis\":\"one sentence\",\"entry_zone\":\"$X-$Y\","
-        "\"catalyst_date\":\"YYYY-MM-DD or text\"}"
+        "Schema: {\"ticker\":\"\",\"signal_score\":0,\"thesis\":\"\","
+        "\"entry_low\":0,\"entry_high\":0,\"catalyst_date\":\"\","
+        "\"conviction\":\"\",\"time_horizon\":\"\",\"stop_loss\":0}"
     )
     resp = await _call_claude("You output compact JSON only. No prose.", prompt)
     if not resp:
@@ -217,8 +256,12 @@ async def analyze_single(ticker: str, context: dict[str, Any] | None = None) -> 
             "ticker": ticker.upper(),
             "signal_score": int(item.get("signal_score", 0) or 0),
             "thesis": str(item.get("thesis", "")).strip(),
-            "entry_zone": str(item.get("entry_zone", "")).strip(),
+            "entry_low": _num(item.get("entry_low")),
+            "entry_high": _num(item.get("entry_high")),
             "catalyst_date": str(item.get("catalyst_date", "")).strip(),
+            "conviction": str(item.get("conviction", "medium")).strip().lower(),
+            "time_horizon": str(item.get("time_horizon", "medium")).strip().lower(),
+            "stop_loss": _num(item.get("stop_loss")),
         }
         await set_cached(ticker, analysis)
         return {**analysis, "cached": False}

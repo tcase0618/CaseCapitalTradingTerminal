@@ -1,18 +1,20 @@
-"""Scanner: fetch all signals -> aggregate -> pre-filter (2+) -> Claude batch."""
+"""Scanner: fetch all signals (market + gov) -> aggregate -> pre-filter (2+) ->
+compute risk + targets in Python -> single batched Claude call (only thesis/
+conviction/horizon/stop_loss). 24h cache."""
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from . import claude_service
+from . import claude_service, risk_target, usaspending
 from .db import get_db, log_activity
 from .scrapers import collect_all_signals
 
 logger = logging.getLogger(__name__)
 
 
-def _aggregate_candidates(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    """Aggregate by ticker; keep only those with 2+ distinct signal sources."""
+def _aggregate_market_signals(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     by_ticker: dict[str, dict[str, Any]] = {}
 
     for c in raw.get("insider_clusters", []):
@@ -40,33 +42,170 @@ def _aggregate_candidates(raw: dict[str, Any]) -> list[dict[str, Any]]:
             x["signals"].append("upcoming_earnings")
         x["earnings_summary"] = {"earnings_date": e.get("earnings_date")}
 
-    # Pre-filter: 2+ distinct signals
-    candidates = [v for v in by_ticker.values() if len(set(v["signals"])) >= 2]
-    candidates.sort(key=lambda v: len(set(v["signals"])), reverse=True)
-    return candidates
+    return by_ticker
+
+
+def _merge_gov_signals(by_ticker: dict[str, dict[str, Any]],
+                        gov: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    for ticker, info in gov.get("by_ticker", {}).items():
+        x = by_ticker.setdefault(ticker, {"ticker": ticker, "signals": []})
+        for s in info.get("signals", []):
+            if s not in x["signals"] and s != "CONCENTRATION_WIN_PROVISIONAL":
+                x["signals"].append(s)
+        x["gov_summary"] = info.get("gov_summary", {})
+        x["contracts"] = info.get("contracts", [])
+        x["concentration_provisional"] = "CONCENTRATION_WIN_PROVISIONAL" in info.get("signals", [])
+    return by_ticker
+
+
+def _finalize_signals_and_filter(by_ticker: dict[str, dict[str, Any]],
+                                  fundamentals: dict[str, dict]) -> list[dict[str, Any]]:
+    """Apply 2+ signal pre-filter + finalize CONCENTRATION_WIN with mkt-cap."""
+    out: list[dict[str, Any]] = []
+    for ticker, x in by_ticker.items():
+        # Finalize CONCENTRATION_WIN: requires mkt cap < $2B
+        if x.get("concentration_provisional"):
+            mc = (fundamentals.get(ticker) or {}).get("market_cap")
+            if mc and mc < 2_000_000_000:
+                if "CONCENTRATION_WIN" not in x["signals"]:
+                    x["signals"].append("CONCENTRATION_WIN")
+        x.pop("concentration_provisional", None)
+        unique = list(dict.fromkeys(x["signals"]))
+        x["signals"] = unique
+        if len(unique) >= 2:
+            out.append(x)
+    out.sort(key=lambda v: len(v["signals"]), reverse=True)
+    return out
+
+
+def _short_pct(x: dict) -> float | None:
+    s = (x.get("short_summary") or {}).get("short_float_pct")
+    if isinstance(s, (int, float)):
+        return float(s)
+    return None
+
+
+def _insider_buys(x: dict) -> int:
+    return int((x.get("insider_summary") or {}).get("buy_count") or 0)
 
 
 async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
-    """Full scan flow. Returns scan summary doc."""
     started = datetime.now(timezone.utc)
     await log_activity(f"Scan started ({triggered_by})", "info")
 
-    raw = await collect_all_signals()
-    candidates = _aggregate_candidates(raw)
+    raw, gov = await asyncio.gather(
+        collect_all_signals(),
+        usaspending.detect_gov_signals(),
+    )
+
+    by_ticker = _aggregate_market_signals(raw)
+    by_ticker = _merge_gov_signals(by_ticker, gov)
+
+    # Determine which tickers need fundamentals: those with 2+ signals OR
+    # those that have concentration_provisional (need mkt-cap to finalize).
+    needs_fund: set[str] = set()
+    for v in by_ticker.values():
+        if len(set(v["signals"])) >= 2:
+            needs_fund.add(v["ticker"])
+        elif v.get("concentration_provisional"):
+            needs_fund.add(v["ticker"])
+
+    # yfinance is rate-sensitive under high concurrency — limit to 2 at a time
+    sem = asyncio.Semaphore(2)
+    async def _bounded(tk):
+        async with sem:
+            return await risk_target.fetch_fundamentals(tk)
+    fundamentals: dict[str, dict] = {}
+    keys = sorted(needs_fund)
+    if keys:
+        vals = await asyncio.gather(*[_bounded(k) for k in keys], return_exceptions=True)
+        for k, v in zip(keys, vals):
+            if isinstance(v, Exception):
+                fundamentals[k] = {}
+            else:
+                fundamentals[k] = v or {}
+
+    # Apply 2+ signal pre-filter (after CONCENTRATION_WIN finalization)
+    candidates = _finalize_signals_and_filter(by_ticker, fundamentals)
     pre_filter_count = len(candidates)
 
     await log_activity(
-        f"Aggregated signals: {len(raw['insider_clusters'])} insider, "
+        f"Aggregated: {len(raw['insider_clusters'])} insider, "
         f"{len(raw['high_short_interest'])} short, "
-        f"{len(raw['upcoming_earnings'])} earnings -> "
-        f"{pre_filter_count} candidates passed 2+ signals",
+        f"{len(raw['upcoming_earnings'])} earnings, "
+        f"{len(gov.get('by_ticker', {}))} gov-public -> {pre_filter_count} candidates 2+ signals",
         "info",
     )
 
-    # Token-efficient batch Claude (cache-aware)
-    analyses = await claude_service.analyze_batch(candidates)
+    # Compute risk + targets in pure Python (zero Claude tokens)
+    enriched: list[dict[str, Any]] = []
+    for c in candidates:
+        ticker = c["ticker"]
+        fund = fundamentals.get(ticker, {}) or {}
+        gov_summary = c.get("gov_summary") or {}
+        risk = risk_target.compute_risk(
+            fund, c["signals"], gov_summary,
+            short_pct=_short_pct(c), insider_buys=_insider_buys(c),
+        )
+        targets = risk_target.compute_targets(fund, c["signals"], gov_summary)
+        c["fundamentals"] = fund
+        c["risk"] = risk
+        c["targets"] = targets
+        c["price"] = fund.get("price")
+        c["market_cap"] = fund.get("market_cap")
+        c["sector"] = fund.get("sector")
+        c["beta"] = fund.get("beta")
+        c["rev_ttm"] = fund.get("trailing_revenue")
+        c["short_pct"] = _short_pct(c)
+        c["insider_buys"] = _insider_buys(c)
+        c["risk_score"] = risk["score"]
+        c["target_low"] = targets.get("target_low")
+        c["target_high"] = targets.get("target_high")
+        c["target_blended"] = targets.get("target_blended")
+        c["contracts_brief"] = [
+            {"agency": ct.get("agency"), "amount": ct.get("amount")}
+            for ct in (c.get("contracts") or [])[:2]
+        ]
+        enriched.append(c)
+
+    # Single batched Claude call (only thesis/conviction/horizon/stop_loss/entry/score)
+    analyses = await claude_service.analyze_batch(enriched)
     cache_hits = sum(1 for a in analyses if a.get("cached"))
-    fresh_calls = len(analyses) - cache_hits
+    fresh_calls = (1 if (len(analyses) - cache_hits) > 0 else 0)  # 1 batched call total
+
+    # Merge Claude output into enriched dicts (keyed by ticker)
+    by_t = {a["ticker"]: a for a in analyses}
+    final: list[dict[str, Any]] = []
+    for c in enriched:
+        a = by_t.get(c["ticker"])
+        if not a:
+            continue
+        # Stop loss: Claude or computed fallback
+        stop_loss = a.get("stop_loss") or risk_target.compute_stop_loss(c["fundamentals"], c["risk"])
+        final.append({
+            "ticker": c["ticker"],
+            "signals": c["signals"],
+            "signal_score": a.get("signal_score") or 0,
+            "thesis": a.get("thesis", ""),
+            "entry_low": a.get("entry_low"),
+            "entry_high": a.get("entry_high"),
+            "catalyst_date": a.get("catalyst_date", ""),
+            "conviction": a.get("conviction", "medium"),
+            "time_horizon": a.get("time_horizon", "medium"),
+            "stop_loss": stop_loss,
+            "cached": a.get("cached", False),
+            "price": c["price"],
+            "market_cap": c["market_cap"],
+            "sector": c["sector"],
+            "risk": c["risk"],
+            "targets": c["targets"],
+            "contracts": c.get("contracts") or [],
+            "gov_summary": c.get("gov_summary") or {},
+            "insider_summary": c.get("insider_summary"),
+            "short_summary": c.get("short_summary"),
+            "earnings_summary": c.get("earnings_summary"),
+        })
+    final.sort(key=lambda x: (x.get("signal_score", 0), x.get("targets", {}).get("upside_blended") or 0), reverse=True)
 
     finished = datetime.now(timezone.utc)
     db = get_db()
@@ -79,11 +218,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "insider_clusters": len(raw["insider_clusters"]),
             "high_short_interest": len(raw["high_short_interest"]),
             "upcoming_earnings": len(raw["upcoming_earnings"]),
+            "gov_public_tickers": len(gov.get("by_ticker", {})),
         },
         "pre_filter_passed": pre_filter_count,
         "claude_calls_made": fresh_calls,
         "claude_cache_hits": cache_hits,
-        "results": analyses,
+        "results": final,
+        "budget_surges": gov.get("budget_surges", []),
     }
     await db.scan_results.insert_one(dict(scan_doc))
     await db.bot_state.update_one(
@@ -92,7 +233,7 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "last_scan_at": finished.isoformat(),
             "last_scan_summary": {
                 "pre_filter_passed": pre_filter_count,
-                "results_count": len(analyses),
+                "results_count": len(final),
                 "claude_calls_made": fresh_calls,
                 "claude_cache_hits": cache_hits,
             },
@@ -100,11 +241,10 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         upsert=True,
     )
     await log_activity(
-        f"Scan complete: {len(analyses)} analyses ({fresh_calls} fresh, "
+        f"Scan complete: {len(final)} analyses ({fresh_calls} batched Claude call, "
         f"{cache_hits} cached) in {scan_doc['duration_sec']}s",
         "success",
     )
-    # Return without _id
     scan_doc.pop("_id", None)
     return scan_doc
 
@@ -112,3 +252,42 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
 async def latest_scan() -> dict[str, Any] | None:
     db = get_db()
     return await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+
+
+async def run_gov_scan_only(triggered_by: str = "manual") -> dict[str, Any]:
+    """For /scan_gov — gov contracts only, separate from full scan."""
+    started = datetime.now(timezone.utc)
+    gov = await usaspending.detect_gov_signals()
+    by_ticker = gov.get("by_ticker", {})
+    # Compute risk/targets for each public-company ticker
+    out = []
+    if by_ticker:
+        keys = list(by_ticker.keys())
+        funds = await asyncio.gather(*[risk_target.fetch_fundamentals(t) for t in keys])
+        for ticker, fund in zip(keys, funds):
+            info = by_ticker[ticker]
+            signals = [s for s in info.get("signals", []) if s != "CONCENTRATION_WIN_PROVISIONAL"]
+            # finalize concentration
+            if "CONCENTRATION_WIN_PROVISIONAL" in info.get("signals", []):
+                mc = (fund or {}).get("market_cap")
+                if mc and mc < 2_000_000_000:
+                    signals.append("CONCENTRATION_WIN")
+            risk = risk_target.compute_risk(fund or {}, signals, info.get("gov_summary"),
+                                              short_pct=None, insider_buys=0)
+            targets = risk_target.compute_targets(fund or {}, signals, info.get("gov_summary"))
+            out.append({
+                "ticker": ticker, "signals": signals,
+                "price": (fund or {}).get("price"),
+                "market_cap": (fund or {}).get("market_cap"),
+                "risk": risk, "targets": targets,
+                "contracts": info.get("contracts", []),
+                "gov_summary": info.get("gov_summary", {}),
+            })
+    out.sort(key=lambda x: x["risk"]["score"], reverse=False)
+    return {
+        "started_at": started.isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "results": out,
+        "budget_surges": gov.get("budget_surges", []),
+        "triggered_by": triggered_by,
+    }

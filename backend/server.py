@@ -14,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from services import claude_service, scanner, scheduler, telegram_service  # noqa: E402
+from services import claude_service, risk_target, scanner, scheduler, telegram_service, usaspending  # noqa: E402
 from services.db import get_db, log_activity  # noqa: E402
 from services.scrapers import fetch_quote  # noqa: E402
 
@@ -79,8 +79,62 @@ async def status():
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        await telegram_service.send_message(telegram_service.format_scan_results(scan))
+        await telegram_service.send_message(telegram_service.format_scan_summary(scan))
+        for r in scan.get("results", [])[:10]:
+            await telegram_service.send_message(telegram_service.format_stock_alert(r))
     return scan
+
+
+@api.post("/scan/gov")
+async def scan_gov():
+    return await scanner.run_gov_scan_only(triggered_by="admin_dashboard")
+
+
+@api.get("/contracts")
+async def contracts(limit: int = 5):
+    return await usaspending.list_recent_contracts_for_tickers(limit=limit)
+
+
+@api.get("/agency/{name}")
+async def agency_awards(name: str, days: int = 30):
+    return await usaspending.awards_for_agency(name, days=days, limit=50)
+
+
+@api.get("/risk/{ticker}")
+async def risk_breakdown(ticker: str):
+    fund = await risk_target.fetch_fundamentals(ticker.upper())
+    if not fund:
+        raise HTTPException(404, "no data")
+    risk = risk_target.compute_risk(fund, [], None, None, 0)
+    return {"ticker": ticker.upper(), "fundamentals": fund, "risk": risk}
+
+
+@api.get("/target/{ticker}")
+async def target_breakdown(ticker: str):
+    fund = await risk_target.fetch_fundamentals(ticker.upper())
+    if not fund or not fund.get("price"):
+        raise HTTPException(404, "no price data")
+    targets = risk_target.compute_targets(fund, [], None)
+    return {"ticker": ticker.upper(), "fundamentals": fund, "targets": targets}
+
+
+@api.get("/compare/{t1}/{t2}")
+async def compare_two(t1: str, t2: str):
+    import asyncio as _aio
+    f1, f2 = await _aio.gather(
+        risk_target.fetch_fundamentals(t1.upper()),
+        risk_target.fetch_fundamentals(t2.upper()),
+    )
+    return {
+        t1.upper(): {
+            "fundamentals": f1, "risk": risk_target.compute_risk(f1 or {}, [], None, None, 0),
+            "targets": risk_target.compute_targets(f1 or {}, [], None),
+        },
+        t2.upper(): {
+            "fundamentals": f2, "risk": risk_target.compute_risk(f2 or {}, [], None, None, 0),
+            "targets": risk_target.compute_targets(f2 or {}, [], None),
+        },
+    }
 
 
 @api.get("/scan/latest")

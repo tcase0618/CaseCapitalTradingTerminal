@@ -58,7 +58,7 @@ class TestScan:
         for item in s1["results"]:
             assert "_id" not in item
             assert "ticker" in item
-            for rk in ["signal_score", "thesis", "entry_zone", "catalyst_date"]:
+            for rk in ["signal_score", "thesis", "entry_low", "entry_high", "catalyst_date"]:
                 assert rk in item
         # Second run — should hit cache fully (live scrapers may yield
         # slightly different candidate counts between back-to-back runs, so we
@@ -172,5 +172,5 @@ class TestQuoteAnalyze:
             d = r.json()
             assert "analysis" in d
             a = d["analysis"]
-            for k in ["ticker", "signal_score", "thesis", "entry_zone", "catalyst_date"]:
+            for k in ["ticker", "signal_score", "thesis", "entry_low", "entry_high", "catalyst_date"]:
                 assert k in a

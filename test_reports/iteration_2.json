@@ -1,0 +1,48 @@
+{
+  "summary": "Full v2 regression: USASpending gov contract intel, Risk score, 3-method Target price, batched Claude w/ 24h cache. 16/16 new pytest cases pass. Frontend dashboard renders Risk + Target columns, gold/amber gov signal badges (CONTRACT_SURGE/NEW_WINNER/MOMENTUM_STACK), Government Contracts panel, Budget Surges panel, GOV SCAN + RUN SCAN NOW buttons. All 7 new Telegram commands (/contracts, /scan_gov, /agency, /watchlist_contracts, /risk, /target, /compare) processed without crash (verified via activity_log entries). Token efficiency confirmed: 2nd scan run reports claude_calls_made=0 with claude_cache_hits == pre_filter_passed (11/11). Gov signals firing on expected tickers (LDOS, BAH, SAIC, LHX, DELL) — schema matches v2 spec.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/scan/run", "issue": "Endpoint is unauthenticated and triggers real Claude tokens + Telegram blasts on every call. Acceptable for admin MVP but worth a rate-limit / shared-secret in production."},
+      {"endpoint": "/api/risk/{ticker}", "issue": "Risk score for LDOS came back negative (-1) with single positive factor '4+ agencies winning [-]'. Negative score still maps to LOW but mathematically odd; consider clamping score >= 0 before threshold mapping."},
+      {"endpoint": "/api/target/{ticker}", "issue": "SAIC blended target shows +343.8% upside on dashboard — flagged in Claude thesis itself ('blended target appears anomalous'). Suggests contract_revenue_multiple method should be capped or weighted lower when revenue mismatch is extreme."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Latest Scan Results table", "issues": ["Target column shows extreme upside numbers (+343%, +172%) without visual de-emphasis — could mislead users; consider amber/red coloring when blended deviates >2x from analyst consensus"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v2_api.py",
+    "/app/backend/tests/test_stock_bot_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_v2_results.xml"
+  ],
+  "action_items": [
+    "Consider clamping risk score floor at 0 in compute_risk (/app/backend/services/risk_target.py)",
+    "Cap or down-weight contract_revenue_multiple target method when ratio vs analyst consensus exceeds e.g. 2x to avoid wildly off blended targets (SAIC +343%, LDOS +172%)",
+    "Optional: rate-limit /api/scan/run to prevent accidental Claude token burn and Telegram spam"
+  ],
+  "critical_code_review_comments": [
+    "scanner.run_scan: single batched Claude call confirmed working (claude_calls_made=1 on first run with 11 candidates). Cache key (ticker, date_key) hits 100% on subsequent same-day runs — solid token-efficiency design.",
+    "server.py /api/risk and /api/target each call fetch_fundamentals separately — for /compare endpoint they are gathered in parallel (good) but /risk → /target consecutive calls do not share fundamentals. Minor latency issue only.",
+    "telegram_service.handle_update logs every command via log_activity (verified) — webhook returns 200 even when handler raises async exceptions in BackgroundTasks. Consider surfacing handler failures to logs explicitly.",
+    "risk_target.compute_risk allows negative score (observed -1 for LDOS). Threshold logic still classifies as LOW so user-visible behaviour is fine, but score field semantically should be 0..N.",
+    "USASpending name_to_ticker is a static map — any new public-company contractor not in the map is silently dropped. Acceptable for v2 but worth documenting.",
+    "Dashboard.jsx target column numerator uses raw target_blended without bounds check; when methods diverge (e.g. SAIC 343%), no visual warning. Add color tier or warning icon when |upside| > 100%."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v2_api.py",
+    "/app/backend/tests/test_stock_bot_api.py"
+  ],
+  "success_rate": {"backend": "100% (16/16 v2 tests)", "frontend": "100% (all v2 testids + integrations)"},
+  "test_credentials": "N/A — no auth in this app",
+  "seed_data_creation": "Frontend test added+removed TSLA in watchlist. 7 Telegram cmd activity_log entries created (harmless, used for verification). No /scan/run was triggered beyond the single token-efficiency check (which hit cache, claude_calls_made=0).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "v2 schema fully verified. Latest scan has 11 results: LDOS, BAH, SAIC, DUOL, LHX, DELL, SOC, NRIX, TWST, PRCH, CAR. Cache for today is hot — re-running /api/scan/run will return claude_calls_made=0 deterministically. Public URL: https://stock-scout-bot.preview.emergentagent.com. Keep an eye on the SAIC/LDOS extreme target % values — these come from contract_revenue_multiple method amplifying when small-cap has many contracts.",
+  "rca of the issue": "No blocking bugs. Minor anomaly: risk score may go negative due to '4+ agencies winning' subtracting without floor; target blended occasionally extreme when contract_revenue_multiple diverges from analyst_consensus. Both are cosmetic/UX concerns, not functional failures."
+}

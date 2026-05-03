@@ -17,7 +17,9 @@ ET = pytz.timezone("America/New_York")
 async def _daily_scan_job():
     try:
         scan = await scanner.run_scan(triggered_by="scheduler")
-        await telegram_service.send_message(telegram_service.format_scan_results(scan))
+        await telegram_service.send_message(telegram_service.format_scan_summary(scan))
+        for r in scan.get("results", [])[:10]:
+            await telegram_service.send_message(telegram_service.format_stock_alert(r))
     except Exception as e:
         logger.exception("daily scan job failed: %s", e)
 
