@@ -66,3 +66,11 @@ Backend-first full-stack stock intelligence bot. Primary interface: Telegram. Ad
 
 ## Notes
 - Congressional data is currently a curated public-domain snapshot in services/congress.py (_CURATED list) — clearly labeled and easily swapped for a live source by replacing fetch_recent_buys()
+
+### Bug fix (Feb 2026) — Telegram delivery dropping all stocks
+- **Root cause**: Stray `<` characters in dynamic content (thesis, agency, risk factors) broke Telegram HTML parse mode → 400 "Unsupported start tag". Plus the prior 2-message cap truncated mid-HTML-tag causing a second parse error. Net effect: zero stocks delivered.
+- **Fixes** in `services/telegram_service.py`:
+  1. `_esc()` helper html-escapes all dynamic fields (ticker, thesis, agency, recipient, risk factors, levels) in every formatter (`format_stock_alert`, `_format_one_card`, `_format_footer`, `format_brief`, `format_contracts_*`).
+  2. `build_consolidated_messages` rewritten — greedy N-message chunking that fits cards under 4000 chars per message and **never splits a card mid-string**. No more 2-message cap; all results delivered.
+  3. `send_message` plain-text fallback: on Telegram 400 parse error, retry with HTML stripped so users always receive content.
+- **Verified**: 30 stocks → 3 messages, all 30 delivered, 0 parse errors. Live dispatch tested via real bot @Quantninjabot.

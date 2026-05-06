@@ -1,5 +1,6 @@
 """Telegram bot: send messages, register webhook, parse commands."""
 from __future__ import annotations
+import html
 import logging
 import os
 import re
@@ -43,6 +44,22 @@ async def send_message(text: str, chat_id: str | None = None, parse_mode: str = 
             r = await client.post(_api_url("sendMessage"), json=payload)
         if r.status_code != 200:
             logger.warning("Telegram send failed (%s): %s", r.status_code, r.text[:200])
+            # Plain-text fallback: if HTML parsing fails, retry without parse_mode
+            # so the user always receives content (even if styling is lost).
+            if parse_mode and r.status_code == 400 and "parse" in r.text.lower():
+                stripped = re.sub(r"<[^>]+>", "", text)
+                payload2 = {"chat_id": chat_id, "text": stripped,
+                             "disable_web_page_preview": True}
+                try:
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        r2 = await client.post(_api_url("sendMessage"), json=payload2)
+                    if r2.status_code == 200:
+                        logger.info("Telegram plain-text fallback succeeded")
+                        return True
+                    logger.warning("Telegram plain-text fallback failed (%s): %s",
+                                    r2.status_code, r2.text[:200])
+                except Exception as e:
+                    logger.warning("Telegram plain-text fallback exception: %s", e)
             return False
         return True
     except Exception as e:
@@ -87,6 +104,14 @@ SIG_BADGE = {
 }
 
 
+def _esc(v: Any) -> str:
+    """HTML-escape any dynamic content. Stray '<' chars in thesis/agency/recipient
+    names break Telegram HTML parse mode (e.g. '<5%' -> 'Unsupported start tag')."""
+    if v is None:
+        return ""
+    return html.escape(str(v), quote=False)
+
+
 def _fmt_price(v):
     if v is None:
         return "—"
@@ -112,7 +137,7 @@ def _now_et() -> str:
 
 
 def format_stock_alert(r: dict[str, Any]) -> str:
-    badges = " ".join(SIG_BADGE.get(s, s) for s in r.get("signals", []))
+    badges = " ".join(SIG_BADGE.get(s, _esc(s)) for s in r.get("signals", []))
     risk = r.get("risk") or {}
     targets = r.get("targets") or {}
     sq = r.get("squeeze") or {}
@@ -122,10 +147,10 @@ def format_stock_alert(r: dict[str, Any]) -> str:
     contracts = r.get("contracts") or []
     if contracts:
         c0 = contracts[0]
-        contract_line = (f"\n🏛 Gov contract: {c0.get('agency')} — "
-                         f"${(c0.get('amount') or 0)/1e6:.1f}M ({c0.get('award_id') or 'n/a'})")
+        contract_line = (f"\n🏛 Gov contract: {_esc(c0.get('agency'))} — "
+                         f"${(c0.get('amount') or 0)/1e6:.1f}M ({_esc(c0.get('award_id') or 'n/a')})")
 
-    line_factors = "\n".join(f"   └ {f}" for f in risk_factors[:3]) or "   └ (none)"
+    line_factors = "\n".join(f"   └ {_esc(f)}" for f in risk_factors[:3]) or "   └ (none)"
 
     sq_line = ""
     if sq.get("score") is not None:
@@ -133,7 +158,7 @@ def format_stock_alert(r: dict[str, Any]) -> str:
 
     tt_line = ""
     if tt.get("target_date"):
-        tt_line = (f"\n📅 Time target: <b>{tt['target_date']}</b> "
+        tt_line = (f"\n📅 Time target: <b>{_esc(tt['target_date'])}</b> "
                    f"({tt.get('days_remaining', 0)}d)\n"
                    f"⏱ Hold: {tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)} days")
 
@@ -142,11 +167,11 @@ def format_stock_alert(r: dict[str, Any]) -> str:
     head = (
         f"📡 <b>STOCK INTEL</b> — {_now_et()}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>${r['ticker']}</b> — <code>{r.get('signal_score',0)}/10</code> — "
-        f"{risk.get('emoji','⚪')} <b>{risk.get('level','?')}</b>{fy_line}\n"
+        f"🎯 <b>${_esc(r['ticker'])}</b> — <code>{r.get('signal_score',0)}/10</code> — "
+        f"{risk.get('emoji','⚪')} <b>{_esc(risk.get('level','?'))}</b>{fy_line}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Signals: {badges}\n"
-        f"💡 <i>{r.get('thesis','')}</i>\n"
+        f"💡 <i>{_esc(r.get('thesis',''))}</i>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Entry zone: {_fmt_price(r.get('entry_low'))} — {_fmt_price(r.get('entry_high'))}\n\n"
         "🎯 Price targets:\n"
@@ -155,7 +180,7 @@ def format_stock_alert(r: dict[str, Any]) -> str:
         f"   └ Bull:    {_fmt_price(targets.get('target_high'))} ({_fmt_pct(targets.get('upside_high'))})"
         f"{tt_line}{sq_line}\n\n"
         f"🛑 Stop loss: {_fmt_price(r.get('stop_loss'))}\n"
-        f"🏆 Conviction: {r.get('conviction','?')}\n\n"
+        f"🏆 Conviction: {_esc(r.get('conviction','?'))}\n\n"
         "⚠️ Risk factors:\n"
         f"{line_factors}"
         f"{contract_line}\n"
@@ -185,14 +210,14 @@ def format_scan_summary(scan: dict[str, Any]) -> str:
 def format_brief(r: dict[str, Any]) -> str:
     risk = r.get("risk") or {}
     targets = r.get("targets") or {}
-    badges = " ".join(SIG_BADGE.get(s, s) for s in r.get("signals", []))
+    badges = " ".join(SIG_BADGE.get(s, _esc(s)) for s in r.get("signals", []))
     return (
-        f"<b>${r['ticker']}</b> {risk.get('emoji','')} "
+        f"<b>${_esc(r['ticker'])}</b> {risk.get('emoji','')} "
         f"<code>{r.get('signal_score',0)}/10</code> "
         f"{badges}\n"
         f"  💰 {_fmt_price(r.get('price'))} → {_fmt_price(targets.get('target_blended'))} "
         f"({_fmt_pct(targets.get('upside_blended'))})\n"
-        f"  💡 {r.get('thesis','')}"
+        f"  💡 {_esc(r.get('thesis',''))}"
     )
 
 
@@ -200,22 +225,22 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
     risk = r.get("risk") or {}
     targets = r.get("targets") or {}
     tt = r.get("time_target") or {}
-    badges = " ".join(SIG_BADGE.get(s, s) for s in r.get("signals", []))
+    badges = " ".join(SIG_BADGE.get(s, _esc(s)) for s in r.get("signals", []))
     risk_factors = (risk.get("factors") or [])[:2]
-    rf_line = " · ".join(risk_factors) if risk_factors else "(none)"
+    rf_line = " · ".join(_esc(f) for f in risk_factors) if risk_factors else "(none)"
     contract_line = ""
     contracts = r.get("contracts") or []
     if contracts:
         c0 = contracts[0]
-        contract_line = (f"\n🏛 {c0.get('agency','')[:30]} "
+        contract_line = (f"\n🏛 {_esc((c0.get('agency') or '')[:30])} "
                          f"${(c0.get('amount') or 0)/1e6:.1f}M")
-    target_date = tt.get("target_date", "—")
+    target_date = _esc(tt.get("target_date", "—"))
     hold = f"{tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)}"
     return (
-        f"<b>{rank}. 🎯 ${r['ticker']}</b> — <code>{r.get('signal_score',0)}/10</code>"
-        f" — {risk.get('emoji','⚪')} {risk.get('level','?')}\n"
+        f"<b>{rank}. 🎯 ${_esc(r['ticker'])}</b> — <code>{r.get('signal_score',0)}/10</code>"
+        f" — {risk.get('emoji','⚪')} {_esc(risk.get('level','?'))}\n"
         f"📊 {badges}\n"
-        f"💡 <i>{r.get('thesis','')}</i>\n"
+        f"💡 <i>{_esc(r.get('thesis',''))}</i>\n"
         f"💰 Entry: {_fmt_price(r.get('entry_low'))}–{_fmt_price(r.get('entry_high'))}\n"
         f"🎯 Target: {_fmt_price(targets.get('target_blended'))} "
         f"({_fmt_pct(targets.get('upside_blended'))}) by {target_date}\n"
@@ -237,15 +262,15 @@ def _format_footer(results: list[dict[str, Any]]) -> str:
     lines = ["━━━━━━━━━━━━━━━━━━━━━━━━━"]
     if top_pick:
         tg = top_pick.get("targets") or {}
-        lines.append(f"🏆 TOP PICK: <b>${top_pick['ticker']}</b> — "
+        lines.append(f"🏆 TOP PICK: <b>${_esc(top_pick['ticker'])}</b> — "
                      f"score {top_pick.get('signal_score',0)}/10 ({_fmt_pct(tg.get('upside_blended'))})")
     if sq_pick and (sq_pick.get("squeeze") or {}).get("score", 0):
         sq = sq_pick.get("squeeze") or {}
-        lines.append(f"⚡ SQUEEZE WATCH: <b>${sq_pick['ticker']}</b> — {sq.get('score','?')}/100")
+        lines.append(f"⚡ SQUEEZE WATCH: <b>${_esc(sq_pick['ticker'])}</b> — {sq.get('score','?')}/100")
     if gov_pick:
         c0 = (gov_pick.get("contracts") or [{}])[0]
-        lines.append(f"🏛 GOV PLAY: <b>${gov_pick['ticker']}</b> — "
-                     f"${(c0.get('amount') or 0)/1e6:.1f}M ({c0.get('agency','?')[:30]})")
+        lines.append(f"🏛 GOV PLAY: <b>${_esc(gov_pick['ticker'])}</b> — "
+                     f"${(c0.get('amount') or 0)/1e6:.1f}M ({_esc((c0.get('agency') or '?')[:30])})")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("📈 /target [ticker] · 🔍 /risk [ticker]")
     lines.append("📊 /backtest [signal] · 💬 Ask anything")
@@ -270,34 +295,61 @@ TG_LIMIT = 4000  # leave buffer below 4096
 
 
 def build_consolidated_messages(scan: dict[str, Any], title: str = "STOCK INTEL BOT") -> list[str]:
-    """Returns 1 or 2 messages. Sorted desc by signal_score. Footer on last."""
+    """Greedy chunking: fits as many cards as possible per message, opens a new
+    message when the next card would overflow. Header on first, footer on last.
+    Never truncates mid-card (which would break HTML parsing)."""
     results = list(scan.get("results", []))
     results.sort(key=lambda r: r.get("signal_score", 0), reverse=True)
 
     header = _format_header(scan, title)
     footer = _format_footer(results)
-    divider = "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    sep = "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     if not results:
-        return [header + "\n\n<i>No tickers passed 2+ signal filter.</i>" + footer]
+        return [header + "\n\n<i>No tickers passed 2+ signal filter.</i>\n" + footer]
 
     cards = [_format_one_card(i + 1, r) for i, r in enumerate(results)]
 
-    # Try single message first
-    full = header + "\n\n" + divider.join(cards) + "\n" + footer
-    if len(full) <= TG_LIMIT:
-        return [full]
+    # Greedy pack cards into messages
+    chunks: list[list[str]] = [[]]
+    # Budget for chunk 0 must include header; last chunk must include footer.
+    # Start by reserving header for chunk 0.
+    current_len = len(header) + len(sep)
+    for card in cards:
+        # If adding this card would exceed limit (with safety for footer/sep),
+        # start a new chunk.
+        # Reserve footer length only when on what could be the final chunk.
+        add_len = len(card) + len(sep)
+        if current_len + add_len > TG_LIMIT and chunks[-1]:
+            chunks.append([])
+            current_len = 0
+        chunks[-1].append(card)
+        current_len += add_len
 
-    # Split into 2 — first half + (header + first cards), second half + footer
-    half = (len(cards) + 1) // 2
-    msg1 = header + "\n\n" + divider.join(cards[:half])
-    msg2 = divider.join(cards[half:]) + "\n" + footer
-    # If still over, truncate cards section in msg1 / msg2
-    if len(msg1) > TG_LIMIT:
-        msg1 = msg1[: TG_LIMIT - 50] + "\n\n<i>(truncated)</i>"
-    if len(msg2) > TG_LIMIT:
-        msg2 = msg2[: TG_LIMIT - 50] + "\n\n<i>(truncated)</i>"
-    return [msg1, msg2]
+    # Build message strings
+    msgs: list[str] = []
+    for i, chunk in enumerate(chunks):
+        body = sep.join(chunk)
+        if i == 0:
+            body = header + "\n\n" + body
+        if i == len(chunks) - 1:
+            body = body + "\n" + footer
+        msgs.append(body)
+
+    # Safety net: if any single message is still over limit (shouldn't happen
+    # unless one card itself is huge), truncate by removing trailing tags safely.
+    safe = []
+    for m in msgs:
+        if len(m) <= TG_LIMIT:
+            safe.append(m)
+            continue
+        # Trim at last newline before limit so we don't break mid-tag
+        cut = m[: TG_LIMIT - 50]
+        last_nl = cut.rfind("\n")
+        if last_nl > 0:
+            cut = cut[:last_nl]
+        safe.append(cut + "\n\n<i>(truncated)</i>")
+    return safe
 
 
 async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None,
@@ -321,9 +373,9 @@ def format_contracts_condensed(rows: list[dict[str, Any]]) -> str:
     lines = ["🏛 <b>GOV CONTRACTS — RECENT</b>"]
     for r in rows:
         amt = (r.get("amount") or 0) / 1e6
-        agency = (r.get("agency") or "?")[:25]
+        agency = _esc((r.get("agency") or "?")[:25])
         lines.append(
-            f"🏛 <b>${r['ticker']}</b> — ${amt:.1f}M — {agency}"
+            f"🏛 <b>${_esc(r['ticker'])}</b> — ${amt:.1f}M — {agency}"
         )
     return "\n".join(lines)
 
@@ -335,8 +387,8 @@ def format_contracts_list(rows: list[dict[str, Any]]) -> str:
     for r in rows:
         amount = r.get('amount') or 0
         lines.append(
-            f"• <b>${r['ticker']}</b> — {r.get('agency','?')[:35]}\n"
-            f"  ${amount/1e6:.1f}M · {r.get('recipient','')[:40]}"
+            f"• <b>${_esc(r['ticker'])}</b> — {_esc((r.get('agency') or '?')[:35])}\n"
+            f"  ${amount/1e6:.1f}M · {_esc((r.get('recipient') or '')[:40])}"
         )
     return "\n".join(lines)
 
