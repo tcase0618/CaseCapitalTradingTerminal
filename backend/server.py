@@ -79,10 +79,26 @@ async def status():
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        await telegram_service.send_message(telegram_service.format_scan_summary(scan))
-        for r in scan.get("results", [])[:10]:
-            await telegram_service.send_message(telegram_service.format_stock_alert(r))
+        await telegram_service.dispatch_consolidated(scan)
     return scan
+
+
+@api.post("/scan/dispatch")
+async def scan_dispatch():
+    scan = await scanner.latest_scan()
+    if not scan:
+        raise HTTPException(404, "no scan available")
+    return await telegram_service.dispatch_consolidated(scan)
+
+
+@api.get("/scan/preview")
+async def scan_preview():
+    scan = await scanner.latest_scan()
+    if not scan:
+        return {"messages": [], "char_counts": [], "total_chars": 0}
+    msgs = telegram_service.build_consolidated_messages(scan)
+    return {"messages": msgs, "char_counts": [len(m) for m in msgs],
+             "total_chars": sum(len(m) for m in msgs)}
 
 
 @api.post("/scan/gov")

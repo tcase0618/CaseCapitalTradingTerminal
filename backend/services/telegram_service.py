@@ -196,6 +196,138 @@ def format_brief(r: dict[str, Any]) -> str:
     )
 
 
+def _format_one_card(rank: int, r: dict[str, Any]) -> str:
+    risk = r.get("risk") or {}
+    targets = r.get("targets") or {}
+    tt = r.get("time_target") or {}
+    badges = " ".join(SIG_BADGE.get(s, s) for s in r.get("signals", []))
+    risk_factors = (risk.get("factors") or [])[:2]
+    rf_line = " · ".join(risk_factors) if risk_factors else "(none)"
+    contract_line = ""
+    contracts = r.get("contracts") or []
+    if contracts:
+        c0 = contracts[0]
+        contract_line = (f"\n🏛 {c0.get('agency','')[:30]} "
+                         f"${(c0.get('amount') or 0)/1e6:.1f}M")
+    target_date = tt.get("target_date", "—")
+    hold = f"{tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)}"
+    return (
+        f"<b>{rank}. 🎯 ${r['ticker']}</b> — <code>{r.get('signal_score',0)}/10</code>"
+        f" — {risk.get('emoji','⚪')} {risk.get('level','?')}\n"
+        f"📊 {badges}\n"
+        f"💡 <i>{r.get('thesis','')}</i>\n"
+        f"💰 Entry: {_fmt_price(r.get('entry_low'))}–{_fmt_price(r.get('entry_high'))}\n"
+        f"🎯 Target: {_fmt_price(targets.get('target_blended'))} "
+        f"({_fmt_pct(targets.get('upside_blended'))}) by {target_date}\n"
+        f"🛑 Stop: {_fmt_price(r.get('stop_loss'))} | ⏱ Hold: {hold} days\n"
+        f"⚠️ Risk: {rf_line}"
+        f"{contract_line}"
+    )
+
+
+def _format_footer(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return ""
+    top_pick = max(results, key=lambda x: x.get("signal_score", 0))
+    sq_pick = max(results, key=lambda x: (x.get("squeeze") or {}).get("score", 0) or 0)
+    gov_results = [r for r in results if r.get("contracts")]
+    gov_pick = max(gov_results,
+                    key=lambda x: max((c.get("amount", 0) for c in x.get("contracts", [])), default=0)) if gov_results else None
+
+    lines = ["━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if top_pick:
+        tg = top_pick.get("targets") or {}
+        lines.append(f"🏆 TOP PICK: <b>${top_pick['ticker']}</b> — "
+                     f"score {top_pick.get('signal_score',0)}/10 ({_fmt_pct(tg.get('upside_blended'))})")
+    if sq_pick and (sq_pick.get("squeeze") or {}).get("score", 0):
+        sq = sq_pick.get("squeeze") or {}
+        lines.append(f"⚡ SQUEEZE WATCH: <b>${sq_pick['ticker']}</b> — {sq.get('score','?')}/100")
+    if gov_pick:
+        c0 = (gov_pick.get("contracts") or [{}])[0]
+        lines.append(f"🏛 GOV PLAY: <b>${gov_pick['ticker']}</b> — "
+                     f"${(c0.get('amount') or 0)/1e6:.1f}M ({c0.get('agency','?')[:30]})")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📈 /target [ticker] · 🔍 /risk [ticker]")
+    lines.append("📊 /backtest [signal] · 💬 Ask anything")
+    return "\n".join(lines)
+
+
+def _format_header(scan: dict[str, Any], title: str = "STOCK INTEL BOT") -> str:
+    raw = scan.get("raw_counts", {})
+    total_signals = sum(raw.values())
+    return (
+        f"📡 <b>{title}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🗓 {_now_et()}\n"
+        f"📊 {total_signals} signals → {scan.get('pre_filter_passed', 0)} passed filter\n"
+        f"💾 Cache: {scan.get('claude_cache_hits', 0)} hits · "
+        f"{scan.get('claude_calls_made', 0)} fresh\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+TG_LIMIT = 4000  # leave buffer below 4096
+
+
+def build_consolidated_messages(scan: dict[str, Any], title: str = "STOCK INTEL BOT") -> list[str]:
+    """Returns 1 or 2 messages. Sorted desc by signal_score. Footer on last."""
+    results = list(scan.get("results", []))
+    results.sort(key=lambda r: r.get("signal_score", 0), reverse=True)
+
+    header = _format_header(scan, title)
+    footer = _format_footer(results)
+    divider = "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if not results:
+        return [header + "\n\n<i>No tickers passed 2+ signal filter.</i>" + footer]
+
+    cards = [_format_one_card(i + 1, r) for i, r in enumerate(results)]
+
+    # Try single message first
+    full = header + "\n\n" + divider.join(cards) + "\n" + footer
+    if len(full) <= TG_LIMIT:
+        return [full]
+
+    # Split into 2 — first half + (header + first cards), second half + footer
+    half = (len(cards) + 1) // 2
+    msg1 = header + "\n\n" + divider.join(cards[:half])
+    msg2 = divider.join(cards[half:]) + "\n" + footer
+    # If still over, truncate cards section in msg1 / msg2
+    if len(msg1) > TG_LIMIT:
+        msg1 = msg1[: TG_LIMIT - 50] + "\n\n<i>(truncated)</i>"
+    if len(msg2) > TG_LIMIT:
+        msg2 = msg2[: TG_LIMIT - 50] + "\n\n<i>(truncated)</i>"
+    return [msg1, msg2]
+
+
+async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None,
+                                 title: str = "STOCK INTEL BOT") -> dict[str, Any]:
+    """Build + send consolidated msgs. Returns delivery summary."""
+    msgs = build_consolidated_messages(scan, title=title)
+    sent = 0
+    for m in msgs:
+        await log_activity(f"Telegram dispatch: {len(m)} chars", "info")
+        ok = await send_message(m, chat_id=chat_id)
+        if ok:
+            sent += 1
+    return {"messages_built": len(msgs), "messages_sent": sent,
+             "char_counts": [len(m) for m in msgs]}
+
+
+def format_contracts_condensed(rows: list[dict[str, Any]]) -> str:
+    """For /contracts: one line per award."""
+    if not rows:
+        return "No recent gov contracts to public companies."
+    lines = ["🏛 <b>GOV CONTRACTS — RECENT</b>"]
+    for r in rows:
+        amt = (r.get("amount") or 0) / 1e6
+        agency = (r.get("agency") or "?")[:25]
+        lines.append(
+            f"🏛 <b>${r['ticker']}</b> — ${amt:.1f}M — {agency}"
+        )
+    return "\n".join(lines)
+
+
 def format_contracts_list(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "No recent gov contracts to public companies."
@@ -384,23 +516,21 @@ async def handle_update(update: dict[str, Any]) -> None:
     if cmd == "/scan":
         await send_message("⏳ Running full scan...", chat_id=chat_id)
         scan = await scanner.run_scan(triggered_by=f"telegram:{chat_id}")
-        await send_message(format_scan_summary(scan), chat_id=chat_id)
-        for r in scan.get("results", [])[:10]:
-            await send_message(format_stock_alert(r), chat_id=chat_id)
-        if not scan.get("results"):
-            await send_message("No tickers passed 2+ signal filter.", chat_id=chat_id)
+        await dispatch_consolidated(scan, chat_id=chat_id)
         return
 
     if cmd == "/scan_gov":
-        await send_message("⏳ Running government contracts scan...", chat_id=chat_id)
+        await send_message("⏳ Running gov contracts scan...", chat_id=chat_id)
         scan = await scanner.run_gov_scan_only(triggered_by=f"telegram:{chat_id}")
-        await send_message(
-            f"🏛 <b>GOV CONTRACTS SCAN</b> — {len(scan['results'])} public-company hits",
-            chat_id=chat_id,
-        )
-        for r in scan["results"][:10]:
-            await send_message(format_brief(r), chat_id=chat_id)
-        # Budget surges
+        # Reshape gov scan into the consolidated schema
+        gov_doc = {
+            "raw_counts": {},
+            "pre_filter_passed": len(scan.get("results", [])),
+            "claude_calls_made": 0,
+            "claude_cache_hits": 0,
+            "results": scan.get("results", []),
+        }
+        await dispatch_consolidated(gov_doc, chat_id=chat_id, title="GOV CONTRACT SCAN")
         bs = scan.get("budget_surges", [])
         if bs:
             lines = ["💰 <b>AGENCY BUDGET SURGES</b>"]
@@ -411,8 +541,8 @@ async def handle_update(update: dict[str, Any]) -> None:
         return
 
     if cmd == "/contracts":
-        rows = await usaspending.list_recent_contracts_for_tickers(limit=5)
-        await send_message(format_contracts_list(rows), chat_id=chat_id)
+        rows = await usaspending.list_recent_contracts_for_tickers(limit=10)
+        await send_message(format_contracts_condensed(rows), chat_id=chat_id)
         return
 
     if cmd == "/agency":

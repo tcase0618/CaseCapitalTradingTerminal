@@ -1,93 +1,111 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-import {
-  Activity,
-  RefreshCw,
-  Zap,
-  PlayCircle,
-  Plus,
-  Trash2,
-  Bell,
-  Eye,
-  TrendingUp,
-  Database,
-  Radio,
-  Send,
-  ChevronRight,
-  Landmark,
-  Building2,
-  AlertTriangle,
-  Target,
-} from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const cls = (...x) => x.filter(Boolean).join(" ");
 
-const scoreColor = (s) => {
-  if (s >= 9) return "text-green-400 bg-green-500/10 border-green-500/40";
-  if (s >= 7) return "text-green-500 bg-green-500/10 border-green-500/30";
-  if (s >= 5) return "text-amber-500 bg-amber-500/10 border-amber-500/30";
-  return "text-slate-400 bg-slate-800 border-slate-700";
-};
-
-const SIG_META = {
-  insider_cluster_buy: { label: "INSIDER", color: "text-indigo-300 bg-indigo-500/10 border-indigo-500/30" },
-  high_short_interest: { label: "SHORT", color: "text-red-400 bg-red-500/10 border-red-500/30" },
-  upcoming_earnings: { label: "EARNINGS", color: "text-blue-400 bg-blue-500/10 border-blue-500/30" },
-  CONTRACT_SURGE: { label: "CONTRACT_SURGE", color: "text-amber-300 bg-amber-500/10 border-amber-500/40" },
-  NEW_WINNER: { label: "NEW_WINNER", color: "text-yellow-300 bg-yellow-500/10 border-yellow-500/40" },
-  CONCENTRATION_WIN: { label: "CONCENTRATION_WIN", color: "text-orange-300 bg-orange-500/10 border-orange-500/40" },
-  MOMENTUM_STACK: { label: "MOMENTUM_STACK", color: "text-amber-400 bg-amber-500/10 border-amber-500/40" },
-  BUDGET_SURGE: { label: "BUDGET_SURGE", color: "text-yellow-400 bg-yellow-500/10 border-yellow-500/40" },
-  CONGRESSIONAL_BUY: { label: "CONGRESS_BUY", color: "text-yellow-200 bg-yellow-500/15 border-yellow-400/50" },
-  PRE_AWARD: { label: "PRE_AWARD", color: "text-amber-200 bg-amber-500/10 border-amber-400/40" },
-  SUB_BENEFICIARY: { label: "SUB_BENEFICIARY", color: "text-orange-200 bg-orange-500/10 border-orange-400/40" },
-};
-
-const squeezeColor = (s) => {
-  if (s == null) return "text-slate-500 bg-slate-800 border-slate-700";
-  if (s >= 86) return "text-red-300 bg-red-500/15 border-red-500/50 animate-pulse";
-  if (s >= 66) return "text-orange-300 bg-orange-500/10 border-orange-500/40";
-  if (s >= 41) return "text-yellow-300 bg-yellow-500/10 border-yellow-500/40";
-  return "text-slate-400 bg-slate-800 border-slate-700";
-};
-
-const RISK_BG = {
-  LOW: "text-green-400 bg-green-500/10 border-green-500/30",
-  MEDIUM: "text-amber-400 bg-amber-500/10 border-amber-500/30",
-  HIGH: "text-red-400 bg-red-500/10 border-red-500/30",
-  EXTREME: "text-red-300 bg-red-500/20 border-red-500/50",
-};
-
-const fmtMoney = (v) => (v == null || v === "" ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+const fmtPrice = (v) => (v == null ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
 const fmtPct = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}%`);
 const fmtAmt = (v) => (v == null ? "—" : `$${(Number(v) / 1e6).toFixed(1)}M`);
 
-function Section({ title, right, children, testid }) {
+const SIG_TAG = {
+  insider_cluster_buy:  { label: "INSIDER",         color: "#c084fc", bg: "rgba(192,132,252,0.07)", bd: "rgba(192,132,252,0.35)" },
+  high_short_interest:  { label: "SHORT",           color: "#f87171", bg: "rgba(248,113,113,0.07)", bd: "rgba(248,113,113,0.35)" },
+  upcoming_earnings:    { label: "EARNINGS",        color: "#60a5fa", bg: "rgba(96,165,250,0.07)",  bd: "rgba(96,165,250,0.35)" },
+  CONTRACT_SURGE:       { label: "CONTRACT SURGE",  color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+  NEW_WINNER:           { label: "NEW WINNER",      color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+  CONCENTRATION_WIN:    { label: "CONCENTRATION",   color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+  MOMENTUM_STACK:       { label: "MOMENTUM",        color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+  BUDGET_SURGE:         { label: "BUDGET SURGE",    color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+  CONGRESSIONAL_BUY:    { label: "CONGRESS BUY",    color: "#34d399", bg: "rgba(52,211,153,0.07)",  bd: "rgba(52,211,153,0.35)" },
+  PRE_AWARD:            { label: "PRE AWARD",       color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+};
+
+const RISK_PILL = {
+  LOW:     { color: "#4ade80", bd: "rgba(74,222,128,0.3)" },
+  MEDIUM:  { color: "#c8a84b", bd: "rgba(200,168,75,0.3)" },
+  HIGH:    { color: "#fb923c", bd: "rgba(251,146,60,0.3)" },
+  EXTREME: { color: "#f87171", bd: "rgba(248,113,113,0.3)" },
+};
+
+function ScoreRing({ score = 0 }) {
+  const color = score >= 7 ? "#c8a84b" : score >= 5 ? "#fb923c" : "#6b7280";
+  const r = 18, c = 2 * Math.PI * r;
+  const offset = c - (Math.max(0, Math.min(10, score)) / 10) * c;
   return (
-    <div data-testid={testid} className="border border-slate-800 bg-slate-900/40">
-      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
-        <h3 className="font-mono text-[11px] uppercase tracking-[0.25em] text-slate-400">{title}</h3>
-        {right}
-      </div>
-      <div>{children}</div>
+    <svg width="40" height="40" viewBox="0 0 40 40" style={{ transform: "rotate(-90deg)" }}>
+      <circle cx="20" cy="20" r={r} stroke="rgba(255,255,255,0.08)" strokeWidth="2" fill="none" />
+      <circle cx="20" cy="20" r={r} stroke={color} strokeWidth="2" fill="none"
+        strokeDasharray={c} strokeDashoffset={offset} style={{ transition: "stroke-dashoffset 0.4s" }} />
+      <text x="20" y="20" textAnchor="middle" dominantBaseline="central" fill={color}
+        fontSize="14" fontWeight="700" fontFamily="Courier New" style={{ transform: "rotate(90deg)", transformOrigin: "20px 20px" }}>
+        {score}
+      </text>
+    </svg>
+  );
+}
+
+function StrengthBars({ score = 0 }) {
+  const filled = Math.round((Math.max(0, Math.min(10, score)) / 10) * 5);
+  return (
+    <div style={{ display: "flex", flexDirection: "column-reverse", gap: 2 }}>
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} style={{
+          width: 22, height: 2,
+          background: i < filled ? "#c8a84b" : "#1a1a2e",
+          transition: "background 0.2s",
+        }} />
+      ))}
     </div>
   );
 }
 
-function StatTile({ label, value, sub, icon: Icon, accent = "text-slate-50", testid }) {
-  return (
-    <div data-testid={testid} className="border border-slate-800 bg-slate-900/40 p-4 hover:bg-slate-900 transition-colors">
-      <div className="flex items-center justify-between">
-        <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-slate-500">{label}</div>
-        {Icon && <Icon className="h-3.5 w-3.5 text-slate-600" />}
-      </div>
-      <div className={cls("mt-3 font-mono text-3xl font-semibold tabular-nums", accent)}>{value}</div>
-      {sub && <div className="mt-1 font-mono text-[11px] text-slate-500">{sub}</div>}
-    </div>
-  );
+function useClock() {
+  const [t, setT] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setT(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return t;
 }
+
+function _padZ(n) { return n < 10 ? `0${n}` : `${n}`; }
+
+function formatET(t) {
+  return t.toLocaleTimeString("en-US", { hour12: false, timeZone: "America/New_York" });
+}
+
+function formatETDate(t) {
+  return t.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "2-digit", year: "numeric", timeZone: "America/New_York" }).toUpperCase();
+}
+
+function nextScanCountdown(now) {
+  // Next 8:00 AM America/New_York
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
+  const todayET = new Date(`${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`);
+  const target = new Date(todayET);
+  target.setHours(8, 0, 0, 0);
+  if (todayET.getTime() >= target.getTime()) target.setDate(target.getDate() + 1);
+  let diff = Math.max(0, Math.floor((target.getTime() - todayET.getTime()) / 1000));
+  const hh = Math.floor(diff / 3600); diff -= hh * 3600;
+  const mm = Math.floor(diff / 60);   diff -= mm * 60;
+  return `${_padZ(hh)}:${_padZ(mm)}:${_padZ(diff)}`;
+}
+
+const accent = "#c8a84b";
+const muted = "#6b7280";
+const dim = "#374151";
+const labelLight = "#4a5568";
+const cardBg = "#0c0c12";
+const pageBg = "#06060a";
+const hairline = "0.5px solid rgba(255,255,255,0.06)";
+const hairlineLight = "0.5px solid rgba(255,255,255,0.04)";
 
 export default function Dashboard() {
   const [status, setStatus] = useState(null);
@@ -99,557 +117,558 @@ export default function Dashboard() {
   const [congress, setCongress] = useState([]);
   const [squeezeLb, setSqueezeLb] = useState([]);
   const [fyStatus, setFyStatus] = useState({ fy_multiplier_active: false, days_to_fy_end: 0 });
+  const [preview, setPreview] = useState(null);
   const [scanning, setScanning] = useState(false);
-  const [govScanning, setGovScanning] = useState(false);
+  const [dispatching, setDispatching] = useState(false);
+  const [selected, setSelected] = useState(null);
 
   const [tInput, setTInput] = useState("");
   const [aTicker, setATicker] = useState("");
   const [aPrice, setAPrice] = useState("");
 
+  const [openPanel, setOpenPanel] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const t = useClock();
+
   const refresh = useCallback(async () => {
     try {
-      const [s, sc, ac, wl, al, ct, cg, sq, fy] = await Promise.all([
-        axios.get(`${API}/status`),
-        axios.get(`${API}/scan/latest`),
-        axios.get(`${API}/activity?limit=30`),
-        axios.get(`${API}/watchlist`),
-        axios.get(`${API}/alerts`),
-        axios.get(`${API}/contracts?limit=5`),
+      const [s, sc, ac, wl, al, ct, cg, sq, fy, pv] = await Promise.all([
+        axios.get(`${API}/status`), axios.get(`${API}/scan/latest`),
+        axios.get(`${API}/activity?limit=20`), axios.get(`${API}/watchlist`),
+        axios.get(`${API}/alerts`), axios.get(`${API}/contracts?limit=10`),
         axios.get(`${API}/congress/recent?days=30`),
         axios.get(`${API}/squeeze/leaderboard/top?limit=10`),
-        axios.get(`${API}/fy/status`),
+        axios.get(`${API}/fy/status`), axios.get(`${API}/scan/preview`),
       ]);
-      setStatus(s.data);
-      setScan(sc.data);
-      setActivity(ac.data);
-      setWatchlist(wl.data);
-      setAlerts(al.data);
-      setContracts(ct.data);
-      setCongress(cg.data);
-      setSqueezeLb(sq.data);
-      setFyStatus(fy.data);
-    } catch (e) {
-      console.error(e);
-    }
+      setStatus(s.data); setScan(sc.data); setActivity(ac.data);
+      setWatchlist(wl.data); setAlerts(al.data); setContracts(ct.data);
+      setCongress(cg.data); setSqueezeLb(sq.data); setFyStatus(fy.data);
+      setPreview(pv.data);
+    } catch (e) { console.error(e); }
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 15000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
 
   const runScan = async () => {
     setScanning(true);
-    toast.message("SCAN INITIATED", { description: "Fetching market + gov signals..." });
+    toast("SCAN INITIATED");
     try {
       const { data } = await axios.post(`${API}/scan/run`);
       setScan(data);
-      toast.success("SCAN COMPLETE", {
-        description: `${data.results?.length || 0} results · ${data.claude_calls_made} Claude call · ${data.claude_cache_hits} cached`,
-      });
+      toast(`SCAN COMPLETE — ${data.results?.length || 0} TARGETS`);
       refresh();
-    } catch (e) {
-      toast.error("SCAN FAILED", { description: e?.response?.data?.detail || e.message });
-    } finally {
-      setScanning(false);
-    }
+    } catch { toast("SCAN FAILED"); }
+    setScanning(false);
   };
 
-  const runGovScan = async () => {
-    setGovScanning(true);
+  const dispatch = async () => {
+    setDispatching(true);
     try {
-      const { data } = await axios.post(`${API}/scan/gov`);
-      toast.success("GOV SCAN COMPLETE", { description: `${data.results?.length || 0} public-co hits` });
-      refresh();
-    } catch (e) {
-      toast.error("GOV SCAN FAILED");
-    } finally {
-      setGovScanning(false);
-    }
+      const { data } = await axios.post(`${API}/scan/dispatch`);
+      toast(`DISPATCHED — ${data.messages_sent}/${data.messages_built} MSG · ${(data.char_counts || []).join("/")} CHARS`);
+    } catch { toast("DISPATCH FAILED"); }
+    setDispatching(false);
   };
+
+  const fireToast = (cmd) => toast(`COMMAND DISPATCHED — ${cmd}`);
 
   const addWatch = async () => {
     if (!tInput.trim()) return;
-    try {
-      await axios.post(`${API}/watchlist`, { ticker: tInput.trim() });
-      setTInput("");
-      toast.success(`ADDED $${tInput.toUpperCase()}`);
-      refresh();
-    } catch { toast.error("ADD FAILED"); }
+    try { await axios.post(`${API}/watchlist`, { ticker: tInput.trim() }); setTInput(""); refresh(); } catch {}
   };
   const removeWatch = async (t) => { await axios.delete(`${API}/watchlist/${t}`); refresh(); };
   const addAlert = async () => {
     if (!aTicker.trim() || !aPrice) return;
-    try {
-      await axios.post(`${API}/alerts`, { ticker: aTicker.trim(), target_price: parseFloat(aPrice) });
-      setATicker(""); setAPrice("");
-      toast.success("ALERT SET"); refresh();
-    } catch { toast.error("ALERT FAILED"); }
+    try { await axios.post(`${API}/alerts`, { ticker: aTicker.trim(), target_price: parseFloat(aPrice) });
+          setATicker(""); setAPrice(""); refresh(); } catch {}
   };
   const removeAlert = async (t) => { await axios.delete(`${API}/alerts/${t}`); refresh(); };
 
-  const formatTime = (iso) => {
-    if (!iso) return "—";
-    try {
-      return new Date(iso).toLocaleString("en-US", {
-        month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-      });
-    } catch { return iso; }
+  const results = useMemo(() => {
+    const r = [...((scan && scan.results) || [])];
+    r.sort((a, b) => (b.signal_score || 0) - (a.signal_score || 0));
+    return r;
+  }, [scan]);
+
+  const counts = {
+    insider: scan?.raw_counts?.insider_clusters || 0,
+    short: scan?.raw_counts?.high_short_interest || 0,
+    earnings: scan?.raw_counts?.upcoming_earnings || 0,
+    gov: scan?.raw_counts?.gov_public_tickers || 0,
+    congress: congress.length || 0,
+    pre_award: 0,
   };
 
-  const tickersInScan = scan?.pre_filter_passed ?? 0;
-  const callsSaved = useMemo(() => (status?.stats?.cached_analyses_today ?? 0), [status]);
-  const webhookOk = status?.bot?.telegram_configured && status?.webhook_url;
-  const budgetSurges = scan?.budget_surges || [];
+  const totalSignalsFired = results.reduce((acc, r) => acc + (r.signals?.length || 0), 0);
+  const cacheRate = scan?.pre_filter_passed
+    ? Math.round((scan.claude_cache_hits / scan.pre_filter_passed) * 100) : 0;
+
+  // Bottom callouts
+  const topPick = results[0];
+  const sqWatch = useMemo(() =>
+    [...results].sort((a, b) => ((b.squeeze?.score || 0) - (a.squeeze?.score || 0)))[0],
+  [results]);
+  const govPlay = useMemo(() =>
+    [...results].filter(r => r.contracts?.length)
+      .sort((a, b) => (b.contracts?.[0]?.amount || 0) - (a.contracts?.[0]?.amount || 0))[0],
+  [results]);
+  const catalystWatch = useMemo(() =>
+    [...results].filter(r => r.time_target?.target_date)
+      .sort((a, b) => (a.time_target?.days_remaining || 999) - (b.time_target?.days_remaining || 999))[0],
+  [results]);
 
   return (
-    <div className="min-h-screen terminal-grid">
-      {/* HEADER */}
-      <header className="border-b border-slate-800 bg-slate-950/95 backdrop-blur sticky top-0 z-20">
-        <div className="mx-auto max-w-[1600px] px-6 py-4 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
-            <div className="h-9 w-9 border border-slate-800 bg-slate-900 flex items-center justify-center">
-              <Radio className="h-4 w-4 text-green-500" />
-            </div>
-            <div>
-              <div className="font-mono text-sm tracking-[0.3em] uppercase text-slate-50">STOCK_INTEL_BOT</div>
-              <div className="font-mono text-[10px] tracking-[0.2em] uppercase text-slate-500">
-                Daily 8 AM ET · Insider · Short · Earnings · Gov · Claude
+    <>
+      <div className="scanline-overlay" />
+
+      {/* Sidebar toggle (mobile) */}
+      <button onClick={() => setSidebarOpen(o => !o)}
+        className="fixed left-0 top-1/2 -translate-y-1/2 z-30 lg:hidden"
+        style={{ background: cardBg, border: hairline, color: accent, padding: "8px 4px", fontSize: 10 }}>
+        {sidebarOpen ? "<" : ">"}
+      </button>
+
+      <div className="h-screen w-screen relative z-10" style={{
+        display: "grid",
+        gridTemplateColumns: "180px 1fr",
+        background: pageBg,
+      }}>
+        {/* === SIDEBAR === */}
+        <aside style={{
+          background: cardBg, borderRight: hairline,
+          padding: "16px 14px", overflowY: "auto",
+          display: "flex", flexDirection: "column", gap: 20,
+        }} className={cls("z-20", !sidebarOpen && "hidden lg:flex")}>
+
+          {/* Identity */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+              <div style={{ width: 20, height: 20, border: `1.5px solid ${accent}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ width: 7, height: 7, background: accent }} />
               </div>
+              <span style={{ fontSize: 11, color: accent, letterSpacing: "0.14em", fontWeight: 700 }}>INTEL_SYS</span>
             </div>
+            <div style={{ fontSize: 13, color: accent, fontWeight: 700, fontFamily: "Courier New" }}>{formatET(t)} ET</div>
+            <div style={{ fontSize: 9, color: dim, marginTop: 2 }}>{formatETDate(t)}</div>
           </div>
 
-          <div className="flex items-center gap-6">
-            <div className="hidden md:flex items-center gap-2.5">
-              <span className="status-dot" />
-              <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-green-400">BOT ONLINE</span>
-            </div>
-            <div className="hidden md:block font-mono text-[11px] uppercase tracking-[0.2em] text-slate-500">
-              LAST SCAN&nbsp;<span className="text-slate-300">{formatTime(status?.last_scan_at)}</span>
-            </div>
-
-            <button
-              data-testid="run-gov-scan-button"
-              onClick={runGovScan}
-              disabled={govScanning}
-              className="flex items-center gap-2 border px-3 py-2 font-mono text-[11px] uppercase tracking-[0.25em] border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500 hover:text-slate-950 transition-colors disabled:opacity-50"
-            >
-              {govScanning ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Landmark className="h-3.5 w-3.5" />}
-              {govScanning ? "RUNNING" : "GOV SCAN"}
-            </button>
-
-            <button
-              data-testid="run-scan-button"
-              onClick={runScan}
-              disabled={scanning}
-              className="flex items-center gap-2 border px-4 py-2 font-mono text-[11px] uppercase tracking-[0.25em] border-green-500/50 bg-green-500/10 text-green-400 hover:bg-green-500 hover:text-slate-950 transition-colors disabled:opacity-50"
-            >
-              {scanning ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
-              {scanning ? "RUNNING" : "RUN SCAN NOW"}
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-[1600px] px-6 py-6 space-y-6">
-        {/* FY BANNER */}
-        {fyStatus.fy_multiplier_active && (
-          <div data-testid="fy-banner" className="border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Building2 className="h-4 w-4 text-amber-400" />
-              <span className="font-mono text-xs uppercase tracking-[0.25em] text-amber-300">
-                GOV FISCAL YEAR-END · GOV CONTRACT SIGNALS WEIGHTED 1.5x
-              </span>
-            </div>
-            <span className="font-mono text-[11px] text-amber-400">
-              {fyStatus.days_to_fy_end}d to FY end
-            </span>
-          </div>
-        )}
-
-        {/* TOP STATS */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatTile
-            testid="stat-tickers"
-            label="Tickers Passed"
-            value={tickersInScan}
-            sub={`From ${scan?.raw_counts?.insider_clusters || 0} ins · ${scan?.raw_counts?.high_short_interest || 0} sh · ${scan?.raw_counts?.upcoming_earnings || 0} ern · ${scan?.raw_counts?.gov_public_tickers || 0} gov`}
-            icon={TrendingUp}
-            accent="text-slate-50"
-          />
-          <StatTile
-            testid="stat-cache"
-            label="Calls Saved (Cache)"
-            value={callsSaved}
-            sub={`${scan?.claude_calls_made || 0} batched call · ${scan?.claude_cache_hits || 0} hits`}
-            icon={Database}
-            accent="text-indigo-300"
-          />
-          <StatTile
-            testid="stat-signals"
-            label="Signals Fired"
-            value={scan?.results?.length || 0}
-            sub="Passed Claude analysis"
-            icon={Zap}
-            accent="text-green-400"
-          />
-          <StatTile
-            testid="stat-webhook"
-            label="Webhook"
-            value={webhookOk ? "LIVE" : status?.bot?.telegram_configured ? "PENDING" : "UNCFG"}
-            sub={status?.bot?.telegram_configured ? (status?.webhook_url || "register pending") : "TELEGRAM_BOT_TOKEN missing"}
-            icon={Send}
-            accent={webhookOk ? "text-green-400" : "text-amber-400"}
-          />
-        </div>
-
-        {/* MAIN GRID */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-          <div className="lg:col-span-3">
-            <Section
-              testid="scan-results-section"
-              title={`LATEST SCAN RESULTS · ${scan?.results?.length || 0}`}
-              right={
-                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                  {scan?.finished_at ? formatTime(scan.finished_at) : "no scan yet"}
-                </span>
-              }
-            >
-              {!scan?.results?.length ? (
-                <div className="p-8 text-center font-mono text-xs text-slate-500">
-                  No scan results yet. Click <span className="text-green-400">RUN SCAN NOW</span> to start.
+          {/* System status */}
+          <div>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>SYSTEM STATUS</div>
+            {[
+              { label: "BOT STATUS", color: "#4ade80", text: status ? "ONLINE" : "..." },
+              { label: "WEBHOOK", color: status?.webhook_url ? "#4ade80" : "#fb923c", text: status?.webhook_url ? "ACTIVE" : "PENDING" },
+              { label: "CLAUDE API", color: accent, text: status?.bot?.claude_configured ? "CONNECTED" : "OFFLINE" },
+            ].map((s, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "3px 0", fontSize: 9 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ width: 4, height: 4, borderRadius: "50%", background: s.color }} />
+                  <span style={{ color: labelLight }}>{s.label}</span>
                 </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-800 text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                        <th className="px-4 py-2.5 text-left font-mono">Ticker</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Score</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Risk</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Squeeze</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Signals</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Thesis</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Entry</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Target</th>
-                        <th className="px-3 py-2.5 text-left font-mono">Time</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scan.results.map((r, i) => {
-                        const risk = r.risk || {};
-                        const tg = r.targets || {};
-                        const sq = r.squeeze || {};
-                        const tt = r.time_target || {};
-                        return (
-                          <tr
-                            key={r.ticker}
-                            data-testid={`result-row-${r.ticker}`}
-                            className={cls("border-b border-slate-900 hover:bg-slate-900", i === 0 && "row-flash")}
-                          >
-                            <td className="px-4 py-3 font-mono font-semibold text-slate-50 align-top">
-                              ${r.ticker}
-                              {r.cached && <span className="ml-2 font-mono text-[9px] uppercase text-slate-600">cache</span>}
-                              {r.price != null && (
-                                <div className="font-mono text-[10px] text-slate-500">{fmtMoney(r.price)}</div>
-                              )}
-                            </td>
-                            <td className="px-3 py-3 align-top">
-                              <span className={cls("inline-flex items-center px-2 py-0.5 border font-mono text-xs", scoreColor(r.signal_score))}>
-                                {r.signal_score}/10
-                              </span>
-                              {r.fy_multiplier_applied && (
-                                <div className="mt-1 font-mono text-[8px] text-amber-400">FY×1.5</div>
-                              )}
-                            </td>
-                            <td className="px-3 py-3 align-top">
-                              <span className={cls("inline-flex items-center gap-1 px-2 py-0.5 border font-mono text-[10px]", RISK_BG[risk.level] || RISK_BG.MEDIUM)}>
-                                {risk.emoji} {risk.level || "?"}
-                              </span>
-                            </td>
-                            <td className="px-3 py-3 align-top">
-                              <span className={cls("inline-flex items-center px-2 py-0.5 border font-mono text-[10px] tabular-nums", squeezeColor(sq.score))}>
-                                {sq.score != null ? `${sq.score}/100` : "—"}
-                              </span>
-                            </td>
-                            <td className="px-3 py-3 align-top">
-                              <div className="flex flex-wrap gap-1 max-w-[200px]">
-                                {(r.signals || []).map((s) => {
-                                  const m = SIG_META[s] || { label: s, color: "text-slate-400 bg-slate-800 border-slate-700" };
-                                  return (
-                                    <span key={s} className={cls("inline-flex items-center px-1.5 py-0.5 border font-mono text-[9px] tracking-wider", m.color)}>
-                                      {m.label}
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            </td>
-                            <td className="px-3 py-3 max-w-md text-slate-300 leading-snug align-top">
-                              <div>{r.thesis}</div>
-                              {r.conviction && (
-                                <div className="font-mono text-[9px] text-slate-500 mt-1 uppercase tracking-wider">
-                                  {r.conviction} · {r.time_horizon}
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-3 py-3 font-mono text-xs text-slate-300 align-top whitespace-nowrap">
-                              {r.entry_low != null && r.entry_high != null
-                                ? `${fmtMoney(r.entry_low)}–${fmtMoney(r.entry_high)}`
-                                : "—"}
-                            </td>
-                            <td className="px-3 py-3 font-mono text-xs align-top whitespace-nowrap">
-                              {tg.target_blended != null ? (
-                                <>
-                                  <div className={cls(
-                                    Math.abs(tg.upside_blended || 0) > 100 ? "text-amber-400" : "text-green-400"
-                                  )}>{fmtMoney(tg.target_blended)}</div>
-                                  <div className={cls(
-                                    "text-[10px]",
-                                    Math.abs(tg.upside_blended || 0) > 100 ? "text-amber-500/70" : "text-green-500/70"
-                                  )}>
-                                    {fmtPct(tg.upside_blended)}
-                                    {Math.abs(tg.upside_blended || 0) > 100 && (
-                                      <AlertTriangle className="h-2.5 w-2.5 inline ml-1" />
-                                    )}
-                                  </div>
-                                </>
-                              ) : "—"}
-                            </td>
-                            <td className="px-3 py-3 font-mono text-xs text-amber-400 align-top whitespace-nowrap">
-                              {tt.target_date ? (
-                                <>
-                                  <div>{tt.target_date}</div>
-                                  <div className="text-[10px] text-amber-500/70">{tt.days_remaining}d</div>
-                                </>
-                              ) : (r.catalyst_date || "—")}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </Section>
-          </div>
-
-          {/* Right column: Watchlist + Alerts */}
-          <div className="space-y-4">
-            <Section
-              testid="watchlist-section"
-              title={`WATCHLIST · ${watchlist.length}`}
-              right={<Eye className="h-3.5 w-3.5 text-slate-500" />}
-            >
-              <div className="p-3 border-b border-slate-800 flex gap-2">
-                <input
-                  data-testid="watchlist-input"
-                  value={tInput}
-                  onChange={(e) => setTInput(e.target.value.toUpperCase())}
-                  onKeyDown={(e) => e.key === "Enter" && addWatch()}
-                  placeholder="TICKER"
-                  className="flex-1 bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-xs text-slate-50 focus:outline-none focus:border-green-500/60"
-                />
-                <button data-testid="watchlist-add-btn" onClick={addWatch}
-                  className="border border-slate-700 px-2.5 py-1.5 hover:bg-slate-800 hover:text-green-400 transition-colors">
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="max-h-72 overflow-y-auto">
-                {!watchlist.length && <div className="p-4 font-mono text-xs text-slate-600 text-center">empty</div>}
-                {watchlist.map((w) => (
-                  <div key={w.ticker} data-testid={`watch-row-${w.ticker}`}
-                    className="flex items-center justify-between px-4 py-2.5 border-b border-slate-900 hover:bg-slate-900">
-                    <div>
-                      <div className="font-mono text-sm font-semibold">${w.ticker}</div>
-                      <div className="font-mono text-[10px] text-slate-500 truncate max-w-[150px]">{w.name || ""}</div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono text-xs text-slate-300 tabular-nums">{w.price != null ? `$${w.price}` : "—"}</span>
-                      <button onClick={() => removeWatch(w.ticker)} className="text-slate-600 hover:text-red-500">
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Section>
-
-            <Section
-              testid="alerts-section"
-              title={`PRICE ALERTS · ${alerts.length}`}
-              right={<Bell className="h-3.5 w-3.5 text-slate-500" />}
-            >
-              <div className="p-3 border-b border-slate-800 grid grid-cols-[1fr_1fr_auto] gap-2">
-                <input data-testid="alert-ticker-input" value={aTicker} onChange={(e) => setATicker(e.target.value.toUpperCase())}
-                  placeholder="TICKER" className="bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-xs focus:outline-none focus:border-green-500/60" />
-                <input data-testid="alert-price-input" value={aPrice} onChange={(e) => setAPrice(e.target.value)}
-                  placeholder="PRICE" className="bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-xs focus:outline-none focus:border-green-500/60" />
-                <button data-testid="alert-add-btn" onClick={addAlert}
-                  className="border border-slate-700 px-2.5 py-1.5 hover:bg-slate-800 hover:text-green-400 transition-colors">
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="max-h-60 overflow-y-auto">
-                {!alerts.length && <div className="p-4 font-mono text-xs text-slate-600 text-center">no alerts</div>}
-                {alerts.map((a) => (
-                  <div key={`${a.ticker}-${a.created_at}`} className="flex items-center justify-between px-4 py-2.5 border-b border-slate-900 hover:bg-slate-900">
-                    <div className="font-mono text-sm">
-                      <span className="font-semibold">${a.ticker}</span>{" "}
-                      <span className="text-slate-500">@</span>{" "}
-                      <span className="text-amber-400 tabular-nums">${a.target_price}</span>
-                    </div>
-                    <button onClick={() => removeAlert(a.ticker)} className="text-slate-600 hover:text-red-500">
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </Section>
-          </div>
-        </div>
-
-        {/* GOV CONTRACTS + CONGRESS + SQUEEZE PANELS */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <Section
-            testid="contracts-section"
-            title={`GOV CONTRACTS · TOP ${contracts.length}`}
-            right={<Landmark className="h-3.5 w-3.5 text-amber-400" />}
-          >
-            {!contracts.length ? (
-              <div className="p-4 font-mono text-xs text-slate-600 text-center">no contracts in last 14d</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-800 text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                      <th className="px-3 py-2 text-left font-mono">Ticker</th>
-                      <th className="px-3 py-2 text-left font-mono">Agency</th>
-                      <th className="px-3 py-2 text-right font-mono">Value</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {contracts.map((c, i) => (
-                      <tr key={i} data-testid={`contract-row-${c.ticker}`} className="border-b border-slate-900 hover:bg-slate-900">
-                        <td className="px-3 py-2 font-mono text-sm font-semibold text-amber-300">${c.ticker}</td>
-                        <td className="px-3 py-2 text-xs text-slate-400 max-w-[180px] truncate">{c.agency}</td>
-                        <td className="px-3 py-2 font-mono text-xs text-right text-green-400 tabular-nums">{fmtAmt(c.amount)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Section>
-
-          <Section
-            testid="congress-section"
-            title={`CONGRESSIONAL BUYS · ${congress.length}`}
-            right={<Landmark className="h-3.5 w-3.5 text-yellow-400" />}
-          >
-            {!congress.length ? (
-              <div className="p-4 font-mono text-xs text-slate-600 text-center">no recent buys</div>
-            ) : (
-              <div className="max-h-72 overflow-y-auto">
-                {congress.slice(0, 10).map((c, i) => (
-                  <div key={i} data-testid={`congress-row-${c.ticker}`} className="px-3 py-2 border-b border-slate-900 hover:bg-slate-900">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-semibold text-yellow-300">${c.ticker}</span>
-                        {c.committee_match && (
-                          <span className="font-mono text-[9px] uppercase tracking-wider text-amber-400 border border-amber-400/40 px-1">
-                            +3pts match
-                          </span>
-                        )}
-                      </div>
-                      <span className="font-mono text-[10px] text-slate-500">{c.tx_date}</span>
-                    </div>
-                    <div className="font-mono text-[11px] text-slate-400 mt-0.5">
-                      {c.name} <span className="text-slate-600">({c.chamber})</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Section>
-
-          <Section
-            testid="squeeze-leaderboard-section"
-            title={`SQUEEZE LEADERBOARD · TOP ${squeezeLb.length}`}
-            right={<Target className="h-3.5 w-3.5 text-orange-400" />}
-          >
-            {!squeezeLb.length ? (
-              <div className="p-4 font-mono text-xs text-slate-600 text-center">no squeeze data</div>
-            ) : (
-              <div className="max-h-72 overflow-y-auto">
-                {squeezeLb.map((s, i) => (
-                  <div key={i} data-testid={`squeeze-row-${s.ticker}`} className="px-3 py-2 border-b border-slate-900 hover:bg-slate-900 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[10px] text-slate-600">#{i + 1}</span>
-                      <span className="font-mono text-sm font-semibold text-slate-200">${s.ticker}</span>
-                    </div>
-                    <span className={cls("inline-flex items-center px-2 py-0.5 border font-mono text-xs tabular-nums", squeezeColor(s.score))}>
-                      {s.score}/100
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Section>
-        </div>
-
-        {/* AGENCY BUDGET TRACKER (full width) */}
-        <Section
-          testid="budget-surges-section"
-          title="AGENCY BUDGET TRACKER"
-          right={<Building2 className="h-3.5 w-3.5 text-amber-400" />}
-        >
-          {!budgetSurges.length ? (
-            <div className="p-4 font-mono text-xs text-slate-600 text-center">
-              no budget surges detected this scan
-            </div>
-          ) : (
-            <div>
-              {budgetSurges.slice(0, 5).map((b, i) => (
-                <div key={i} className="px-4 py-3 border-b border-slate-900 hover:bg-slate-900">
-                  <div className="flex items-center justify-between">
-                    <div className="font-mono text-sm text-slate-200 truncate max-w-[400px]">{b.agency}</div>
-                    <div className="font-mono text-sm text-amber-400">+{b.pct_increase}%</div>
-                  </div>
-                  <div className="mt-1 font-mono text-[10px] text-slate-500">
-                    Exposed: {(b.exposed_tickers || []).map(t => `$${t}`).join(" · ") || "—"}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Section>
-
-        {/* ACTIVITY LOG */}
-        <Section testid="activity-section" title="ACTIVITY LOG" right={<Activity className="h-3.5 w-3.5 text-slate-500" />}>
-          <div className="bg-black/40 max-h-72 overflow-y-auto font-mono text-xs">
-            {!activity.length && <div className="p-4 text-slate-600 text-center">no activity yet</div>}
-            {activity.map((a, i) => (
-              <div key={i} className="px-4 py-1.5 flex items-start gap-3 border-b border-slate-900/50 hover:bg-slate-900/40">
-                <span className="text-slate-600 shrink-0">{formatTime(a.ts)}</span>
-                <ChevronRight className="h-3 w-3 text-slate-700 shrink-0 mt-0.5" />
-                <span className={cls("shrink-0 uppercase tracking-wider w-16",
-                  a.level === "success" && "text-green-500",
-                  a.level === "info" && "text-slate-400",
-                  a.level === "error" && "text-red-500")}>
-                  {a.level}
-                </span>
-                <span className="text-slate-300 break-all">{a.message}</span>
+                <span style={{ color: s.color }}>{s.text}</span>
               </div>
             ))}
           </div>
-        </Section>
 
-        <footer className="pt-4 pb-8 font-mono text-[10px] uppercase tracking-[0.25em] text-slate-600 flex items-center justify-between">
-          <span>STOCK_INTEL_BOT · v3.0 · USASpending + Congress + Squeeze</span>
-          <span>{status?.bot?.claude_configured ? "CLAUDE ✓" : "CLAUDE ✗"} · {status?.bot?.telegram_configured ? "TG ✓" : "TG ✗"}</span>
-        </footer>
-      </main>
+          {/* Signal sources */}
+          <div>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>SIGNAL SOURCES</div>
+            {[
+              { label: "INSIDER", v: counts.insider },
+              { label: "SHORT", v: counts.short },
+              { label: "EARNINGS", v: counts.earnings },
+              { label: "GOV CONTRACTS", v: counts.gov },
+              { label: "CONGRESS", v: counts.congress },
+              { label: "PRE-AWARD", v: counts.pre_award },
+            ].map((s, i) => (
+              <div key={i} className="hover:bg-white/[0.03]"
+                style={{ display: "flex", justifyContent: "space-between", padding: "3px 4px", fontSize: 9 }}>
+                <span style={{ color: labelLight }}>{s.label}</span>
+                <span style={{ color: muted }}>{s.v}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Coverage */}
+          <div>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>COVERAGE</div>
+            {[
+              { label: "TICKERS SCANNED", v: Math.min(100, ((scan?.pre_filter_passed || 0) / 50) * 100) },
+              { label: "SIGNALS FIRED", v: Math.min(100, (totalSignalsFired / 30) * 100) },
+              { label: "CACHE HIT RATE", v: cacheRate },
+            ].map((s, i) => (
+              <div key={i} style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                  <span style={{ fontSize: 8, color: labelLight }}>{s.label}</span>
+                  <span style={{ fontSize: 8, color: muted }}>{Math.round(s.v)}%</span>
+                </div>
+                <div style={{ height: 4, background: "#1a1a2e" }}>
+                  <div style={{ height: "100%", width: `${s.v}%`, background: accent, transition: "width 0.5s" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Next scan */}
+          <div>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em" }}>NEXT SCAN</div>
+            <div style={{ fontSize: 14, color: accent, fontFamily: "Courier New", marginTop: 2 }}>{nextScanCountdown(t)}</div>
+            <div style={{ fontSize: 8, color: dim }}>DAILY 08:00 ET</div>
+          </div>
+
+          {/* Watchlist */}
+          <div>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 6 }}>WATCHLIST · {watchlist.length}</div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              <input data-testid="watchlist-input" value={tInput} onChange={e => setTInput(e.target.value.toUpperCase())}
+                onKeyDown={e => e.key === "Enter" && addWatch()}
+                placeholder="TICKER" style={{
+                  flex: 1, background: "transparent", border: "none", borderBottom: "0.5px solid rgba(255,255,255,0.1)",
+                  color: "#fff", fontSize: 9, fontFamily: "Courier New", outline: "none", padding: "3px 0",
+                }} />
+              <button data-testid="watchlist-add-btn" onClick={addWatch}
+                style={{ background: "transparent", border: "none", color: accent, fontSize: 9, cursor: "pointer" }}>+ ADD</button>
+            </div>
+            {watchlist.slice(0, 8).map(w => (
+              <div key={w.ticker} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", fontSize: 9 }}>
+                <span style={{ color: muted }}>${w.ticker}</span>
+                <button onClick={() => removeWatch(w.ticker)} style={{ background: "transparent", border: "none", color: dim, cursor: "pointer", fontSize: 9 }}>×</button>
+              </div>
+            ))}
+          </div>
+
+          {/* Alerts */}
+          <div>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 6 }}>PRICE ALERTS · {alerts.length}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 4, marginBottom: 6 }}>
+              <input data-testid="alert-ticker-input" value={aTicker} onChange={e => setATicker(e.target.value.toUpperCase())}
+                placeholder="TICK" style={{ background: "transparent", border: "none", borderBottom: "0.5px solid rgba(255,255,255,0.1)", color: "#fff", fontSize: 9, fontFamily: "Courier New", outline: "none", padding: "3px 0" }} />
+              <input data-testid="alert-price-input" value={aPrice} onChange={e => setAPrice(e.target.value)}
+                placeholder="$" style={{ background: "transparent", border: "none", borderBottom: "0.5px solid rgba(255,255,255,0.1)", color: "#fff", fontSize: 9, fontFamily: "Courier New", outline: "none", padding: "3px 0" }} />
+              <button data-testid="alert-add-btn" onClick={addAlert}
+                style={{ background: "transparent", border: "none", color: accent, fontSize: 9, cursor: "pointer" }}>+</button>
+            </div>
+            {alerts.slice(0, 6).map(a => (
+              <div key={`${a.ticker}-${a.created_at}`} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", fontSize: 9 }}>
+                <span style={{ color: muted }}>${a.ticker} @ ${a.target_price}</span>
+                <button onClick={() => removeAlert(a.ticker)} style={{ background: "transparent", border: "none", color: dim, cursor: "pointer", fontSize: 9 }}>×</button>
+              </div>
+            ))}
+          </div>
+
+          {/* Quick commands (push to bottom) */}
+          <div style={{ marginTop: "auto" }}>
+            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>COMMANDS</div>
+            {["/scan", "/scan_gov", "/contracts", "/congress", "/performance", "/backtest", "/help"].map(c => (
+              <div key={c} onClick={() => fireToast(c)} className="hover:text-amber-400" style={{
+                fontSize: 9, color: labelLight, cursor: "pointer", padding: "3px 0", transition: "color 0.15s",
+              }}>{c}</div>
+            ))}
+          </div>
+        </aside>
+
+        {/* === MAIN === */}
+        <main style={{ overflowY: "auto", display: "flex", flexDirection: "column" }}>
+          {/* Metrics */}
+          <div style={{ background: cardBg, borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(6, 1fr)" }}>
+            {[
+              { label: "TARGETS ACQUIRED", v: scan?.pre_filter_passed || 0, sub: `${scan?.results?.length || 0} ANALYZED`, color: "#fff" },
+              { label: "INSIDER SIGNALS", v: counts.insider, sub: "OPENINSIDER", color: accent },
+              { label: "SHORT SIGNALS", v: counts.short, sub: "FINVIZ", color: accent },
+              { label: "GOV SIGNALS", v: counts.gov, sub: "USASPENDING", color: accent },
+              { label: "CACHE SAVED", v: scan?.claude_cache_hits || 0, sub: `${scan?.claude_calls_made || 0} BATCHED CALLS`, color: muted },
+              { label: "UPLINK", v: status?.bot?.telegram_configured ? "LIVE" : "OFF", sub: "TELEGRAM CONNECTED", color: status?.bot?.telegram_configured ? "#4ade80" : "#fb923c", isText: true },
+            ].map((c, i) => (
+              <div key={i} data-testid={`metric-${i}`} style={{ padding: "14px 18px", borderRight: i < 5 ? hairline : "none" }}>
+                <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em" }}>{c.label}</div>
+                <div style={{ fontSize: c.isText ? 22 : 28, fontWeight: 300, color: c.color, marginTop: 4, fontFamily: "Courier New" }}>{c.v}</div>
+                <div style={{ fontSize: 8, color: dim, marginTop: 2 }}>{c.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Classify line */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "5px 20px", background: pageBg }}>
+            <div style={{ flex: 1, height: 1, background: "rgba(200,168,75,0.12)" }} />
+            <span style={{ fontSize: 7, color: accent, letterSpacing: "0.18em" }}>
+              CLASSIFIED · ALPHA INTELLIGENCE SYSTEM · SIGNAL CONFIDENCE RANKED
+            </span>
+            <div style={{ flex: 1, height: 1, background: "rgba(200,168,75,0.12)" }} />
+          </div>
+
+          {/* FY banner */}
+          {fyStatus.fy_multiplier_active && (
+            <div data-testid="fy-banner" style={{
+              padding: "8px 20px", background: "rgba(200,168,75,0.05)", borderBottom: hairline,
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span style={{ fontSize: 9, color: accent, letterSpacing: "0.14em" }}>
+                ◆ GOV FISCAL YEAR-END · CONTRACT SIGNALS WEIGHTED 1.5×
+              </span>
+              <span style={{ fontSize: 9, color: accent }}>{fyStatus.days_to_fy_end}D TO FY END</span>
+            </div>
+          )}
+
+          {/* Intel feed header */}
+          <div style={{ padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: hairlineLight }}>
+            <span style={{ fontSize: 8, color: dim, letterSpacing: "0.14em" }}>ACTIVE INTELLIGENCE</span>
+            <div style={{ flex: 1, height: 1, margin: "0 16px", background: "rgba(200,168,75,0.15)" }} />
+            <span style={{ fontSize: 8, color: accent, letterSpacing: "0.1em" }}>SHOWING {results.length} OF {scan?.pre_filter_passed || 0} TARGETS</span>
+            <button data-testid="run-scan-button" onClick={runScan} disabled={scanning}
+              style={{
+                marginLeft: 16, background: scanning ? "rgba(200,168,75,0.1)" : "transparent",
+                border: `0.5px solid ${accent}`, color: accent, fontSize: 9, padding: "5px 12px",
+                cursor: scanning ? "wait" : "pointer", letterSpacing: "0.1em", fontFamily: "Courier New",
+                transition: "background 0.2s",
+              }}
+              onMouseEnter={e => !scanning && (e.target.style.background = "rgba(200,168,75,0.1)")}
+              onMouseLeave={e => !scanning && (e.target.style.background = "transparent")}>
+              {scanning ? "SCANNING..." : "RUN SCAN NOW"}
+            </button>
+          </div>
+
+          {/* Stock rows */}
+          {results.length === 0 && (
+            <div style={{ padding: 40, textAlign: "center", color: dim, fontSize: 11 }}>
+              NO TARGETS ACQUIRED — RUN SCAN TO BEGIN
+            </div>
+          )}
+          {results.map((r, idx) => {
+            const isSel = selected === r.ticker;
+            const risk = r.risk || {};
+            const tg = r.targets || {};
+            const sq = r.squeeze || {};
+            const tt = r.time_target || {};
+            const targetColor = risk.level === "LOW" ? "#4ade80"
+                                : risk.level === "MEDIUM" ? accent
+                                : risk.level === "HIGH" ? "#fb923c" : "#f87171";
+            return (
+              <div key={r.ticker} data-testid={`result-row-${r.ticker}`}
+                onClick={() => setSelected(isSel ? null : r.ticker)}
+                style={{
+                  display: "grid", gridTemplateColumns: "56px 1fr 130px",
+                  borderBottom: hairlineLight, cursor: "pointer",
+                  background: isSel ? "#0f0f15" : "transparent",
+                  borderLeft: isSel ? `2px solid ${accent}` : "2px solid transparent",
+                  transition: "background 0.15s, border-left 0.15s",
+                }}
+                onMouseEnter={e => !isSel && (e.currentTarget.style.background = "#111118")}
+                onMouseLeave={e => !isSel && (e.currentTarget.style.background = "transparent")}>
+
+                {/* Confidence */}
+                <div style={{ padding: "16px 0 16px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                  <ScoreRing score={r.signal_score || 0} />
+                  <StrengthBars score={r.signal_score || 0} />
+                </div>
+
+                {/* Main */}
+                <div style={{ padding: "14px 12px 14px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "baseline" }}>
+                    <span style={{ fontSize: 15, color: "#fff", fontWeight: 700, letterSpacing: "0.05em" }}>${r.ticker}</span>
+                    {r.fy_multiplier_applied && <span style={{ fontSize: 8, color: accent, marginLeft: 8 }}>FY×1.5</span>}
+                    <span style={{ fontSize: 11, color: dim, marginLeft: 8 }}>{r.sector || ""}</span>
+                    <span style={{ fontSize: 10, color: labelLight, marginLeft: 8, fontFamily: "Courier New" }}>{fmtPrice(r.price)}</span>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "5px 0 7px" }}>
+                    {(r.signals || []).map(s => {
+                      const m = SIG_TAG[s] || { label: s, color: muted, bg: "rgba(255,255,255,0.03)", bd: "rgba(255,255,255,0.1)" };
+                      return (
+                        <span key={s} style={{
+                          fontSize: 8, padding: "2px 7px", border: `0.5px solid ${m.bd}`,
+                          color: m.color, background: m.bg,
+                          letterSpacing: "0.06em", fontWeight: 700,
+                        }}>{m.label}</span>
+                      );
+                    })}
+                  </div>
+                  <div style={{
+                    fontSize: 11, color: labelLight, lineHeight: 1.65, marginBottom: 8,
+                    display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+                  }}>{r.thesis}</div>
+                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 8, color: dim }}>
+                    <span>ENTRY <span style={{ color: muted }}>{fmtPrice(r.entry_low)}–{fmtPrice(r.entry_high)}</span></span>
+                    {tt.target_date && <span>HOLD <span style={{ color: muted }}>{tt.hold_period_low}–{tt.hold_period_high}d</span></span>}
+                    {sq.score != null && <span>SQUEEZE <span style={{ color: muted }}>{sq.score}/100</span></span>}
+                  </div>
+                </div>
+
+                {/* Target */}
+                <div style={{ padding: "14px 16px 14px 8px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: targetColor, fontFamily: "Courier New" }}>
+                    {fmtPrice(tg.target_blended)}
+                  </div>
+                  <div style={{ fontSize: 10, color: targetColor, opacity: 0.5 }}>{fmtPct(tg.upside_blended)}</div>
+                  {tt.target_date && (
+                    <div style={{ fontSize: 8, color: accent, letterSpacing: "0.04em" }}>TARGET — {tt.target_date}</div>
+                  )}
+                  <div style={{ fontSize: 8, color: dim }}>ENTRY {fmtPrice(r.entry_low)} — {fmtPrice(r.entry_high)}</div>
+                  <div style={{ fontSize: 8, color: "rgba(248,113,113,0.5)" }}>STOP {fmtPrice(r.stop_loss)}</div>
+                  <div style={{
+                    fontSize: 7, padding: "2px 7px",
+                    border: `0.5px solid ${(RISK_PILL[risk.level] || RISK_PILL.MEDIUM).bd}`,
+                    color: (RISK_PILL[risk.level] || RISK_PILL.MEDIUM).color,
+                    borderRadius: 2, marginTop: 2, letterSpacing: "0.08em",
+                  }}>{risk.level || "?"}</div>
+                  {sq.score != null && <div style={{ fontSize: 8, color: labelLight }}>SQZ {sq.score}/100</div>}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Collapsed panels */}
+          <CollapsiblePanel
+            testid="contracts-section"
+            title={`GOVERNMENT CONTRACT FEED · ${contracts.length}`}
+            isOpen={openPanel === "contracts"}
+            onToggle={() => setOpenPanel(openPanel === "contracts" ? null : "contracts")}
+          >
+            {contracts.map((c, i) => (
+              <div key={i} data-testid={`contract-row-${c.ticker}`} style={{
+                display: "grid", gridTemplateColumns: "60px 1fr 100px",
+                padding: "8px 20px", borderBottom: hairlineLight, fontSize: 9,
+              }}>
+                <span style={{ color: accent, fontWeight: 700 }}>${c.ticker}</span>
+                <span style={{ color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.agency}</span>
+                <span style={{ color: "#4ade80", textAlign: "right" }}>{fmtAmt(c.amount)}</span>
+              </div>
+            ))}
+          </CollapsiblePanel>
+
+          <CollapsiblePanel
+            testid="squeeze-leaderboard-section"
+            title={`SQUEEZE LEADERBOARD · TOP ${squeezeLb.length}`}
+            isOpen={openPanel === "squeeze"}
+            onToggle={() => setOpenPanel(openPanel === "squeeze" ? null : "squeeze")}
+          >
+            {squeezeLb.map((s, i) => (
+              <div key={s.ticker} data-testid={`squeeze-row-${s.ticker}`} style={{
+                display: "flex", justifyContent: "space-between",
+                padding: "6px 20px", borderBottom: hairlineLight, fontSize: 9,
+              }}>
+                <span style={{ color: muted }}>#{i + 1} ${s.ticker}</span>
+                <span style={{ color: s.score >= 66 ? "#fb923c" : s.score >= 41 ? accent : muted }}>{s.score}/100</span>
+              </div>
+            ))}
+          </CollapsiblePanel>
+
+          <CollapsiblePanel
+            testid="congress-section"
+            title={`CONGRESSIONAL INTELLIGENCE · ${congress.length}`}
+            isOpen={openPanel === "congress"}
+            onToggle={() => setOpenPanel(openPanel === "congress" ? null : "congress")}
+          >
+            {congress.slice(0, 10).map((c, i) => (
+              <div key={i} data-testid={`congress-row-${c.ticker}`} style={{
+                display: "grid", gridTemplateColumns: "60px 1fr 80px 80px",
+                padding: "6px 20px", borderBottom: hairlineLight, fontSize: 9, alignItems: "center", gap: 8,
+              }}>
+                <span style={{ color: "#34d399", fontWeight: 700 }}>${c.ticker}</span>
+                <span style={{ color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.name} <span style={{ color: dim }}>({c.chamber})</span>
+                </span>
+                <span style={{ color: c.committee_match ? accent : labelLight, textAlign: "right" }}>
+                  +{c.weight_points}pt{c.committee_match && " ✓"}
+                </span>
+                <span style={{ color: dim, textAlign: "right" }}>{c.tx_date}</span>
+              </div>
+            ))}
+          </CollapsiblePanel>
+
+          {/* Telegram preview */}
+          <CollapsiblePanel
+            testid="preview-section"
+            title={`TELEGRAM DISPATCH PREVIEW · ${preview?.total_chars || 0} CHARS · ${(preview?.messages || []).length} MSG`}
+            isOpen={openPanel === "preview"}
+            onToggle={() => setOpenPanel(openPanel === "preview" ? null : "preview")}
+          >
+            {(preview?.messages || []).map((m, i) => (
+              <div key={i} style={{
+                padding: "10px 20px", borderBottom: hairlineLight,
+                fontSize: 9, color: muted, whiteSpace: "pre-wrap", lineHeight: 1.5,
+              }}>
+                <div style={{ fontSize: 8, color: accent, marginBottom: 6, letterSpacing: "0.12em" }}>
+                  MSG {i + 1} · {m.length} CHARS
+                </div>
+                {m.replace(/<[^>]+>/g, "")}
+              </div>
+            ))}
+          </CollapsiblePanel>
+
+          {/* Bottom callouts */}
+          <div style={{
+            background: cardBg, borderTop: hairline,
+            display: "grid", gridTemplateColumns: "repeat(4, 1fr)", marginTop: "auto",
+          }}>
+            {[
+              { idx: "01", label: "TOP PICK", t: topPick, detail: topPick ? `${topPick.signal_score}/10 · ${fmtPct(topPick.targets?.upside_blended)}` : "—" },
+              { idx: "02", label: "SQUEEZE WATCH", t: sqWatch, detail: sqWatch ? `${(sqWatch.squeeze?.score || 0)}/100 · ${fmtPrice(sqWatch.targets?.target_blended)}` : "—" },
+              { idx: "03", label: "GOV PLAY", t: govPlay, detail: govPlay ? `${fmtAmt(govPlay.contracts?.[0]?.amount)} · ${fmtPct(govPlay.targets?.upside_blended)}` : "—" },
+              { idx: "04", label: "CATALYST WATCH", t: catalystWatch, detail: catalystWatch ? `${catalystWatch.time_target?.target_date} · ${(catalystWatch.signals || [])[0] || "—"}` : "—" },
+            ].map((c, i) => (
+              <div key={i} data-testid={`callout-${c.label.toLowerCase().replace(' ', '-')}`}
+                style={{ padding: "10px 18px", borderRight: i < 3 ? hairline : "none", display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 9, color: dim, fontWeight: 700 }}>{c.idx}</span>
+                <div>
+                  <div style={{ fontSize: 7, color: dim, letterSpacing: "0.1em" }}>{c.label}</div>
+                  <div style={{ fontSize: 13, color: "#fff", fontWeight: 700, marginTop: 2 }}>
+                    {c.t ? `$${c.t.ticker}` : "—"}
+                  </div>
+                  <div style={{ fontSize: 8, color: labelLight, marginTop: 1 }}>{c.detail}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Footer */}
+          <div style={{
+            background: pageBg, borderTop: hairlineLight, padding: "8px 20px",
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <div style={{ display: "flex", gap: 20, fontSize: 8, color: dim, letterSpacing: "0.06em" }}>
+              <span>SCANS {scan?.results?.length || 0}</span>
+              <span>CACHE {cacheRate}%</span>
+              <span>MODEL CLAUDE-SONNET-4-5</span>
+              <span>VERSION 3.1.0</span>
+            </div>
+            <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.04)", margin: "0 20px" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 9, color: accent, fontFamily: "Courier New" }}>NEXT SCAN {nextScanCountdown(t)}</span>
+              <button data-testid="dispatch-button" onClick={dispatch} disabled={dispatching}
+                style={{
+                  background: dispatching ? "rgba(200,168,75,0.1)" : "transparent",
+                  border: `0.5px solid ${accent}`, color: accent, fontSize: 9,
+                  padding: "5px 14px", cursor: dispatching ? "wait" : "pointer",
+                  letterSpacing: "0.1em", fontFamily: "Courier New",
+                }}
+                onMouseEnter={e => !dispatching && (e.target.style.background = "rgba(200,168,75,0.1)")}
+                onMouseLeave={e => !dispatching && (e.target.style.background = "transparent")}>
+                {dispatching ? "DISPATCHING..." : "DISPATCH TO TELEGRAM"}
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    </>
+  );
+}
+
+function CollapsiblePanel({ title, children, isOpen, onToggle, testid }) {
+  return (
+    <div data-testid={testid} style={{ borderBottom: hairlineLight }}>
+      <div onClick={onToggle} style={{
+        padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center",
+        cursor: "pointer", borderBottom: isOpen ? hairlineLight : "none",
+        background: isOpen ? cardBg : "transparent",
+      }}>
+        <span style={{ fontSize: 8, color: dim, letterSpacing: "0.14em" }}>{title}</span>
+        <div style={{ flex: 1, height: 1, margin: "0 16px", background: "rgba(200,168,75,0.15)" }} />
+        <span style={{
+          fontSize: 10, color: accent, transform: `rotate(${isOpen ? 90 : 0}deg)`,
+          transition: "transform 0.2s", display: "inline-block",
+        }}>▶</span>
+      </div>
+      {isOpen && <div style={{ background: cardBg }}>{children}</div>}
     </div>
   );
 }
