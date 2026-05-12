@@ -103,9 +103,11 @@ async def set_cached(ticker: str, analysis: dict[str, Any]):
 
 def _build_prompt(candidates: list[dict[str, Any]]) -> str:
     """New schema: pre-computed values are passed in. Claude only generates
-    thesis, conviction, time_horizon, stop_loss. Entry zone too (price band)."""
+    thesis, conviction, time_horizon, stop_loss, options_strategy_name (3 words),
+    options_one_liner (1 sentence). Entry zone too (price band)."""
     stocks = []
     for c in candidates:
+        opts = c.get("options") or {}
         stocks.append({
             "ticker": c["ticker"],
             "price": c.get("price"),
@@ -122,18 +124,28 @@ def _build_prompt(candidates: list[dict[str, Any]]) -> str:
             "target_low": c.get("target_low"),
             "target_high": c.get("target_high"),
             "target_blended": c.get("target_blended"),
+            # Pre-computed options context — stays under 200 tokens/stock
+            "opt_strategy": opts.get("strategy"),
+            "opt_iv_rank": opts.get("iv_rank"),
+            "opt_crush": opts.get("crush_risk"),
+            "opt_debit": (opts.get("spread") or {}).get("net_debit"),
+            "opt_max_profit": (opts.get("spread") or {}).get("max_profit"),
+            "opt_max_loss": (opts.get("spread") or {}).get("max_loss") or (opts.get("contract") or {}).get("max_loss"),
         })
     payload = {"stocks": stocks}
     return (
         "Pre-filtered stocks below already have signals confirmed and risk/targets/"
-        "squeeze computed. For each ticker, produce ONLY: signal_score(1-10), "
+        "squeeze/options computed. For each ticker, produce ONLY: signal_score(1-10), "
         "thesis(1 sentence), entry_low, entry_high (suggested buy band), "
         "catalyst_date, conviction(low/medium/high), time_horizon(swing/short/"
-        "medium/long), stop_loss(price).\n"
+        "medium/long), stop_loss(price), options_strategy_name(3 words max), "
+        "options_one_liner(1 sentence why this strategy fits), "
+        "hold_stock_instead(true if opt_strategy=AVOID_OPTIONS).\n"
         f"INPUT:{json.dumps(payload, separators=(',', ':'))}\n"
         "Return ONLY: {\"results\":[{\"ticker\":\"\",\"signal_score\":0,\"thesis\":\"\","
         "\"entry_low\":0,\"entry_high\":0,\"catalyst_date\":\"\",\"conviction\":\"\","
-        "\"time_horizon\":\"\",\"stop_loss\":0}]} — no prose, no fences."
+        "\"time_horizon\":\"\",\"stop_loss\":0,\"options_strategy_name\":\"\","
+        "\"options_one_liner\":\"\",\"hold_stock_instead\":false}]} — no prose, no fences."
     )
 
 
@@ -209,6 +221,9 @@ async def analyze_batch(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
                         "conviction": str(item.get("conviction", "")).strip().lower() or "medium",
                         "time_horizon": str(item.get("time_horizon", "")).strip().lower() or "medium",
                         "stop_loss": _num(item.get("stop_loss")),
+                        "options_strategy_name": str(item.get("options_strategy_name", "")).strip(),
+                        "options_one_liner": str(item.get("options_one_liner", "")).strip(),
+                        "hold_stock_instead": bool(item.get("hold_stock_instead", False)),
                     }
                     await set_cached(t, analysis)
                     results[t] = {**analysis, "cached": False}

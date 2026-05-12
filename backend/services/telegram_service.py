@@ -101,6 +101,8 @@ SIG_BADGE = {
     "CONGRESSIONAL_BUY": "🏛️ CONGRESS_BUY",
     "PRE_AWARD": "📋 PRE_AWARD",
     "SUB_BENEFICIARY": "🔗 SUB_BENEFICIARY",
+    "UNUSUAL_FLOW": "⚡ UNUSUAL_FLOW",
+    "CALL_SWEEP": "🔥 CALL_SWEEP",
 }
 
 
@@ -221,6 +223,64 @@ def format_brief(r: dict[str, Any]) -> str:
     )
 
 
+def _format_options_block(opts: dict[str, Any] | None) -> str:
+    """Telegram options block (Part 12). Returns '' when no options data."""
+    if not opts:
+        return ""
+    strat = opts.get("strategy") or "LONG_CALL"
+    name = _esc(opts.get("strategy_name") or strat.replace("_", " ").title())
+    one = _esc(opts.get("one_liner") or opts.get("strategy_reason") or "")
+    crush = opts.get("crush_risk") or "MODERATE"
+    iv_rank = opts.get("iv_rank")
+    iv_label = opts.get("iv_label") or ""
+    flow = opts.get("flow") or {}
+    bias = flow.get("flow_bias") or "NEUTRAL"
+    cp = flow.get("call_put_ratio") or 0
+
+    # AVOID block
+    if strat == "AVOID_OPTIONS":
+        return (
+            f"\n⚠️ <b>OPTIONS — AVOID</b> · IV CRUSH RISK {_esc(crush)}\n"
+            f"   └ Buy stock directly or wait until after catalyst"
+        )
+
+    contract = opts.get("contract") or {}
+    spread = opts.get("spread") or {}
+
+    if strat in ("BULL_CALL_SPREAD", "BEAR_PUT_SPREAD") and spread:
+        return (
+            f"\n🎯 <b>SPREAD — {name}</b>\n"
+            f"   └ <i>{one}</i>\n"
+            f"   └ Buy ${spread['buy_strike']}{contract.get('type','C')} / "
+            f"Sell ${spread['sell_strike']}{contract.get('type','C')} exp {_esc(spread['expiration'])}\n"
+            f"   └ Net debit: ${spread['net_debit']} · Max profit: ${spread['max_profit']}\n"
+            f"   └ Max loss: ${spread['max_loss']} · BE: ${spread['break_even']} · R/R: {spread['risk_reward']}:1\n"
+            f"   └ IV rank: {iv_rank}% {_esc(iv_label)}"
+            f"{_crush_line(crush)}"
+            f"\n⚡ FLOW: {_esc(bias)} · P/C ratio {cp}"
+        )
+
+    # Single-leg
+    if not contract:
+        return ""
+    return (
+        f"\n🎯 <b>OPTIONS PLAY — {name}</b>\n"
+        f"   └ <i>{one}</i>\n"
+        f"   └ Play: ${contract['strike']}{contract.get('type','C')} exp {_esc(contract['expiration'])}\n"
+        f"   └ Premium: ~${contract['premium']} · Max loss: ${contract['max_loss']}\n"
+        f"   └ R/R per contract · Liquidity: {_esc(contract.get('liquidity','?'))}\n"
+        f"   └ IV rank: {iv_rank}% {_esc(iv_label)}"
+        f"{_crush_line(crush)}"
+        f"\n⚡ FLOW: {_esc(bias)} · P/C ratio {cp}"
+    )
+
+
+def _crush_line(crush: str) -> str:
+    if crush in ("HIGH", "SEVERE"):
+        return f"\n   └ ⚠️ IV CRUSH RISK: <b>{_esc(crush)}</b>"
+    return ""
+
+
 def _format_one_card(rank: int, r: dict[str, Any]) -> str:
     risk = r.get("risk") or {}
     targets = r.get("targets") or {}
@@ -236,6 +296,7 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
                          f"${(c0.get('amount') or 0)/1e6:.1f}M")
     target_date = _esc(tt.get("target_date", "—"))
     hold = f"{tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)}"
+    options_block = _format_options_block(r.get("options"))
     return (
         f"<b>{rank}. 🎯 ${_esc(r['ticker'])}</b> — <code>{r.get('signal_score',0)}/10</code>"
         f" — {risk.get('emoji','⚪')} {_esc(risk.get('level','?'))}\n"
@@ -246,6 +307,7 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
         f"({_fmt_pct(targets.get('upside_blended'))}) by {target_date}\n"
         f"🛑 Stop: {_fmt_price(r.get('stop_loss'))} | ⏱ Hold: {hold} days\n"
         f"⚠️ Risk: {rf_line}"
+        f"{options_block}"
         f"{contract_line}"
     )
 
@@ -417,7 +479,10 @@ async def handle_update(update: dict[str, Any]) -> None:
             "/contracts · /agency NAME · /watchlist_contracts\n\n"
             "<b>Analysis:</b>\n"
             "/risk TICKER · /target TICKER · /squeeze TICKER\n"
-            "/compare T1 T2 · /performance · /backtest S1 S2\n\n"
+            "/compare T1 T2 · /performance · /backtest · /backtest_seed\n\n"
+            "<b>Options:</b>\n"
+            "/options TICKER · /flow TICKER · /iv TICKER · /spread TICKER\n"
+            "/calls · /puts · /noiv\n\n"
             "<b>Tracking:</b>\n"
             "/watch · /unwatch · /watchlist · /alert TICKER PRICE · /alerts\n\n"
             "<b>Live:</b>\n"
@@ -450,6 +515,147 @@ async def handle_update(update: dict[str, Any]) -> None:
         )
         return
 
+    # ---------------- Options commands (Part 13) ----------------
+    if cmd == "/options":
+        if not args:
+            await send_message("Usage: <code>/options TICKER</code>", chat_id=chat_id)
+            return
+        ticker = args[0].upper().lstrip("$")
+        from . import options_engine
+        fund = await risk_target.fetch_fundamentals(ticker)
+        signals: list[str] = []
+        stock = {"ticker": ticker, "signals": signals,
+                 "risk": risk_target.compute_risk(fund or {}, signals, None, None, 0),
+                 "squeeze": {}, "time_target": {"days_remaining": 30}}
+        opts = await options_engine.analyze_ticker(stock)
+        if not opts:
+            await send_message(f"No options data for ${_esc(ticker)}.", chat_id=chat_id)
+            return
+        # Provide a default name so the formatter has something
+        opts["strategy_name"] = opts.get("strategy", "LONG_CALL").replace("_", " ").title()
+        opts["one_liner"] = opts.get("strategy_reason", "")
+        block = _format_options_block(opts)
+        await send_message(f"🎯 <b>OPTIONS — ${_esc(ticker)}</b>{block}", chat_id=chat_id)
+        return
+
+    if cmd == "/flow":
+        if not args:
+            await send_message("Usage: <code>/flow TICKER</code>", chat_id=chat_id)
+            return
+        ticker = args[0].upper().lstrip("$")
+        from . import options_engine
+        flow = await options_engine.detect_unusual_flow(ticker)
+        await send_message(
+            f"⚡ <b>FLOW — ${_esc(ticker)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Call vol: <b>{flow['total_call_volume']:,}</b> · OI: {flow.get('call_oi', 0):,}\n"
+            f"Put vol:  <b>{flow['total_put_volume']:,}</b> · OI: {flow.get('put_oi', 0):,}\n"
+            f"P/C ratio: <b>{flow['call_put_ratio']}</b>\n"
+            f"Bias: <b>{_esc(flow['flow_bias'])}</b>\n"
+            f"{'🔥 CALL SWEEP DETECTED' if flow.get('call_sweep') else ''}",
+            chat_id=chat_id,
+        )
+        return
+
+    if cmd == "/iv":
+        if not args:
+            await send_message("Usage: <code>/iv TICKER</code>", chat_id=chat_id)
+            return
+        ticker = args[0].upper().lstrip("$")
+        from . import options_engine
+        iv = await options_engine.calculate_iv_rank(ticker)
+        if iv.get("iv_rank") is None:
+            await send_message(f"No IV data for ${_esc(ticker)}.", chat_id=chat_id)
+            return
+        # Build a fake stock for crush risk
+        stock = {"ticker": ticker, "signals": [], "time_target": {"days_remaining": 30}}
+        chain = {"iv_rank": iv["iv_rank"]}
+        crush = options_engine.assess_iv_crush_risk(stock, chain)
+        await send_message(
+            f"📊 <b>IV — ${_esc(ticker)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"IV rank: <b>{iv['iv_rank']}/100</b> ({_esc(iv.get('iv_label','?'))})\n"
+            f"ATM IV: {iv.get('atm_iv') or '—'}\n"
+            f"30d HV: {iv.get('hv_30') or '—'}\n"
+            f"Crush risk: <b>{_esc(crush['crush_risk'])}</b>\n"
+            f"<i>{_esc(crush['recommendation'])}</i>",
+            chat_id=chat_id,
+        )
+        return
+
+    if cmd == "/spread":
+        if not args:
+            await send_message("Usage: <code>/spread TICKER</code>", chat_id=chat_id)
+            return
+        ticker = args[0].upper().lstrip("$")
+        from . import options_engine
+        chain = await options_engine.get_options_data(ticker)
+        if not chain:
+            await send_message(f"No options chain for ${_esc(ticker)}.", chat_id=chat_id)
+            return
+        bull = options_engine.build_spread(chain, "BULL")
+        bear = options_engine.build_spread(chain, "BEAR")
+        lines = [f"🎯 <b>SPREAD ANALYSIS — ${_esc(ticker)}</b>", "━━━━━━━━━━━━━━━━━━"]
+        if bull:
+            lines.append(
+                f"<b>BULL CALL SPREAD</b>\n"
+                f"Buy ${bull['buy_strike']}C / Sell ${bull['sell_strike']}C exp {_esc(bull['expiration'])}\n"
+                f"Net debit: ${bull['net_debit']} · Max P: ${bull['max_profit']} · "
+                f"Max L: ${bull['max_loss']} · R/R {bull['risk_reward']}:1"
+            )
+        if bear:
+            lines.append(
+                f"\n<b>BEAR PUT SPREAD</b>\n"
+                f"Buy ${bear['buy_strike']}P / Sell ${bear['sell_strike']}P exp {_esc(bear['expiration'])}\n"
+                f"Net debit: ${bear['net_debit']} · Max P: ${bear['max_profit']} · "
+                f"Max L: ${bear['max_loss']} · R/R {bear['risk_reward']}:1"
+            )
+        await send_message("\n".join(lines), chat_id=chat_id)
+        return
+
+    if cmd in ("/calls", "/puts", "/noiv"):
+        # Fetch latest scan; if missing today, run one
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+        latest = await scanner.latest_scan()
+        if not latest or latest.get("started_at", "")[:10] != today_iso:
+            await send_message("⏳ Running fresh scan...", chat_id=chat_id)
+            latest = await scanner.run_scan(triggered_by=f"telegram:{chat_id}")
+        results = latest.get("results", [])
+        if cmd == "/calls":
+            picks = [r for r in results
+                     if "UNUSUAL_FLOW" in r.get("signals", []) or "CALL_SWEEP" in r.get("signals", [])
+                     or (r.get("options", {}) or {}).get("flow", {}).get("flow_bias") == "BULLISH"]
+            picks.sort(key=lambda x: (x.get("options", {}) or {}).get("flow", {}).get("call_volume_ratio", 0), reverse=True)
+            title = "📞 CALLS — UNUSUAL FLOW"
+        elif cmd == "/puts":
+            picks = [r for r in results
+                     if (r.get("options", {}) or {}).get("flow", {}).get("flow_bias") == "BEARISH"]
+            picks.sort(key=lambda x: (x.get("options", {}) or {}).get("flow", {}).get("put_volume_ratio", 0), reverse=True)
+            title = "📉 PUTS — UNUSUAL FLOW"
+        else:  # /noiv
+            picks = [r for r in results
+                     if (r.get("options", {}) or {}).get("iv_rank") is not None
+                     and r["options"]["iv_rank"] < 35
+                     and (r.get("options", {}) or {}).get("strategy") == "LONG_CALL"]
+            picks.sort(key=lambda x: x["options"]["iv_rank"])
+            title = "🟢 LOW IV ENTRIES (<35)"
+        if not picks:
+            await send_message(f"<b>{title}</b>\nNo matching tickers in today's scan.", chat_id=chat_id)
+            return
+        lines = [f"<b>{title}</b> · {len(picks)} matches"]
+        for r in picks[:15]:
+            opts = r.get("options") or {}
+            ct = opts.get("contract") or {}
+            f = opts.get("flow") or {}
+            lines.append(
+                f"\n<b>${_esc(r['ticker'])}</b> · IV {opts.get('iv_rank','?')}% · "
+                f"P/C {f.get('call_put_ratio','?')} · "
+                f"{_esc(opts.get('strategy_name') or opts.get('strategy','?'))}"
+                + (f" · ${ct.get('strike')}{ct.get('type','')} exp {ct.get('expiration','')}" if ct else "")
+            )
+        await send_message("\n".join(lines), chat_id=chat_id)
+        return
+
     if cmd == "/congress":
         from .congress import fetch_recent_buys
         buys = await fetch_recent_buys(days=30)
@@ -467,49 +673,66 @@ async def handle_update(update: dict[str, Any]) -> None:
         return
 
     if cmd == "/performance":
-        db = get_db()
-        # Aggregate from signal_performance collection (populated by scheduled job)
-        rows = await db.signal_performance.find({}, {"_id": 0}).sort("ts", -1).to_list(500)
-        if not rows:
-            await send_message(
-                "📊 <b>SIGNAL PERFORMANCE REPORT</b>\n"
-                "Performance attribution requires 7+ days of scans to start producing data.\n"
-                "<i>Once enough surfaced stocks have aged 7/30/90 days, this will rank "
-                "best-performing signal combinations.</i>",
-                chat_id=chat_id,
-            )
-            return
-        # Group by signal-combo
-        from collections import defaultdict
-        agg = defaultdict(list)
-        for r in rows:
-            key = " + ".join(sorted(r.get("signals", [])))
-            ret = r.get("return_30d")
-            if ret is not None:
-                agg[key].append(ret)
-        if not agg:
-            await send_message("No 30d returns yet — keep scanning daily.", chat_id=chat_id)
-            return
-        ranked = sorted(
-            [(k, sum(v) / len(v), len(v), sum(1 for x in v if x > 0) / len(v))
-              for k, v in agg.items() if len(v) >= 1],
-            key=lambda x: x[1], reverse=True,
-        )
-        lines = ["📊 <b>SIGNAL PERFORMANCE (30d)</b>"]
-        for combo, avg_ret, n, wr in ranked[:5]:
-            lines.append(f"• {combo}: {avg_ret:+.1f}% avg · {n} trades · {wr*100:.0f}% win rate")
+        from . import pnl_tracker
+        sig_perf = await pnl_tracker.performance_by_signals()
+        opt_perf = await pnl_tracker.options_performance_summary()
+        lines = ["📊 <b>SIGNAL PERFORMANCE</b>"]
+        if not sig_perf:
+            lines.append("<i>Waiting for 7+ days of scan data to compute returns.</i>")
+        else:
+            for r in sig_perf[:5]:
+                lines.append(
+                    f"• {_esc(r['combo'])}: 30d {r.get('avg_30d', '—')}% · "
+                    f"WR {r.get('win_rate_30d', '—')}% · n={r['n']}"
+                )
+        lines.append("\n📊 <b>OPTIONS PERFORMANCE</b>")
+        if not opt_perf.get("by_strategy"):
+            lines.append("<i>Options P&L data accumulates 3 days post-pick.</i>")
+        else:
+            for r in opt_perf["by_strategy"][:5]:
+                lines.append(
+                    f"• {_esc(r['strategy'])}: actual {r.get('avg_return_actual','—')}% · "
+                    f"proxy {r.get('avg_return_proxy','—')}% · IV@entry {r.get('avg_iv_at_entry','—')} · n={r['n']}"
+                )
+        if opt_perf.get("by_crush_risk"):
+            lines.append("\n<b>By IV crush risk:</b>")
+            for r in opt_perf["by_crush_risk"]:
+                lines.append(
+                    f"• {_esc(r['crush_risk'])}: avg {r['avg_return']}% · WR {r['win_rate']}% · n={r['n']}"
+                )
         await send_message("\n".join(lines), chat_id=chat_id)
         return
 
     if cmd == "/backtest":
-        if len(args) < 1:
-            await send_message("Usage: <code>/backtest SIGNAL1 [SIGNAL2]</code>", chat_id=chat_id)
-            return
+        from . import backtest as _bt
+        summary = await _bt.backtest_summary()
+        lines = ["📈 <b>BACKTEST SUMMARY</b>",
+                 f"Forward rows: {summary['forward_count']} · Synthetic rows: {summary['synthetic_count']}"]
+        if summary["synthetic"]:
+            lines.append("\n<b>Synthetic (congress 30d):</b>")
+            for r in summary["synthetic"][:5]:
+                lines.append(
+                    f"• {_esc(r['combo'])}: avg {r['avg_30d']}% · WR {r['win_rate_30d']}% · "
+                    f"best {r['best']}% · worst {r['worst']}% · n={r['n']}"
+                )
+        if summary["forward"]:
+            lines.append("\n<b>Forward (live scans 30d):</b>")
+            for r in summary["forward"][:5]:
+                lines.append(
+                    f"• {_esc(r['combo'])}: avg {r['avg_30d']}% · WR {r['win_rate_30d']}% · n={r['n']}"
+                )
+        if not summary["synthetic"] and not summary["forward"]:
+            lines.append("<i>Run /backtest_seed to seed synthetic data.</i>")
+        await send_message("\n".join(lines), chat_id=chat_id)
+        return
+
+    if cmd == "/backtest_seed":
+        from . import backtest as _bt
+        await send_message("⏳ Seeding synthetic backtest from congressional dataset...", chat_id=chat_id)
+        res = await _bt.synthetic_congress_backtest()
         await send_message(
-            "📈 <b>BACKTEST</b>\n"
-            "<i>Backtesting engine requires 24 months of historical signal+price "
-            "data which is being assembled. Currently: simulated performance "
-            "available via /performance once 7+ days of data accumulate.</i>",
+            f"✅ Seeded <b>{res['written']}</b> congressional rows "
+            f"({res['skipped']} already complete) from {_esc(res['source'])}",
             chat_id=chat_id,
         )
         return

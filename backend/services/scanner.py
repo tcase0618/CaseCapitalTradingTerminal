@@ -7,9 +7,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from . import claude_service, congress, risk_target, squeeze as squeeze_mod, \
-    time_target, usaspending
-from .db import get_db, log_activity
+from . import claude_service, congress, options_engine, pnl_tracker, risk_target, \
+    squeeze as squeeze_mod, time_target, usaspending
+from .db import get_db, log_activity, stamped
 from .scrapers import collect_all_signals
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,19 @@ def _short_pct(x: dict) -> float | None:
     if isinstance(s, (int, float)):
         return float(s)
     return None
+
+
+_STRATEGY_DEFAULT_NAMES = {
+    "LONG_CALL": "Long Call",
+    "BULL_CALL_SPREAD": "Bull Call Spread",
+    "BEAR_PUT_SPREAD": "Bear Put Spread",
+    "LOTTERY_CALL": "Lottery Call",
+    "AVOID_OPTIONS": "Avoid Options",
+}
+
+
+def _strategy_default_name(strat: str | None) -> str:
+    return _STRATEGY_DEFAULT_NAMES.get(strat or "", "Long Call")
 
 
 def _insider_buys(x: dict) -> int:
@@ -197,6 +210,28 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         ]
         enriched.append(c)
 
+    # Options intelligence — bounded concurrency (yfinance is rate-sensitive)
+    opt_sem = asyncio.Semaphore(2)
+    async def _bounded_opts(stock):
+        async with opt_sem:
+            try:
+                return await options_engine.analyze_ticker(stock)
+            except Exception as e:
+                logger.warning("options analyze failed for %s: %s", stock.get("ticker"), e)
+                return None
+
+    if enriched:
+        opts_results = await asyncio.gather(*[_bounded_opts(s) for s in enriched])
+        for stock, opts in zip(enriched, opts_results):
+            stock["options"] = opts
+            # UNUSUAL_FLOW signal injection (+2 pts), CALL_SWEEP (+3 pts)
+            if opts and opts.get("flow"):
+                f = opts["flow"]
+                if (f.get("unusual_calls") or f.get("unusual_puts")) and "UNUSUAL_FLOW" not in stock["signals"]:
+                    stock["signals"].append("UNUSUAL_FLOW")
+                if f.get("call_sweep") and "CALL_SWEEP" not in stock["signals"]:
+                    stock["signals"].append("CALL_SWEEP")
+
     # Single batched Claude call (only thesis/conviction/horizon/stop_loss/entry/score)
     analyses = await claude_service.analyze_batch(enriched)
     cache_hits = sum(1 for a in analyses if a.get("cached"))
@@ -214,10 +249,22 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         # Apply FY seasonality multiplier on signal_score (gov signals only)
         score = a.get("signal_score") or 0
         score, fy_applied = time_target.apply_fy_multiplier(c["signals"], score)
+        # +2 for UNUSUAL_FLOW, +3 for CALL_SWEEP (additive bonuses)
+        if "UNUSUAL_FLOW" in c["signals"]:
+            score = min(10, score + 2)
+        if "CALL_SWEEP" in c["signals"]:
+            score = min(10, score + 3)
         # Re-compute time target now that we have catalyst
         tt = time_target.compute_time_target(c["signals"], a.get("catalyst_date", ""))
         # Stop loss: Claude or computed fallback
         stop_loss = a.get("stop_loss") or risk_target.compute_stop_loss(c["fundamentals"], c["risk"])
+        opts = c.get("options")
+        # Inject Claude-provided strategy_name + one-liner into options block
+        if opts:
+            opts = {**opts}
+            opts["strategy_name"] = a.get("options_strategy_name") or _strategy_default_name(opts.get("strategy"))
+            opts["one_liner"] = a.get("options_one_liner") or opts.get("strategy_reason", "")
+            opts["hold_stock_instead"] = bool(a.get("hold_stock_instead")) or opts.get("strategy") == "AVOID_OPTIONS"
         final.append({
             "ticker": c["ticker"],
             "signals": c["signals"],
@@ -244,12 +291,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "insider_summary": c.get("insider_summary"),
             "short_summary": c.get("short_summary"),
             "earnings_summary": c.get("earnings_summary"),
+            "options": opts,
         })
     final.sort(key=lambda x: (x.get("signal_score", 0), x.get("targets", {}).get("upside_blended") or 0), reverse=True)
 
     finished = datetime.now(timezone.utc)
     db = get_db()
-    scan_doc = {
+    scan_doc = stamped({
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "duration_sec": round((finished - started).total_seconds(), 2),
@@ -265,8 +313,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         "claude_cache_hits": cache_hits,
         "results": final,
         "budget_surges": gov.get("budget_surges", []),
-    }
+    })
     await db.scan_results.insert_one(dict(scan_doc))
+    # Record P&L tracking rows (one per ticker, signal & options)
+    try:
+        await pnl_tracker.record_scan_picks(scan_doc)
+    except Exception as e:
+        logger.warning("P&L recording failed: %s", e)
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

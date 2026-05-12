@@ -175,9 +175,129 @@ async def congress_recent(days: int = 30):
 
 @api.get("/performance/summary")
 async def performance_summary():
-    db = get_db()
-    rows = await db.signal_performance.find({}, {"_id": 0}).sort("ts", -1).to_list(500)
-    return {"count": len(rows), "rows": rows[:50]}
+    from services import pnl_tracker
+    sig = await pnl_tracker.performance_by_signals()
+    opt = await pnl_tracker.options_performance_summary()
+    return {"signals": sig, "options": opt}
+
+
+@api.get("/options/{ticker}")
+async def options_endpoint(ticker: str):
+    from services import options_engine
+    fund = await risk_target.fetch_fundamentals(ticker.upper())
+    signals: list[str] = []
+    stock = {
+        "ticker": ticker.upper(), "signals": signals,
+        "risk": risk_target.compute_risk(fund or {}, signals, None, None, 0),
+        "squeeze": {}, "time_target": {"days_remaining": 30},
+    }
+    opts = await options_engine.analyze_ticker(stock)
+    if not opts:
+        raise HTTPException(404, "no options data")
+    return {"ticker": ticker.upper(), "options": opts}
+
+
+@api.get("/flow/{ticker}")
+async def flow_endpoint(ticker: str):
+    from services import options_engine
+    return {"ticker": ticker.upper(), "flow": await options_engine.detect_unusual_flow(ticker.upper())}
+
+
+@api.get("/iv/{ticker}")
+async def iv_endpoint(ticker: str):
+    from services import options_engine
+    iv = await options_engine.calculate_iv_rank(ticker.upper())
+    if iv.get("iv_rank") is None:
+        raise HTTPException(404, "no IV data")
+    stock = {"ticker": ticker.upper(), "signals": [], "time_target": {"days_remaining": 30}}
+    crush = options_engine.assess_iv_crush_risk(stock, {"iv_rank": iv["iv_rank"]})
+    return {"ticker": ticker.upper(), **iv, **crush}
+
+
+@api.get("/spread/{ticker}")
+async def spread_endpoint(ticker: str):
+    from services import options_engine
+    chain = await options_engine.get_options_data(ticker.upper())
+    if not chain:
+        raise HTTPException(404, "no options chain")
+    return {
+        "ticker": ticker.upper(),
+        "bull": options_engine.build_spread(chain, "BULL"),
+        "bear": options_engine.build_spread(chain, "BEAR"),
+        "expiration": chain.get("expiration"),
+    }
+
+
+@api.get("/options/flow/today")
+async def options_flow_today():
+    """Latest scan tickers + their flow data for OPTIONS FLOW MONITOR panel."""
+    s = await scanner.latest_scan()
+    if not s:
+        return {"rows": []}
+    rows = []
+    for r in s.get("results", []):
+        opts = r.get("options") or {}
+        flow = opts.get("flow") or {}
+        if not flow:
+            continue
+        rows.append({
+            "ticker": r["ticker"],
+            "call_volume": flow.get("total_call_volume", 0),
+            "put_volume": flow.get("total_put_volume", 0),
+            "call_put_ratio": flow.get("call_put_ratio", 0),
+            "flow_bias": flow.get("flow_bias", "NEUTRAL"),
+            "iv_rank": opts.get("iv_rank"),
+            "signal": "CALL_SWEEP" if flow.get("call_sweep")
+                      else ("UNUSUAL" if flow.get("unusual_calls") or flow.get("unusual_puts") else "NORMAL"),
+        })
+    rows.sort(key=lambda r: r["call_volume"], reverse=True)
+    return {"rows": rows}
+
+
+@api.get("/options/low_iv")
+async def options_low_iv():
+    """LOW IV ENTRIES panel: today's stocks with iv_rank<35 and LONG_CALL strategy."""
+    s = await scanner.latest_scan()
+    if not s:
+        return {"rows": []}
+    rows = []
+    for r in s.get("results", []):
+        opts = r.get("options") or {}
+        if opts.get("iv_rank") is None or opts.get("iv_rank") >= 35:
+            continue
+        if opts.get("strategy") != "LONG_CALL":
+            continue
+        ct = opts.get("contract") or {}
+        rows.append({
+            "ticker": r["ticker"],
+            "iv_rank": opts.get("iv_rank"),
+            "strategy": opts.get("strategy_name") or opts.get("strategy"),
+            "premium": ct.get("premium"),
+            "max_loss": ct.get("max_loss"),
+            "catalyst_date": (r.get("time_target") or {}).get("target_date"),
+        })
+    rows.sort(key=lambda r: r["iv_rank"] or 100)
+    return {"rows": rows}
+
+
+@api.post("/backtest/seed")
+async def backtest_seed():
+    from services import backtest as _bt
+    return await _bt.synthetic_congress_backtest()
+
+
+@api.get("/backtest/summary")
+async def backtest_summary():
+    from services import backtest as _bt
+    return await _bt.backtest_summary()
+
+
+@api.post("/pnl/refresh")
+async def pnl_refresh():
+    from services import pnl_tracker
+    sig = await pnl_tracker.refresh_due_returns()
+    opt = await pnl_tracker.refresh_due_options_returns()
+    return {"signals_refreshed": sig, "options_rows_refreshed": opt}
 
 
 @api.get("/fy/status")

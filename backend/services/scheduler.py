@@ -1,13 +1,16 @@
-"""APScheduler: 8AM ET daily scan + every-5min alert check."""
+"""APScheduler: 8AM ET daily scan + every-5min alert check + 15-min market-hours
+options-flow refresh + nightly P&L returns refresh."""
 from __future__ import annotations
 import logging
+from datetime import datetime
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import scanner, telegram_service
+from . import options_engine, pnl_tracker, scanner, telegram_service
+from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
@@ -29,6 +32,49 @@ async def _alerts_job():
         logger.exception("alerts job failed: %s", e)
 
 
+async def _flow_refresh_job():
+    """Every 15min during US market hours — refresh unusual flow on tickers
+    from today's scan. Stores into flow_snapshots collection for the dashboard."""
+    try:
+        now_et = datetime.now(ET)
+        # Skip weekends
+        if now_et.weekday() >= 5:
+            return
+        # Market hours 9:30-16:00 ET (CronTrigger handles day/hour but we
+        # double-guard the minute-level boundary)
+        h, m = now_et.hour, now_et.minute
+        if h < 9 or h > 16 or (h == 9 and m < 30):
+            return
+        latest = await scanner.latest_scan()
+        if not latest:
+            return
+        tickers = [r["ticker"] for r in latest.get("results", [])][:30]
+        if not tickers:
+            return
+        db = get_db()
+        for tk in tickers:
+            try:
+                flow = await options_engine.detect_unusual_flow(tk)
+                await db.flow_snapshots.insert_one(stamped({
+                    "ticker": tk, "ts": now_et.isoformat(), **flow,
+                }))
+            except Exception:
+                continue
+        await log_activity(f"Flow refresh complete for {len(tickers)} tickers", "info")
+    except Exception as e:
+        logger.exception("flow refresh job failed: %s", e)
+
+
+async def _pnl_refresh_job():
+    """Nightly: fill 7/30/90d returns, refresh options proxy + actual."""
+    try:
+        sig = await pnl_tracker.refresh_due_returns()
+        opt = await pnl_tracker.refresh_due_options_returns()
+        await log_activity(f"P&L refresh: signals={sig} options_rows={opt}", "info")
+    except Exception as e:
+        logger.exception("P&L refresh job failed: %s", e)
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler and _scheduler.running:
@@ -46,8 +92,22 @@ def start_scheduler():
         id="alerts_check",
         replace_existing=True,
     )
+    # 15-min options flow refresh — Mon-Fri 9:30 to 16:00 ET
+    _scheduler.add_job(
+        _flow_refresh_job,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15", timezone=ET),
+        id="flow_refresh",
+        replace_existing=True,
+    )
+    # Nightly P&L refresh — 02:00 ET
+    _scheduler.add_job(
+        _pnl_refresh_job,
+        CronTrigger(hour=2, minute=0, timezone=ET),
+        id="pnl_refresh",
+        replace_existing=True,
+    )
     _scheduler.start()
-    logger.info("Scheduler started: daily 8AM ET scan + 5min alert check")
+    logger.info("Scheduler started: daily 8AM scan + 5min alerts + 15min flow + 02:00 P&L refresh")
 
 
 def shutdown_scheduler():
