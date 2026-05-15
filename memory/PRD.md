@@ -128,3 +128,18 @@ P&L tracking, backtesting, and a progressive learning engine.
 - Backtest seed: 12 synthetic congressional trades, real historical returns
 - Dashboard renders with options inline + AXIOM score + IV crush badges
 - All 5 routes resolve: `/`, `/learning`, `/performance`, `/ticker/:ticker`, `/settings`
+
+## Feb 2026 — v4: Massive API + Options Curve + Learning Page Expansion
+- **Massive API (Polygon.io rebrand) integrated** as primary price source via new `services/pricer.py`. Uses `/v2/aggs/ticker/{T}/prev` (latest close) and `/v2/aggs/ticker/{T}/range/1/day/{from}/{to}` (historical), with yfinance as automatic fallback. Live key plugged into `/app/backend/.env` as `MASSIVE_API_KEY`. Two new MongoDB caches: `price_cache` (10-min TTL) and `price_history_cache` (24h TTL).
+- **`/api/admin/refresh_prices`** rewrites every `signal_first_seen.first_seen_price` + matching `signal_performance.entry_price` using Massive's historical close on the original signal date. Idempotent — verified live: 33 entries refreshed, 0 failures. UI exposes a `[ REFRESH PRICES ]` button at the top of the Performance page.
+- **`/api/admin/price_source`** returns `{source, massive_available}` — drives the green `SRC · MASSIVE` badge at the top-right of the Performance page.
+- **AXIOM OPTIONS PERFORMANCE curve** — twin of the stock curve, teal `#5eead4`. Sources from `options_performance` collection. Formula: `(current_spot - entry_spot) * delta * sign / premium`, capped at -100%. New endpoint `/api/signals/options_curve?days=N`. PerformancePage extracted a reusable `PerfCurve` component to avoid duplication.
+- **Learning page rebuild**:
+  - PENDING ADJUSTMENTS dry-run card (new `/api/learning/preview`) — shows the exact projection of what the next cycle WOULD change, including "blocked because need 10+ trades" gating.
+  - WEIGHT EVOLUTION OVER TIME multi-line chart (new `/api/learning/weight_history` + new `learning_weight_history` Mongo collection). Filter dropdown populated from live weights (not only history), so users can browse signals before the first auto-cycle.
+  - SIGNAL LIFETIME PERFORMANCE league table (new `/api/learning/signal_stats`) — per-signal win rate + avg 7/30/90d returns + best/worst across ALL trades.
+  - PENDING CHANGES tile added to status strip.
+  - Stat tiles for trades-available, pending-changes, and next-auto-run.
+- Backend: 57/57 pytest cases pass (12 new v4 tests + 45 regression). All new endpoints return clean JSON, no `_id` leakage.
+
+

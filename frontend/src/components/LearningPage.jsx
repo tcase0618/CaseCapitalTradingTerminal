@@ -68,6 +68,12 @@ export default function LearningPage() {
     };
   }, [history]);
 
+  // Filter dropdown lists ALL live signals (so user can browse before first cycle)
+  const filterOptions = useMemo(() => {
+    if (historyChart.keys.length > 0) return historyChart.keys;
+    return weights.map(w => w.weight_key);
+  }, [historyChart.keys, weights]);
+
   return (
     <CrtShell title="LEARNING ENGINE"
       headerRight={
@@ -164,7 +170,7 @@ export default function LearningPage() {
               letterSpacing: "0.1em", outline: "none",
             }}>
             <option value="">ALL SIGNALS</option>
-            {historyChart.keys.map(k => (
+            {filterOptions.map(k => (
               <option key={k} value={k}>{k.replace(/_/g, " ").toUpperCase()}</option>
             ))}
           </select>
