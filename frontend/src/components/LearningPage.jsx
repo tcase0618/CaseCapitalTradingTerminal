@@ -1,24 +1,31 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
+const STROKES = ["#c8a84b", "#5eead4", "#f87171", "#a78bfa", "#fb923c", "#4ade80",
+                  "#60a5fa", "#fbbf24", "#f472b6", "#34d399", "#e879f9", "#facc15"];
+
 export default function LearningPage() {
   const [status, setStatus] = useState(null);
   const [combos, setCombos] = useState([]);
+  const [preview, setPreview] = useState(null);
+  const [signalStats, setSignalStats] = useState([]);
+  const [history, setHistory] = useState([]);
   const [running, setRunning] = useState(false);
+  const [selectedSignal, setSelectedSignal] = useState(null);
 
   const refresh = async () => {
-    try {
-      const [s, c] = await Promise.all([
-        axios.get(`${API}/learning/status`),
-        axios.get(`${API}/learning/combos`),
-      ]);
-      setStatus(s.data); setCombos(c.data);
-    } catch (e) { console.error(e); }
+    // Independent .catch so one failure doesn't kill the page
+    axios.get(`${API}/learning/status`).then(r => setStatus(r.data)).catch(e => console.error("status:", e));
+    axios.get(`${API}/learning/combos`).then(r => setCombos(r.data)).catch(e => console.error("combos:", e));
+    axios.get(`${API}/learning/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
+    axios.get(`${API}/learning/signal_stats`).then(r => setSignalStats(r.data)).catch(e => console.error("stats:", e));
+    axios.get(`${API}/learning/weight_history?limit=2000`).then(r => setHistory(r.data)).catch(e => console.error("history:", e));
   };
   useEffect(() => { refresh(); }, []);
 
@@ -44,6 +51,23 @@ export default function LearningPage() {
   const lastRun = status?.last_run;
   const weights = status?.weights || [];
 
+  // Build history chart data: { ts: ..., [signal]: value } grouped by timestamp
+  const historyChart = useMemo(() => {
+    if (!history.length) return { data: [], keys: [] };
+    const byTs = {};
+    const keys = new Set();
+    for (const h of history) {
+      const t = new Date(h.ts).toLocaleDateString();
+      byTs[t] = byTs[t] || { ts: t };
+      byTs[t][h.weight_key] = h.new_value;
+      keys.add(h.weight_key);
+    }
+    return {
+      data: Object.values(byTs).sort((a, b) => new Date(a.ts) - new Date(b.ts)),
+      keys: Array.from(keys),
+    };
+  }, [history]);
+
   return (
     <CrtShell title="LEARNING ENGINE"
       headerRight={
@@ -54,21 +78,68 @@ export default function LearningPage() {
         </div>
       }>
       {/* Status strip */}
-      <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
+      <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
         <Stat label="LAST RUN" value={lastRun ? new Date(lastRun.run_at).toLocaleDateString() : "NEVER"}
               sub={lastRun?.run_at ? new Date(lastRun.run_at).toLocaleTimeString() : "—"} color={accent} />
-        <Stat label="TRADES ANALYZED" value={lastRun?.trades_analyzed || 0} sub="LIFETIME" />
+        <Stat label="TRADES ANALYZED" value={lastRun?.trades_analyzed || preview?.trades_available || 0}
+              sub={preview?.would_run ? "READY" : `NEED ${preview?.min_required || 10}+`} />
         <Stat label="OVERALL WIN RATE" value={`${((lastRun?.overall_win_rate || 0) * 100).toFixed(1)}%`}
               color={(lastRun?.overall_win_rate || 0) >= 0.5 ? "#4ade80" : "#f87171"} sub="30D RETURN BASIS" />
+        <Stat label="PENDING CHANGES" value={preview?.would_change_count || 0}
+              color={preview?.would_change_count > 0 ? "#fb923c" : muted} sub="IF RUN NOW" />
         <Stat label="WEIGHTS ADJUSTED" value={Object.keys(lastRun?.weights_changed || {}).length}
-              sub="THIS CYCLE" />
-        <Stat label="NEXT RUN" value="SUN 02:00" sub="ET WEEKLY" />
+              sub="LAST CYCLE" />
+        <Stat label="NEXT AUTO RUN" value="SUN 02:00" sub="ET WEEKLY" />
       </div>
 
-      <Card title="INSIGHTS">
+      {/* PREVIEW — what the next cycle would do */}
+      <Card title={`PENDING ADJUSTMENTS — DRY-RUN OF NEXT CYCLE${preview?.would_run ? "" : ` · BLOCKED (NEED ${preview?.min_required || 10}+ COMPLETED TRADES)`}`}
+        action={preview && (
+          <div style={{ fontSize: 11, color: muted, letterSpacing: "0.1em" }}>
+            {preview.trades_available} / {preview.min_required} TRADES
+          </div>
+        )}>
+        {!preview || !preview.rows ? (
+          <div style={{ color: muted, fontSize: 13 }}>Computing projection...</div>
+        ) : preview.would_change_count === 0 ? (
+          <div style={{ color: muted, fontSize: 13, padding: "8px 0", letterSpacing: "0.04em" }}>
+            {preview.would_run
+              ? "No weights would change next cycle — all signals either lack 10+ samples or are within ±0.05 of their current value."
+              : `Need ${preview.min_required - preview.trades_available} more completed trades (30d returns) before the engine engages. Trades complete automatically 30 days after each scan.`}
+          </div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
+                <th style={th}>SIGNAL</th><th style={th}>CURRENT</th>
+                <th style={th}>PROJECTED</th><th style={th}>DELTA</th>
+                <th style={th}>WIN RATE</th><th style={th}>SAMPLES</th>
+                <th style={th}>CONF.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.rows.filter(r => r.would_change).map(r => (
+                <tr key={r.weight_key} data-testid={`preview-${r.weight_key}`} style={{ borderTop: hairline }}>
+                  <td style={{ ...td, color: accent, fontSize: 12 }}>{r.weight_key.replace(/_/g, " ").toUpperCase()}</td>
+                  <td style={td}>{r.current?.toFixed(2)}</td>
+                  <td style={{ ...td, color: r.delta > 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>{r.projected?.toFixed(2)}</td>
+                  <td style={{ ...td, color: r.delta > 0 ? "#4ade80" : "#f87171" }}>
+                    {r.delta > 0 ? "+" : ""}{r.delta?.toFixed(2)} ({r.pct >= 0 ? "+" : ""}{r.pct?.toFixed(1)}%)
+                  </td>
+                  <td style={td}>{r.win_rate != null ? `${(r.win_rate * 100).toFixed(0)}%` : "—"}</td>
+                  <td style={td}>{r.samples}</td>
+                  <td style={td}>{r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <Card title="INSIGHTS — LAST CYCLE">
         {(!lastRun?.insights || lastRun.insights.length === 0) ? (
           <div style={{ color: muted, fontSize: 13, padding: "8px 0", letterSpacing: "0.05em" }}>
-            Need 10+ completed trades (30 days old) to generate insights. P&L records build up over time.
+            Run a learning cycle once you have 10+ trades with 30-day returns. Insights surface high-WR signals, weak signals, and the best signal combination.
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -83,7 +154,55 @@ export default function LearningPage() {
         )}
       </Card>
 
-      <Card title="LIVE SIGNAL WEIGHTS">
+      {/* WEIGHT EVOLUTION CHART */}
+      <Card title={`WEIGHT EVOLUTION OVER TIME · ${historyChart.keys.length} SIGNALS · ${history.length} ADJUSTMENTS`}
+        action={
+          <select data-testid="signal-filter" value={selectedSignal || ""} onChange={e => setSelectedSignal(e.target.value || null)}
+            style={{
+              background: "transparent", border: `0.5px solid ${dim}`, color: muted,
+              fontFamily: "Courier New", fontSize: 11, padding: "4px 8px",
+              letterSpacing: "0.1em", outline: "none",
+            }}>
+            <option value="">ALL SIGNALS</option>
+            {historyChart.keys.map(k => (
+              <option key={k} value={k}>{k.replace(/_/g, " ").toUpperCase()}</option>
+            ))}
+          </select>
+        }>
+        {historyChart.data.length === 0 ? (
+          <div style={{ color: muted, fontSize: 13, padding: "12px 0" }}>
+            No weight changes recorded yet. Once the engine starts adjusting weights, the trajectory of each signal's importance will plot here.
+          </div>
+        ) : (
+          <div style={{ width: "100%", height: 320, marginLeft: -8 }}>
+            <ResponsiveContainer>
+              <LineChart data={historyChart.data} margin={{ top: 10, right: 14, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
+                <XAxis dataKey="ts" stroke="#374151"
+                  tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                  tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                  interval="preserveStartEnd" minTickGap={50} />
+                <YAxis stroke="#374151"
+                  tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                  tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                  width={50} />
+                <Tooltip contentStyle={{
+                  background: "#0c0c12", border: `0.5px solid ${accent}66`,
+                  fontSize: 11, fontFamily: "Courier New", color: "#e5e7eb",
+                }} />
+                <Legend wrapperStyle={{ fontSize: 10, fontFamily: "Courier New", letterSpacing: "0.1em" }} />
+                {(selectedSignal ? [selectedSignal] : historyChart.keys).map((k, i) => (
+                  <Line key={k} type="monotone" dataKey={k}
+                    stroke={STROKES[i % STROKES.length]} strokeWidth={1.5}
+                    dot={{ r: 2 }} activeDot={{ r: 4 }} connectNulls />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </Card>
+
+      <Card title="LIVE SIGNAL WEIGHTS — POST-LEARNING VALUES IN USE BY SCANNER">
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
@@ -127,7 +246,46 @@ export default function LearningPage() {
         </table>
       </Card>
 
-      <Card title={`SIGNAL COMBO PERFORMANCE — ${combos.length} TRACKED`}>
+      {/* SIGNAL LIFETIME LEAGUE TABLE — works even with zero adjusted weights */}
+      <Card title="SIGNAL LIFETIME PERFORMANCE — EVERY SIGNAL, EVERY TRADE EVER">
+        {signalStats.length === 0 ? (
+          <div style={{ color: muted, fontSize: 13 }}>No completed trades yet.</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
+                <th style={th}>SIGNAL</th><th style={th}>TRADES</th><th style={th}>WIN%</th>
+                <th style={th}>AVG 7D</th><th style={th}>AVG 30D</th><th style={th}>AVG 90D</th>
+                <th style={th}>BEST</th><th style={th}>WORST</th>
+              </tr>
+            </thead>
+            <tbody>
+              {signalStats.map((s) => (
+                <tr key={s.signal} data-testid={`signal-stat-${s.signal}`}
+                    style={{ borderTop: hairline, opacity: s.n === 0 ? 0.4 : 1 }}>
+                  <td style={{ ...td, color: accent }}>{s.signal.replace(/_/g, " ").toUpperCase()}</td>
+                  <td style={td}>{s.n}</td>
+                  <td style={{
+                    ...td,
+                    color: s.win_rate == null ? muted : s.win_rate >= 0.65 ? "#4ade80" : s.win_rate < 0.40 ? "#f87171" : accent,
+                  }}>{s.win_rate != null ? `${(s.win_rate * 100).toFixed(0)}%` : "—"}</td>
+                  <td style={{ ...td, color: pctColor(s.avg_7d) }}>{fmt(s.avg_7d)}%</td>
+                  <td style={{ ...td, color: pctColor(s.avg_30d) }}>{fmt(s.avg_30d)}%</td>
+                  <td style={{ ...td, color: pctColor(s.avg_90d) }}>{fmt(s.avg_90d)}%</td>
+                  <td style={{ ...td, color: s.best != null ? "#4ade80" : muted }}>
+                    {s.best != null ? `+${s.best}%` : "—"}
+                  </td>
+                  <td style={{ ...td, color: s.worst != null ? "#f87171" : muted }}>
+                    {s.worst != null ? `${s.worst}%` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <Card title={`SIGNAL COMBO PERFORMANCE — ${combos.length} TRACKED COMBINATIONS`}>
         {combos.length === 0 ? (
           <div style={{ color: muted, fontSize: 13, padding: "8px 0", letterSpacing: "0.05em" }}>
             No signal combinations with 3+ trades yet.
@@ -166,6 +324,8 @@ export default function LearningPage() {
   );
 }
 
+const fmt = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}`;
+const pctColor = (v) => v == null ? muted : v > 0 ? "#4ade80" : v < 0 ? "#f87171" : labelLight;
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400 };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em" };
 const btnPrimary = (loading) => ({

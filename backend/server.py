@@ -189,6 +189,33 @@ async def signals_curve(days: int = 90):
     return {"days": days, "curve": await pnl_tracker.daily_pnl_curve(days=days)}
 
 
+@api.get("/signals/options_curve")
+async def signals_options_curve(days: int = 90):
+    """Robinhood-style OPTIONS P/L curve. Avg proxy % return across all
+    tracked options positions on each day in the window. Uses
+    (current_spot - entry_spot) * delta / premium."""
+    from services import pnl_tracker
+    return {"days": days, "curve": await pnl_tracker.daily_options_pnl_curve(days=days)}
+
+
+@api.post("/admin/refresh_prices")
+async def admin_refresh_prices():
+    """Re-fetch every signal_first_seen entry price using Massive API.
+    Also clears the price cache so the next render hits Massive cleanly."""
+    from services import pnl_tracker, pricer
+    result = await pnl_tracker.refresh_all_entry_prices(force=True)
+    return {"ok": True, "source": pricer.source_label(),
+             "massive_available": pricer.has_massive(), **result}
+
+
+@api.get("/admin/price_source")
+async def admin_price_source():
+    from services import pricer
+    return {"source": pricer.source_label(),
+             "massive_available": pricer.has_massive()}
+
+
+
 @api.get("/signals/tracker")
 async def signals_tracker(limit: int = 200):
     """Every signal we've ever surfaced, treated as 'bought immediately on
@@ -374,6 +401,26 @@ async def learning_reset():
     from services import learning_engine
     n = await learning_engine.reset_weights()
     return {"reset": True, "weights_reset": n}
+
+
+@api.get("/learning/preview")
+async def learning_preview():
+    """Dry-run preview of what the next cycle would do."""
+    from services import learning_engine
+    return await learning_engine.preview_learning_cycle()
+
+
+@api.get("/learning/weight_history")
+async def learning_weight_history(weight_key: str | None = None, limit: int = 500):
+    from services import learning_engine
+    return await learning_engine.weight_history(weight_key=weight_key, limit=limit)
+
+
+@api.get("/learning/signal_stats")
+async def learning_signal_stats():
+    """Lifetime per-signal win-rate + return league table."""
+    from services import learning_engine
+    return await learning_engine.signal_lifetime_stats()
 
 
 @api.get("/ticker/{ticker}")

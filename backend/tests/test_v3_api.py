@@ -95,8 +95,9 @@ class TestPerformance:
         r = api_client.get(f"{base_url}/api/performance/summary", timeout=15)
         assert r.status_code == 200
         d = r.json()
-        assert "count" in d and "rows" in d
-        assert isinstance(d["rows"], list)
+        # v4: shape changed to {signals: [...], options: {...}} (main agent expanded it)
+        assert "signals" in d and "options" in d
+        assert isinstance(d["signals"], list)
 
 
 # ---------- V3 scan schema ----------

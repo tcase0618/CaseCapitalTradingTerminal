@@ -107,7 +107,6 @@ async def run_learning_cycle() -> dict[str, Any]:
         msg = f"Learning skipped — only {len(docs)} completed trades (need {MIN_SAMPLES}+)"
         await log_activity(msg, "warn")
         return {"skipped": True, "reason": msg, "trades": len(docs)}
-
     # Per-signal performance
     signal_stats: dict[str, dict | None] = {}
     for key in DEFAULT_WEIGHTS.keys():
@@ -161,11 +160,13 @@ async def run_learning_cycle() -> dict[str, Any]:
     weight_rows = await db.learning_weights.find({}, {"_id": 0}).to_list(100)
     changes: dict[str, dict] = {}
     now = datetime.now(timezone.utc).isoformat()
+    snapshot: dict[str, float] = {}
     for row in weight_rows:
         key = row["weight_key"]
         current = row["current_value"]
         wmin = row["min_value"]
         wmax = row["max_value"]
+        snapshot[key] = round(current, 2)
         stats = signal_stats.get(key)
         if not stats or stats["count"] < MIN_SAMPLES:
             continue
@@ -186,12 +187,23 @@ async def run_learning_cycle() -> dict[str, Any]:
                     "last_updated": now,
                 }},
             )
+            # Append per-weight history row
+            await db.learning_weight_history.insert_one(stamped({
+                "weight_key": key,
+                "ts": now,
+                "old_value": round(current, 2),
+                "new_value": round(new_value, 2),
+                "win_rate": stats["win_rate"],
+                "sample_count": stats["count"],
+                "confidence": round(confidence, 2),
+            }))
             changes[key] = {
                 "old": round(current, 2),
                 "new": round(new_value, 2),
                 "delta": round(new_value - current, 2),
                 "pct": round((new_value - current) / current * 100, 1) if current else 0,
             }
+            snapshot[key] = round(new_value, 2)
 
     insights = _build_insights(signal_stats, combo_map, changes, docs)
     overall_wr = sum(1 for d in docs if (d.get("return_30d") or 0) > 0) / len(docs)
@@ -200,6 +212,7 @@ async def run_learning_cycle() -> dict[str, Any]:
         "run_at": now,
         "trades_analyzed": len(docs),
         "weights_changed": changes,
+        "weights_snapshot": snapshot,
         "overall_win_rate": round(overall_wr, 3),
         "insights": insights,
     }))
@@ -241,3 +254,113 @@ def _build_insights(signal_stats, combo_map, changes, docs) -> list[str]:
         arrow = "📈" if ch["delta"] > 0 else "📉"
         insights.append(f"{arrow} {key}: {ch['old']} → {ch['new']} ({ch['pct']:+.1f}%)")
     return insights
+
+
+
+async def preview_learning_cycle() -> dict[str, Any]:
+    """Dry-run: compute the adjustments the next cycle WOULD make, without
+    writing anything. Useful for the Learning page to show 'pending changes'
+    before the user clicks RUN CYCLE."""
+    db = get_db()
+    await ensure_weights_exist()
+    docs = await db.signal_performance.find(
+        {"return_30d": {"$ne": None}}, {"_id": 0},
+    ).to_list(5000)
+    weight_rows = await db.learning_weights.find({}, {"_id": 0}).to_list(100)
+    weights_by_key = {w["weight_key"]: w for w in weight_rows}
+
+    signal_stats: dict[str, dict] = {}
+    for key in DEFAULT_WEIGHTS.keys():
+        relevant = [d for d in docs if key in (d.get("signals") or [])]
+        if len(relevant) < 5:
+            continue
+        wins = [d for d in relevant if (d.get("return_30d") or 0) > 0]
+        signal_stats[key] = {
+            "count": len(relevant),
+            "wins": len(wins),
+            "win_rate": round(len(wins) / len(relevant), 3) if relevant else 0,
+            "avg_return": round(sum(d["return_30d"] for d in relevant) / len(relevant), 2) if relevant else 0,
+        }
+
+    preview: list[dict[str, Any]] = []
+    for key, w in weights_by_key.items():
+        stats = signal_stats.get(key)
+        row: dict[str, Any] = {
+            "weight_key": key,
+            "current": w["current_value"],
+            "min": w["min_value"],
+            "max": w["max_value"],
+            "samples": stats["count"] if stats else 0,
+            "win_rate": stats["win_rate"] if stats else None,
+            "avg_return": stats["avg_return"] if stats else None,
+            "projected": w["current_value"],
+            "would_change": False,
+            "blocked_reason": None,
+        }
+        if not stats or stats["count"] < MIN_SAMPLES:
+            row["blocked_reason"] = f"need {MIN_SAMPLES}+ trades ({stats['count'] if stats else 0} so far)"
+        else:
+            confidence = min(stats["count"] / 50.0, 1.0)
+            wr_delta = stats["win_rate"] - BASELINE_WR
+            max_adj = w["current_value"] * MAX_CHANGE
+            adjustment = wr_delta * max_adj * confidence
+            new_value = max(w["min_value"], min(w["max_value"],
+                              w["current_value"] + adjustment))
+            row["projected"] = round(new_value, 2)
+            row["delta"] = round(new_value - w["current_value"], 2)
+            row["pct"] = round((new_value - w["current_value"]) / w["current_value"] * 100, 1) if w["current_value"] else 0
+            row["confidence"] = round(confidence, 2)
+            row["would_change"] = abs(new_value - w["current_value"]) > 0.05
+        preview.append(row)
+
+    eligible_changes = sum(1 for p in preview if p["would_change"])
+    return {
+        "trades_available": len(docs),
+        "min_required": MIN_SAMPLES,
+        "would_run": len(docs) >= MIN_SAMPLES,
+        "would_change_count": eligible_changes,
+        "rows": preview,
+    }
+
+
+async def weight_history(weight_key: str | None = None,
+                          limit: int = 500) -> list[dict[str, Any]]:
+    db = get_db()
+    q = {"weight_key": weight_key} if weight_key else {}
+    rows = await db.learning_weight_history.find(q, {"_id": 0}).sort("ts", 1).to_list(limit)
+    return rows
+
+
+async def signal_lifetime_stats() -> list[dict[str, Any]]:
+    """Per-signal historical win rate + avg return across ALL completed trades.
+    Used by the Learning page to show a sortable league table even when no
+    weight cycle has run yet."""
+    db = get_db()
+    docs = await db.signal_performance.find(
+        {"return_30d": {"$ne": None}}, {"_id": 0},
+    ).to_list(5000)
+    out: list[dict[str, Any]] = []
+    for key in DEFAULT_WEIGHTS.keys():
+        relevant = [d for d in docs if key in (d.get("signals") or [])]
+        if not relevant:
+            out.append({
+                "signal": key, "n": 0, "win_rate": None, "avg_30d": None,
+                "avg_7d": None, "avg_90d": None, "best": None, "worst": None,
+            })
+            continue
+        wins = sum(1 for d in relevant if (d.get("return_30d") or 0) > 0)
+        r30 = [d["return_30d"] for d in relevant if d.get("return_30d") is not None]
+        r7 = [d["return_7d"] for d in relevant if d.get("return_7d") is not None]
+        r90 = [d["return_90d"] for d in relevant if d.get("return_90d") is not None]
+        out.append({
+            "signal": key,
+            "n": len(relevant),
+            "win_rate": round(wins / len(relevant), 3),
+            "avg_30d": round(sum(r30) / len(r30), 2) if r30 else None,
+            "avg_7d": round(sum(r7) / len(r7), 2) if r7 else None,
+            "avg_90d": round(sum(r90) / len(r90), 2) if r90 else None,
+            "best": round(max(r30), 2) if r30 else None,
+            "worst": round(min(r30), 2) if r30 else None,
+        })
+    out.sort(key=lambda x: (x["avg_30d"] is None, -(x["avg_30d"] or -999)))
+    return out

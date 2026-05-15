@@ -12,8 +12,11 @@ export default function PerformancePage() {
   const [backtest, setBacktest] = useState(null);
   const [tracker, setTracker] = useState(null);
   const [curve, setCurve] = useState(null);
+  const [optionsCurve, setOptionsCurve] = useState(null);
   const [curveDays, setCurveDays] = useState(90);
   const [seeding, setSeeding] = useState(false);
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
+  const [priceSource, setPriceSource] = useState(null);
 
   const refresh = async () => {
     // Use independent .catch so one failure doesn't kill the others
@@ -21,6 +24,8 @@ export default function PerformancePage() {
     axios.get(`${API}/backtest/summary`).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
     axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
     axios.get(`${API}/signals/curve?days=${curveDays}`).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
+    axios.get(`${API}/signals/options_curve?days=${curveDays}`).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
+    axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
   };
   useEffect(() => { refresh(); }, [curveDays]);
 
@@ -35,6 +40,17 @@ export default function PerformancePage() {
     setSeeding(false);
   };
 
+  const refreshPrices = async () => {
+    setRefreshingPrices(true);
+    toast("REFRESHING ENTRY PRICES VIA MASSIVE...");
+    try {
+      const { data } = await axios.post(`${API}/admin/refresh_prices`, null, { timeout: 120000 });
+      toast(`UPDATED ${data.first_seen_updated} ENTRIES · ${data.failures} FAILED · SRC=${data.source.toUpperCase()}`);
+      refresh();
+    } catch { toast("REFRESH FAILED"); }
+    setRefreshingPrices(false);
+  };
+
   const signals = perf?.signals || [];
   const options = perf?.options || {};
   const fwd = backtest?.forward || [];
@@ -43,8 +59,19 @@ export default function PerformancePage() {
   return (
     <CrtShell title="PERFORMANCE TRACKER"
       headerRight={
-        <button data-testid="seed-backtest-btn" onClick={seedBacktest} disabled={seeding}
-          style={btnPrimary(seeding)}>{seeding ? "SEEDING..." : "[ SEED BACKTEST ]"}</button>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {priceSource && (
+            <div data-testid="price-source-badge" style={{
+              fontSize: 9, letterSpacing: "0.14em", color: priceSource.massive_available ? "#4ade80" : muted,
+              border: `0.5px solid ${priceSource.massive_available ? "#4ade80" : tokens.dim}`,
+              padding: "4px 8px", fontFamily: "Courier New",
+            }}>SRC · {priceSource.source.toUpperCase()}</div>
+          )}
+          <button data-testid="refresh-prices-btn" onClick={refreshPrices} disabled={refreshingPrices}
+            style={btnGhost(refreshingPrices)}>{refreshingPrices ? "REFRESHING..." : "[ REFRESH PRICES ]"}</button>
+          <button data-testid="seed-backtest-btn" onClick={seedBacktest} disabled={seeding}
+            style={btnPrimary(seeding)}>{seeding ? "SEEDING..." : "[ SEED BACKTEST ]"}</button>
+        </div>
       }>
       {/* Summary stat strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
@@ -122,91 +149,34 @@ export default function PerformancePage() {
       </Card>
 
       {/* AXIOM Performance Curve — Robinhood-style */}
-      <Card title={`AXIOM PERFORMANCE — ${curveDays}D · AVG % GAIN ACROSS ALL TRACKED SIGNALS`}
-        action={
-          <div style={{ display: "flex", gap: 6 }}>
-            {[30, 60, 90, 180].map(d => (
-              <button key={d} data-testid={`curve-range-${d}`} onClick={() => setCurveDays(d)}
-                style={{
-                  background: curveDays === d ? "rgba(200,168,75,0.12)" : "transparent",
-                  border: `0.5px solid ${curveDays === d ? accent : tokens.dim}`,
-                  color: curveDays === d ? accent : tokens.muted,
-                  fontSize: 10, padding: "4px 10px", cursor: "pointer",
-                  letterSpacing: "0.1em", fontFamily: "Courier New", fontWeight: 700,
-                }}>{d}D</button>
-            ))}
-          </div>
-        }>
-        {!curve || curve.length === 0 ? (
-          <div style={{ color: muted, fontSize: 13, padding: "12px 0" }}>
-            Building performance curve... Need at least 1 day of signal history.
-          </div>
-        ) : (
-          <>
-            <div style={{ display: "flex", gap: 32, marginBottom: 14, paddingLeft: 8 }}>
-              <div>
-                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>CURRENT</div>
-                <div style={{
-                  fontSize: 30, fontWeight: 300, fontFamily: "Courier New",
-                  color: pctColor(curve[curve.length - 1]?.avg_gain_pct),
-                  letterSpacing: "0.02em",
-                }}>{fmt(curve[curve.length - 1]?.avg_gain_pct)}%</div>
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>PEAK</div>
-                <div style={{
-                  fontSize: 18, fontWeight: 700, color: "#4ade80", fontFamily: "Courier New",
-                }}>+{Math.max(...curve.map(c => c.avg_gain_pct || 0)).toFixed(2)}%</div>
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>TROUGH</div>
-                <div style={{
-                  fontSize: 18, fontWeight: 700, color: "#f87171", fontFamily: "Courier New",
-                }}>{Math.min(...curve.map(c => c.avg_gain_pct || 0)).toFixed(2)}%</div>
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>POSITIONS</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "Courier New" }}>
-                  {curve[curve.length - 1]?.positions || 0}
-                </div>
-              </div>
-            </div>
-            <div style={{ width: "100%", height: 280, marginLeft: -8 }}>
-              <ResponsiveContainer>
-                <AreaChart data={curve} margin={{ top: 10, right: 14, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="axiomGain" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#c8a84b" stopOpacity={0.45} />
-                      <stop offset="100%" stopColor="#c8a84b" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
-                  <XAxis dataKey="date" stroke="#374151"
-                    tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
-                    tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
-                    interval="preserveStartEnd" minTickGap={50} />
-                  <YAxis stroke="#374151" tickFormatter={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`}
-                    tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
-                    tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
-                    width={70} />
-                  <ReferenceLine y={0} stroke="#374151" strokeDasharray="3 3" />
-                  <Tooltip
-                    contentStyle={{
-                      background: "#0c0c12", border: "0.5px solid rgba(200,168,75,0.4)",
-                      fontSize: 11, fontFamily: "Courier New", color: "#e5e7eb",
-                      letterSpacing: "0.04em",
-                    }}
-                    formatter={(v, n) => [`${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`, "AVG GAIN"]}
-                    labelFormatter={(l) => `${l}`}
-                  />
-                  <Area type="monotone" dataKey="avg_gain_pct" stroke="#c8a84b" strokeWidth={2}
-                    fill="url(#axiomGain)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </>
-        )}
-      </Card>
+      <PerfCurve
+        title={`AXIOM STOCK PERFORMANCE — ${curveDays}D · AVG % GAIN ACROSS ALL TRACKED SIGNALS`}
+        curve={curve}
+        days={curveDays}
+        setDays={setCurveDays}
+        gradId="axiomGain"
+        strokeColor="#c8a84b"
+        testidPrefix="curve-range"
+        emptyMsg="Building performance curve... Need at least 1 day of signal history."
+      />
+
+      {/* AXIOM Options Curve — same shape, different data */}
+      <PerfCurve
+        title={`AXIOM OPTIONS PERFORMANCE — ${curveDays}D · AVG PROXY % RETURN ACROSS ALL OPEN OPTIONS PLAYS`}
+        curve={optionsCurve}
+        days={curveDays}
+        setDays={setCurveDays}
+        gradId="axiomOptions"
+        strokeColor="#5eead4"
+        testidPrefix="opt-curve-range"
+        emptyMsg="No options positions tracked in this window. Options curve builds from every scan that surfaces an options play."
+        extraStats={(c) => [{
+          label: "STRATEGIES",
+          value: c[c.length - 1]?.strategies || 0,
+          color: "#5eead4",
+        }]}
+      />
+
 
       <Card title="SIGNAL PERFORMANCE — RETURNS BY COMBINATION">
         {signals.length === 0 ? (
@@ -357,3 +327,106 @@ const btnPrimary = (loading) => ({
   padding: "8px 16px", cursor: loading ? "wait" : "pointer",
   letterSpacing: "0.12em", fontFamily: "Courier New", fontWeight: 700,
 });
+const btnGhost = (loading) => ({
+  background: "transparent", border: `0.5px solid ${dim}`,
+  color: loading ? accent : muted, fontSize: 11,
+  padding: "8px 12px", cursor: loading ? "wait" : "pointer",
+  letterSpacing: "0.12em", fontFamily: "Courier New", fontWeight: 700,
+});
+
+function PerfCurve({ title, curve, days, setDays, gradId, strokeColor,
+                     testidPrefix, emptyMsg, extraStats }) {
+  return (
+    <Card title={title}
+      action={
+        <div style={{ display: "flex", gap: 6 }}>
+          {[30, 60, 90, 180].map(d => (
+            <button key={d} data-testid={`${testidPrefix}-${d}`} onClick={() => setDays(d)}
+              style={{
+                background: days === d ? "rgba(200,168,75,0.12)" : "transparent",
+                border: `0.5px solid ${days === d ? accent : tokens.dim}`,
+                color: days === d ? accent : tokens.muted,
+                fontSize: 10, padding: "4px 10px", cursor: "pointer",
+                letterSpacing: "0.1em", fontFamily: "Courier New", fontWeight: 700,
+              }}>{d}D</button>
+          ))}
+        </div>
+      }>
+      {!curve || curve.length === 0 ? (
+        <div style={{ color: muted, fontSize: 13, padding: "12px 0" }}>{emptyMsg}</div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 32, marginBottom: 14, paddingLeft: 8, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>CURRENT</div>
+              <div style={{
+                fontSize: 30, fontWeight: 300, fontFamily: "Courier New",
+                color: pctColor(curve[curve.length - 1]?.avg_gain_pct),
+                letterSpacing: "0.02em",
+              }}>{fmt(curve[curve.length - 1]?.avg_gain_pct)}%</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>PEAK</div>
+              <div style={{
+                fontSize: 18, fontWeight: 700, color: "#4ade80", fontFamily: "Courier New",
+              }}>+{Math.max(...curve.map(c => c.avg_gain_pct || 0)).toFixed(2)}%</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>TROUGH</div>
+              <div style={{
+                fontSize: 18, fontWeight: 700, color: "#f87171", fontFamily: "Courier New",
+              }}>{Math.min(...curve.map(c => c.avg_gain_pct || 0)).toFixed(2)}%</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>POSITIONS</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "Courier New" }}>
+                {curve[curve.length - 1]?.positions || 0}
+              </div>
+            </div>
+            {(extraStats ? extraStats(curve) : []).map((s, i) => (
+              <div key={i}>
+                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>{s.label}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: s.color, fontFamily: "Courier New" }}>
+                  {s.value}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ width: "100%", height: 280, marginLeft: -8 }}>
+            <ResponsiveContainer>
+              <AreaChart data={curve} margin={{ top: 10, right: 14, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={strokeColor} stopOpacity={0.45} />
+                    <stop offset="100%" stopColor={strokeColor} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
+                <XAxis dataKey="date" stroke="#374151"
+                  tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                  tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                  interval="preserveStartEnd" minTickGap={50} />
+                <YAxis stroke="#374151" tickFormatter={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`}
+                  tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                  tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                  width={70} />
+                <ReferenceLine y={0} stroke="#374151" strokeDasharray="3 3" />
+                <Tooltip
+                  contentStyle={{
+                    background: "#0c0c12", border: `0.5px solid ${strokeColor}66`,
+                    fontSize: 11, fontFamily: "Courier New", color: "#e5e7eb",
+                    letterSpacing: "0.04em",
+                  }}
+                  formatter={(v) => [`${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`, "AVG GAIN"]}
+                  labelFormatter={(l) => `${l}`}
+                />
+                <Area type="monotone" dataKey="avg_gain_pct" stroke={strokeColor} strokeWidth={2}
+                  fill={`url(#${gradId})`} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}

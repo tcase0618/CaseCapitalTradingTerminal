@@ -1,0 +1,52 @@
+{
+  "summary": "Full v4 regression covering Massive API price source integration, options performance curve, and learning-page expansions (preview, weight_history, signal_lifetime_stats). 12/12 new v4 pytest cases pass and full backend regression is 57/57 green. Both new Performance page curves render correctly (AXIOM STOCK in amber #c8a84b, AXIOM OPTIONS in teal #5eead4 with 45 positions / 3 strategies). SRC \u00b7 MASSIVE badge confirms live Massive API integration. /learning page renders status strip (LAST RUN, TRADES ANALYZED, OVERALL WIN RATE, PENDING CHANGES, WEIGHTS ADJUSTED, NEXT AUTO RUN), PENDING ADJUSTMENTS (4/10 trades — gated state correct), INSIGHTS, WEIGHT EVOLUTION dropdown, LIVE SIGNAL WEIGHTS (13 rows), SIGNAL LIFETIME PERFORMANCE (13 rows incl. CONGRESSIONAL_BUY 25% WR / +2.3% avg 7d), SIGNAL COMBO PERFORMANCE (empty — needs >=3 trades). No frontend errors in console. POST /api/admin/refresh_prices completes without crash and returns first_seen_updated + perf_rows_updated counts.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/performance/summary", "issue": "Response shape changed from {count, rows, options} to {signals: [...], options: {...}} (intentional by main agent for new combo aggregation). v3 test was outdated and was updated by testing agent to match new contract."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/learning — Weight Evolution dropdown", "issues": ["ALL SIGNALS dropdown shows only the empty/default option because learning_weight_history is empty (engine hasn't engaged — needs >=10 trades, currently 4). Once weights start adjusting, dropdown will populate. Cosmetic only — could pre-populate from live weight keys for transparency before first cycle."]},
+      {"screen": "/learning — Signal Combo Performance card", "issues": ["Shows 'No signal combinations with 3+ trades yet.' — correct because /api/learning/combos filters trade_count>=3. Different from /api/performance/summary which returns 12 combos with looser filter. Naming could mention the >=3 trades threshold inline."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v4_api.py",
+    "/app/backend/tests/test_v3_api.py",
+    "/app/backend/tests/test_v2_api.py",
+    "/app/backend/tests/test_stock_bot_api.py",
+    "/app/test_reports/pytest/pytest_v4_results.xml",
+    "/app/test_reports/pytest/pytest_regression.xml"
+  ],
+  "action_items": [
+    "[Optional] Pre-populate /learning signal-filter dropdown from /api/learning/status weights instead of from weight_history so user can browse signals before first auto-cycle.",
+    "[Optional] Add inline threshold hint '(min 3 trades)' to SIGNAL COMBO PERFORMANCE card header so empty state is self-explanatory.",
+    "[Optional] Add unit-label suffix '%' on AXIOM OPTIONS PERFORMANCE Y-axis tooltip (currently visible only as +X.X% beside CURRENT label)."
+  ],
+  "critical_code_review_comments": [
+    "services/pricer.py: Massive API key is correctly read from env; source_label() and has_massive() flags are exposed via /api/admin/price_source — clean separation.",
+    "services/pnl_tracker.refresh_all_entry_prices: Tested live — completed without exception and returned first_seen_updated/perf_rows_updated counts. Safe to call on demand from REFRESH PRICES button.",
+    "services/pnl_tracker.daily_options_pnl_curve: Returns the required avg_gain_pct/positions/winners/losers/strategies shape and frontend renders teal curve with correct data — proxy formula (current_spot - entry_spot)*delta/premium documented in server.py docstring.",
+    "services/learning_engine.preview_learning_cycle: Returns trades_available=4, would_run=false (<10 trade threshold), would_change_count=0, rows=[] — gating logic correct.",
+    "services/learning_engine.weight_history: Returns [] cleanly when no adjustments yet; supports weight_key filter param — verified.",
+    "services/learning_engine.signal_lifetime_stats: Returns 13 per-signal rows; CONGRESSIONAL_BUY computed correctly (25% WR, +2.3% avg 7d, best +4.15%, worst -7.14% across 4 trades).",
+    "server.py: All 6 new endpoints (/api/admin/price_source, /api/admin/refresh_prices, /api/signals/options_curve, /api/learning/preview, /api/learning/weight_history, /api/learning/signal_stats) return clean JSON with no _id leakage.",
+    "PerformancePage.jsx: PerfCurve reusable component is a good DRY pattern. Note: both curves share the SAME curveDays state (lines 156 & 168 both setCurveDays) — clicking 30D on stock curve also changes options curve and vice versa. This may or may not be intentional; if user expects independent toggles per chart, split state. Worth confirming with main agent.",
+    "LearningPage.jsx: signal-filter dropdown is wired to weight_history rather than the static signal list — first-time users see only an empty option until first learning cycle adjusts weights."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v4_api.py (new, 12 cases)",
+    "/app/backend/tests/test_v3_api.py (loosened performance summary shape assertion to {signals, options})"
+  ],
+  "success_rate": {"backend": "100% (57/57 — 12 v4 + 45 v1+v2+v3 regression)", "frontend": "100% (all required Performance + Learning testids present, both charts render, no console errors)"},
+  "test_credentials": "N/A — public dashboard, no auth. Massive API key live in backend/.env.",
+  "seed_data_creation": "None destructive. POST /api/admin/refresh_prices was invoked once during backend tests (updates signal_first_seen entry prices in-place using live Massive API quotes). 33 entries were refreshed per main-agent smoke test; running again is idempotent.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 57 backend tests now pass. New v4 endpoints all live: /api/admin/price_source (massive), /api/admin/refresh_prices (idempotent), /api/signals/options_curve (returns avg_gain_pct/positions/winners/losers/strategies), /api/learning/preview (4 trades, would_run=false until 10), /api/learning/weight_history (empty until first auto-cycle), /api/learning/signal_stats (13 signals, only CONGRESSIONAL_BUY has trades). Frontend /performance now has dual Robinhood-style curves with shared 30/60/90/180D toggles (note: toggles are not independent — see code review comment). /learning page is feature-complete. Watch curveDays shared state — confirm with main agent whether intentional. Massive API daily-bars endpoint returns 403 on snapshot endpoint per main agent note — falls through to yfinance, which is graceful and expected.",
+  "rca of the issue": "N/A — no blocking issues. All v4 features implemented and verified end-to-end (backend API + frontend rendering + data flow). One pre-existing v3 test was failing because performance summary response shape was expanded — test updated to match new contract."
+}

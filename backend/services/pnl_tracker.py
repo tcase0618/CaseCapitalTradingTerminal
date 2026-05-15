@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import FEATURE_VERSION, get_db, log_activity, stamped
+from . import pricer
 
 logger = logging.getLogger(__name__)
 
@@ -28,25 +29,12 @@ def _now() -> datetime:
 
 
 async def _fetch_close(ticker: str, days_ago: int = 0) -> float | None:
-    """Get a close price `days_ago` ago. days_ago=0 returns latest."""
-    try:
-        import yfinance as yf
-
-        def _sync():
-            t = yf.Ticker(ticker)
-            period = "1y" if days_ago > 90 else ("3mo" if days_ago > 14 else "1mo")
-            h = t.history(period=period)
-            if len(h) == 0:
-                return None
-            if days_ago <= 0:
-                return float(h["Close"].iloc[-1])
-            target_idx = max(0, len(h) - 1 - days_ago)
-            return float(h["Close"].iloc[target_idx])
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync)
-    except Exception as e:
-        logger.warning("close fetch failed %s/%s: %s", ticker, days_ago, e)
-        return None
+    """Get a close price `days_ago` ago via Massive API (yfinance fallback).
+    days_ago=0 returns the latest available close."""
+    if days_ago <= 0:
+        return await pricer.get_latest_close(ticker)
+    target = (datetime.now(timezone.utc).date() - timedelta(days=days_ago)).isoformat()
+    return await pricer.get_close_on_date(ticker, target)
 
 
 # ============== Recording ==============
@@ -390,11 +378,65 @@ async def ensure_first_seen_backfill() -> int:
     return backfilled
 
 
+async def refresh_all_entry_prices(force: bool = True) -> dict[str, int]:
+    """Re-fetch the close on `first_seen_date` for every tracked ticker
+    using Massive API. Updates both `signal_first_seen.first_seen_price`
+    and matching `signal_performance.entry_price` rows. This corrects any
+    yfinance-era entry prices once Massive is plugged in."""
+    db = get_db()
+    # Clear stale price caches first
+    await pricer.clear_cache()
+
+    rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
+    updated_first_seen = 0
+    updated_perf = 0
+    failures = 0
+    for r in rows:
+        ticker = r["ticker"]
+        d = r.get("first_seen_date")
+        if not ticker or not d:
+            continue
+        new_price = await pricer.get_close_on_date(ticker, d)
+        if not new_price:
+            failures += 1
+            continue
+        # Only update if it actually changed (or row had no price)
+        cur = r.get("first_seen_price")
+        if cur and abs(cur - new_price) < 0.01:
+            continue
+        await db.signal_first_seen.update_one(
+            {"ticker": ticker},
+            {"$set": {
+                "first_seen_price": round(new_price, 2),
+                "first_seen_price_source": "massive" if pricer.has_massive() else "yfinance",
+                "first_seen_price_refreshed_at": _now().isoformat(),
+            }},
+        )
+        updated_first_seen += 1
+        # Also refresh the matching signal_performance row's entry_price
+        res = await db.signal_performance.update_one(
+            {"ticker": ticker, "date": d},
+            {"$set": {"entry_price": round(new_price, 2)}},
+        )
+        if res.modified_count:
+            updated_perf += 1
+    await log_activity(
+        f"Refreshed {updated_first_seen} entry prices via Massive ({failures} failed)",
+        "info",
+    )
+    return {
+        "first_seen_updated": updated_first_seen,
+        "perf_rows_updated": updated_perf,
+        "failures": failures,
+        "source": pricer.source_label(),
+    }
+
+
+
 async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
-    """Robinhood-style curve. For each date in the last N days, sum the
-    portfolio's % gain across every ticker that had been signaled by that date.
-    Equal-weight (each ticker contributes 1 unit). Uses yfinance historical
-    closes once per ticker; results cached for 1 hour."""
+    """Robinhood-style stock curve via Massive API (yfinance fallback). For
+    each date in the last N days, average % gain across every ticker that
+    had been signaled by that date. Equal-weight."""
     db = get_db()
     rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
     if not rows:
@@ -406,61 +448,117 @@ async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
         return []
 
     tickers = sorted({r["ticker"] for r in rows})
-    # Fetch historical closes once
-    import yfinance as yf
-
-    def _hist():
-        try:
-            df = yf.download(tickers=" ".join(tickers), period=f"{days + 10}d",
-                              interval="1d", progress=False, threads=True,
-                              group_by="ticker", auto_adjust=True)
-            return df
-        except Exception:
-            return None
-    loop = asyncio.get_event_loop()
-    hist = await loop.run_in_executor(None, _hist)
-    if hist is None or len(hist) == 0:
+    hist = await pricer.batch_history(tickers, days=days + 10)
+    if not hist:
         return []
 
-    # Build date → {ticker: close}
-    closes: dict[str, dict[str, float]] = {}
-    for t in tickers:
-        try:
-            series = hist["Close"] if len(tickers) == 1 else hist[t]["Close"]
-            for ts, v in series.dropna().items():
-                d = ts.date().isoformat()
-                closes.setdefault(d, {})[t] = float(v)
-        except Exception:
-            continue
+    # date → {ticker: close}
+    closes_by_date: dict[str, dict[str, float]] = {}
+    for t, series in hist.items():
+        for d, v in series.items():
+            closes_by_date.setdefault(d, {})[t] = v
 
-    # For each date in window, compute portfolio % gain
     first_seen_map = {r["ticker"]: (r["first_seen_date"], r["first_seen_price"]) for r in rows}
-    sorted_dates = sorted(closes.keys())
+    sorted_dates = sorted(closes_by_date.keys())
     today = datetime.now(timezone.utc).date().isoformat()
+    floor = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
     out: list[dict[str, Any]] = []
     for d in sorted_dates:
-        if d < (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat():
+        if d < floor:
             continue
         gains: list[float] = []
-        active = 0
         for t, (entry_date, entry_price) in first_seen_map.items():
             if entry_date > d:
                 continue
-            cur = closes.get(d, {}).get(t)
+            cur = closes_by_date.get(d, {}).get(t)
             if cur is None or not entry_price:
                 continue
             gains.append((cur - entry_price) / entry_price * 100.0)
-            active += 1
-        if active == 0:
+        if not gains:
             continue
-        avg = sum(gains) / len(gains)
         winners = sum(1 for g in gains if g > 0)
         out.append({
             "date": d,
-            "avg_gain_pct": round(avg, 2),
-            "positions": active,
+            "avg_gain_pct": round(sum(gains) / len(gains), 2),
+            "positions": len(gains),
             "winners": winners,
-            "losers": active - winners,
+            "losers": len(gains) - winners,
+            "is_today": d == today,
+        })
+    return out
+
+
+async def daily_options_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
+    """Robinhood-style OPTIONS curve. Sources from `options_performance` —
+    one row per (ticker, scan_date, expiration). For each historical day,
+    average the proxy options P&L across every position that was open by
+    that day (entered ≤ day, not yet expired):
+        option_pl_pct = (current_spot - entry_spot) * delta * sign / premium * 100
+    Capped at -100% (you can't lose more than premium)."""
+    db = get_db()
+    rows = await db.options_performance.find({}, {"_id": 0}).to_list(5000)
+    if not rows:
+        return []
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days + 5)
+    rows = [r for r in rows
+            if r.get("date") and r["date"] >= cutoff.isoformat()
+            and r.get("entry_spot") and r.get("estimated_premium")
+            and float(r.get("estimated_premium") or 0) > 0]
+    if not rows:
+        return []
+
+    tickers = sorted({r["ticker"] for r in rows})
+    hist = await pricer.batch_history(tickers, days=days + 10)
+    if not hist:
+        return []
+
+    closes_by_date: dict[str, dict[str, float]] = {}
+    for t, series in hist.items():
+        for d, v in series.items():
+            closes_by_date.setdefault(d, {})[t] = v
+
+    sorted_dates = sorted(closes_by_date.keys())
+    today = datetime.now(timezone.utc).date().isoformat()
+    floor = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    out: list[dict[str, Any]] = []
+    for d in sorted_dates:
+        if d < floor:
+            continue
+        gains: list[float] = []
+        strats: set[str] = set()
+        winners = 0
+        for r in rows:
+            entry_date = r["date"]
+            if entry_date > d:
+                continue
+            expiration = r.get("expiration")
+            if expiration and expiration < d:
+                continue
+            t = r["ticker"]
+            cur = closes_by_date.get(d, {}).get(t)
+            if cur is None:
+                continue
+            entry_spot = float(r["entry_spot"])
+            delta = float(r.get("delta_at_entry") or 0)
+            premium = float(r["estimated_premium"])
+            if delta == 0 or premium <= 0:
+                continue
+            sign = 1 if (r.get("direction") or "BULL") == "BULL" else -1
+            premium_delta = (cur - entry_spot) * delta * sign
+            pct = max(premium_delta / premium * 100.0, -100.0)
+            gains.append(pct)
+            strats.add(r.get("strategy_type") or "?")
+            if pct > 0:
+                winners += 1
+        if not gains:
+            continue
+        out.append({
+            "date": d,
+            "avg_gain_pct": round(sum(gains) / len(gains), 2),
+            "positions": len(gains),
+            "winners": winners,
+            "losers": len(gains) - winners,
+            "strategies": len(strats),
             "is_today": d == today,
         })
     return out
@@ -474,61 +572,9 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
     if not tickers:
         return out
 
-    # Read from price_cache (10min TTL)
-    now = _now()
-    cur_prices: dict[str, float | None] = {}
-    fresh_after = now - timedelta(minutes=10)
-    cached = await db.price_cache.find(
-        {"ticker": {"$in": tickers}}, {"_id": 0},
-    ).to_list(len(tickers))
-    for c in cached:
-        try:
-            ts = datetime.fromisoformat(c["fetched_at"])
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= fresh_after and c.get("price"):
-                cur_prices[c["ticker"]] = c["price"]
-        except Exception:
-            pass
-
-    # Fetch missing
-    missing = [t for t in tickers if t not in cur_prices]
-    if missing:
-        import yfinance as yf
-        def _batch():
-            try:
-                data = yf.download(tickers=" ".join(missing), period="2d",
-                                    interval="1d", progress=False, threads=True,
-                                    group_by="ticker", auto_adjust=True)
-            except Exception:
-                return {}
-            result: dict[str, float | None] = {}
-            if data is None or len(data) == 0:
-                return result
-            for t in missing:
-                try:
-                    if len(missing) == 1:
-                        series = data["Close"]
-                    else:
-                        series = data[t]["Close"]
-                    cur = float(series.dropna().iloc[-1])
-                    result[t] = cur
-                except Exception:
-                    result[t] = None
-            return result
-        loop = asyncio.get_event_loop()
-        fetched = await loop.run_in_executor(None, _batch)
-        cur_prices.update(fetched)
-        # Write to cache
-        now_iso = now.isoformat()
-        for t, p in fetched.items():
-            if p is not None:
-                await db.price_cache.update_one(
-                    {"ticker": t},
-                    {"$set": {"ticker": t, "price": p, "fetched_at": now_iso,
-                               "source": "yfinance"}},
-                    upsert=True,
-                )
+    # Single pricer call routes through Massive first, yfinance fallback,
+    # with built-in 10-min cache.
+    cur_prices = await pricer.batch_latest_closes(tickers)
 
     for r in rows:
         t = r["ticker"]
@@ -542,7 +588,7 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
         delta = r.get("first_options_delta") or 0.0
         opt_premium = r.get("first_options_premium") or 0.0
         opt_proxy_pct = None
-        if gain_pct is not None and delta and opt_premium > 0:
+        if gain_pct is not None and delta and opt_premium > 0 and current and entry:
             premium_delta = (current - entry) * delta
             opt_proxy_pct = round(premium_delta / opt_premium * 100, 2)
         out.append({
