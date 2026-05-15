@@ -181,6 +181,33 @@ async def performance_summary():
     return {"signals": sig, "options": opt}
 
 
+@api.get("/signals/tracker")
+async def signals_tracker(limit: int = 200):
+    """Every signal we've ever surfaced, treated as 'bought immediately on
+    signal'. Returns first-seen price + current price + gain since signal.
+    Used by Performance page 'ALL BUY SIGNALS — DAILY P/L' section."""
+    from services import pnl_tracker
+    rows = await pnl_tracker.signals_tracker_summary(limit=limit)
+    # Summary stats
+    total = len(rows)
+    with_gain = [r for r in rows if r.get("gain_pct") is not None]
+    winners = [r for r in with_gain if r["gain_pct"] > 0]
+    losers = [r for r in with_gain if r["gain_pct"] < 0]
+    avg_gain = round(sum(r["gain_pct"] for r in with_gain) / len(with_gain), 2) if with_gain else None
+    best = max(with_gain, key=lambda r: r["gain_pct"]) if with_gain else None
+    worst = min(with_gain, key=lambda r: r["gain_pct"]) if with_gain else None
+    return {
+        "rows": rows,
+        "total": total,
+        "tracked": len(with_gain),
+        "winners": len(winners),
+        "losers": len(losers),
+        "avg_gain_pct": avg_gain,
+        "best": {"ticker": best["ticker"], "gain_pct": best["gain_pct"]} if best else None,
+        "worst": {"ticker": worst["ticker"], "gain_pct": worst["gain_pct"]} if worst else None,
+    }
+
+
 @api.get("/options/{ticker}")
 async def options_endpoint(ticker: str):
     from services import options_engine
@@ -537,8 +564,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup():
-    from services import learning_engine
+    from services import learning_engine, pnl_tracker
     await learning_engine.ensure_weights_exist()
+    try:
+        await pnl_tracker.ensure_first_seen_backfill()
+    except Exception as e:
+        logger.warning("first_seen backfill failed: %s", e)
     scheduler.start_scheduler()
     base = os.environ.get("PUBLIC_BASE_URL")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and base:

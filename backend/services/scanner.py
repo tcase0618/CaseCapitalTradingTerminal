@@ -132,6 +132,11 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     by_ticker = _merge_gov_signals(by_ticker, gov)
     by_ticker = _merge_congress_signals(by_ticker, cong)
 
+    # Universe size = total distinct tickers swept across all sources before
+    # the 2+ signal pre-filter. This is what the dashboard shows as the
+    # "PRE-FILTER UNIVERSE" tile so the user sees coverage breadth.
+    universe_size = len(by_ticker)
+
     # Determine which tickers need fundamentals: those with 2+ signals OR
     # those that have concentration_provisional (need mkt-cap to finalize).
     needs_fund: set[str] = set()
@@ -320,6 +325,7 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "upcoming_earnings": len(raw["upcoming_earnings"]),
             "gov_public_tickers": len(gov.get("by_ticker", {})),
         },
+        "universe_size": universe_size,
         "pre_filter_passed": pre_filter_count,
         "claude_calls_made": fresh_calls,
         "claude_cache_hits": cache_hits,

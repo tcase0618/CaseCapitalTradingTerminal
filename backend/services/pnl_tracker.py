@@ -52,7 +52,10 @@ async def _fetch_close(ticker: str, days_ago: int = 0) -> float | None:
 # ============== Recording ==============
 async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
     """For every result in a scan, write a signal_performance row + (if options
-    play exists) an options_performance row. Idempotent on (ticker, date)."""
+    play exists) an options_performance row. Idempotent on (ticker, date).
+    Also writes a `signal_first_seen` row ONCE per ticker — locks in the
+    very first price + signal combo we surfaced, so the Performance page
+    can show 'as if I bought on day-one of signal' P&L."""
     db = get_db()
     today = _today_iso()
     written = 0
@@ -63,7 +66,41 @@ async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
         entry_price = r.get("price")
         signals = r.get("signals", [])
 
-        # signal_performance: 1 row per (ticker, date)
+        # signal_first_seen — ONE row per ticker, INSERT-only (never updated).
+        # First time we ever surfaced this ticker, with that day's price.
+        await db.signal_first_seen.update_one(
+            {"ticker": ticker},
+            {"$setOnInsert": stamped({
+                "ticker": ticker,
+                "first_seen_date": today,
+                "first_seen_ts": _now().isoformat(),
+                "first_seen_price": entry_price,
+                "first_signals": signals,
+                "first_signal_score": r.get("signal_score", 0),
+                "first_risk_level": (r.get("risk") or {}).get("level"),
+                "first_options_strategy": (r.get("options") or {}).get("strategy"),
+                "first_options_contract": (r.get("options") or {}).get("contract"),
+                "first_options_iv_rank": (r.get("options") or {}).get("iv_rank"),
+                "first_options_premium": ((r.get("options") or {}).get("contract") or {}).get("premium"),
+                "first_options_delta": ((r.get("options") or {}).get("contract") or {}).get("delta"),
+                "first_options_strike": ((r.get("options") or {}).get("contract") or {}).get("strike"),
+                "first_options_expiration": ((r.get("options") or {}).get("contract") or {}).get("expiration"),
+                "first_thesis": r.get("thesis", ""),
+            })},
+            upsert=True,
+        )
+        # Also bump last_seen on every appearance
+        await db.signal_first_seen.update_one(
+            {"ticker": ticker},
+            {"$set": {
+                "last_seen_date": today,
+                "last_seen_price": entry_price,
+                "last_signal_score": r.get("signal_score", 0),
+            },
+             "$inc": {"times_found": 1}},
+        )
+
+        # signal_performance: 1 row per (ticker, date) — feeds 7/30/90d returns
         await db.signal_performance.update_one(
             {"ticker": ticker, "date": today},
             {"$set": stamped({
@@ -303,6 +340,159 @@ async def performance_by_signals() -> list[dict[str, Any]]:
             "win_rate_30d": round(sum(1 for x in v30 if x > 0) / len(v30) * 100, 1) if v30 else None,
         })
     out.sort(key=lambda x: (x["avg_30d"] is None, -(x["avg_30d"] or -999)))
+    return out
+
+
+async def ensure_first_seen_backfill() -> int:
+    """One-time backfill: for every distinct ticker in signal_performance,
+    create a signal_first_seen row from the earliest historical entry.
+    Idempotent — only inserts new rows."""
+    db = get_db()
+    # Aggregate earliest entry per ticker
+    pipeline = [
+        {"$sort": {"ticker": 1, "date": 1}},
+        {"$group": {
+            "_id": "$ticker",
+            "first_seen_date": {"$first": "$date"},
+            "first_seen_price": {"$first": "$entry_price"},
+            "first_signals": {"$first": "$signals"},
+            "first_signal_score": {"$first": "$signal_score"},
+            "first_risk_level": {"$first": "$risk_level"},
+            "first_ts": {"$first": "$ts"},
+            "times_found": {"$sum": 1},
+            "last_seen_date": {"$last": "$date"},
+        }},
+    ]
+    backfilled = 0
+    async for r in db.signal_performance.aggregate(pipeline):
+        ticker = r.get("_id")
+        if not ticker or not r.get("first_seen_price"):
+            continue
+        res = await db.signal_first_seen.update_one(
+            {"ticker": ticker},
+            {"$setOnInsert": stamped({
+                "ticker": ticker,
+                "first_seen_date": r["first_seen_date"],
+                "first_seen_ts": r.get("first_ts"),
+                "first_seen_price": r["first_seen_price"],
+                "first_signals": r.get("first_signals", []),
+                "first_signal_score": r.get("first_signal_score"),
+                "first_risk_level": r.get("first_risk_level"),
+                "last_seen_date": r.get("last_seen_date"),
+                "times_found": r.get("times_found", 1),
+            })},
+            upsert=True,
+        )
+        if res.upserted_id:
+            backfilled += 1
+    if backfilled:
+        await log_activity(f"Backfilled {backfilled} signal_first_seen rows", "info")
+    return backfilled
+
+
+async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
+    """Returns every ticker we've ever surfaced with first-seen price, current
+    price, and gain since signal. Treats every surfaced ticker as 'bought
+    immediately on signal' for daily P&L tracking on the Performance tab.
+    Current prices are cached for 10 minutes."""
+    db = get_db()
+    rows = await db.signal_first_seen.find({}, {"_id": 0}).sort("first_seen_date", -1).to_list(limit)
+    out: list[dict[str, Any]] = []
+    tickers = [r["ticker"] for r in rows]
+    if not tickers:
+        return out
+
+    # Read from price_cache (10min TTL)
+    now = _now()
+    cur_prices: dict[str, float | None] = {}
+    fresh_after = now - timedelta(minutes=10)
+    cached = await db.price_cache.find(
+        {"ticker": {"$in": tickers}}, {"_id": 0},
+    ).to_list(len(tickers))
+    for c in cached:
+        try:
+            ts = datetime.fromisoformat(c["fetched_at"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= fresh_after and c.get("price"):
+                cur_prices[c["ticker"]] = c["price"]
+        except Exception:
+            pass
+
+    # Fetch missing
+    missing = [t for t in tickers if t not in cur_prices]
+    if missing:
+        import yfinance as yf
+        def _batch():
+            try:
+                data = yf.download(tickers=" ".join(missing), period="2d",
+                                    interval="1d", progress=False, threads=True,
+                                    group_by="ticker", auto_adjust=True)
+            except Exception:
+                return {}
+            result: dict[str, float | None] = {}
+            if data is None or len(data) == 0:
+                return result
+            for t in missing:
+                try:
+                    if len(missing) == 1:
+                        series = data["Close"]
+                    else:
+                        series = data[t]["Close"]
+                    cur = float(series.dropna().iloc[-1])
+                    result[t] = cur
+                except Exception:
+                    result[t] = None
+            return result
+        loop = asyncio.get_event_loop()
+        fetched = await loop.run_in_executor(None, _batch)
+        cur_prices.update(fetched)
+        # Write to cache
+        now_iso = now.isoformat()
+        for t, p in fetched.items():
+            if p is not None:
+                await db.price_cache.update_one(
+                    {"ticker": t},
+                    {"$set": {"ticker": t, "price": p, "fetched_at": now_iso,
+                               "source": "yfinance"}},
+                    upsert=True,
+                )
+
+    for r in rows:
+        t = r["ticker"]
+        entry = r.get("first_seen_price")
+        current = cur_prices.get(t)
+        gain_pct = None
+        gain_abs = None
+        if entry and current and entry > 0:
+            gain_pct = round((current - entry) / entry * 100, 2)
+            gain_abs = round(current - entry, 2)
+        delta = r.get("first_options_delta") or 0.0
+        opt_premium = r.get("first_options_premium") or 0.0
+        opt_proxy_pct = None
+        if gain_pct is not None and delta and opt_premium > 0:
+            premium_delta = (current - entry) * delta
+            opt_proxy_pct = round(premium_delta / opt_premium * 100, 2)
+        out.append({
+            "ticker": t,
+            "first_seen_date": r.get("first_seen_date"),
+            "first_seen_price": entry,
+            "current_price": current,
+            "gain_pct": gain_pct,
+            "gain_abs": gain_abs,
+            "signals": r.get("first_signals") or [],
+            "signal_score": r.get("first_signal_score"),
+            "thesis": r.get("first_thesis", ""),
+            "times_found": r.get("times_found", 1),
+            "options_strategy": r.get("first_options_strategy"),
+            "options_strike": r.get("first_options_strike"),
+            "options_type": (r.get("first_options_contract") or {}).get("type"),
+            "options_expiration": r.get("first_options_expiration"),
+            "options_premium_at_entry": opt_premium or None,
+            "options_iv_rank_at_entry": r.get("first_options_iv_rank"),
+            "options_return_proxy_pct": opt_proxy_pct,
+            "risk_level": r.get("first_risk_level"),
+        })
     return out
 
 

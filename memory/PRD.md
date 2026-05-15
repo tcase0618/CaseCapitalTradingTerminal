@@ -72,6 +72,23 @@ P&L tracking, backtesting, and a progressive learning engine.
 - Plus NLQ — any plain-English message routes to Claude
 
 ## Bug Fixes
+### May 2026 — Performance page fetch race condition + slow tracker
+- Root cause 1: `Promise.all` in `useEffect` rejected on the slowest endpoint, blanking all dashboard data when one of 10 calls was slow
+- Root cause 2: `/api/signals/tracker` was hitting yfinance batch download live (8+ seconds, 58 tickers)
+- Fixed:
+  - Both Dashboard and Performance pages now use independent `axios.get().then().catch()` so one slow/failing endpoint can't blank the rest
+  - Added `price_cache` MongoDB collection with 10-min TTL → tracker endpoint went from 8.2s to **0.12s** on cached pass
+- Verified: 58 signals tracked, real entry vs current prices, gain $ + gain % displaying correctly
+
+### May 2026 — UI requests
+- Top-left logo: `INTEL_SYS` → **`AXIOM`** (all caps, larger font)
+- Added **PRE-FILTER UNIVERSE** stat tile at top of Dashboard showing total tickers swept
+  across S&P 500 · NASDAQ · Russell 2000 (430 in latest scan)
+- Added **ALL BUY SIGNALS — DAILY P/L** section on Performance page tracking every
+  ticker AXIOM has ever surfaced (signal date, entry price, current price, gain since)
+- Bumped all dashboard fonts to hedge-fund-readable sizes (8-11px → 13-15px body, 24-26px metrics)
+
+## What's Implemented
 ### Feb 2026 — Telegram delivery dropping all stocks
 - Stray `<` chars in dynamic content broke Telegram HTML parse mode
 - Fixed: `_esc()` HTML-escape helper + greedy N-message chunking (never splits

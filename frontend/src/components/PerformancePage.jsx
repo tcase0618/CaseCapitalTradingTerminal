@@ -9,16 +9,14 @@ const { accent, dim, muted, labelLight, hairline } = tokens;
 export default function PerformancePage() {
   const [perf, setPerf] = useState(null);
   const [backtest, setBacktest] = useState(null);
+  const [tracker, setTracker] = useState(null);
   const [seeding, setSeeding] = useState(false);
 
   const refresh = async () => {
-    try {
-      const [p, b] = await Promise.all([
-        axios.get(`${API}/performance/summary`),
-        axios.get(`${API}/backtest/summary`),
-      ]);
-      setPerf(p.data); setBacktest(b.data);
-    } catch (e) { console.error(e); }
+    // Use independent .catch so one failure doesn't kill the others
+    axios.get(`${API}/performance/summary`).then(r => setPerf(r.data)).catch(e => console.error("perf:", e));
+    axios.get(`${API}/backtest/summary`).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
+    axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
   };
   useEffect(() => { refresh(); }, []);
 
@@ -46,11 +44,78 @@ export default function PerformancePage() {
       }>
       {/* Summary stat strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
-        <Stat label="SIGNAL COMBOS TRACKED" value={signals.length} sub="WITH RETURNS DATA" />
-        <Stat label="OPTIONS STRATEGIES" value={(options.by_strategy || []).length} sub="WITH RETURNS DATA" />
-        <Stat label="BACKTEST FORWARD" value={backtest?.forward_count || 0} sub="LIVE TRADES" />
-        <Stat label="BACKTEST SYNTHETIC" value={backtest?.synthetic_count || 0} sub="CONGRESS REPLAY" color={accent} />
+        <Stat label="SIGNALS TRACKED" value={tracker?.tracked || 0}
+              sub={`${tracker?.total || 0} TOTAL · ${tracker?.winners || 0}W / ${tracker?.losers || 0}L`} color={accent} />
+        <Stat label="AVG GAIN SINCE SIGNAL" value={fmt(tracker?.avg_gain_pct) + "%"}
+              color={pctColor(tracker?.avg_gain_pct)} sub="ALL TIME" />
+        <Stat label="BEST PICK" value={tracker?.best ? `${tracker.best.ticker} ${fmt(tracker.best.gain_pct)}%` : "—"}
+              color="#4ade80" sub="HIGHEST GAIN" />
+        <Stat label="WORST PICK" value={tracker?.worst ? `${tracker.worst.ticker} ${fmt(tracker.worst.gain_pct)}%` : "—"}
+              color="#f87171" sub="LOWEST GAIN" />
+        <Stat label="SIGNAL COMBOS" value={(perf?.signals || []).length} sub="WITH 7/30/90D" />
       </div>
+
+      {/* ALL BUY SIGNALS — DAILY P/L */}
+      <Card title={`ALL BUY SIGNALS — DAILY P/L · BOUGHT-ON-SIGNAL · ${tracker?.tracked || 0} TRACKED`}>
+        {!tracker || !tracker.rows || tracker.rows.length === 0 ? (
+          <div style={{ color: muted, fontSize: 13, padding: "10px 0" }}>
+            No signals tracked yet. Every scan now records the first time it surfaces a
+            ticker — the price at that moment becomes your entry. Run /scan to start.
+          </div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
+                <th style={th}>TICKER</th><th style={th}>FIRST SIGNAL</th>
+                <th style={th}>ENTRY</th><th style={th}>CURRENT</th>
+                <th style={th}>GAIN $</th><th style={th}>GAIN %</th>
+                <th style={th}>OPT P/L %</th>
+                <th style={th}>SIGNALS</th>
+                <th style={th}>SEEN</th><th style={th}>STRATEGY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tracker.rows.map((r) => (
+                <tr key={r.ticker} data-testid={`signal-row-${r.ticker}`}
+                    style={{ borderTop: hairline }}>
+                  <td style={{ ...td, color: accent, fontWeight: 700, fontSize: 14 }}>
+                    <a href={`/ticker/${r.ticker}`} style={{ color: accent, textDecoration: "none" }}>
+                      ${r.ticker}
+                    </a>
+                  </td>
+                  <td style={td}>{r.first_seen_date || "—"}</td>
+                  <td style={td}>${r.first_seen_price?.toFixed(2) || "—"}</td>
+                  <td style={td}>${r.current_price?.toFixed(2) || "—"}</td>
+                  <td style={{ ...td, color: pctColor(r.gain_abs), fontWeight: 700 }}>
+                    {r.gain_abs != null ? `${r.gain_abs >= 0 ? "+" : ""}$${Math.abs(r.gain_abs).toFixed(2)}` : "—"}
+                  </td>
+                  <td style={{ ...td, color: pctColor(r.gain_pct), fontWeight: 700, fontSize: 14 }}>
+                    {fmt(r.gain_pct)}%
+                  </td>
+                  <td style={{ ...td, color: pctColor(r.options_return_proxy_pct), fontWeight: 700 }}>
+                    {r.options_return_proxy_pct != null ? `${fmt(r.options_return_proxy_pct)}%` : "—"}
+                  </td>
+                  <td style={{ ...td, fontSize: 11 }}>
+                    {(r.signals || []).slice(0, 3).map(s => (
+                      <span key={s} style={{
+                        display: "inline-block", padding: "2px 6px", marginRight: 4,
+                        border: `0.5px solid ${tokens.dim}`, color: tokens.labelLight,
+                        fontSize: 10, letterSpacing: "0.06em",
+                      }}>{s.replace(/_/g, " ")}</span>
+                    ))}
+                  </td>
+                  <td style={td}>{r.times_found}×</td>
+                  <td style={{ ...td, color: r.options_strategy ? accent : muted, fontSize: 11 }}>
+                    {r.options_strategy
+                      ? `${r.options_strategy.replace(/_/g, " ")}${r.options_strike ? ` $${r.options_strike}${r.options_type || ""}` : ""}`
+                      : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
 
       <Card title="SIGNAL PERFORMANCE — RETURNS BY COMBINATION">
         {signals.length === 0 ? (

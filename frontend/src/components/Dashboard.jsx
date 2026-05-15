@@ -136,20 +136,17 @@ export default function Dashboard() {
   const t = useClock();
 
   const refresh = useCallback(async () => {
-    try {
-      const [s, sc, ac, wl, al, ct, cg, sq, fy, pv] = await Promise.all([
-        axios.get(`${API}/status`), axios.get(`${API}/scan/latest`),
-        axios.get(`${API}/activity?limit=20`), axios.get(`${API}/watchlist`),
-        axios.get(`${API}/alerts`), axios.get(`${API}/contracts?limit=10`),
-        axios.get(`${API}/congress/recent?days=30`),
-        axios.get(`${API}/squeeze/leaderboard/top?limit=10`),
-        axios.get(`${API}/fy/status`), axios.get(`${API}/scan/preview`),
-      ]);
-      setStatus(s.data); setScan(sc.data); setActivity(ac.data);
-      setWatchlist(wl.data); setAlerts(al.data); setContracts(ct.data);
-      setCongress(cg.data); setSqueezeLb(sq.data); setFyStatus(fy.data);
-      setPreview(pv.data);
-    } catch (e) { console.error(e); }
+    // Independent fetches — one slow/failing endpoint shouldn't blank the dashboard
+    axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(e => console.error("status:", e));
+    axios.get(`${API}/scan/latest`).then(r => setScan(r.data)).catch(e => console.error("scan:", e));
+    axios.get(`${API}/activity?limit=20`).then(r => setActivity(r.data)).catch(e => console.error("activity:", e));
+    axios.get(`${API}/watchlist`).then(r => setWatchlist(r.data)).catch(e => console.error("wl:", e));
+    axios.get(`${API}/alerts`).then(r => setAlerts(r.data)).catch(e => console.error("alerts:", e));
+    axios.get(`${API}/contracts?limit=10`).then(r => setContracts(r.data)).catch(e => console.error("contracts:", e));
+    axios.get(`${API}/congress/recent?days=30`).then(r => setCongress(r.data)).catch(e => console.error("congress:", e));
+    axios.get(`${API}/squeeze/leaderboard/top?limit=10`).then(r => setSqueezeLb(r.data)).catch(e => console.error("squeeze:", e));
+    axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
+    axios.get(`${API}/scan/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
   }, []);
 
   useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
@@ -251,7 +248,7 @@ export default function Dashboard() {
               <div style={{ width: 20, height: 20, border: `1.5px solid ${accent}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <div style={{ width: 7, height: 7, background: accent }} />
               </div>
-              <span style={{ fontSize: 11, color: accent, letterSpacing: "0.14em", fontWeight: 700 }}>INTEL_SYS</span>
+              <span style={{ fontSize: 14, color: accent, letterSpacing: "0.18em", fontWeight: 700 }}>AXIOM</span>
             </div>
             <div style={{ fontSize: 13, color: accent, fontWeight: 700, fontFamily: "Courier New" }}>{formatET(t)} ET</div>
             <div style={{ fontSize: 9, color: dim, marginTop: 2 }}>{formatETDate(t)}</div>
@@ -386,8 +383,9 @@ export default function Dashboard() {
         {/* === MAIN === */}
         <main style={{ overflowY: "auto", display: "flex", flexDirection: "column" }}>
           {/* Metrics */}
-          <div style={{ background: cardBg, borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(6, 1fr)" }}>
+          <div style={{ background: cardBg, borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(7, 1fr)" }}>
             {[
+              { label: "PRE-FILTER UNIVERSE", v: scan?.universe_size || "—", sub: "S&P 500 · NASDAQ · RUSSELL 2K", color: accent },
               { label: "TARGETS ACQUIRED", v: scan?.pre_filter_passed || 0, sub: `${scan?.results?.length || 0} ANALYZED`, color: "#fff" },
               { label: "INSIDER SIGNALS", v: counts.insider, sub: "OPENINSIDER", color: accent },
               { label: "SHORT SIGNALS", v: counts.short, sub: "FINVIZ", color: accent },
@@ -395,10 +393,10 @@ export default function Dashboard() {
               { label: "CACHE SAVED", v: scan?.claude_cache_hits || 0, sub: `${scan?.claude_calls_made || 0} BATCHED CALLS`, color: muted },
               { label: "UPLINK", v: status?.bot?.telegram_configured ? "LIVE" : "OFF", sub: "TELEGRAM CONNECTED", color: status?.bot?.telegram_configured ? "#4ade80" : "#fb923c", isText: true },
             ].map((c, i) => (
-              <div key={i} data-testid={`metric-${i}`} style={{ padding: "14px 18px", borderRight: i < 5 ? hairline : "none" }}>
-                <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em" }}>{c.label}</div>
-                <div style={{ fontSize: c.isText ? 22 : 28, fontWeight: 300, color: c.color, marginTop: 4, fontFamily: "Courier New" }}>{c.v}</div>
-                <div style={{ fontSize: 8, color: dim, marginTop: 2 }}>{c.sub}</div>
+              <div key={i} data-testid={`metric-${i}`} style={{ padding: "16px 18px", borderRight: i < 6 ? hairline : "none" }}>
+                <div style={{ fontSize: 10, color: dim, letterSpacing: "0.14em" }}>{c.label}</div>
+                <div style={{ fontSize: c.isText ? 22 : 26, fontWeight: 300, color: c.color, marginTop: 5, fontFamily: "Courier New", letterSpacing: "0.02em" }}>{c.v}</div>
+                <div style={{ fontSize: 10, color: dim, marginTop: 3, letterSpacing: "0.08em" }}>{c.sub}</div>
               </div>
             ))}
           </div>
