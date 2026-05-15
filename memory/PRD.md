@@ -130,16 +130,19 @@ P&L tracking, backtesting, and a progressive learning engine.
 - All 5 routes resolve: `/`, `/learning`, `/performance`, `/ticker/:ticker`, `/settings`
 
 ## Feb 2026 — v4: Massive API + Options Curve + Learning Page Expansion
-- **Massive API (Polygon.io rebrand) integrated** as primary price source via new `services/pricer.py`. Uses `/v2/aggs/ticker/{T}/prev` (latest close) and `/v2/aggs/ticker/{T}/range/1/day/{from}/{to}` (historical), with yfinance as automatic fallback. Live key plugged into `/app/backend/.env` as `MASSIVE_API_KEY`. Two new MongoDB caches: `price_cache` (10-min TTL) and `price_history_cache` (24h TTL).
-- **`/api/admin/refresh_prices`** rewrites every `signal_first_seen.first_seen_price` + matching `signal_performance.entry_price` using Massive's historical close on the original signal date. Idempotent — verified live: 33 entries refreshed, 0 failures. UI exposes a `[ REFRESH PRICES ]` button at the top of the Performance page.
-- **`/api/admin/price_source`** returns `{source, massive_available}` — drives the green `SRC · MASSIVE` badge at the top-right of the Performance page.
-- **AXIOM OPTIONS PERFORMANCE curve** — twin of the stock curve, teal `#5eead4`. Sources from `options_performance` collection. Formula: `(current_spot - entry_spot) * delta * sign / premium`, capped at -100%. New endpoint `/api/signals/options_curve?days=N`. PerformancePage extracted a reusable `PerfCurve` component to avoid duplication.
-- **Learning page rebuild**:
-  - PENDING ADJUSTMENTS dry-run card (new `/api/learning/preview`) — shows the exact projection of what the next cycle WOULD change, including "blocked because need 10+ trades" gating.
-  - WEIGHT EVOLUTION OVER TIME multi-line chart (new `/api/learning/weight_history` + new `learning_weight_history` Mongo collection). Filter dropdown populated from live weights (not only history), so users can browse signals before the first auto-cycle.
-  - SIGNAL LIFETIME PERFORMANCE league table (new `/api/learning/signal_stats`) — per-signal win rate + avg 7/30/90d returns + best/worst across ALL trades.
-  - PENDING CHANGES tile added to status strip.
-  - Stat tiles for trades-available, pending-changes, and next-auto-run.
-- Backend: 57/57 pytest cases pass (12 new v4 tests + 45 regression). All new endpoints return clean JSON, no `_id` leakage.
+- **Massive API (Polygon.io rebrand) integrated** as primary price source via new `services/pricer.py`. Live key plugged into `/app/backend/.env` as `MASSIVE_API_KEY`. Two new MongoDB caches: `price_cache` (10-min TTL) and `price_history_cache` (24h TTL).
+- **`/api/admin/refresh_prices`** rewrites current price cache only (no longer touches entry prices). UI exposes a `[ REFRESH PRICES ]` button on the Performance page.
+- **`/api/admin/price_source`** drives the green `SRC · MASSIVE` badge at top-right of the Performance page.
+- **AXIOM OPTIONS PERFORMANCE curve** — twin of stock curve, teal `#5eead4`. Sources from `options_performance` collection. New endpoint `/api/signals/options_curve?days=N`. Reusable `PerfCurve` component to avoid duplication.
+- **Learning page rebuild**: PENDING ADJUSTMENTS dry-run card, WEIGHT EVOLUTION OVER TIME multi-line chart, SIGNAL LIFETIME PERFORMANCE league table, PENDING CHANGES tile.
+
+## Feb 2026 — v5: Price Source Fixed + Learning Engine LIVE Basis
+- **ROOT BUG**: Massive free-tier 5-req/min rate limit caused 53/58 ticker price fetches to fail. Fixed by routing current-prices through `yf.download` batch (1 HTTP call for all 58 tickers, intraday-delayed) and reserving Massive for historical date queries via the grouped-daily endpoint (1 call per date returns all 12,000+ tickers).
+- **Intraday entry-price restore**: previous Massive refresh overwrote intraday entry fills with day-end closes (entry==current==0% gain). New `/api/admin/restore_entry_prices` walks `scan_results` and recovers the original yfinance intraday price. Verified live: 53/58 entries restored to truth.
+- **Learning engine LIVE basis**: New `_collect_live_trades()` treats EVERY `signal_first_seen` row (with current price) as a trade. `MIN_SAMPLES_LIVE=3` (vs 30d `MIN_SAMPLES=10`). Live-basis confidence capped at 60% to weight 30d data heavier when both exist. Result: engine engages immediately with all 58 tracked signals instead of waiting 30 days for return_30d to fill. Verified: 58 trades analyzed → 2 weights adjusted (high_short_interest -0.9%, CONTRACT_SURGE -0.4%), best combo identified (UNUSUAL_FLOW + INSIDER_CLUSTER_BUY + UPCOMING_EARNINGS — 67% WR, +14.7%).
+- **Per-scan combo refresh**: `scanner.run_scan` now calls `learning_engine.refresh_combo_stats_live()` after every scan so the Learning page reflects newly-surfaced signals immediately (no need to wait for the Sunday cycle).
+- **Combo threshold lowered** from `trade_count>=3` to `>=2` to surface live data quickly.
+- **Frontend**: Status strip shows `4 × 30D + 54 × LIVE` split. Pending adjustments table shows `BASIS` column (LIVE vs 30D). Lifetime stats table shows `AVG LIVE` column. All 13 signals populated.
+- **Backend**: 71/71 pytest cases pass (14 new v5 + 57 regression). Real movements verified end-to-end: ONDS +26.5%, KLAR +20.3%, CELC +8.2%, BLSH -5.6%, AVG GAIN +1.4%, PANW +40.5%, CERT -25.5%.
 
 
