@@ -35,9 +35,18 @@ logger = logging.getLogger(__name__)
 MASSIVE_KEY = os.environ.get("MASSIVE_API_KEY", "").strip()
 MASSIVE_BASE = "https://api.polygon.io"
 
+FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+FINNHUB_RATE_PER_MIN = 60  # free tier hard limit
+
 LATEST_TTL_MIN = 10
 HISTORY_TTL_HR = 24
-_SOURCE = "massive" if MASSIVE_KEY else "yfinance"
+_SOURCE = (
+    "finnhub+massive" if FINNHUB_KEY and MASSIVE_KEY
+    else "finnhub" if FINNHUB_KEY
+    else "massive" if MASSIVE_KEY
+    else "yfinance"
+)
 
 # Shared HTTP client (created lazily)
 _client: httpx.AsyncClient | None = None
@@ -62,8 +71,74 @@ def has_massive() -> bool:
     return bool(MASSIVE_KEY)
 
 
+def has_finnhub() -> bool:
+    return bool(FINNHUB_KEY)
+
+
 def source_label() -> str:
     return _SOURCE
+
+
+# ─────────────────────────── Finnhub primitives ───────────────────────────
+# Free tier: 60 requests/min. We use a rolling-window throttle to stay under.
+_finnhub_calls: list[datetime] = []
+_finnhub_lock = asyncio.Lock()
+
+
+async def _finnhub_throttle() -> None:
+    """Block if we'd exceed 60 calls in the last 60 seconds."""
+    if not FINNHUB_KEY:
+        return
+    async with _finnhub_lock:
+        now = _now()
+        cutoff = now - timedelta(seconds=60)
+        # Drop old call timestamps
+        _finnhub_calls[:] = [t for t in _finnhub_calls if t > cutoff]
+        if len(_finnhub_calls) >= FINNHUB_RATE_PER_MIN:
+            wait_for = 60 - (now - _finnhub_calls[0]).total_seconds() + 0.5
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+                # Re-prune after wait
+                now2 = _now()
+                _finnhub_calls[:] = [t for t in _finnhub_calls if t > now2 - timedelta(seconds=60)]
+        _finnhub_calls.append(_now())
+
+
+async def _finnhub_quote(ticker: str) -> float | None:
+    """Real-time quote → returns current price `c`.
+    `c=0` means Finnhub doesn't recognize the ticker."""
+    if not FINNHUB_KEY:
+        return None
+    await _finnhub_throttle()
+    try:
+        c = await _get_client()
+        r = await c.get(
+            f"{FINNHUB_BASE}/quote",
+            params={"symbol": ticker, "token": FINNHUB_KEY},
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        price = data.get("c")
+        if price is None or price == 0:
+            return None
+        return float(price)
+    except Exception as e:
+        logger.debug("finnhub quote %s failed: %s", ticker, e)
+        return None
+
+
+async def _finnhub_batch(tickers: list[str], concurrency: int = 8) -> dict[str, float]:
+    """Concurrent Finnhub quote fetch. Throttled to 60/min globally."""
+    if not FINNHUB_KEY or not tickers:
+        return {}
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(t: str) -> tuple[str, float | None]:
+        async with sem:
+            return t, await _finnhub_quote(t)
+    res = await asyncio.gather(*[_one(t) for t in tickers])
+    return {t: p for t, p in res if p is not None and p > 0}
 
 
 # ─────────────────────────── Massive primitives ───────────────────────────
@@ -276,6 +351,8 @@ async def _store_history(ticker: str, closes: dict[str, float], src: str) -> Non
 
 # ───────────────────────────── Public API ─────────────────────────────────
 async def get_latest_close(ticker: str, force: bool = False) -> float | None:
+    """Single-ticker latest price. Order: Finnhub (real-time) → Massive
+    (EOD close) → yfinance (intraday-delayed)."""
     ticker = (ticker or "").upper().strip()
     if not ticker:
         return None
@@ -283,10 +360,19 @@ async def get_latest_close(ticker: str, force: bool = False) -> float | None:
         c = await _cached_latest(ticker)
         if c is not None:
             return c
-    price = await _massive_prev_close(ticker)
+    # Finnhub primary for current price (real-time)
+    price = await _finnhub_quote(ticker)
     if price is not None:
-        await _store_latest(ticker, price, "massive")
+        await _store_latest(ticker, price, "finnhub")
         return price
+    # Massive grouped (yesterday close)
+    if MASSIVE_KEY:
+        _, grouped = await grouped_latest()
+        if grouped and ticker in grouped:
+            p = grouped[ticker]
+            await _store_latest(ticker, p, "massive")
+            return p
+    # yfinance final fallback
     price = await _yf_latest_close(ticker)
     if price is not None:
         await _store_latest(ticker, price, "yfinance")
@@ -336,15 +422,17 @@ async def _yf_batch_latest(tickers: list[str]) -> dict[str, float]:
 
 async def batch_latest_closes(tickers: list[str], force: bool = False,
                                 concurrency: int = 8) -> dict[str, float | None]:
-    """Latest available close for many tickers.
+    """Latest price for many tickers.
 
-    Strategy:
-      1. yfinance batch (single HTTP call) — gives real intraday-delayed data
-         that reflects today's movement. Free, no rate limit.
-      2. Massive grouped backfill — fills any ticker yfinance missed using
-         the most recent grouped-daily snapshot.
+    Strategy (Massive first, Finnhub for real-time freshness, yfinance fallback):
+      1. **Massive grouped daily** — 1 HTTP call returns yesterday's close for
+         all 12,000+ US stocks. Free, instant, no rate-limit pain.
+      2. **Finnhub /quote** — overrides Massive's EOD close with TODAY's
+         intraday quote (real-time, 60 req/min). Throttled internally.
+      3. **yfinance batch** — fallback for anything both APIs missed
+         (delisted tickers, etc.).
 
-    Caches every result for 10 min."""
+    All results cached in `price_cache` for `LATEST_TTL_MIN` minutes."""
     tickers = [t.upper().strip() for t in tickers if t]
     if not tickers:
         return {}
@@ -371,35 +459,49 @@ async def batch_latest_closes(tickers: list[str], force: bool = False,
     if not missing:
         return result
 
-    # Primary: yfinance batch (real movement)
-    yf_data = await _yf_batch_latest(missing)
     now_iso = _now().isoformat()
     db = get_db()
-    for t, p in yf_data.items():
-        result[t] = p
-        await db.price_cache.update_one(
-            {"ticker": t},
-            {"$set": {"ticker": t, "price": float(p),
-                      "fetched_at": now_iso, "source": "yfinance"}},
-            upsert=True,
-        )
 
-    # Backfill anything yfinance missed via Massive grouped (no rate-limit issue)
-    still_missing = [t for t in missing if t not in yf_data]
-    if still_missing and MASSIVE_KEY:
+    # 1) Massive grouped — single call gets yesterday's close for everything
+    if MASSIVE_KEY:
         _, grouped = await grouped_latest()
-        for t in still_missing:
-            p = grouped.get(t)
-            if p is not None:
-                result[t] = float(p)
-                await db.price_cache.update_one(
-                    {"ticker": t},
-                    {"$set": {"ticker": t, "price": float(p),
-                              "fetched_at": now_iso, "source": "massive"}},
-                    upsert=True,
-                )
-            else:
-                result[t] = None
+        if grouped:
+            for t in missing:
+                p = grouped.get(t)
+                if p is not None:
+                    result[t] = float(p)
+                    await db.price_cache.update_one(
+                        {"ticker": t},
+                        {"$set": {"ticker": t, "price": float(p),
+                                  "fetched_at": now_iso, "source": "massive"}},
+                        upsert=True,
+                    )
+
+    # 2) Finnhub — override with real-time quote for every ticker we want fresh
+    #    (overwrites Massive's EOD close with today's intraday price)
+    if FINNHUB_KEY:
+        fh_data = await _finnhub_batch(missing, concurrency=concurrency)
+        for t, p in fh_data.items():
+            result[t] = float(p)
+            await db.price_cache.update_one(
+                {"ticker": t},
+                {"$set": {"ticker": t, "price": float(p),
+                          "fetched_at": now_iso, "source": "finnhub"}},
+                upsert=True,
+            )
+
+    # 3) yfinance backfill — anything we still don't have a price for
+    still_missing = [t for t in missing if t not in result]
+    if still_missing:
+        yf_data = await _yf_batch_latest(still_missing)
+        for t, p in yf_data.items():
+            result[t] = float(p)
+            await db.price_cache.update_one(
+                {"ticker": t},
+                {"$set": {"ticker": t, "price": float(p),
+                          "fetched_at": now_iso, "source": "yfinance"}},
+                upsert=True,
+            )
 
     # Any leftovers stay None
     for t in tickers:

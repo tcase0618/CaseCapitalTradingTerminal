@@ -62,10 +62,11 @@ export default function PerformancePage() {
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {priceSource && (
             <div data-testid="price-source-badge" style={{
-              fontSize: 9, letterSpacing: "0.14em", color: priceSource.massive_available ? "#4ade80" : muted,
-              border: `0.5px solid ${priceSource.massive_available ? "#4ade80" : tokens.dim}`,
+              fontSize: 9, letterSpacing: "0.14em",
+              color: priceSource.finnhub_available ? "#4ade80" : priceSource.massive_available ? "#5eead4" : muted,
+              border: `0.5px solid ${priceSource.finnhub_available ? "#4ade80" : priceSource.massive_available ? "#5eead4" : tokens.dim}`,
               padding: "4px 8px", fontFamily: "Courier New",
-            }}>SRC · {priceSource.source.toUpperCase()}</div>
+            }}>SRC · {priceSource.source.toUpperCase().replace("+", " + ")}</div>
           )}
           <button data-testid="refresh-prices-btn" onClick={refreshPrices} disabled={refreshingPrices}
             style={btnGhost(refreshingPrices)}>{refreshingPrices ? "REFRESHING..." : "[ REFRESH PRICES ]"}</button>

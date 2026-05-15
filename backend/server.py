@@ -226,8 +226,11 @@ async def admin_fill_missing_entry_prices():
 @api.get("/admin/price_source")
 async def admin_price_source():
     from services import pricer
-    return {"source": pricer.source_label(),
-             "massive_available": pricer.has_massive()}
+    return {
+        "source": pricer.source_label(),
+        "massive_available": pricer.has_massive(),
+        "finnhub_available": pricer.has_finnhub(),
+    }
 
 
 

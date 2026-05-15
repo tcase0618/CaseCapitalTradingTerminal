@@ -139,10 +139,18 @@ P&L tracking, backtesting, and a progressive learning engine.
 ## Feb 2026 — v5: Price Source Fixed + Learning Engine LIVE Basis
 - **ROOT BUG**: Massive free-tier 5-req/min rate limit caused 53/58 ticker price fetches to fail. Fixed by routing current-prices through `yf.download` batch (1 HTTP call for all 58 tickers, intraday-delayed) and reserving Massive for historical date queries via the grouped-daily endpoint (1 call per date returns all 12,000+ tickers).
 - **Intraday entry-price restore**: previous Massive refresh overwrote intraday entry fills with day-end closes (entry==current==0% gain). New `/api/admin/restore_entry_prices` walks `scan_results` and recovers the original yfinance intraday price. Verified live: 53/58 entries restored to truth.
-- **Learning engine LIVE basis**: New `_collect_live_trades()` treats EVERY `signal_first_seen` row (with current price) as a trade. `MIN_SAMPLES_LIVE=3` (vs 30d `MIN_SAMPLES=10`). Live-basis confidence capped at 60% to weight 30d data heavier when both exist. Result: engine engages immediately with all 58 tracked signals instead of waiting 30 days for return_30d to fill. Verified: 58 trades analyzed → 2 weights adjusted (high_short_interest -0.9%, CONTRACT_SURGE -0.4%), best combo identified (UNUSUAL_FLOW + INSIDER_CLUSTER_BUY + UPCOMING_EARNINGS — 67% WR, +14.7%).
-- **Per-scan combo refresh**: `scanner.run_scan` now calls `learning_engine.refresh_combo_stats_live()` after every scan so the Learning page reflects newly-surfaced signals immediately (no need to wait for the Sunday cycle).
-- **Combo threshold lowered** from `trade_count>=3` to `>=2` to surface live data quickly.
-- **Frontend**: Status strip shows `4 × 30D + 54 × LIVE` split. Pending adjustments table shows `BASIS` column (LIVE vs 30D). Lifetime stats table shows `AVG LIVE` column. All 13 signals populated.
-- **Backend**: 71/71 pytest cases pass (14 new v5 + 57 regression). Real movements verified end-to-end: ONDS +26.5%, KLAR +20.3%, CELC +8.2%, BLSH -5.6%, AVG GAIN +1.4%, PANW +40.5%, CERT -25.5%.
+- **Learning engine LIVE basis**: New `_collect_live_trades()` treats EVERY `signal_first_seen` row (with current price) as a trade. `MIN_SAMPLES_LIVE=3` (vs 30d `MIN_SAMPLES=10`). Live-basis confidence capped at 60% to weight 30d data heavier when both exist.
+- **Per-scan combo refresh**: `scanner.run_scan` now calls `learning_engine.refresh_combo_stats_live()` after every scan.
+- **Combo threshold lowered** from `>=3` to `>=2` to surface live data quickly.
+
+## Feb 2026 — v6: Finnhub Real-Time Quotes Added
+- **Finnhub free-tier integrated** as the primary current-price source. Live key in `/app/backend/.env` as `FINNHUB_API_KEY`. Real-time quotes (30-second freshness), 60 req/min throttled internally via rolling window.
+- **Smart routing for current prices** (`pricer.batch_latest_closes`):
+  1. Massive grouped-daily — 1 call fills yesterday's close for everything
+  2. **Finnhub /quote** — overrides Massive with TODAY's intraday quote (real-time)
+  3. yfinance batch — fallback for anything both APIs missed
+- **For single-ticker `get_latest_close`**: Finnhub primary → Massive backfill → yfinance ultimate fallback.
+- **`/api/admin/price_source`** returns `{source, massive_available, finnhub_available}` — drives a green `SRC · FINNHUB + MASSIVE` badge at top-right of the Performance page. Color denotes source: green=finnhub real-time, teal=massive EOD, gray=yfinance.
+- All 58 tracked tickers now sourced from Finnhub (verified). No rate limit hits.
 
 
