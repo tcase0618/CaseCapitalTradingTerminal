@@ -2,6 +2,7 @@
 options-flow refresh + nightly P&L returns refresh."""
 from __future__ import annotations
 import logging
+import os
 from datetime import datetime
 
 import pytz
@@ -9,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import options_engine, pnl_tracker, scanner, telegram_service
+from . import learning_engine, options_engine, pnl_tracker, scanner, telegram_service
 from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
@@ -99,15 +100,58 @@ def start_scheduler():
         id="flow_refresh",
         replace_existing=True,
     )
-    # Nightly P&L refresh — 02:00 ET
+    # Nightly P&L refresh — 23:00 ET (also runs at 02:00 ET below)
+    _scheduler.add_job(
+        _pnl_refresh_job,
+        CronTrigger(hour=23, minute=0, timezone=ET),
+        id="pnl_refresh_nightly",
+        replace_existing=True,
+    )
+    # 02:00 ET P&L refresh — second pass after market settle
     _scheduler.add_job(
         _pnl_refresh_job,
         CronTrigger(hour=2, minute=0, timezone=ET),
         id="pnl_refresh",
         replace_existing=True,
     )
+    # Mid-day scan — 12:01 ET Mon-Fri
+    _scheduler.add_job(
+        _daily_scan_job,
+        CronTrigger(day_of_week="mon-fri", hour=12, minute=1, timezone=ET),
+        id="midday_scan",
+        replace_existing=True,
+    )
+    # Pre-close scan — 15:30 ET Mon-Fri
+    _scheduler.add_job(
+        _daily_scan_job,
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=ET),
+        id="preclose_scan",
+        replace_existing=True,
+    )
+    # Learning cycle — Sunday 02:00 ET weekly
+    async def _learning_job():
+        try:
+            res = await learning_engine.run_learning_cycle()
+            if res.get("insights") and os.environ.get("TELEGRAM_CHAT_ID"):
+                msg = (
+                    "🧠 <b>AXIOM Learning Cycle Complete</b>\n\n"
+                    f"Trades analyzed: {res.get('trades', 0)}\n"
+                    f"Overall win rate: {res.get('win_rate', 0):.1%}\n"
+                    f"Weights adjusted: {res.get('changes', 0)}\n\n"
+                    "<b>Insights:</b>\n" + "\n".join(f"• {i}" for i in res["insights"][:5])
+                )
+                await telegram_service.send_message(msg)
+        except Exception as e:
+            logger.exception("learning cycle failed: %s", e)
+
+    _scheduler.add_job(
+        _learning_job,
+        CronTrigger(day_of_week="sun", hour=2, minute=0, timezone=ET),
+        id="learning_cycle",
+        replace_existing=True,
+    )
     _scheduler.start()
-    logger.info("Scheduler started: daily 8AM scan + 5min alerts + 15min flow + 02:00 P&L refresh")
+    logger.info("Scheduler: 8AM/12:01/15:30 scans + 5m alerts + 15m flow + P&L + Sunday 2AM learning")
 
 
 def shutdown_scheduler():

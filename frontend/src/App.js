@@ -1,6 +1,10 @@
 import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Dashboard from "@/components/Dashboard";
+import LearningPage from "@/components/LearningPage";
+import PerformancePage from "@/components/PerformancePage";
+import TickerPage from "@/components/TickerPage";
+import SettingsPage from "@/components/SettingsPage";
 import { Toaster } from "sonner";
 
 function App() {
@@ -9,6 +13,10 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/learning" element={<LearningPage />} />
+          <Route path="/performance" element={<PerformancePage />} />
+          <Route path="/ticker/:ticker" element={<TickerPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </BrowserRouter>
       <Toaster

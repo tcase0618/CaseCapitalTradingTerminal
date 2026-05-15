@@ -12,6 +12,10 @@ Public API:
 - detect_unusual_flow(ticker)                    — call/put volume vs OI
 - assess_iv_crush_risk(stock, chain)             — pre-catalyst safety
 - analyze_ticker(stock)                          — runs the full pipeline
+
+Hard rule: NO function in this module raises. Every function returns a clean
+dict or None. The scanner catches None and continues — one bad ticker never
+kills the run.
 """
 from __future__ import annotations
 import asyncio
@@ -21,6 +25,36 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _is_nan(v) -> bool:
+    """True if value is NaN/inf/None/non-numeric."""
+    if v is None:
+        return True
+    try:
+        f = float(v)
+        return math.isnan(f) or math.isinf(f)
+    except (TypeError, ValueError):
+        return True
+
+
+def _safe_int(v, default: int = 0) -> int:
+    if _is_nan(v):
+        return default
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    if _is_nan(v):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
 
 # All yfinance access is sync → wrap each call in run_in_executor.
 async def _to_thread(fn, *a, **kw):
@@ -105,10 +139,15 @@ async def get_options_data(ticker: str, catalyst_date: str | None = None) -> dic
             atm_iv = None
             try:
                 if "impliedVolatility" in calls.columns and len(calls):
-                    idx = (calls["strike"] - price).abs().idxmin()
-                    iv = calls.loc[idx, "impliedVolatility"]
-                    if iv and not (isinstance(iv, float) and math.isnan(iv)):
-                        atm_iv = float(iv)
+                    # Filter out NaN/inf rows first
+                    valid = calls[calls["impliedVolatility"].notna() &
+                                  (calls["impliedVolatility"] != math.inf) &
+                                  (calls["impliedVolatility"] != -math.inf)]
+                    if len(valid):
+                        idx = (valid["strike"] - price).abs().idxmin()
+                        iv = valid.loc[idx, "impliedVolatility"]
+                        if not _is_nan(iv):
+                            atm_iv = _safe_float(iv)
             except Exception:
                 pass
 
@@ -117,16 +156,17 @@ async def get_options_data(ticker: str, catalyst_date: str | None = None) -> dic
             iv_label = "FAIR"
             try:
                 hist = t.history(period="1y")
-                if len(hist) >= 30 and atm_iv is not None:
+                if len(hist) >= 30 and atm_iv is not None and atm_iv > 0:
                     rets = hist["Close"].pct_change().dropna()
-                    hv = float(rets.std() * (252 ** 0.5))
+                    hv = _safe_float(rets.std() * (252 ** 0.5))
                     if hv > 0:
                         rank = (atm_iv - hv) / hv * 100.0
-                        iv_rank = int(max(0, min(100, rank)))
+                        if not _is_nan(rank):
+                            iv_rank = max(0, min(100, _safe_int(rank, 50)))
             except Exception:
                 pass
             if iv_rank is None:
-                iv_rank = 50  # neutral fallback
+                iv_rank = 50  # neutral fallback when no IV data available
             if iv_rank < 30:
                 iv_label = "CHEAP"
             elif iv_rank < 60:
@@ -175,59 +215,67 @@ def _liquidity_flag(oi: int, spread: float) -> str:
 
 
 def find_best_contract(chain_data: dict, direction: str, budget: float = 100.0) -> dict | None:
-    """Returns the recommended single-leg contract dict for BULL or BEAR."""
-    if not chain_data:
-        return None
-    spot = chain_data["price"]
-    if direction == "BULL":
-        df = chain_data["calls"]
-        target_strike = spot * 1.03
-        is_call = True
-    else:
-        df = chain_data["puts"]
-        target_strike = spot * 0.97
-        is_call = False
-    if df is None or len(df) == 0:
-        return None
+    """Returns the recommended single-leg contract dict for BULL or BEAR.
+    Never raises — returns None on any data issue."""
+    try:
+        if not chain_data:
+            return None
+        spot = _safe_float(chain_data.get("price"))
+        if spot <= 0:
+            return None
+        if direction == "BULL":
+            df = chain_data.get("calls")
+            target_strike = spot * 1.03
+            is_call = True
+        else:
+            df = chain_data.get("puts")
+            target_strike = spot * 0.97
+            is_call = False
+        if df is None or len(df) == 0 or "strike" not in df.columns:
+            return None
 
-    df = df.copy()
-    # Strike closest to target
-    df["dist"] = (df["strike"] - target_strike).abs()
-    df = df.sort_values("dist").head(1)
-    if not len(df):
-        return None
-    row = df.iloc[0]
+        df = df.copy()
+        df["dist"] = (df["strike"] - target_strike).abs()
+        df = df.sort_values("dist").head(1)
+        if not len(df):
+            return None
+        row = df.iloc[0]
 
-    strike = float(row["strike"])
-    last = float(row.get("lastPrice") or 0)
-    bid = float(row.get("bid") or 0)
-    ask = float(row.get("ask") or 0)
-    iv = float(row.get("impliedVolatility") or 0) or chain_data.get("atm_iv") or 0.0
-    oi = int(row.get("openInterest") or 0)
-    volume = int(row.get("volume") or 0)
-    spread = max(0.0, ask - bid)
-    # If lastPrice is zero use mid
-    premium = last or ((bid + ask) / 2 if bid and ask else last)
-    if premium <= 0:
-        premium = max(0.05, abs(spot - strike) * 0.05)
-    delta = _approx_delta(strike, spot, is_call)
-    affordable = max(0, int(budget // (premium * 100)))
-    return {
-        "strike": strike,
-        "expiration": chain_data["expiration"],
-        "premium": round(premium, 2),
-        "bid": round(bid, 2),
-        "ask": round(ask, 2),
-        "iv": round(iv, 4),
-        "delta": round(delta, 3),
-        "open_interest": oi,
-        "volume": volume,
-        "spread": round(spread, 2),
-        "contracts_at_budget": affordable,
-        "max_loss": round(premium * 100, 2),
-        "liquidity": _liquidity_flag(oi, spread),
-        "type": "C" if is_call else "P",
-    }
+        strike = _safe_float(row.get("strike"))
+        if strike <= 0:
+            return None
+        last = _safe_float(row.get("lastPrice"))
+        bid = _safe_float(row.get("bid"))
+        ask = _safe_float(row.get("ask"))
+        iv = _safe_float(row.get("impliedVolatility")) or _safe_float(chain_data.get("atm_iv"))
+        oi = _safe_int(row.get("openInterest"))
+        volume = _safe_int(row.get("volume"))
+        spread = max(0.0, ask - bid)
+        # Mid-price fallback if lastPrice missing
+        premium = last or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
+        if premium <= 0:
+            premium = max(0.05, abs(spot - strike) * 0.05)
+        delta = _approx_delta(strike, spot, is_call)
+        affordable = max(0, int(budget // (premium * 100))) if premium > 0 else 0
+        return {
+            "strike": round(strike, 2),
+            "expiration": chain_data.get("expiration"),
+            "premium": round(premium, 2),
+            "bid": round(bid, 2),
+            "ask": round(ask, 2),
+            "iv": round(iv, 4),
+            "delta": round(delta, 3),
+            "open_interest": oi,
+            "volume": volume,
+            "spread": round(spread, 2),
+            "contracts_at_budget": affordable,
+            "max_loss": round(premium * 100, 2),
+            "liquidity": _liquidity_flag(oi, spread),
+            "type": "C" if is_call else "P",
+        }
+    except Exception as e:
+        logger.warning("find_best_contract failed: %s", e)
+        return None
 
 
 # ---------------- strategy selector (Part 4) ----------------
@@ -358,10 +406,10 @@ async def detect_unusual_flow(ticker: str) -> dict[str, Any]:
                 "call_put_ratio": 0.0, "flow_bias": "NEUTRAL"}
     try:
         calls = chain["calls"]; puts = chain["puts"]
-        cv = int(calls["volume"].fillna(0).sum()) if "volume" in calls.columns else 0
-        pv = int(puts["volume"].fillna(0).sum()) if "volume" in puts.columns else 0
-        coi = int(calls["openInterest"].fillna(0).sum()) if "openInterest" in calls.columns else 0
-        poi = int(puts["openInterest"].fillna(0).sum()) if "openInterest" in puts.columns else 0
+        cv = _safe_int(calls["volume"].fillna(0).sum()) if "volume" in calls.columns else 0
+        pv = _safe_int(puts["volume"].fillna(0).sum()) if "volume" in puts.columns else 0
+        coi = _safe_int(calls["openInterest"].fillna(0).sum()) if "openInterest" in calls.columns else 0
+        poi = _safe_int(puts["openInterest"].fillna(0).sum()) if "openInterest" in puts.columns else 0
         call_ratio = (cv / coi) if coi > 0 else 0.0
         put_ratio = (pv / poi) if poi > 0 else 0.0
         cp_ratio = (cv / pv) if pv > 0 else (cv if cv else 0.0)
@@ -419,37 +467,44 @@ def assess_iv_crush_risk(stock: dict, chain: dict | None) -> dict:
 # ---------------- top-level pipeline ----------------
 async def analyze_ticker(stock: dict) -> dict | None:
     """Full pipeline for one ticker. Returns the options-intelligence block
-    that gets attached to the stock dict and surfaced everywhere."""
-    ticker = stock["ticker"]
-    catalyst = stock.get("time_target", {}).get("target_date") or stock.get("catalyst_date")
-    chain = await get_options_data(ticker, catalyst)
-    if not chain:
+    that gets attached to the stock dict and surfaced everywhere.
+    NEVER raises — returns None on any failure."""
+    try:
+        ticker = stock.get("ticker")
+        if not ticker:
+            return None
+        catalyst = stock.get("time_target", {}).get("target_date") or stock.get("catalyst_date")
+        chain = await get_options_data(ticker, catalyst)
+        if not chain:
+            return None
+
+        selected = select_strategy(stock, chain)
+        contract = find_best_contract(chain, selected["direction"]) if selected["direction"] != "NONE" else None
+        spread = None
+        if selected["strategy"] == "BULL_CALL_SPREAD":
+            spread = build_spread(chain, "BULL")
+        elif selected["strategy"] == "BEAR_PUT_SPREAD":
+            spread = build_spread(chain, "BEAR")
+
+        crush = assess_iv_crush_risk(stock, chain)
+        flow = await detect_unusual_flow(ticker)
+
+        # Don't carry dataframes downstream — they're huge and unnecessary
+        return {
+            "strategy": selected["strategy"],
+            "direction": selected["direction"],
+            "strategy_reason": selected["reason"],
+            "iv_rank": chain.get("iv_rank"),
+            "iv_label": chain.get("iv_label"),
+            "atm_iv": chain.get("atm_iv"),
+            "expiration": chain.get("expiration"),
+            "spot": chain.get("price"),
+            "contract": contract,
+            "spread": spread,
+            "crush_risk": crush.get("crush_risk"),
+            "crush_recommendation": crush.get("recommendation"),
+            "flow": flow,
+        }
+    except Exception as e:
+        logger.warning("analyze_ticker failed for %s: %s", stock.get("ticker"), e)
         return None
-
-    selected = select_strategy(stock, chain)
-    contract = find_best_contract(chain, selected["direction"]) if selected["direction"] != "NONE" else None
-    spread = None
-    if selected["strategy"] == "BULL_CALL_SPREAD":
-        spread = build_spread(chain, "BULL")
-    elif selected["strategy"] == "BEAR_PUT_SPREAD":
-        spread = build_spread(chain, "BEAR")
-
-    crush = assess_iv_crush_risk(stock, chain)
-    flow = await detect_unusual_flow(ticker)
-
-    # Don't carry dataframes downstream — they're huge and unnecessary
-    return {
-        "strategy": selected["strategy"],
-        "direction": selected["direction"],
-        "strategy_reason": selected["reason"],
-        "iv_rank": chain.get("iv_rank"),
-        "iv_label": chain.get("iv_label"),
-        "atm_iv": chain.get("atm_iv"),
-        "expiration": chain.get("expiration"),
-        "spot": chain.get("price"),
-        "contract": contract,
-        "spread": spread,
-        "crush_risk": crush.get("crush_risk"),
-        "crush_recommendation": crush.get("recommendation"),
-        "flow": flow,
-    }

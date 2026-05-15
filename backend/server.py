@@ -300,6 +300,84 @@ async def pnl_refresh():
     return {"signals_refreshed": sig, "options_rows_refreshed": opt}
 
 
+# ---------------- Learning Engine endpoints ----------------
+@api.get("/learning/status")
+async def learning_status():
+    db = get_db()
+    last_run = await db.learning_runs.find_one({}, {"_id": 0}, sort=[("run_at", -1)])
+    weights = await db.learning_weights.find({}, {"_id": 0}).to_list(100)
+    return {
+        "last_run": last_run,
+        "weights": weights,
+        "next_run": "Sunday 02:00 ET",
+    }
+
+
+@api.get("/learning/combos")
+async def learning_combos():
+    db = get_db()
+    rows = await db.combo_stats.find(
+        {"trade_count": {"$gte": 3}}, {"_id": 0},
+    ).sort("avg_return_30d", -1).to_list(100)
+    return rows
+
+
+@api.get("/learning/runs")
+async def learning_runs(limit: int = 10):
+    db = get_db()
+    return await db.learning_runs.find({}, {"_id": 0}).sort("run_at", -1).to_list(limit)
+
+
+@api.post("/learning/run")
+async def learning_run():
+    from services import learning_engine
+    return await learning_engine.run_learning_cycle()
+
+
+@api.post("/learning/reset")
+async def learning_reset():
+    from services import learning_engine
+    n = await learning_engine.reset_weights()
+    return {"reset": True, "weights_reset": n}
+
+
+@api.get("/ticker/{ticker}")
+async def ticker_detail(ticker: str):
+    """Full deep-dive for a single ticker — used by /ticker/:ticker frontend page."""
+    db = get_db()
+    t = ticker.upper()
+    latest_scan = await db.scan_results.find_one(
+        {"results.ticker": t}, {"_id": 0}, sort=[("finished_at", -1)],
+    )
+    pnl_record = await db.signal_performance.find_one(
+        {"ticker": t}, {"_id": 0}, sort=[("ts", -1)],
+    )
+    fund = await risk_target.fetch_fundamentals(t)
+    q = await fetch_quote(t)
+    result: dict[str, Any] = {"ticker": t}
+    if latest_scan:
+        for r in latest_scan.get("results", []) or []:
+            if r.get("ticker") == t:
+                result.update(r)
+                break
+    if pnl_record:
+        result["pnl_record"] = pnl_record
+        result["first_found"] = pnl_record.get("date")
+    times_found = await db.signal_performance.count_documents({"ticker": t})
+    result["times_found"] = times_found
+    result["fundamentals"] = fund or {}
+    result["price"] = (q or {}).get("price")
+    result["change_pct"] = None
+    if q and q.get("previous_close") and q.get("price"):
+        try:
+            result["change_pct"] = round(
+                (q["price"] - q["previous_close"]) / q["previous_close"] * 100, 2
+            )
+        except Exception:
+            pass
+    return result
+
+
 @api.get("/fy/status")
 async def fy_status():
     from services.time_target import fiscal_year_multiplier_active, fy_days_remaining
@@ -459,6 +537,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup():
+    from services import learning_engine
+    await learning_engine.ensure_weights_exist()
     scheduler.start_scheduler()
     base = os.environ.get("PUBLIC_BASE_URL")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and base:

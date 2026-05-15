@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from . import claude_service, congress, options_engine, pnl_tracker, risk_target, \
+from . import claude_service, congress, learning_engine, options_engine, pnl_tracker, risk_target, \
     squeeze as squeeze_mod, time_target, usaspending
 from .db import get_db, log_activity, stamped
 from .scrapers import collect_all_signals
@@ -242,6 +242,9 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     final: list[dict[str, Any]] = []
     fy_active = time_target.fiscal_year_multiplier_active()
     _ = fy_active  # used for scan_doc below
+    # Load live learning weights for this scan
+    live_weights = await learning_engine.get_weights()
+
     for c in enriched:
         a = by_t.get(c["ticker"])
         if not a:
@@ -254,6 +257,14 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             score = min(10, score + 2)
         if "CALL_SWEEP" in c["signals"]:
             score = min(10, score + 3)
+        # AXIOM Learning Engine — additive points per signal from live weights
+        # Capped at 10 so existing dashboards keep the 0-10 scale; the raw
+        # learning_score is also surfaced separately for the Learning UI.
+        learning_score = sum(live_weights.get(s, 0) for s in c["signals"])
+        if c.get("congress_summary") and (c["congress_summary"].get("any_committee_match")):
+            learning_score += live_weights.get("committee_match_bonus", 0)
+        if (c.get("squeeze") or {}).get("score", 0) >= 65:
+            learning_score += live_weights.get("squeeze_bonus", 0)
         # Re-compute time target now that we have catalyst
         tt = time_target.compute_time_target(c["signals"], a.get("catalyst_date", ""))
         # Stop loss: Claude or computed fallback
@@ -269,6 +280,7 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "ticker": c["ticker"],
             "signals": c["signals"],
             "signal_score": score,
+            "learning_score": round(learning_score, 1),
             "fy_multiplier_applied": fy_applied,
             "thesis": a.get("thesis", ""),
             "entry_low": a.get("entry_low"),

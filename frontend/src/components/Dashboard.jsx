@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { Link } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
 
@@ -20,6 +21,9 @@ const SIG_TAG = {
   BUDGET_SURGE:         { label: "BUDGET SURGE",    color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
   CONGRESSIONAL_BUY:    { label: "CONGRESS BUY",    color: "#34d399", bg: "rgba(52,211,153,0.07)",  bd: "rgba(52,211,153,0.35)" },
   PRE_AWARD:            { label: "PRE AWARD",       color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.35)" },
+  UNUSUAL_FLOW:         { label: "UNUSUAL FLOW",    color: "#2dd4bf", bg: "rgba(45,212,191,0.07)",  bd: "rgba(45,212,191,0.35)" },
+  CALL_SWEEP:           { label: "CALL SWEEP",      color: "#5eead4", bg: "rgba(94,234,212,0.10)",  bd: "rgba(94,234,212,0.45)" },
+  IV_CRUSH:             { label: "IV CRUSH RISK",   color: "#f87171", bg: "rgba(248,113,113,0.07)", bd: "rgba(248,113,113,0.35)" },
 };
 
 const RISK_PILL = {
@@ -359,10 +363,21 @@ export default function Dashboard() {
 
           {/* Quick commands (push to bottom) */}
           <div style={{ marginTop: "auto" }}>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>COMMANDS</div>
-            {["/scan", "/scan_gov", "/contracts", "/congress", "/performance", "/backtest", "/help"].map(c => (
+            <div style={{ fontSize: 9, color: dim, letterSpacing: "0.14em", marginBottom: 8 }}>NAVIGATION</div>
+            {[
+              { to: "/performance", label: "[PERFORMANCE]" },
+              { to: "/learning",    label: "[LEARNING]" },
+              { to: "/settings",    label: "[SETTINGS]" },
+            ].map(n => (
+              <Link key={n.to} to={n.to} data-testid={`sidebar-nav-${n.label.replace(/[\[\]]/g, "").toLowerCase()}`} style={{
+                display: "block", fontSize: 11, color: accent, padding: "4px 0",
+                textDecoration: "none", letterSpacing: "0.08em", fontWeight: 700,
+              }}>{n.label}</Link>
+            ))}
+            <div style={{ fontSize: 9, color: dim, letterSpacing: "0.14em", marginTop: 14, marginBottom: 8 }}>COMMANDS</div>
+            {["/scan", "/scan_gov", "/contracts", "/congress", "/options", "/flow", "/iv", "/backtest", "/help"].map(c => (
               <div key={c} onClick={() => fireToast(c)} className="hover:text-amber-400" style={{
-                fontSize: 9, color: labelLight, cursor: "pointer", padding: "3px 0", transition: "color 0.15s",
+                fontSize: 10, color: labelLight, cursor: "pointer", padding: "3px 0", transition: "color 0.15s", letterSpacing: "0.04em",
               }}>{c}</div>
             ))}
           </div>
@@ -465,52 +480,109 @@ export default function Dashboard() {
                 {/* Main */}
                 <div style={{ padding: "14px 12px 14px 8px" }}>
                   <div style={{ display: "flex", alignItems: "baseline" }}>
-                    <span style={{ fontSize: 15, color: "#fff", fontWeight: 700, letterSpacing: "0.05em" }}>${r.ticker}</span>
-                    {r.fy_multiplier_applied && <span style={{ fontSize: 8, color: accent, marginLeft: 8 }}>FY×1.5</span>}
-                    <span style={{ fontSize: 11, color: dim, marginLeft: 8 }}>{r.sector || ""}</span>
-                    <span style={{ fontSize: 10, color: labelLight, marginLeft: 8, fontFamily: "Courier New" }}>{fmtPrice(r.price)}</span>
+                    <Link to={`/ticker/${r.ticker}`} style={{
+                      fontSize: 19, color: "#fff", fontWeight: 700, letterSpacing: "0.05em",
+                      textDecoration: "none", fontFamily: "Courier New",
+                    }}>${r.ticker}</Link>
+                    {r.fy_multiplier_applied && <span style={{ fontSize: 9, color: accent, marginLeft: 10 }}>FY×1.5</span>}
+                    <span style={{ fontSize: 13, color: dim, marginLeft: 10 }}>{r.sector || ""}</span>
+                    <span style={{ fontSize: 13, color: labelLight, marginLeft: 10, fontFamily: "Courier New" }}>{fmtPrice(r.price)}</span>
+                    {r.options?.crush_risk === "SEVERE" || r.options?.crush_risk === "HIGH" ? (
+                      <span style={{
+                        fontSize: 9, padding: "2px 7px", marginLeft: 10,
+                        border: `0.5px solid ${SIG_TAG.IV_CRUSH.bd}`,
+                        color: SIG_TAG.IV_CRUSH.color, background: SIG_TAG.IV_CRUSH.bg,
+                        letterSpacing: "0.08em", fontWeight: 700,
+                      }}>IV CRUSH {r.options.crush_risk}</span>
+                    ) : null}
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "5px 0 7px" }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, margin: "7px 0 9px" }}>
                     {(r.signals || []).map(s => {
                       const m = SIG_TAG[s] || { label: s, color: muted, bg: "rgba(255,255,255,0.03)", bd: "rgba(255,255,255,0.1)" };
                       return (
                         <span key={s} style={{
-                          fontSize: 8, padding: "2px 7px", border: `0.5px solid ${m.bd}`,
+                          fontSize: 10, padding: "3px 9px", border: `0.5px solid ${m.bd}`,
                           color: m.color, background: m.bg,
-                          letterSpacing: "0.06em", fontWeight: 700,
+                          letterSpacing: "0.08em", fontWeight: 700,
                         }}>{m.label}</span>
                       );
                     })}
                   </div>
                   <div style={{
-                    fontSize: 11, color: labelLight, lineHeight: 1.65, marginBottom: 8,
+                    fontSize: 13, color: "#e5e7eb", lineHeight: 1.7, marginBottom: 9,
                     display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
                   }}>{r.thesis}</div>
-                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 8, color: dim }}>
-                    <span>ENTRY <span style={{ color: muted }}>{fmtPrice(r.entry_low)}–{fmtPrice(r.entry_high)}</span></span>
-                    {tt.target_date && <span>HOLD <span style={{ color: muted }}>{tt.hold_period_low}–{tt.hold_period_high}d</span></span>}
-                    {sq.score != null && <span>SQUEEZE <span style={{ color: muted }}>{sq.score}/100</span></span>}
+                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 10, color: dim, letterSpacing: "0.08em" }}>
+                    <span>ENTRY <span style={{ color: labelLight }}>{fmtPrice(r.entry_low)}–{fmtPrice(r.entry_high)}</span></span>
+                    {tt.target_date && <span>HOLD <span style={{ color: labelLight }}>{tt.hold_period_low}–{tt.hold_period_high}d</span></span>}
+                    {sq.score != null && <span>SQUEEZE <span style={{ color: labelLight }}>{sq.score}/100</span></span>}
+                    {r.learning_score != null && <span>AXIOM <span style={{ color: accent, fontWeight: 700 }}>{r.learning_score}</span></span>}
                   </div>
+                  {/* Options panel */}
+                  {r.options && (r.options.contract || r.options.spread || r.options.strategy === "AVOID_OPTIONS") && (
+                    <div style={{
+                      marginTop: 12, padding: "10px 12px",
+                      background: "#0a0a10", borderLeft: `2px solid ${accent}`,
+                    }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                        <span style={{ fontSize: 10, color: dim, letterSpacing: "0.14em" }}>
+                          {"// OPTIONS INTEL — "}
+                          <span style={{ color: accent, fontWeight: 700 }}>{r.options.strategy_name || r.options.strategy}</span>
+                        </span>
+                        <span style={{ fontSize: 10, color: dim, letterSpacing: "0.08em" }}>
+                          IV RANK <span style={{ color: r.options.iv_rank < 30 ? "#4ade80" : r.options.iv_rank > 70 ? "#f87171" : accent, fontWeight: 700 }}>{r.options.iv_rank}%</span>
+                          <span style={{ color: muted, marginLeft: 4 }}>({r.options.iv_label})</span>
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#d1d5db", lineHeight: 1.6, marginBottom: 8 }}>
+                        {r.options.one_liner || r.options.strategy_reason}
+                      </div>
+                      {r.options.strategy === "AVOID_OPTIONS" ? (
+                        <div style={{ fontSize: 11, color: "#f87171", fontWeight: 700, letterSpacing: "0.06em" }}>
+                          DO NOT BUY OPTIONS · {r.options.crush_recommendation}
+                        </div>
+                      ) : r.options.contract ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, fontSize: 11 }}>
+                          <div><span style={{ color: dim }}>BUY </span><span style={{ color: accent, fontWeight: 700 }}>${r.options.contract.strike}{r.options.contract.type}</span></div>
+                          <div><span style={{ color: dim }}>EXP </span><span style={{ color: labelLight }}>{r.options.contract.expiration}</span></div>
+                          <div><span style={{ color: dim }}>PREMIUM </span><span style={{ color: "#fff", fontWeight: 700 }}>${r.options.contract.premium}</span></div>
+                          <div><span style={{ color: dim }}>MAX LOSS </span><span style={{ color: "#f87171", fontWeight: 700 }}>${r.options.contract.max_loss}</span></div>
+                          {r.options.spread && (<>
+                            <div><span style={{ color: dim }}>SPREAD </span><span style={{ color: accent }}>${r.options.spread.buy_strike}/${r.options.spread.sell_strike}</span></div>
+                            <div><span style={{ color: dim }}>MAX PROFIT </span><span style={{ color: "#4ade80", fontWeight: 700 }}>${r.options.spread.max_profit}</span></div>
+                            <div><span style={{ color: dim }}>R/R </span><span style={{ color: "#fff", fontWeight: 700 }}>{r.options.spread.risk_reward}:1</span></div>
+                            <div><span style={{ color: dim }}>BREAK EVEN </span><span style={{ color: labelLight }}>${r.options.spread.break_even}</span></div>
+                          </>)}
+                          <div><span style={{ color: dim }}>LIQ </span><span style={{ color: r.options.contract.liquidity === "GOOD" ? "#4ade80" : r.options.contract.liquidity === "WARN" ? "#fb923c" : "#f87171", fontWeight: 700 }}>{r.options.contract.liquidity}</span></div>
+                          {r.options.flow && (<>
+                            <div><span style={{ color: dim }}>FLOW </span><span style={{ color: r.options.flow.flow_bias === "BULLISH" ? "#4ade80" : r.options.flow.flow_bias === "BEARISH" ? "#f87171" : muted, fontWeight: 700 }}>{r.options.flow.flow_bias}</span></div>
+                            <div><span style={{ color: dim }}>P/C </span><span style={{ color: labelLight }}>{r.options.flow.call_put_ratio}</span></div>
+                            <div><span style={{ color: dim }}>CRUSH </span><span style={{ color: r.options.crush_risk === "SEVERE" ? "#f87171" : r.options.crush_risk === "HIGH" ? "#fb923c" : r.options.crush_risk === "LOW" ? "#4ade80" : accent, fontWeight: 700 }}>{r.options.crush_risk}</span></div>
+                          </>)}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
 
                 {/* Target */}
-                <div style={{ padding: "14px 16px 14px 8px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: targetColor, fontFamily: "Courier New" }}>
+                <div style={{ padding: "14px 16px 14px 8px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: targetColor, fontFamily: "Courier New", letterSpacing: "0.02em" }}>
                     {fmtPrice(tg.target_blended)}
                   </div>
-                  <div style={{ fontSize: 10, color: targetColor, opacity: 0.5 }}>{fmtPct(tg.upside_blended)}</div>
+                  <div style={{ fontSize: 12, color: targetColor, opacity: 0.6, fontWeight: 700 }}>{fmtPct(tg.upside_blended)}</div>
                   {tt.target_date && (
-                    <div style={{ fontSize: 8, color: accent, letterSpacing: "0.04em" }}>TARGET — {tt.target_date}</div>
+                    <div style={{ fontSize: 10, color: accent, letterSpacing: "0.06em" }}>TARGET — {tt.target_date}</div>
                   )}
-                  <div style={{ fontSize: 8, color: dim }}>ENTRY {fmtPrice(r.entry_low)} — {fmtPrice(r.entry_high)}</div>
-                  <div style={{ fontSize: 8, color: "rgba(248,113,113,0.5)" }}>STOP {fmtPrice(r.stop_loss)}</div>
+                  <div style={{ fontSize: 10, color: dim, letterSpacing: "0.06em" }}>ENTRY {fmtPrice(r.entry_low)} — {fmtPrice(r.entry_high)}</div>
+                  <div style={{ fontSize: 10, color: "rgba(248,113,113,0.6)", letterSpacing: "0.06em" }}>STOP {fmtPrice(r.stop_loss)}</div>
                   <div style={{
-                    fontSize: 7, padding: "2px 7px",
+                    fontSize: 10, padding: "3px 9px",
                     border: `0.5px solid ${(RISK_PILL[risk.level] || RISK_PILL.MEDIUM).bd}`,
                     color: (RISK_PILL[risk.level] || RISK_PILL.MEDIUM).color,
-                    borderRadius: 2, marginTop: 2, letterSpacing: "0.08em",
+                    borderRadius: 2, marginTop: 3, letterSpacing: "0.1em", fontWeight: 700,
                   }}>{risk.level || "?"}</div>
-                  {sq.score != null && <div style={{ fontSize: 8, color: labelLight }}>SQZ {sq.score}/100</div>}
+                  {sq.score != null && <div style={{ fontSize: 10, color: labelLight, letterSpacing: "0.06em" }}>SQZ {sq.score}/100</div>}
                 </div>
               </div>
             );
