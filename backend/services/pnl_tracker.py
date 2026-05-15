@@ -378,58 +378,119 @@ async def ensure_first_seen_backfill() -> int:
     return backfilled
 
 
-async def refresh_all_entry_prices(force: bool = True) -> dict[str, int]:
-    """Re-fetch the close on `first_seen_date` for every tracked ticker
-    using Massive API. Updates both `signal_first_seen.first_seen_price`
-    and matching `signal_performance.entry_price` rows. This corrects any
-    yfinance-era entry prices once Massive is plugged in."""
+async def refresh_all_entry_prices(force: bool = False) -> dict[str, int]:
+    """Fill MISSING entry prices using Massive's historical close. Never
+    overwrites an existing valid price — the original intraday yfinance
+    fill is the truth-of-entry. Set `force=True` only if you want to
+    rewrite every row (typically only after a data corruption)."""
     db = get_db()
-    # Clear stale price caches first
+    # Clear stale price caches so current-price queries re-hit Massive
     await pricer.clear_cache()
 
     rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
-    updated_first_seen = 0
-    updated_perf = 0
+    filled_first_seen = 0
+    filled_perf = 0
     failures = 0
     for r in rows:
         ticker = r["ticker"]
         d = r.get("first_seen_date")
         if not ticker or not d:
             continue
+        cur = r.get("first_seen_price")
+        # Skip rows that already have a valid entry price (the intraday yfinance
+        # fill is more accurate than a day-end close).
+        if cur and cur > 0 and not force:
+            continue
         new_price = await pricer.get_close_on_date(ticker, d)
         if not new_price:
             failures += 1
-            continue
-        # Only update if it actually changed (or row had no price)
-        cur = r.get("first_seen_price")
-        if cur and abs(cur - new_price) < 0.01:
             continue
         await db.signal_first_seen.update_one(
             {"ticker": ticker},
             {"$set": {
                 "first_seen_price": round(new_price, 2),
-                "first_seen_price_source": "massive" if pricer.has_massive() else "yfinance",
+                "first_seen_price_source": pricer.source_label(),
                 "first_seen_price_refreshed_at": _now().isoformat(),
             }},
         )
-        updated_first_seen += 1
-        # Also refresh the matching signal_performance row's entry_price
+        filled_first_seen += 1
         res = await db.signal_performance.update_one(
-            {"ticker": ticker, "date": d},
+            {"ticker": ticker, "date": d, "entry_price": None},
             {"$set": {"entry_price": round(new_price, 2)}},
         )
         if res.modified_count:
-            updated_perf += 1
+            filled_perf += 1
     await log_activity(
-        f"Refreshed {updated_first_seen} entry prices via Massive ({failures} failed)",
-        "info",
+        f"Entry-price backfill: filled {filled_first_seen} first_seen + "
+        f"{filled_perf} perf rows ({failures} failed)", "info",
     )
     return {
-        "first_seen_updated": updated_first_seen,
-        "perf_rows_updated": updated_perf,
+        "first_seen_filled": filled_first_seen,
+        "perf_rows_filled": filled_perf,
         "failures": failures,
         "source": pricer.source_label(),
     }
+
+
+async def restore_intraday_entry_prices() -> dict[str, int]:
+    """Restore first_seen_price from the earliest scan_results record where
+    we recorded the actual intraday yfinance price at scan time. This
+    rebuilds entries the Massive-refresh overwrote with day-end closes."""
+    db = get_db()
+    rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
+    restored = 0
+    for r in rows:
+        ticker = r["ticker"]
+        d = r.get("first_seen_date")
+        if not ticker or not d:
+            continue
+        # Walk scan_results from oldest to newest, find first one that
+        # surfaced this ticker on or near `d` — that price is the truth.
+        async for scan in db.scan_results.find(
+            {"results.ticker": ticker}, {"_id": 0, "results": 1, "finished_at": 1},
+        ).sort("finished_at", 1):
+            for sr in scan.get("results") or []:
+                if sr.get("ticker") != ticker:
+                    continue
+                price = sr.get("price")
+                if price and price > 0:
+                    await db.signal_first_seen.update_one(
+                        {"ticker": ticker},
+                        {"$set": {
+                            "first_seen_price": round(float(price), 4),
+                            "first_seen_price_source": "restored_intraday",
+                            "first_seen_price_refreshed_at": _now().isoformat(),
+                        }},
+                    )
+                    restored += 1
+                    break
+            else:
+                continue
+            break
+    await log_activity(f"Restored {restored} intraday entry prices", "info")
+    return {"restored": restored}
+
+
+async def refresh_current_prices_only() -> dict[str, Any]:
+    """Force-refresh the current-price cache for every tracked ticker via
+    Massive's grouped endpoint. Does NOT touch entry prices."""
+    db = get_db()
+    rows = await db.signal_first_seen.find(
+        {}, {"_id": 0, "ticker": 1},
+    ).to_list(2000)
+    tickers = [r["ticker"] for r in rows if r.get("ticker")]
+    if not tickers:
+        return {"refreshed": 0, "source": pricer.source_label()}
+    await pricer.clear_cache()
+    prices = await pricer.batch_latest_closes(tickers, force=True)
+    valid = {t: p for t, p in prices.items() if p is not None}
+    return {
+        "tickers_requested": len(tickers),
+        "tickers_refreshed": len(valid),
+        "tickers_missing": len(tickers) - len(valid),
+        "source": pricer.source_label(),
+    }
+
 
 
 

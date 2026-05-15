@@ -117,6 +117,64 @@ async def _massive_range(ticker: str, from_iso: str, to_iso: str) -> dict[str, f
         return {}
 
 
+# Module-level grouped cache: date_iso → {ticker: close}
+_grouped_cache: dict[str, dict[str, float]] = {}
+_grouped_cache_at: dict[str, datetime] = {}
+_grouped_lock = asyncio.Lock()
+
+
+async def _massive_grouped(date_iso: str) -> dict[str, float]:
+    """ONE call returns close for every US stock on `date_iso`.
+    Free-tier-friendly: 1 request handles 12,000+ tickers.
+    Skips weekends/holidays by walking back up to 5 calendar days."""
+    if not MASSIVE_KEY:
+        return {}
+    # Memory cache (1h TTL) — grouped data for a finished day never changes
+    ts = _grouped_cache_at.get(date_iso)
+    if ts and (_now() - ts) <= timedelta(hours=1):
+        return _grouped_cache.get(date_iso, {})
+
+    async with _grouped_lock:
+        # Re-check under lock
+        ts = _grouped_cache_at.get(date_iso)
+        if ts and (_now() - ts) <= timedelta(hours=1):
+            return _grouped_cache.get(date_iso, {})
+        try:
+            c = await _get_client()
+            r = await c.get(
+                f"{MASSIVE_BASE}/v2/aggs/grouped/locale/us/market/stocks/{date_iso}",
+                params={"adjusted": "true", "apiKey": MASSIVE_KEY},
+                timeout=30.0,
+            )
+            if r.status_code != 200:
+                _grouped_cache[date_iso] = {}
+                _grouped_cache_at[date_iso] = _now()
+                return {}
+            data = r.json()
+            results = data.get("results") or []
+            out = {row["T"]: float(row["c"]) for row in results if row.get("T") and row.get("c") is not None}
+            _grouped_cache[date_iso] = out
+            _grouped_cache_at[date_iso] = _now()
+            return out
+        except Exception as e:
+            logger.debug("massive grouped %s failed: %s", date_iso, e)
+            return {}
+
+
+async def grouped_latest() -> tuple[str, dict[str, float]]:
+    """Return (effective_date, {ticker: close}) for the most recent trading day
+    that has grouped data. Walks back up to 5 calendar days for weekends/holidays."""
+    today = _now().date()
+    # Start at yesterday — markets settle T+0 daily close after 16:00 ET, but
+    # safest is to walk from yesterday.
+    for offset in range(1, 7):
+        d = (today - timedelta(days=offset)).isoformat()
+        data = await _massive_grouped(d)
+        if data:
+            return d, data
+    return today.isoformat(), {}
+
+
 # ─────────────────────────── yfinance fallback ───────────────────────────
 async def _yf_latest_close(ticker: str) -> float | None:
     try:
@@ -235,19 +293,118 @@ async def get_latest_close(ticker: str, force: bool = False) -> float | None:
     return price
 
 
+async def _yf_batch_latest(tickers: list[str]) -> dict[str, float]:
+    """Single yfinance call that returns latest intraday close for many
+    tickers in one shot. Returns {ticker: price}. yfinance intraday data
+    is ~15-min delayed but shows real movement (Massive free tier is EOD
+    only, so daily close = entry price for same-day signals = 0% gain
+    forever — yfinance fixes that)."""
+    if not tickers:
+        return {}
+    try:
+        import yfinance as yf
+
+        def _sync():
+            data = yf.download(
+                tickers=" ".join(tickers), period="2d", interval="1d",
+                progress=False, threads=True, group_by="ticker", auto_adjust=True,
+            )
+            if data is None or len(data) == 0:
+                return {}
+            out: dict[str, float] = {}
+            if len(tickers) == 1:
+                t = tickers[0]
+                try:
+                    out[t] = float(data["Close"].dropna().iloc[-1])
+                except Exception:
+                    pass
+                return out
+            for t in tickers:
+                try:
+                    series = data[t]["Close"].dropna()
+                    if len(series):
+                        out[t] = float(series.iloc[-1])
+                except Exception:
+                    continue
+            return out
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
+    except Exception as e:
+        logger.debug("yf batch latest failed: %s", e)
+        return {}
+
+
 async def batch_latest_closes(tickers: list[str], force: bool = False,
                                 concurrency: int = 8) -> dict[str, float | None]:
-    """Concurrent latest-close fetcher."""
+    """Latest available close for many tickers.
+
+    Strategy:
+      1. yfinance batch (single HTTP call) — gives real intraday-delayed data
+         that reflects today's movement. Free, no rate limit.
+      2. Massive grouped backfill — fills any ticker yfinance missed using
+         the most recent grouped-daily snapshot.
+
+    Caches every result for 10 min."""
     tickers = [t.upper().strip() for t in tickers if t]
     if not tickers:
         return {}
-    sem = asyncio.Semaphore(concurrency)
 
-    async def _one(t: str) -> tuple[str, float | None]:
-        async with sem:
-            return t, await get_latest_close(t, force=force)
-    results = await asyncio.gather(*[_one(t) for t in tickers])
-    return dict(results)
+    # Honor existing cache unless force
+    result: dict[str, float | None] = {}
+    if not force:
+        db = get_db()
+        cached = await db.price_cache.find(
+            {"ticker": {"$in": tickers}}, {"_id": 0},
+        ).to_list(len(tickers))
+        fresh_after = _now() - timedelta(minutes=LATEST_TTL_MIN)
+        for c in cached:
+            try:
+                ts = datetime.fromisoformat(c["fetched_at"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= fresh_after and c.get("price"):
+                    result[c["ticker"]] = float(c["price"])
+            except Exception:
+                pass
+
+    missing = [t for t in tickers if t not in result]
+    if not missing:
+        return result
+
+    # Primary: yfinance batch (real movement)
+    yf_data = await _yf_batch_latest(missing)
+    now_iso = _now().isoformat()
+    db = get_db()
+    for t, p in yf_data.items():
+        result[t] = p
+        await db.price_cache.update_one(
+            {"ticker": t},
+            {"$set": {"ticker": t, "price": float(p),
+                      "fetched_at": now_iso, "source": "yfinance"}},
+            upsert=True,
+        )
+
+    # Backfill anything yfinance missed via Massive grouped (no rate-limit issue)
+    still_missing = [t for t in missing if t not in yf_data]
+    if still_missing and MASSIVE_KEY:
+        _, grouped = await grouped_latest()
+        for t in still_missing:
+            p = grouped.get(t)
+            if p is not None:
+                result[t] = float(p)
+                await db.price_cache.update_one(
+                    {"ticker": t},
+                    {"$set": {"ticker": t, "price": float(p),
+                              "fetched_at": now_iso, "source": "massive"}},
+                    upsert=True,
+                )
+            else:
+                result[t] = None
+
+    # Any leftovers stay None
+    for t in tickers:
+        result.setdefault(t, None)
+    return result
 
 
 async def get_history(ticker: str, days: int = 120,
@@ -285,21 +442,33 @@ async def get_history_range(ticker: str, from_iso: str, to_iso: str,
 
 
 async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
-    """Close on a specific date, or the nearest prior trading day."""
+    """Close on a specific date, or the nearest prior trading day.
+    Uses Massive's grouped daily endpoint — one cached request covers
+    every ticker on that date."""
     ticker = (ticker or "").upper().strip()
     if not ticker or not date_iso:
         return None
-    # Pull a small window around the target date — guards against weekends/holidays
     try:
         target = datetime.fromisoformat(date_iso).date()
     except Exception:
         return None
+    # Walk back up to 7 calendar days to handle weekends/holidays
+    if MASSIVE_KEY:
+        for offset in range(8):
+            d = target - timedelta(days=offset)
+            if d.weekday() >= 5:
+                continue
+            grouped = await _massive_grouped(d.isoformat())
+            if grouped and ticker in grouped:
+                return grouped[ticker]
+        # If we got here, Massive has no data for this ticker in the window
+        # — fall through to yfinance
+    # yfinance fallback (per-ticker range)
     from_d = (target - timedelta(days=10)).isoformat()
     to_d = (target + timedelta(days=2)).isoformat()
-    closes = await get_history_range(ticker, from_d, to_d)
+    closes = await _yf_range(ticker, from_d, to_d)
     if not closes:
         return None
-    # Prefer exact match, else nearest <= target, else nearest >= target
     if date_iso in closes:
         return closes[date_iso]
     sorted_d = sorted(closes.keys())
@@ -312,7 +481,52 @@ async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
 async def batch_history(tickers: list[str], days: int = 120,
                           force: bool = False,
                           concurrency: int = 6) -> dict[str, dict[str, float]]:
+    """Returns {ticker: {date_iso: close}} for all tickers across `days`.
+    Uses Massive's GROUPED endpoint per-day — 1 request per trading day
+    regardless of ticker count. Massively cheaper than per-ticker range calls
+    on the free tier and immune to rate limits beyond ~5 days back."""
     tickers = [t.upper().strip() for t in tickers if t]
+    if not tickers:
+        return {}
+
+    # Massive grouped path — N trading days = N requests, cached for 1h each
+    if MASSIVE_KEY:
+        today = _now().date()
+        out: dict[str, dict[str, float]] = {t: {} for t in tickers}
+        ticker_set = set(tickers)
+        # Walk back day-by-day. Skip weekends (Sat=5, Sun=6).
+        offset = 0
+        trading_days_collected = 0
+        max_calendar_days = days + 20  # buffer for holidays
+        while offset < max_calendar_days and trading_days_collected < days:
+            d = today - timedelta(days=offset)
+            offset += 1
+            if d.weekday() >= 5:
+                continue
+            data = await _massive_grouped(d.isoformat())
+            if not data:
+                # Could be holiday — keep walking
+                continue
+            trading_days_collected += 1
+            for t in ticker_set:
+                px = data.get(t)
+                if px is not None:
+                    out[t][d.isoformat()] = float(px)
+        # Drop tickers with no data (delisted) — yfinance fallback for those
+        missing = [t for t in tickers if not out[t]]
+        if missing:
+            sem = asyncio.Semaphore(concurrency)
+
+            async def _one(t: str) -> tuple[str, dict[str, float]]:
+                async with sem:
+                    return t, await get_history(t, days=days, force=force)
+            yres = await asyncio.gather(*[_one(t) for t in missing])
+            for t, series in yres:
+                if series:
+                    out[t] = series
+        return out
+
+    # No Massive: per-ticker range with bounded concurrency
     sem = asyncio.Semaphore(concurrency)
 
     async def _one(t: str) -> tuple[str, dict[str, float]]:

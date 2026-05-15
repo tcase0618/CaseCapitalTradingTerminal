@@ -1,0 +1,50 @@
+{
+  "summary": "V5 verification of price-source fix (yfinance batch for current + Massive grouped for historical), intraday entry-price restore, current-only refresh, and learning-engine LIVE-basis trades. All 14 new v5 pytest cases pass; full regression 71/71 green (1 outdated v4 assertion updated for new refresh_prices contract). Performance page renders all expected real movements: ONDS +26.5%, KLAR +20.3%, CELC +8.2%, BLSH -5.6%, AVG GAIN +1.4%, BEST PANW +40.5%, WORST CERT -25.5%, 58 signals tracked, 25W/24L. Learning page shows TRADES ANALYZED 58 with '4 × 30D + 54 × LIVE' subline, PENDING CHANGES 2, WEIGHTS ADJUSTED 2, PENDING ADJUSTMENTS table with BASIS column (LIVE) for both HIGH_SHORT_INTEREST and CONTRACT_SURGE, INSIGHTS populated with best combo (UNUSUAL_FLOW+INSIDER_CLUSTER_BUY+UPCOMING_EARNINGS 67% WR avg +14.7%), Weight Evolution chart now plots 2 signals (was empty in v4). Dashboard/Settings/Ticker pages have no regression. /api/admin/restore_entry_prices=53, /api/admin/refresh_prices=58/58 refreshed, /api/learning/run persisted 58 trades / 2 weights changed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/admin/refresh_prices", "issue": "Response shape changed from {first_seen_updated, perf_rows_updated} to {tickers_requested, tickers_refreshed, tickers_missing} — intentional per v5 spec (current-only semantics). Test test_v4_api.py::TestRefreshPrices updated to match."},
+      {"endpoint": "/api/learning/signal_stats", "issue": "Rows with n_live=0 (signals never seen, e.g. CONCENTRATION_WIN) omit n_30d/best/worst entirely instead of returning nulls. Frontend handles gracefully but inconsistent schema may surprise API consumers."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/performance and /learning", "issues": ["Recharts ResponsiveContainer logs 'width(-1) and height(-1)' warnings during initial render — cosmetic only, charts render correctly once mounted. Likely caused by Container parents that have display:none or 0-height during first render pass. Add minWidth(0)/aspect to silence."]},
+      {"screen": "/learning", "issues": ["Page lacks data-testid attributes on key KPIs (learning-trades-analyzed, learning-pending-adjustments, learning-signal-stats, learning-status-strip). Text-based selectors work but testid would improve E2E robustness."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v5_api.py",
+    "/app/backend/tests/test_v4_api.py",
+    "/app/test_reports/pytest/pytest_v5_results.xml",
+    "/app/test_reports/pytest/pytest_regression.xml"
+  ],
+  "action_items": [
+    "[Optional] Add data-testid attributes on /learning KPI tiles and table rows for robust E2E testing.",
+    "[Optional] Silence Recharts ResponsiveContainer width(-1)/height(-1) console warnings by ensuring chart parent has a defined min-height during first paint.",
+    "[Optional] Make /api/learning/signal_stats return consistent schema for empty signals (n=0 rows still include n_30d:null/best:null/worst:null instead of omitting keys)."
+  ],
+  "critical_code_review_comments": [
+    "services/pricer.py: Switching latest-prices to yf.download batch (1 HTTP call) was the right fix for Massive 5 req/min free-tier rate limit. Historical via Massive grouped-daily (1 call/day for ALL tickers) is also rate-efficient. Good architectural separation.",
+    "services/pnl_tracker.refresh_current_prices_only: Correctly refreshes ONLY current_price, never touches first_seen_price (the original entry-at-signal value). 58/58 tickers refreshed in <2s. Idempotent.",
+    "services/pnl_tracker.restore_intraday_entry_prices: Walks scan_results collection to recover earliest first_seen_price per ticker — correct way to undo prior overwrite. Verified 53/58 restored (5 were already correct).",
+    "services/learning_engine._collect_live_trades + refresh_combo_stats_live: Treating every signal_first_seen row with current_price as a 'live trade' lets the engine engage immediately (58 trades vs prior 4). MIN_SAMPLES_LIVE=3 / MIN_SAMPLES_30D=10 gates are sensible.",
+    "services/scanner.run_scan: Calling learning_engine.refresh_combo_stats_live() after every scan keeps combo_stats fresh. Consider adding try/except so a failing learning refresh doesn't break a scan.",
+    "server.py /api/admin/refresh_prices: Behavior change is undocumented in response (no version/deprecation hint). Consider adding response field 'mode':'current_only' to make the contract explicit.",
+    "server.py /api/learning/combos threshold lowered to 2 (from 3): correct surfacing decision for live-data quickness — but should be documented inline as a constant (MIN_COMBO_TRADES=2) so it's discoverable.",
+    "LearningPage.jsx: Weight Evolution dropdown is now populated (was empty in v4 report). Confirms first auto-cycle ran successfully — improvement realized."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v5_api.py (new, 14 cases — covers v5 price/learning fixes + v4 regression)",
+    "/app/backend/tests/test_v4_api.py (updated TestRefreshPrices assertions to match new tickers_requested/refreshed contract)"
+  ],
+  "success_rate": {"backend": "100% (71/71)", "frontend": "100% (Performance + Learning render all real numbers; Settings + Ticker no regression)"},
+  "test_credentials": "N/A — public dashboard, no auth. Massive API key live in /app/backend/.env.",
+  "seed_data_creation": "POST /api/admin/refresh_prices and /api/learning/run were each invoked once during tests (idempotent — they refresh current prices and snapshot the learning state).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "v5 price-source + learning-engine LIVE-basis fixes fully verified. 71/71 backend tests green across v1+v2+v3+v4+v5. yfinance batch is now the source for current prices; Massive is used for historical (grouped daily). The system handles 58 tracked signals end-to-end with real gains (ONDS +26.5%, PANW +40.5%, CELC +8.2%, BLSH -5.6%, CERT -25.5%, KLAR +20.3%). Learning engine engaged: 58 trades, 2 weights changed (high_short_interest -0.9%, CONTRACT_SURGE -0.4%), overall win rate 43.1%. Pending future work: testids on Learning page, Recharts warnings, consistent schema for empty signal_stats rows.",
+  "rca of the issue": "Root cause was Massive free-tier 5 req/min rate limit causing 53/58 ticker price fetches to fail and fall back to broken yfinance individual calls. Fixed by routing current-prices through yf.download batch (1 HTTP call for all 58 tickers, intraday-delayed) and reserving Massive for historical date queries via grouped-daily endpoint (1 call per date returns all tickers, no rate-limit issue). Original intraday entry prices that had been overwritten were restored via restore_intraday_entry_prices that walks scan_results collection for the earliest first_seen_price per ticker. Learning engine was also broadened to accept LIVE-basis trades (every signal_first_seen with current_price) so the engine engages with 58 trades immediately rather than waiting for 10 × 30D trades to accrue."
+}

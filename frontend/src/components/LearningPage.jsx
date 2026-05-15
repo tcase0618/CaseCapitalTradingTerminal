@@ -87,10 +87,10 @@ export default function LearningPage() {
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
         <Stat label="LAST RUN" value={lastRun ? new Date(lastRun.run_at).toLocaleDateString() : "NEVER"}
               sub={lastRun?.run_at ? new Date(lastRun.run_at).toLocaleTimeString() : "—"} color={accent} />
-        <Stat label="TRADES ANALYZED" value={lastRun?.trades_analyzed || preview?.trades_available || 0}
-              sub={preview?.would_run ? "READY" : `NEED ${preview?.min_required || 10}+`} />
+        <Stat label="TRADES ANALYZED" value={preview?.trades_available || 0}
+              sub={`${preview?.trades_30d || 0} × 30D + ${(preview?.trades_live || 0) - (preview?.trades_30d || 0)} × LIVE`} />
         <Stat label="OVERALL WIN RATE" value={`${((lastRun?.overall_win_rate || 0) * 100).toFixed(1)}%`}
-              color={(lastRun?.overall_win_rate || 0) >= 0.5 ? "#4ade80" : "#f87171"} sub="30D RETURN BASIS" />
+              color={(lastRun?.overall_win_rate || 0) >= 0.5 ? "#4ade80" : "#f87171"} sub="ALL TRADES" />
         <Stat label="PENDING CHANGES" value={preview?.would_change_count || 0}
               color={preview?.would_change_count > 0 ? "#fb923c" : muted} sub="IF RUN NOW" />
         <Stat label="WEIGHTS ADJUSTED" value={Object.keys(lastRun?.weights_changed || {}).length}
@@ -120,6 +120,7 @@ export default function LearningPage() {
                 <th style={th}>SIGNAL</th><th style={th}>CURRENT</th>
                 <th style={th}>PROJECTED</th><th style={th}>DELTA</th>
                 <th style={th}>WIN RATE</th><th style={th}>SAMPLES</th>
+                <th style={th}>BASIS</th>
                 <th style={th}>CONF.</th>
               </tr>
             </thead>
@@ -134,6 +135,9 @@ export default function LearningPage() {
                   </td>
                   <td style={td}>{r.win_rate != null ? `${(r.win_rate * 100).toFixed(0)}%` : "—"}</td>
                   <td style={td}>{r.samples}</td>
+                  <td style={{ ...td, color: r.basis === "30d" ? "#4ade80" : accent, fontSize: 10 }}>
+                    {r.basis ? r.basis.toUpperCase() : "—"}
+                  </td>
                   <td style={td}>{r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : "—"}</td>
                 </tr>
               ))}
@@ -252,8 +256,8 @@ export default function LearningPage() {
         </table>
       </Card>
 
-      {/* SIGNAL LIFETIME LEAGUE TABLE — works even with zero adjusted weights */}
-      <Card title="SIGNAL LIFETIME PERFORMANCE — EVERY SIGNAL, EVERY TRADE EVER">
+      {/* SIGNAL LIFETIME LEAGUE TABLE — every scanned stock counts as a trade */}
+      <Card title="SIGNAL LIFETIME PERFORMANCE — EVERY SCANNED STOCK COUNTS AS A TRADE">
         {signalStats.length === 0 ? (
           <div style={{ color: muted, fontSize: 13 }}>No completed trades yet.</div>
         ) : (
@@ -261,7 +265,7 @@ export default function LearningPage() {
             <thead>
               <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
                 <th style={th}>SIGNAL</th><th style={th}>TRADES</th><th style={th}>WIN%</th>
-                <th style={th}>AVG 7D</th><th style={th}>AVG 30D</th><th style={th}>AVG 90D</th>
+                <th style={th}>AVG LIVE</th><th style={th}>AVG 30D</th>
                 <th style={th}>BEST</th><th style={th}>WORST</th>
               </tr>
             </thead>
@@ -270,14 +274,18 @@ export default function LearningPage() {
                 <tr key={s.signal} data-testid={`signal-stat-${s.signal}`}
                     style={{ borderTop: hairline, opacity: s.n === 0 ? 0.4 : 1 }}>
                   <td style={{ ...td, color: accent }}>{s.signal.replace(/_/g, " ").toUpperCase()}</td>
-                  <td style={td}>{s.n}</td>
+                  <td style={td}>
+                    {s.n}
+                    {s.n_30d > 0 && <span style={{ color: muted, fontSize: 10, marginLeft: 4 }}>
+                      ({s.n_30d}×30d)
+                    </span>}
+                  </td>
                   <td style={{
                     ...td,
                     color: s.win_rate == null ? muted : s.win_rate >= 0.65 ? "#4ade80" : s.win_rate < 0.40 ? "#f87171" : accent,
                   }}>{s.win_rate != null ? `${(s.win_rate * 100).toFixed(0)}%` : "—"}</td>
-                  <td style={{ ...td, color: pctColor(s.avg_7d) }}>{fmt(s.avg_7d)}%</td>
+                  <td style={{ ...td, color: pctColor(s.avg_live) }}>{fmt(s.avg_live)}%</td>
                   <td style={{ ...td, color: pctColor(s.avg_30d) }}>{fmt(s.avg_30d)}%</td>
-                  <td style={{ ...td, color: pctColor(s.avg_90d) }}>{fmt(s.avg_90d)}%</td>
                   <td style={{ ...td, color: s.best != null ? "#4ade80" : muted }}>
                     {s.best != null ? `+${s.best}%` : "—"}
                   </td>

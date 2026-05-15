@@ -200,12 +200,27 @@ async def signals_options_curve(days: int = 90):
 
 @api.post("/admin/refresh_prices")
 async def admin_refresh_prices():
-    """Re-fetch every signal_first_seen entry price using Massive API.
-    Also clears the price cache so the next render hits Massive cleanly."""
+    """Refresh CURRENT prices for every tracked ticker (yfinance batch +
+    Massive grouped backfill). Does NOT touch entry prices — those were
+    captured intraday at scan time and are the truth-of-entry."""
     from services import pnl_tracker, pricer
-    result = await pnl_tracker.refresh_all_entry_prices(force=True)
-    return {"ok": True, "source": pricer.source_label(),
-             "massive_available": pricer.has_massive(), **result}
+    result = await pnl_tracker.refresh_current_prices_only()
+    return {"ok": True, "massive_available": pricer.has_massive(), **result}
+
+
+@api.post("/admin/restore_entry_prices")
+async def admin_restore_entry_prices():
+    """Restore first_seen_price from the original intraday scan_results
+    record. Use if entry prices look stale or were overwritten."""
+    from services import pnl_tracker
+    return await pnl_tracker.restore_intraday_entry_prices()
+
+
+@api.post("/admin/fill_missing_entry_prices")
+async def admin_fill_missing_entry_prices():
+    """Fill ONLY missing/null entry prices using Massive historical close."""
+    from services import pnl_tracker
+    return await pnl_tracker.refresh_all_entry_prices(force=False)
 
 
 @api.get("/admin/price_source")
@@ -379,7 +394,7 @@ async def learning_status():
 async def learning_combos():
     db = get_db()
     rows = await db.combo_stats.find(
-        {"trade_count": {"$gte": 3}}, {"_id": 0},
+        {"trade_count": {"$gte": 2}}, {"_id": 0},
     ).sort("avg_return_30d", -1).to_list(100)
     return rows
 

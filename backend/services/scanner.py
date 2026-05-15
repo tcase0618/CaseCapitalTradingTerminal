@@ -338,6 +338,12 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         await pnl_tracker.record_scan_picks(scan_doc)
     except Exception as e:
         logger.warning("P&L recording failed: %s", e)
+    # Refresh combo stats with the latest live data so the Learning page
+    # reflects every scan immediately
+    try:
+        await learning_engine.refresh_combo_stats_live()
+    except Exception as e:
+        logger.warning("Live combo stats refresh failed: %s", e)
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

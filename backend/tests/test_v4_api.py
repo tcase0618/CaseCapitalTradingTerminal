@@ -31,10 +31,11 @@ class TestRefreshPrices:
         assert r.status_code == 200, r.text
         d = r.json()
         assert d.get("ok") is True
-        assert "first_seen_updated" in d
-        assert "perf_rows_updated" in d
-        assert isinstance(d["first_seen_updated"], int)
-        assert isinstance(d["perf_rows_updated"], int)
+        # v5 semantics: refresh_prices now refreshes CURRENT prices only.
+        assert "tickers_requested" in d
+        assert "tickers_refreshed" in d
+        assert isinstance(d["tickers_requested"], int)
+        assert isinstance(d["tickers_refreshed"], int)
         assert d.get("source") == "massive"
 
 
