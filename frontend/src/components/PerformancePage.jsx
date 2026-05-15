@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -10,6 +11,8 @@ export default function PerformancePage() {
   const [perf, setPerf] = useState(null);
   const [backtest, setBacktest] = useState(null);
   const [tracker, setTracker] = useState(null);
+  const [curve, setCurve] = useState(null);
+  const [curveDays, setCurveDays] = useState(90);
   const [seeding, setSeeding] = useState(false);
 
   const refresh = async () => {
@@ -17,8 +20,9 @@ export default function PerformancePage() {
     axios.get(`${API}/performance/summary`).then(r => setPerf(r.data)).catch(e => console.error("perf:", e));
     axios.get(`${API}/backtest/summary`).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
     axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
+    axios.get(`${API}/signals/curve?days=${curveDays}`).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
   };
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [curveDays]);
 
   const seedBacktest = async () => {
     setSeeding(true);
@@ -114,6 +118,93 @@ export default function PerformancePage() {
               ))}
             </tbody>
           </table>
+        )}
+      </Card>
+
+      {/* AXIOM Performance Curve — Robinhood-style */}
+      <Card title={`AXIOM PERFORMANCE — ${curveDays}D · AVG % GAIN ACROSS ALL TRACKED SIGNALS`}
+        action={
+          <div style={{ display: "flex", gap: 6 }}>
+            {[30, 60, 90, 180].map(d => (
+              <button key={d} data-testid={`curve-range-${d}`} onClick={() => setCurveDays(d)}
+                style={{
+                  background: curveDays === d ? "rgba(200,168,75,0.12)" : "transparent",
+                  border: `0.5px solid ${curveDays === d ? accent : tokens.dim}`,
+                  color: curveDays === d ? accent : tokens.muted,
+                  fontSize: 10, padding: "4px 10px", cursor: "pointer",
+                  letterSpacing: "0.1em", fontFamily: "Courier New", fontWeight: 700,
+                }}>{d}D</button>
+            ))}
+          </div>
+        }>
+        {!curve || curve.length === 0 ? (
+          <div style={{ color: muted, fontSize: 13, padding: "12px 0" }}>
+            Building performance curve... Need at least 1 day of signal history.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 32, marginBottom: 14, paddingLeft: 8 }}>
+              <div>
+                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>CURRENT</div>
+                <div style={{
+                  fontSize: 30, fontWeight: 300, fontFamily: "Courier New",
+                  color: pctColor(curve[curve.length - 1]?.avg_gain_pct),
+                  letterSpacing: "0.02em",
+                }}>{fmt(curve[curve.length - 1]?.avg_gain_pct)}%</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>PEAK</div>
+                <div style={{
+                  fontSize: 18, fontWeight: 700, color: "#4ade80", fontFamily: "Courier New",
+                }}>+{Math.max(...curve.map(c => c.avg_gain_pct || 0)).toFixed(2)}%</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>TROUGH</div>
+                <div style={{
+                  fontSize: 18, fontWeight: 700, color: "#f87171", fontFamily: "Courier New",
+                }}>{Math.min(...curve.map(c => c.avg_gain_pct || 0)).toFixed(2)}%</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>POSITIONS</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", fontFamily: "Courier New" }}>
+                  {curve[curve.length - 1]?.positions || 0}
+                </div>
+              </div>
+            </div>
+            <div style={{ width: "100%", height: 280, marginLeft: -8 }}>
+              <ResponsiveContainer>
+                <AreaChart data={curve} margin={{ top: 10, right: 14, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="axiomGain" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#c8a84b" stopOpacity={0.45} />
+                      <stop offset="100%" stopColor="#c8a84b" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
+                  <XAxis dataKey="date" stroke="#374151"
+                    tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                    tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                    interval="preserveStartEnd" minTickGap={50} />
+                  <YAxis stroke="#374151" tickFormatter={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`}
+                    tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                    tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                    width={70} />
+                  <ReferenceLine y={0} stroke="#374151" strokeDasharray="3 3" />
+                  <Tooltip
+                    contentStyle={{
+                      background: "#0c0c12", border: "0.5px solid rgba(200,168,75,0.4)",
+                      fontSize: 11, fontFamily: "Courier New", color: "#e5e7eb",
+                      letterSpacing: "0.04em",
+                    }}
+                    formatter={(v, n) => [`${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`, "AVG GAIN"]}
+                    labelFormatter={(l) => `${l}`}
+                  />
+                  <Area type="monotone" dataKey="avg_gain_pct" stroke="#c8a84b" strokeWidth={2}
+                    fill="url(#axiomGain)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </>
         )}
       </Card>
 

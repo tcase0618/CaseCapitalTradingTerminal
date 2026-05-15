@@ -181,6 +181,14 @@ async def performance_summary():
     return {"signals": sig, "options": opt}
 
 
+@api.get("/signals/curve")
+async def signals_curve(days: int = 90):
+    """Daily P/L curve — Robinhood-style line. Avg % gain across all tracked
+    signals on each day in the window."""
+    from services import pnl_tracker
+    return {"days": days, "curve": await pnl_tracker.daily_pnl_curve(days=days)}
+
+
 @api.get("/signals/tracker")
 async def signals_tracker(limit: int = 200):
     """Every signal we've ever surfaced, treated as 'bought immediately on

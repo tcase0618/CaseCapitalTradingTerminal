@@ -390,11 +390,83 @@ async def ensure_first_seen_backfill() -> int:
     return backfilled
 
 
+async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
+    """Robinhood-style curve. For each date in the last N days, sum the
+    portfolio's % gain across every ticker that had been signaled by that date.
+    Equal-weight (each ticker contributes 1 unit). Uses yfinance historical
+    closes once per ticker; results cached for 1 hour."""
+    db = get_db()
+    rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
+    if not rows:
+        return []
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days + 5)
+    rows = [r for r in rows if r.get("first_seen_price") and r.get("first_seen_date")
+             and r.get("first_seen_date") >= cutoff.isoformat()]
+    if not rows:
+        return []
+
+    tickers = sorted({r["ticker"] for r in rows})
+    # Fetch historical closes once
+    import yfinance as yf
+
+    def _hist():
+        try:
+            df = yf.download(tickers=" ".join(tickers), period=f"{days + 10}d",
+                              interval="1d", progress=False, threads=True,
+                              group_by="ticker", auto_adjust=True)
+            return df
+        except Exception:
+            return None
+    loop = asyncio.get_event_loop()
+    hist = await loop.run_in_executor(None, _hist)
+    if hist is None or len(hist) == 0:
+        return []
+
+    # Build date → {ticker: close}
+    closes: dict[str, dict[str, float]] = {}
+    for t in tickers:
+        try:
+            series = hist["Close"] if len(tickers) == 1 else hist[t]["Close"]
+            for ts, v in series.dropna().items():
+                d = ts.date().isoformat()
+                closes.setdefault(d, {})[t] = float(v)
+        except Exception:
+            continue
+
+    # For each date in window, compute portfolio % gain
+    first_seen_map = {r["ticker"]: (r["first_seen_date"], r["first_seen_price"]) for r in rows}
+    sorted_dates = sorted(closes.keys())
+    today = datetime.now(timezone.utc).date().isoformat()
+    out: list[dict[str, Any]] = []
+    for d in sorted_dates:
+        if d < (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat():
+            continue
+        gains: list[float] = []
+        active = 0
+        for t, (entry_date, entry_price) in first_seen_map.items():
+            if entry_date > d:
+                continue
+            cur = closes.get(d, {}).get(t)
+            if cur is None or not entry_price:
+                continue
+            gains.append((cur - entry_price) / entry_price * 100.0)
+            active += 1
+        if active == 0:
+            continue
+        avg = sum(gains) / len(gains)
+        winners = sum(1 for g in gains if g > 0)
+        out.append({
+            "date": d,
+            "avg_gain_pct": round(avg, 2),
+            "positions": active,
+            "winners": winners,
+            "losers": active - winners,
+            "is_today": d == today,
+        })
+    return out
+
+
 async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
-    """Returns every ticker we've ever surfaced with first-seen price, current
-    price, and gain since signal. Treats every surfaced ticker as 'bought
-    immediately on signal' for daily P&L tracking on the Performance tab.
-    Current prices are cached for 10 minutes."""
     db = get_db()
     rows = await db.signal_first_seen.find({}, {"_id": 0}).sort("first_seen_date", -1).to_list(limit)
     out: list[dict[str, Any]] = []

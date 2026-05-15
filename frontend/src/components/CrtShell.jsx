@@ -23,7 +23,8 @@ export function CrtShell({ title, children, headerRight = null }) {
     <>
       <div className="scanline-overlay" />
       <div style={{
-        minHeight: "100vh", background: pageBg, color: "#e5e7eb",
+        height: "100vh", overflow: "hidden",
+        background: pageBg, color: "#e5e7eb",
         display: "grid", gridTemplateColumns: "200px 1fr",
         fontFamily: "Courier New, monospace",
       }}>
@@ -31,7 +32,7 @@ export function CrtShell({ title, children, headerRight = null }) {
         <aside style={{
           background: cardBg, borderRight: hairline,
           padding: "20px 16px", display: "flex", flexDirection: "column", gap: 24,
-          position: "sticky", top: 0, height: "100vh", overflowY: "auto",
+          height: "100vh", overflowY: "auto",
         }}>
           <Link to="/" style={{ textDecoration: "none" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -86,7 +87,7 @@ export function CrtShell({ title, children, headerRight = null }) {
         </aside>
 
         {/* Main */}
-        <main style={{ overflowY: "auto", minHeight: "100vh" }}>
+        <main style={{ overflowY: "auto", height: "100vh" }}>
           {/* Page header */}
           <div style={{
             padding: "20px 28px", borderBottom: hairline,

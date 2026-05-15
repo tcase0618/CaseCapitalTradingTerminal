@@ -285,29 +285,56 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
     risk = r.get("risk") or {}
     targets = r.get("targets") or {}
     tt = r.get("time_target") or {}
-    badges = " ".join(SIG_BADGE.get(s, _esc(s)) for s in r.get("signals", []))
-    risk_factors = (risk.get("factors") or [])[:2]
-    rf_line = " · ".join(_esc(f) for f in risk_factors) if risk_factors else "(none)"
+    badges = " ".join(SIG_BADGE.get(s, _esc(s)) for s in r.get("signals", [])[:6])
+    rf = (risk.get("factors") or [])[:2]
+    rf_line = " · ".join(_esc(f) for f in rf) if rf else "—"
+    target_date = _esc(tt.get("target_date", "—"))
+    hold = f"{tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)}d"
+
+    opts = r.get("options") or {}
+    opts_line = ""
+    if opts.get("strategy") == "AVOID_OPTIONS":
+        opts_line = f"\n⚠️ <b>OPTS:AVOID</b> · IV CRUSH {_esc(opts.get('crush_risk','—'))}"
+    elif opts.get("contract"):
+        c = opts["contract"]
+        opts_line = (
+            f"\n🎯 <b>{_esc(opts.get('strategy_name') or opts.get('strategy','OPTS'))}</b>"
+            f" · ${c.get('strike')}{c.get('type','')} {_esc(c.get('expiration',''))}"
+            f" @${c.get('premium')} · IV {opts.get('iv_rank','?')}%"
+        )
+        if opts.get("spread"):
+            sp = opts["spread"]
+            opts_line += f" · R/R {sp.get('risk_reward')}:1"
+
+    crush = opts.get("crush_risk")
+    crush_warn = ""
+    if crush in ("HIGH", "SEVERE"):
+        crush_warn = f" ⚠️IV{crush[0]}"
+
+    flow = opts.get("flow") or {}
+    flow_emoji = "🟢" if flow.get("flow_bias") == "BULLISH" else "🔴" if flow.get("flow_bias") == "BEARISH" else ""
+
     contract_line = ""
     contracts = r.get("contracts") or []
     if contracts:
         c0 = contracts[0]
         contract_line = (f"\n🏛 {_esc((c0.get('agency') or '')[:30])} "
                          f"${(c0.get('amount') or 0)/1e6:.1f}M")
-    target_date = _esc(tt.get("target_date", "—"))
-    hold = f"{tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)}"
-    options_block = _format_options_block(r.get("options"))
+
+    learning = r.get("learning_score")
+    learn_line = f" · AXIOM <b>{learning}</b>" if learning else ""
+
     return (
-        f"<b>{rank}. 🎯 ${_esc(r['ticker'])}</b> — <code>{r.get('signal_score',0)}/10</code>"
-        f" — {risk.get('emoji','⚪')} {_esc(risk.get('level','?'))}\n"
-        f"📊 {badges}\n"
-        f"💡 <i>{_esc(r.get('thesis',''))}</i>\n"
-        f"💰 Entry: {_fmt_price(r.get('entry_low'))}–{_fmt_price(r.get('entry_high'))}\n"
-        f"🎯 Target: {_fmt_price(targets.get('target_blended'))} "
-        f"({_fmt_pct(targets.get('upside_blended'))}) by {target_date}\n"
-        f"🛑 Stop: {_fmt_price(r.get('stop_loss'))} | ⏱ Hold: {hold} days\n"
-        f"⚠️ Risk: {rf_line}"
-        f"{options_block}"
+        f"<b>{rank}. ${_esc(r['ticker'])}</b> · "
+        f"<code>{r.get('signal_score',0)}/10</code> · "
+        f"{risk.get('emoji','⚪')}{_esc(risk.get('level','?'))[:1]}"
+        f"{crush_warn}{learn_line} {flow_emoji}\n"
+        f"{badges}\n"
+        f"<i>{_esc(r.get('thesis',''))}</i>\n"
+        f"💰 {_fmt_price(r.get('price'))} → <b>{_fmt_price(targets.get('target_blended'))}</b>"
+        f" <code>{_fmt_pct(targets.get('upside_blended'))}</code> · {target_date} · {hold}\n"
+        f"⛔ Stop {_fmt_price(r.get('stop_loss'))} · ⚠️ {rf_line}"
+        f"{opts_line}"
         f"{contract_line}"
     )
 
@@ -334,29 +361,33 @@ def _format_footer(results: list[dict[str, Any]]) -> str:
         lines.append(f"🏛 GOV PLAY: <b>${_esc(gov_pick['ticker'])}</b> — "
                      f"${(c0.get('amount') or 0)/1e6:.1f}M ({_esc((c0.get('agency') or '?')[:30])})")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("📈 /target [ticker] · 🔍 /risk [ticker]")
-    lines.append("📊 /backtest [signal] · 💬 Ask anything")
+    lines.append("⚡ /tracker · 📈 /curve · 🎯 /options TICKER")
+    lines.append("💬 Ask anything")
     return "\n".join(lines)
 
 
-def _format_header(scan: dict[str, Any], title: str = "STOCK INTEL BOT") -> str:
-    raw = scan.get("raw_counts", {})
-    total_signals = sum(raw.values())
+def _format_header(scan: dict[str, Any], title: str = "AXIOM INTEL") -> str:
+    rc = scan.get("raw_counts") or {}
+    ct = scan.get("results") or []
+    universe = scan.get("universe_size")
     return (
-        f"📡 <b>{title}</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🗓 {_now_et()}\n"
-        f"📊 {total_signals} signals → {scan.get('pre_filter_passed', 0)} passed filter\n"
-        f"💾 Cache: {scan.get('claude_cache_hits', 0)} hits · "
-        f"{scan.get('claude_calls_made', 0)} fresh\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"⚡ <b>{_esc(title)}</b> · {_now_et()}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 UNIVERSE: <b>{universe or '?'}</b>"
+        f"  ·  ✅ ACQUIRED: <b>{scan.get('pre_filter_passed', 0)}</b>"
+        f"  ·  🤖 BATCH: <b>{scan.get('claude_calls_made', 0)}</b>\n"
+        f"📊 {rc.get('insider_clusters', 0)} INSIDER · "
+        f"{rc.get('high_short_interest', 0)} SHORT · "
+        f"{rc.get('upcoming_earnings', 0)} ERN · "
+        f"{rc.get('gov_public_tickers', 0)} GOV\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
 
 TG_LIMIT = 4000  # leave buffer below 4096
 
 
-def build_consolidated_messages(scan: dict[str, Any], title: str = "STOCK INTEL BOT") -> list[str]:
+def build_consolidated_messages(scan: dict[str, Any], title: str = "AXIOM INTEL") -> list[str]:
     """Greedy chunking: fits as many cards as possible per message, opens a new
     message when the next card would overflow. Header on first, footer on last.
     Never truncates mid-card (which would break HTML parsing)."""
@@ -415,7 +446,7 @@ def build_consolidated_messages(scan: dict[str, Any], title: str = "STOCK INTEL 
 
 
 async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None,
-                                 title: str = "STOCK INTEL BOT") -> dict[str, Any]:
+                                 title: str = "AXIOM INTEL") -> dict[str, Any]:
     """Build + send consolidated msgs. Returns delivery summary."""
     msgs = build_consolidated_messages(scan, title=title)
     sent = 0
@@ -472,23 +503,111 @@ async def handle_update(update: dict[str, Any]) -> None:
 
     if cmd in ("/start", "/help"):
         await send_message(
-            "🤖 <b>Stock Intel Bot</b>\n"
-            "<b>Scans:</b>\n"
+            "⚡ <b>AXIOM INTELLIGENCE</b> · v3.0\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>SCANS</b>\n"
             "/scan · /scan_gov · /analyze TICKER\n\n"
-            "<b>Government:</b>\n"
-            "/contracts · /agency NAME · /watchlist_contracts\n\n"
-            "<b>Analysis:</b>\n"
-            "/risk TICKER · /target TICKER · /squeeze TICKER\n"
-            "/compare T1 T2 · /performance · /backtest · /backtest_seed\n\n"
-            "<b>Options:</b>\n"
-            "/options TICKER · /flow TICKER · /iv TICKER · /spread TICKER\n"
+            "<b>PERFORMANCE</b>\n"
+            "/tracker — live P&L all signals\n"
+            "/curve [days] — daily curve sparkline\n"
+            "/performance — combo win rates\n"
+            "/backtest · /backtest_seed\n\n"
+            "<b>OPTIONS</b>\n"
+            "/options · /flow · /iv · /spread\n"
             "/calls · /puts · /noiv\n\n"
-            "<b>Tracking:</b>\n"
-            "/watch · /unwatch · /watchlist · /alert TICKER PRICE · /alerts\n\n"
-            "<b>Live:</b>\n"
+            "<b>ANALYSIS</b>\n"
+            "/risk · /target · /squeeze · /compare T1 T2\n\n"
+            "<b>GOVERNMENT</b>\n"
+            "/contracts · /agency NAME · /watchlist_contracts\n\n"
+            "<b>TRACKING</b>\n"
+            "/watch · /unwatch · /watchlist\n"
+            "/alert TICKER PRICE · /alerts\n\n"
+            "<b>LIVE</b>\n"
             "/congress · /geo · /premarket\n\n"
-            "<i>Tip: Just type a question like \"What defense stocks "
-            "look good?\" and I'll answer in plain English.</i>",
+            "<i>or type any question — AXIOM answers in plain English.</i>",
+            chat_id=chat_id,
+        )
+        return
+
+    if cmd == "/tracker":
+        # Daily P&L of every ticker we've ever signaled
+        from . import pnl_tracker as _p
+        rows = await _p.signals_tracker_summary(limit=200)
+        if not rows:
+            await send_message("📊 <b>AXIOM TRACKER</b>\nNo signals tracked yet.", chat_id=chat_id)
+            return
+        with_gain = [r for r in rows if r.get("gain_pct") is not None]
+        winners = [r for r in with_gain if r["gain_pct"] > 0]
+        losers = [r for r in with_gain if r["gain_pct"] < 0]
+        avg = round(sum(r["gain_pct"] for r in with_gain) / len(with_gain), 2) if with_gain else 0
+        best = max(with_gain, key=lambda r: r["gain_pct"]) if with_gain else None
+        worst = min(with_gain, key=lambda r: r["gain_pct"]) if with_gain else None
+
+        # Sort by gain desc, take top 15
+        rows_sorted = sorted(with_gain, key=lambda r: r["gain_pct"], reverse=True)
+        top = rows_sorted[:10]
+        bot = rows_sorted[-5:] if len(rows_sorted) > 10 else []
+
+        lines = [
+            f"⚡ <b>AXIOM TRACKER</b> · {_now_et()}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"📊 <b>{len(with_gain)}</b> TRACKED · "
+            f"<b>{len(winners)}W</b>/<b>{len(losers)}L</b> · "
+            f"AVG <b>{avg:+.2f}%</b>",
+        ]
+        if best:
+            lines.append(f"🏆 BEST: <b>${_esc(best['ticker'])}</b> {best['gain_pct']:+.1f}%")
+        if worst:
+            lines.append(f"📉 WORST: <b>${_esc(worst['ticker'])}</b> {worst['gain_pct']:+.1f}%")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("<b>TOP MOVERS:</b>")
+        for r in top:
+            arrow = "📈" if r["gain_pct"] > 0 else "📉"
+            lines.append(
+                f"{arrow} <b>${_esc(r['ticker'])}</b> "
+                f"<code>{r['gain_pct']:+.1f}%</code> "
+                f"${r['first_seen_price']:.2f}→${r['current_price']:.2f} "
+                f"({_esc(r['first_seen_date'])})"
+            )
+        if bot:
+            lines.append("")
+            lines.append("<b>WORST:</b>")
+            for r in bot:
+                lines.append(
+                    f"📉 <b>${_esc(r['ticker'])}</b> "
+                    f"<code>{r['gain_pct']:+.1f}%</code> "
+                    f"${r['first_seen_price']:.2f}→${r['current_price']:.2f}"
+                )
+        await send_message("\n".join(lines), chat_id=chat_id)
+        return
+
+    if cmd == "/curve":
+        from . import pnl_tracker as _p
+        days = int(args[0]) if args and args[0].isdigit() else 30
+        curve = await _p.daily_pnl_curve(days=days)
+        if not curve:
+            await send_message("📈 <b>AXIOM CURVE</b>\nNot enough history yet.", chat_id=chat_id)
+            return
+        latest = curve[-1]
+        peak = max(curve, key=lambda c: c["avg_gain_pct"])
+        trough = min(curve, key=lambda c: c["avg_gain_pct"])
+        # ASCII sparkline
+        vals = [c["avg_gain_pct"] for c in curve]
+        lo, hi = min(vals), max(vals)
+        spark_chars = "▁▂▃▄▅▆▇█"
+        if hi > lo:
+            spark = "".join(spark_chars[min(7, int((v - lo) / (hi - lo) * 7))] for v in vals)
+        else:
+            spark = "▄" * len(vals)
+        await send_message(
+            f"📈 <b>AXIOM CURVE — {days}D</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{spark}</code>\n"
+            f"📊 NOW: <b>{latest['avg_gain_pct']:+.2f}%</b> · "
+            f"{latest['positions']} positions ({latest['winners']}W/{latest['losers']}L)\n"
+            f"🏆 PEAK: <b>{peak['avg_gain_pct']:+.2f}%</b> ({_esc(peak['date'])})\n"
+            f"📉 TROUGH: <b>{trough['avg_gain_pct']:+.2f}%</b> ({_esc(trough['date'])})\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━",
             chat_id=chat_id,
         )
         return
