@@ -16,10 +16,13 @@ const hairline = "0.5px solid rgba(255,255,255,0.06)";
 const hairlineAccent = "0.5px solid rgba(200,168,75,0.18)";
 
 const NAV = [
-  { to: "/", label: "DASHBOARD", icon: "▣" },
-  { to: "/performance", label: "PERFORMANCE", icon: "▶" },
-  { to: "/learning", label: "LEARNING", icon: "◆" },
-  { to: "/settings", label: "SETTINGS", icon: "▥" },
+  { to: "/",            label: "DASHBOARD",   icon: "▣", group: "CORE" },
+  { to: "/intel",       label: "INTEL FEED",  icon: "◉", group: "CORE" },
+  { to: "/earnings",    label: "EARNINGS",    icon: "▤", group: "v3.2" },
+  { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "v3.2" },
+  { to: "/performance", label: "PERFORMANCE", icon: "▶", group: "ANALYSIS" },
+  { to: "/learning",    label: "LEARNING",    icon: "◆", group: "ANALYSIS" },
+  { to: "/settings",    label: "SETTINGS",    icon: "▥", group: "SYSTEM" },
 ];
 
 // US market hours: 9:30 - 16:00 ET (UTC-5 / UTC-4 DST)
@@ -136,41 +139,73 @@ export function CrtShell({ title, children, headerRight = null }) {
             </div>
           </Link>
 
-          {/* Navigation */}
-          <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <div style={{
-              fontSize: 9, color: dim, letterSpacing: "0.18em", marginBottom: 6,
-              paddingLeft: 4,
-            }}>
-              {"// NAVIGATION"}
-            </div>
-            {NAV.map((n, i) => {
-              const isActive = loc.pathname === n.to ||
-                (n.to !== "/" && loc.pathname.startsWith(n.to));
+          {/* Navigation — grouped */}
+          <nav style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            {["CORE", "v3.2", "ANALYSIS", "SYSTEM"].map((group, gi) => {
+              const groupItems = NAV.filter(n => n.group === group);
+              if (groupItems.length === 0) return null;
               return (
-                <Link key={n.to} to={n.to}
-                  data-testid={`nav-${n.label.toLowerCase()}`}
-                  className={`fade-in fade-in-${i+1} hover-glow`}
-                  style={{
+                <div key={group} style={{ marginBottom: 10 }}>
+                  <div style={{
+                    fontSize: 8, color: dim, letterSpacing: "0.22em",
+                    marginBottom: 6, marginTop: gi === 0 ? 0 : 8,
+                    paddingLeft: 4, fontWeight: 700,
                     display: "flex", alignItems: "center", gap: 8,
-                    padding: "8px 10px",
-                    fontSize: 11.5,
-                    color: isActive ? accent : labelLight,
-                    background: isActive ? "rgba(200,168,75,0.06)" : "transparent",
-                    borderLeft: `3px solid ${isActive ? accent : "transparent"}`,
-                    borderRight: hairline,
-                    textDecoration: "none",
-                    letterSpacing: "0.1em",
-                    fontWeight: isActive ? 700 : 500,
-                    transition: "all 0.18s",
-                    boxShadow: isActive ? `inset 0 0 12px rgba(200,168,75,0.08)` : "none",
                   }}>
-                  <span style={{
-                    color: isActive ? accent : dim,
-                    fontSize: 9, width: 12,
-                  }}>{isActive ? "▸" : n.icon}</span>
-                  <span>{n.label}</span>
-                </Link>
+                    <span>{"// "+group}</span>
+                    {group === "v3.2" && (
+                      <span style={{
+                        fontSize: 8, padding: "1px 5px",
+                        background: `${accent2}22`, color: accent2,
+                        letterSpacing: "0.1em", border: `0.5px solid ${accent2}66`,
+                      }}>NEW</span>
+                    )}
+                    <span style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.04)" }} />
+                  </div>
+                  {groupItems.map((n, i) => {
+                    const isActive = loc.pathname === n.to ||
+                      (n.to !== "/" && loc.pathname.startsWith(n.to));
+                    const hue = group === "v3.2" ? accent2 : accent;
+                    return (
+                      <Link key={n.to} to={n.to}
+                        data-testid={`nav-${n.label.toLowerCase().replace(' ', '-')}`}
+                        className={`fade-in fade-in-${(gi+i+1) % 5 + 1}`}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10,
+                          padding: "7px 10px",
+                          fontSize: 11.5,
+                          color: isActive ? hue : labelLight,
+                          background: isActive ? `${hue}10` : "transparent",
+                          borderLeft: `3px solid ${isActive ? hue : "transparent"}`,
+                          textDecoration: "none",
+                          letterSpacing: "0.08em",
+                          fontWeight: isActive ? 700 : 500,
+                          transition: "all 0.18s",
+                          boxShadow: isActive ? `inset 0 0 14px ${hue}14` : "none",
+                        }}
+                        onMouseEnter={e => {
+                          if (!isActive) {
+                            e.currentTarget.style.background = "rgba(255,255,255,0.025)";
+                            e.currentTarget.style.color = "#e5e7eb";
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          if (!isActive) {
+                            e.currentTarget.style.background = "transparent";
+                            e.currentTarget.style.color = labelLight;
+                          }
+                        }}>
+                        <span style={{
+                          color: isActive ? hue : dim,
+                          fontSize: 10, width: 12,
+                          textShadow: isActive ? `0 0 6px ${hue}` : "none",
+                        }}>{isActive ? "▸" : n.icon}</span>
+                        <span style={{ flex: 1 }}>{n.label}</span>
+                        {isActive && <span className="blink" style={{ color: hue, fontSize: 8 }}>●</span>}
+                      </Link>
+                    );
+                  })}
+                </div>
               );
             })}
           </nav>

@@ -5,6 +5,9 @@ import LearningPage from "@/components/LearningPage";
 import PerformancePage from "@/components/PerformancePage";
 import TickerPage from "@/components/TickerPage";
 import SettingsPage from "@/components/SettingsPage";
+import EarningsPage from "@/components/EarningsPage";
+import LotteryPage from "@/components/LotteryPage";
+import IntelPage from "@/components/IntelPage";
 import { Toaster } from "sonner";
 
 function App() {
@@ -15,6 +18,9 @@ function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/learning" element={<LearningPage />} />
           <Route path="/performance" element={<PerformancePage />} />
+          <Route path="/earnings" element={<EarningsPage />} />
+          <Route path="/lottery" element={<LotteryPage />} />
+          <Route path="/intel" element={<IntelPage />} />
           <Route path="/ticker/:ticker" element={<TickerPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

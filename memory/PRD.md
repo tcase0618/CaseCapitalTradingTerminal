@@ -145,12 +145,43 @@ P&L tracking, backtesting, and a progressive learning engine.
 
 ## Feb 2026 — v6: Finnhub Real-Time Quotes Added
 - **Finnhub free-tier integrated** as the primary current-price source. Live key in `/app/backend/.env` as `FINNHUB_API_KEY`. Real-time quotes (30-second freshness), 60 req/min throttled internally via rolling window.
-- **Smart routing for current prices** (`pricer.batch_latest_closes`):
-  1. Massive grouped-daily — 1 call fills yesterday's close for everything
-  2. **Finnhub /quote** — overrides Massive with TODAY's intraday quote (real-time)
-  3. yfinance batch — fallback for anything both APIs missed
-- **For single-ticker `get_latest_close`**: Finnhub primary → Massive backfill → yfinance ultimate fallback.
-- **`/api/admin/price_source`** returns `{source, massive_available, finnhub_available}` — drives a green `SRC · FINNHUB + MASSIVE` badge at top-right of the Performance page. Color denotes source: green=finnhub real-time, teal=massive EOD, gray=yfinance.
-- All 58 tracked tickers now sourced from Finnhub (verified). No rate limit hits.
+- **Smart routing for current prices**: Finnhub primary → Massive grouped backfill → yfinance fallback.
+
+## Feb 2026 — v7: Dashboard Polish + Finviz Scraper Repair + Universe Truthfulness
+- **Critical bug fix**: Finviz changed URL pattern from `quote?t=` to `stock?t=` — our regex no longer matched, so `high_short_interest` returned 0 (~70% of the universe was missing). Both `fetch_finviz_high_short_interest` and `fetch_finviz_upcoming_earnings` patched. Universe went from 69 → 422, short signals 0 → 300, targets 4 → 10.
+- **"PRE-FILTER UNIVERSE" tile relabeled to "UNIVERSE SWEPT"** with honest sub-label (`INSIDER N · SHORT N · GOV N`) instead of the misleading `S&P 500 · NASDAQ · RUSSELL 2K`.
+- **Dashboard upgraded to match Performance/Learning aesthetic**: sticky SystemBar at top, accent stripe along metrics row, primary-tile amber bar + glow, color-coded tiles per signal type (insider purple / short red / gov teal / uplink green), tabular numerals, hover effects.
+
+## Feb 2026 — v3.2: 7-FEATURE MEGA RELEASE
+**Built across 6 new services + 9 new endpoints + 3 new frontend pages.**
+
+### New backend services
+- `services/dark_horse.py` — Institutional accumulation detector via FINRA CNMS daily short-volume CSVs (`cdn.finra.org/equity/regsho/daily/CNMSshvol{YYYYMMDD}.txt`). Computes off-exchange ratio, block-size %ADV, and premium-above-prev-close. Caches FINRA file 12h.
+- `services/x_factor.py` — Sentiment surge detector. StockTwits (mentions + bullish %) and Google Trends (search interest). Reddit disabled (now requires OAuth post-2023; reactivate when client_id/secret supplied). `evaluate_x_factor(ticker, fast=True)` skips Google Trends in scan-time path.
+- `services/macro_pulse.py` — FRED upcoming-events tracker. Live FRED key in `.env` as `FRED_API_KEY`. Tracks FOMC, CPI, PPI, Jobs, GDP, Retail. Each event maps to warned/boosted sectors. `should_block_long_call(industry)` is the recommendation gate.
+- `services/earnings_engine.py` — Full Mon-Fri earnings schedule + Beat Probability model (5-95%, clamped). 5 components: EPS streak, momentum 20D, revenue accel, short %, options-flow blend (60/40). Strategy selector emits LONG CALL / CALL SPREAD / AVOID / BEAR PUT SPREAD.
+- `services/lottery.py` — 4-factor lottery scorer (squeeze · flow · catalyst · cheap IV) + SI bonus. Tiers JACKPOT≥80 / HOT≥65 / WARM≥50 / COLD<50. Contract finder picks calls 10-20% OTM, $0.10-$0.75 premium, 14-28 DTE. EV math (P(2x), P(10x), P(loss)). Logs JACKPOT/HOT picks for nightly settlement tracking.
+- `services/conviction.py` — Max Conviction scoring (8 component flags), Top 3 daily designation, Narrative Lock detector (Dark Horse + X Factor + flow≥75 on same ticker — auto-elevates lottery tier to JACKPOT + adds 20 to AXIOM score).
+
+### Scanner pipeline rewire
+`scanner.run_scan()` now runs all 7 modules in sequence after the core scan: Dark Horse · X Factor · Macro · Earnings (parallel), then Lottery (uses results) → Conviction + Narrative Lock (uses all). Verified live in 14.3s for 10 results / 422 universe.
+
+### New endpoints (all under `/api/v32/...`)
+- `GET /v32/earnings_week` — full Mon-Fri grouped schedule
+- `GET /v32/lottery` + `/v32/lottery/current` — track record + active picks
+- `GET /v32/dark_horse` + `/v32/x_factor` — recent alerts
+- `GET /v32/sentiment/{ticker}` — single-ticker live StockTwits + Google Trends
+- `GET /v32/macro` — upcoming events + imminent warnings
+- `GET /v32/conviction` — Top 3 + Narrative Locks (14d)
+
+### Telegram v3.2 dispatch format (replaced existing)
+Header: UNIVERSE / ACQUIRED / BATCH counts · raw-source breakdown · Macro CLEAR/WARNING line.
+Per-card: AXIOM badge (🟢 if Max Conviction), Dark Horse line, X Factor line, Narrative Lock line, options strategy, Lottery tier + EV.
+Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK summary roll-ups + scan duration.
+
+### Frontend
+- **New sidebar** with grouped sections (CORE / v3.2 with `NEW` badge / ANALYSIS / SYSTEM), hover transitions, blinking active-state dot.
+- **New pages**: `/earnings` (Mon-Fri table with Beat Prob color coding + AXIOM MATCH badge), `/lottery` (tier-stat tiles + current scan + track record tabs), `/intel` (Max Conviction Top 3 cards + Dark Horse table + X Factor table + Macro Pulse calendar).
+- All pages use new CrtShell — sticky SystemBar, corner brackets, fade-in animations.
 
 

@@ -282,6 +282,7 @@ def _crush_line(crush: str) -> str:
 
 
 def _format_one_card(rank: int, r: dict[str, Any]) -> str:
+    """v3.2 ticker card — adds Dark Horse, X Factor, Narrative Lock, Lottery."""
     risk = r.get("risk") or {}
     targets = r.get("targets") or {}
     tt = r.get("time_target") or {}
@@ -290,86 +291,136 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
     rf_line = " · ".join(_esc(f) for f in rf) if rf else "—"
     target_date = _esc(tt.get("target_date", "—"))
     hold = f"{tt.get('hold_period_low', 0)}–{tt.get('hold_period_high', 0)}d"
+    beta = r.get("beta") or (r.get("fundamentals") or {}).get("beta")
+
+    learning = r.get("learning_score") or r.get("signal_score", 0)
+
+    # v3.2 alert lines
+    extras: list[str] = []
+    dh = r.get("dark_horse")
+    if dh:
+        extras.append(
+            f"🐴 <b>DARK HORSE</b> · {dh.get('off_exchange_pct',0)}% off-exchange · "
+            f"{int(dh.get('block_volume',0)/1000)}k shares · +{dh.get('premium_pct',0)}% premium"
+        )
+    xf = r.get("x_factor")
+    if xf:
+        prim = xf.get("primary_trigger") or {}
+        plat = prim.get("platform") or "?"
+        spike = prim.get("spike_x") or prim.get("ratio") or "?"
+        bull = prim.get("bullish_pct") or 0
+        extras.append(f"⚡ <b>X FACTOR</b> · {_esc(plat)} {spike}x spike · {bull}% bullish")
+    if r.get("narrative_lock"):
+        extras.append("🔒 <b>NARRATIVE LOCK — ALL SYSTEMS GO</b>")
 
     opts = r.get("options") or {}
     opts_line = ""
-    if opts.get("strategy") == "AVOID_OPTIONS":
-        opts_line = f"\n⚠️ <b>OPTS:AVOID</b> · IV CRUSH {_esc(opts.get('crush_risk','—'))}"
-    elif opts.get("contract"):
+    if opts.get("contract"):
         c = opts["contract"]
         opts_line = (
-            f"\n🎯 <b>{_esc(opts.get('strategy_name') or opts.get('strategy','OPTS'))}</b>"
-            f" · ${c.get('strike')}{c.get('type','')} {_esc(c.get('expiration',''))}"
-            f" @${c.get('premium')} · IV {opts.get('iv_rank','?')}%"
+            f"🎯 <b>{_esc(opts.get('strategy_name') or opts.get('strategy','OPTS'))}</b> · "
+            f"${c.get('strike')}{c.get('type','')[:1]} {_esc(c.get('expiration',''))} "
+            f"@${c.get('premium')} · IV {opts.get('iv_rank','?')}%"
         )
-        if opts.get("spread"):
-            sp = opts["spread"]
-            opts_line += f" · R/R {sp.get('risk_reward')}:1"
 
-    crush = opts.get("crush_risk")
-    crush_warn = ""
-    if crush in ("HIGH", "SEVERE"):
-        crush_warn = f" ⚠️IV{crush[0]}"
+    lot_line = ""
+    if r.get("lottery_tier"):
+        ls = r.get("lottery_score") or 0
+        tier = r.get("lottery_tier")
+        # Find EV from lottery picks
+        ev = r.get("ev") or {}
+        from .lottery import TIER_LIMITS
+        max_bet = TIER_LIMITS.get(tier, 0)
+        p2x = ev.get("p_double", 0) * 100
+        p10x = ev.get("p_10x", 0) * 100
+        lot_line = (
+            f"🎰 <b>{_esc(tier)}</b> {int(ls)}/100 · "
+            f"P(2x): {p2x:.0f}% · P(10x): {p10x:.1f}% · Max: ${max_bet}"
+        )
 
-    flow = opts.get("flow") or {}
-    flow_emoji = "🟢" if flow.get("flow_bias") == "BULLISH" else "🔴" if flow.get("flow_bias") == "BEARISH" else ""
+    risk_emoji = risk.get("emoji", "⚪")
+    risk_letter = (risk.get("level", "?") or "?")[:1]
 
-    contract_line = ""
-    contracts = r.get("contracts") or []
-    if contracts:
-        c0 = contracts[0]
-        contract_line = (f"\n🏛 {_esc((c0.get('agency') or '')[:30])} "
-                         f"${(c0.get('amount') or 0)/1e6:.1f}M")
-
-    learning = r.get("learning_score")
-    learn_line = f" · AXIOM <b>{learning}</b>" if learning else ""
-
-    return (
-        f"<b>{rank}. ${_esc(r['ticker'])}</b> · "
-        f"<code>{r.get('signal_score',0)}/10</code> · "
-        f"{risk.get('emoji','⚪')}{_esc(risk.get('level','?'))[:1]}"
-        f"{crush_warn}{learn_line} {flow_emoji}\n"
-        f"{badges}\n"
-        f"<i>{_esc(r.get('thesis',''))}</i>\n"
-        f"💰 {_fmt_price(r.get('price'))} → <b>{_fmt_price(targets.get('target_blended'))}</b>"
-        f" <code>{_fmt_pct(targets.get('upside_blended'))}</code> · {target_date} · {hold}\n"
-        f"⛔ Stop {_fmt_price(r.get('stop_loss'))} · ⚠️ {rf_line}"
-        f"{opts_line}"
-        f"{contract_line}"
+    lines = [
+        f"<b>{rank}. ${_esc(r['ticker'])}</b> · <code>{r.get('signal_score',0)}/10</code> · "
+        f"{risk_emoji}{risk_letter} · AXIOM <b>{learning}</b> "
+        + ("🟢" if r.get("max_conviction") else ""),
+        badges,
+    ]
+    lines.extend(extras)
+    lines.append(f"<i>{_esc(r.get('thesis',''))}</i>")
+    lines.append(
+        f"💰 {_fmt_price(r.get('price'))} → <b>{_fmt_price(targets.get('target_blended'))}</b> "
+        f"<code>{_fmt_pct(targets.get('upside_blended'))}</code> · {target_date} · {hold}"
     )
+    stop_str = f"🛑 Stop {_fmt_price(r.get('stop_loss'))} · ⚠️ {rf_line}"
+    if beta:
+        stop_str += f" · Beta {beta:.1f}"
+    lines.append(stop_str)
+    if opts_line:
+        lines.append(opts_line)
+    if lot_line:
+        lines.append(lot_line)
+    return "\n".join(lines)
 
 
-def _format_footer(results: list[dict[str, Any]]) -> str:
-    if not results:
+def _format_footer(results: list[dict[str, Any]], scan: dict[str, Any] | None = None) -> str:
+    """v3.2 footer — lottery picks, earnings, dark horses, narrative locks."""
+    if not results and not scan:
         return ""
-    top_pick = max(results, key=lambda x: x.get("signal_score", 0))
-    sq_pick = max(results, key=lambda x: (x.get("squeeze") or {}).get("score", 0) or 0)
-    gov_results = [r for r in results if r.get("contracts")]
-    gov_pick = max(gov_results,
-                    key=lambda x: max((c.get("amount", 0) for c in x.get("contracts", [])), default=0)) if gov_results else None
-
+    scan = scan or {}
     lines = ["━━━━━━━━━━━━━━━━━━━━━━━━━"]
-    if top_pick:
-        tg = top_pick.get("targets") or {}
-        lines.append(f"🏆 TOP PICK: <b>${_esc(top_pick['ticker'])}</b> — "
-                     f"score {top_pick.get('signal_score',0)}/10 ({_fmt_pct(tg.get('upside_blended'))})")
-    if sq_pick and (sq_pick.get("squeeze") or {}).get("score", 0):
-        sq = sq_pick.get("squeeze") or {}
-        lines.append(f"⚡ SQUEEZE WATCH: <b>${_esc(sq_pick['ticker'])}</b> — {sq.get('score','?')}/100")
-    if gov_pick:
-        c0 = (gov_pick.get("contracts") or [{}])[0]
-        lines.append(f"🏛 GOV PLAY: <b>${_esc(gov_pick['ticker'])}</b> — "
-                     f"${(c0.get('amount') or 0)/1e6:.1f}M ({_esc((c0.get('agency') or '?')[:30])})")
+
+    # Lottery — top 3 by score (only non-COLD)
+    lot = sorted(
+        [r for r in results if r.get("lottery_tier") and r["lottery_tier"] != "COLD"],
+        key=lambda x: -(x.get("lottery_score") or 0),
+    )[:3]
+    if lot:
+        lines.append("🎰 LOTTERY · " + " · ".join(
+            f"${_esc(r['ticker'])} {int(r.get('lottery_score') or 0)}" for r in lot
+        ))
+
+    # Earnings this week — top 3 by beat probability
+    earnings_summary = (scan.get("v32") or {}).get("earnings_summary") or {}
+    # earnings rows are nested under v32.earnings — but we only stored counts.
+    # Surface tickers from results that have earnings_this_week flag, then
+    # if we have full earnings_week from v32, prefer probability-sorted top 3.
+    e_tickers = [r for r in results if r.get("earnings_this_week")]
+    if e_tickers:
+        lines.append("📅 EARNINGS · " + " · ".join(
+            f"${_esc(r['ticker'])}" for r in e_tickers[:3]
+        ))
+
+    # Dark Horse
+    dh = [r for r in results if r.get("dark_horse")][:3]
+    if dh:
+        lines.append("🐴 DARK HORSE · " + " · ".join(f"${_esc(r['ticker'])}" for r in dh))
+
+    # Narrative Lock
+    nl = [r for r in results if r.get("narrative_lock")][:3]
+    if nl:
+        lines.append("🔒 NARRATIVE LOCK · " + " · ".join(f"${_esc(r['ticker'])}" for r in nl))
+
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚡ /tracker · 📈 /curve · 🎯 /options TICKER")
-    lines.append("💬 Ask anything")
+    duration = scan.get("duration_sec", 0)
+    sig_count = sum(len(r.get("signals", [])) for r in results)
+    lines.append(f"⚡ AXIOM v3.2 · {duration}s · {sig_count} signals fired")
     return "\n".join(lines)
 
 
 def _format_header(scan: dict[str, Any], title: str = "AXIOM INTEL") -> str:
+    """v3.2 header — adds Macro line."""
     rc = scan.get("raw_counts") or {}
-    ct = scan.get("results") or []
     universe = scan.get("universe_size")
+    macro = (scan.get("v32") or {}).get("macro") or {}
+    imminent = macro.get("imminent") or []
+    if imminent:
+        m = imminent[0]
+        macro_line = f"🌐 MACRO: <b>WARNING</b> · 📅 {_esc(m.get('tag'))} IN {m.get('days_until')} DAYS"
+    else:
+        macro_line = "🌐 MACRO: <b>CLEAR</b>"
+
     return (
         f"⚡ <b>{_esc(title)}</b> · {_now_et()}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -380,6 +431,7 @@ def _format_header(scan: dict[str, Any], title: str = "AXIOM INTEL") -> str:
         f"{rc.get('high_short_interest', 0)} SHORT · "
         f"{rc.get('upcoming_earnings', 0)} ERN · "
         f"{rc.get('gov_public_tickers', 0)} GOV\n"
+        f"{macro_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -395,7 +447,7 @@ def build_consolidated_messages(scan: dict[str, Any], title: str = "AXIOM INTEL"
     results.sort(key=lambda r: r.get("signal_score", 0), reverse=True)
 
     header = _format_header(scan, title)
-    footer = _format_footer(results)
+    footer = _format_footer(results, scan)
     sep = "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     if not results:

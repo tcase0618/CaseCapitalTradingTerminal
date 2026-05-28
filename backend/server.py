@@ -1,5 +1,6 @@
 """FastAPI entrypoint: Stock Intelligence Telegram Bot backend."""
 from __future__ import annotations
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -439,6 +440,82 @@ async def learning_signal_stats():
     """Lifetime per-signal win-rate + return league table."""
     from services import learning_engine
     return await learning_engine.signal_lifetime_stats()
+
+
+# ─────────── AXIOM v3.2 endpoints ───────────
+@api.get("/v32/earnings_week")
+async def v32_earnings_week():
+    from services import earnings_engine
+    db = get_db()
+    last_scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1},
+                                                  sort=[("finished_at", -1)])
+    scan_set = {r["ticker"] for r in (last_scan or {}).get("results", []) or []}
+    return await earnings_engine.current_week_with_probability(scan_tickers=scan_set)
+
+
+@api.get("/v32/lottery")
+async def v32_lottery(days: int = 14, tier: str | None = None):
+    from services import lottery
+    picks = await lottery.recent_picks(days=days, tier=tier)
+    track = await lottery.track_record()
+    return {"picks": picks, "track_record": track}
+
+
+@api.get("/v32/lottery/current")
+async def v32_lottery_current():
+    """Returns lottery picks attached to the latest scan."""
+    db = get_db()
+    last = await db.scan_results.find_one({}, {"_id": 0, "lottery_picks": 1, "finished_at": 1},
+                                              sort=[("finished_at", -1)])
+    if not last:
+        return {"picks": [], "scan_at": None}
+    return {"picks": last.get("lottery_picks") or [], "scan_at": last.get("finished_at")}
+
+
+@api.get("/v32/dark_horse")
+async def v32_dark_horse(days: int = 7):
+    from services import dark_horse
+    return await dark_horse.recent_alerts(days=days)
+
+
+@api.get("/v32/x_factor")
+async def v32_x_factor(days: int = 7):
+    from services import x_factor
+    return await x_factor.recent_alerts(days=days)
+
+
+@api.get("/v32/sentiment/{ticker}")
+async def v32_sentiment(ticker: str):
+    from services import x_factor
+    twits, trends = await asyncio.gather(
+        x_factor.fetch_stocktwits(ticker),
+        x_factor.fetch_google_trends(ticker),
+        return_exceptions=True,
+    )
+    return {
+        "ticker": ticker.upper(),
+        "stocktwits": None if isinstance(twits, Exception) else twits,
+        "google_trends": None if isinstance(trends, Exception) else trends,
+    }
+
+
+@api.get("/v32/macro")
+async def v32_macro(days_ahead: int = 14):
+    from services import macro_pulse
+    events = await macro_pulse.upcoming_events(days_ahead=days_ahead)
+    return {
+        "events": events,
+        "imminent_warnings": [e for e in events if e.get("is_imminent")],
+        "fred_available": macro_pulse.has_fred(),
+    }
+
+
+@api.get("/v32/conviction")
+async def v32_conviction():
+    from services import conviction
+    top3 = await conviction.latest_top3()
+    locks = await conviction.recent_locks(days=14)
+    return {"top3": top3, "narrative_locks_14d": locks}
 
 
 @api.get("/ticker/{ticker}")

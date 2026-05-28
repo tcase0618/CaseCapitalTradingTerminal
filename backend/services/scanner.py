@@ -7,8 +7,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from . import claude_service, congress, learning_engine, options_engine, pnl_tracker, risk_target, \
-    squeeze as squeeze_mod, time_target, usaspending
+from . import claude_service, congress, conviction, dark_horse, earnings_engine, \
+    learning_engine, lottery, macro_pulse, options_engine, pnl_tracker, pricer, \
+    risk_target, squeeze as squeeze_mod, time_target, usaspending, x_factor
 from .db import get_db, log_activity, stamped
 from .scrapers import collect_all_signals
 
@@ -332,6 +333,20 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         "results": final,
         "budget_surges": gov.get("budget_surges", []),
     })
+
+    # ─────────── AXIOM v3.2 — Post-scan intelligence pipeline ───────────
+    v32 = await _run_v32_pipeline(final)
+    scan_doc.update({
+        "v32": v32,
+        "max_conviction": v32.get("max_conviction") or {},
+        "narrative_locks": v32.get("narrative_locks") or [],
+        "dark_horse_alerts": v32.get("dark_horse") or [],
+        "x_factor_alerts": v32.get("x_factor") or [],
+        "lottery_picks": v32.get("lottery") or [],
+        "macro_pulse": v32.get("macro") or {},
+        "earnings_week": v32.get("earnings_summary") or {},
+    })
+
     await db.scan_results.insert_one(dict(scan_doc))
     # Record P&L tracking rows (one per ticker, signal & options)
     try:
@@ -407,4 +422,158 @@ async def run_gov_scan_only(triggered_by: str = "manual") -> dict[str, Any]:
         "results": out,
         "budget_surges": gov.get("budget_surges", []),
         "triggered_by": triggered_by,
+    }
+
+
+
+async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
+    """Run all 7 AXIOM v3.2 post-scan modules on the scan results.
+    Returns a dict with keys: dark_horse, x_factor, lottery, macro,
+    earnings_summary, narrative_locks, max_conviction."""
+    if not final:
+        return {}
+    tickers = [r["ticker"] for r in final if r.get("ticker")]
+    if not tickers:
+        return {}
+
+    # 1) Dark Horse — needs OHLC + ADV context per ticker
+    async def _build_dh_context():
+        ctx: dict[str, dict] = {}
+        # Pull recent history for ADV + last close/prev close
+        hist = await pricer.batch_history(tickers, days=35)
+        for t in tickers:
+            series = hist.get(t) or {}
+            if not series:
+                continue
+            dates = sorted(series.keys())
+            if len(dates) < 5:
+                continue
+            closes = [series[d] for d in dates]
+            close = closes[-1]
+            prev_close = closes[-2] if len(closes) > 1 else None
+            ctx[t] = {
+                "close": close,
+                "prev_close": prev_close,
+                "vwap_proxy": close,  # fall back to close if no intraday
+                "avg_volume_30d": None,  # filled below
+            }
+        # Volume ADV via yfinance (one batch)
+        try:
+            import yfinance as yf
+            def _vol():
+                data = yf.download(tickers=" ".join(tickers), period="35d",
+                                    interval="1d", progress=False, threads=True,
+                                    group_by="ticker", auto_adjust=False)
+                if data is None or len(data) == 0:
+                    return {}
+                out = {}
+                if len(tickers) == 1:
+                    try:
+                        out[tickers[0]] = float(data["Volume"].dropna().tail(30).mean())
+                    except Exception:
+                        pass
+                    return out
+                for t in tickers:
+                    try:
+                        out[t] = float(data[t]["Volume"].dropna().tail(30).mean())
+                    except Exception:
+                        continue
+                return out
+            vol_map = await asyncio.get_event_loop().run_in_executor(None, _vol)
+            for t, v in vol_map.items():
+                if t in ctx:
+                    ctx[t]["avg_volume_30d"] = v
+        except Exception as e:
+            logger.warning("ADV fetch failed: %s", e)
+        return ctx
+
+    # 2) Run independent modules in parallel
+    dh_ctx_task = _build_dh_context()
+    xf_task = x_factor.batch_evaluate(tickers)
+    macro_task = macro_pulse.upcoming_events()
+    scan_set = set(tickers)
+    earnings_task = earnings_engine.current_week_with_probability(scan_tickers=scan_set)
+
+    dh_ctx, xf_alerts, macro_events, earnings_week = await asyncio.gather(
+        dh_ctx_task, xf_task, macro_task, earnings_task,
+        return_exceptions=True,
+    )
+    if isinstance(dh_ctx, Exception):
+        dh_ctx = {}
+    if isinstance(xf_alerts, Exception):
+        xf_alerts = []
+    if isinstance(macro_events, Exception):
+        macro_events = []
+    if isinstance(earnings_week, Exception):
+        earnings_week = {"by_day": {}}
+
+    # Dark Horse needs context; eval now
+    try:
+        dh_alerts = await dark_horse.batch_evaluate(tickers, dh_ctx)
+    except Exception as e:
+        logger.warning("Dark Horse batch failed: %s", e)
+        dh_alerts = []
+
+    # Build lookup maps
+    dh_by_ticker = {a["ticker"]: a for a in dh_alerts}
+    xf_by_ticker = {a["ticker"]: a for a in xf_alerts}
+
+    # Stitch alerts back into the scan result objects so the dashboard
+    # can render badges inline
+    earnings_tickers = set()
+    for day_rows in (earnings_week.get("by_day") or {}).values():
+        for r in day_rows:
+            earnings_tickers.add(r["ticker"])
+    for r in final:
+        t = r["ticker"]
+        if t in dh_by_ticker:
+            r["dark_horse"] = dh_by_ticker[t]
+        if t in xf_by_ticker:
+            r["x_factor"] = xf_by_ticker[t]
+        if t in earnings_tickers:
+            r["earnings_this_week"] = True
+
+    # 3) Lottery scoring (now that dark_horse is on results)
+    lottery_picks = await lottery.evaluate_for_scan(final)
+    await lottery.log_picks(lottery_picks)
+    lottery_by_ticker = {p["ticker"]: p["score"] for p in lottery_picks}
+    # Stitch lottery score into final results
+    for r in final:
+        t = r["ticker"]
+        if t in lottery_by_ticker:
+            r["lottery_score"] = lottery_by_ticker[t]
+            r["lottery_tier"] = next((p["tier"] for p in lottery_picks if p["ticker"] == t), None)
+
+    # 4) Conviction + Narrative Lock
+    conv = await conviction.compute_for_scan(
+        final, dh_by_ticker, xf_by_ticker, earnings_tickers, lottery_by_ticker,
+    )
+    # Stitch
+    nl_set = {p["ticker"] for p in conv["narrative_locks"]}
+    top3_set = {p["ticker"] for p in conv["top3"]}
+    for r in final:
+        if r["ticker"] in nl_set:
+            r["narrative_lock"] = True
+            # Per spec: Narrative Lock auto-elevates lottery tier to JACKPOT
+            r["lottery_tier"] = "JACKPOT"
+            # Add 20 to axiom_score
+            if r.get("signal_score") is not None:
+                r["signal_score_pre_nl"] = r["signal_score"]
+                r["signal_score"] = r["signal_score"] + 20
+        if r["ticker"] in top3_set:
+            r["max_conviction"] = True
+
+    return {
+        "dark_horse": dh_alerts,
+        "x_factor": xf_alerts,
+        "lottery": lottery_picks,
+        "macro": {"events": macro_events,
+                    "imminent": [e for e in macro_events if e.get("is_imminent")]},
+        "earnings_summary": {
+            "total": earnings_week.get("total", 0),
+            "week_of": earnings_week.get("week_of"),
+            "by_day_counts": {d: len(rows) for d, rows in (earnings_week.get("by_day") or {}).items()},
+        },
+        "narrative_locks": conv["narrative_locks"],
+        "max_conviction": {"top3": conv["top3"]},
     }
