@@ -133,7 +133,8 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                     break
                 soup = BeautifulSoup(resp_text, "lxml")
                 added = 0
-                for a in soup.find_all("a", href=re.compile(r"^quote\?t=")):
+                # Finviz changed link pattern from `quote?t=...` to `stock?t=...` (2026).
+                for a in soup.find_all("a", href=re.compile(r"^(?:stock|quote)\?t=")):
                     t = a.get_text(strip=True).upper()
                     if not TICKER_RE.match(t) or t in seen:
                         continue
@@ -188,7 +189,7 @@ async def fetch_finviz_upcoming_earnings(days: str = "nextweek", limit: int = 30
                     break
                 soup = BeautifulSoup(r.text, "lxml")
                 added = 0
-                for a in soup.find_all("a", href=re.compile(r"^quote\?t=")):
+                for a in soup.find_all("a", href=re.compile(r"^(?:stock|quote)\?t=")):
                     t = a.get_text(strip=True).upper()
                     if not TICKER_RE.match(t) or t in seen:
                         continue

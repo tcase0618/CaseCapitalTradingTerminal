@@ -200,7 +200,7 @@ export default function PerformancePage() {
                   <td style={{ ...td, color: pctColor(s.avg_7d) }}>{fmt(s.avg_7d)}%</td>
                   <td style={{ ...td, color: pctColor(s.avg_30d) }}>{fmt(s.avg_30d)}%</td>
                   <td style={{ ...td, color: pctColor(s.avg_90d) }}>{fmt(s.avg_90d)}%</td>
-                  <td style={td}>{s.win_rate_30d != null ? `${s.win_rate_30d}%` : "—"}</td>
+                  <td style={{ ...td, color: "#4ade80", fontWeight: 700 }}>{s.win_rate_30d != null ? `${s.win_rate_30d}%` : "—"}</td>
                 </tr>
               ))}
             </tbody>

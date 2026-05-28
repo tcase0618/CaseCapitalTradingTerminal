@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
+import { SystemBar } from "./CrtShell";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const cls = (...x) => x.filter(Boolean).join(" ");
@@ -382,21 +383,59 @@ export default function Dashboard() {
 
         {/* === MAIN === */}
         <main style={{ overflowY: "auto", display: "flex", flexDirection: "column" }}>
+          {/* Sticky system bar — matches Performance / Learning pages */}
+          <div style={{ position: "sticky", top: 0, zIndex: 10 }}>
+            <SystemBar />
+          </div>
+
           {/* Metrics */}
-          <div style={{ background: cardBg, borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(7, 1fr)" }}>
+          <div className="fade-in" style={{
+            background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
+            borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(7, 1fr)",
+            position: "relative",
+          }}>
+            {/* accent stripe along top */}
+            <div style={{
+              position: "absolute", top: 0, left: 0, right: 0, height: 1,
+              background: `linear-gradient(90deg, ${accent} 0%, ${accent}33 30%, transparent 100%)`,
+            }} />
             {[
-              { label: "PRE-FILTER UNIVERSE", v: scan?.universe_size || "—", sub: "S&P 500 · NASDAQ · RUSSELL 2K", color: accent },
+              { label: "UNIVERSE SWEPT", v: scan?.universe_size || "—",
+                sub: `INSIDER ${counts.insider} · SHORT ${counts.short} · GOV ${counts.gov}`,
+                color: accent, isPrimary: true },
               { label: "TARGETS ACQUIRED", v: scan?.pre_filter_passed || 0, sub: `${scan?.results?.length || 0} ANALYZED`, color: "#fff" },
-              { label: "INSIDER SIGNALS", v: counts.insider, sub: "OPENINSIDER", color: accent },
-              { label: "SHORT SIGNALS", v: counts.short, sub: "FINVIZ", color: accent },
-              { label: "GOV SIGNALS", v: counts.gov, sub: "USASPENDING", color: accent },
-              { label: "CACHE SAVED", v: scan?.claude_cache_hits || 0, sub: `${scan?.claude_calls_made || 0} BATCHED CALLS`, color: muted },
-              { label: "UPLINK", v: status?.bot?.telegram_configured ? "LIVE" : "OFF", sub: "TELEGRAM CONNECTED", color: status?.bot?.telegram_configured ? "#4ade80" : "#fb923c", isText: true },
+              { label: "INSIDER SIGNALS", v: counts.insider, sub: "OPENINSIDER", color: "#c084fc" },
+              { label: "SHORT SIGNALS", v: counts.short, sub: counts.short === 0 ? "FINVIZ · EMPTY" : "FINVIZ",
+                color: counts.short === 0 ? "#f87171" : "#f87171" },
+              { label: "GOV SIGNALS", v: counts.gov, sub: "USASPENDING", color: "#5eead4" },
+              { label: "CACHE SAVED", v: scan?.claude_cache_hits || 0, sub: `${scan?.claude_calls_made || 0} BATCHED`, color: muted },
+              { label: "UPLINK", v: status?.bot?.telegram_configured ? "LIVE" : "OFF", sub: "TELEGRAM", color: status?.bot?.telegram_configured ? "#4ade80" : "#fb923c", isText: true },
             ].map((c, i) => (
-              <div key={i} data-testid={`metric-${i}`} style={{ padding: "16px 18px", borderRight: i < 6 ? hairline : "none" }}>
-                <div style={{ fontSize: 10, color: dim, letterSpacing: "0.14em" }}>{c.label}</div>
-                <div style={{ fontSize: c.isText ? 22 : 26, fontWeight: 300, color: c.color, marginTop: 5, fontFamily: "Courier New", letterSpacing: "0.02em" }}>{c.v}</div>
-                <div style={{ fontSize: 10, color: dim, marginTop: 3, letterSpacing: "0.08em" }}>{c.sub}</div>
+              <div key={i} data-testid={`metric-${i}`} className="row-hover" style={{
+                padding: "18px 20px", borderRight: i < 6 ? hairline : "none",
+                position: "relative",
+                background: c.isPrimary ? `linear-gradient(90deg, rgba(200,168,75,0.05) 0%, transparent 100%)` : "transparent",
+              }}>
+                {c.isPrimary && (
+                  <div style={{
+                    position: "absolute", left: 0, top: 14, bottom: 14, width: 2,
+                    background: accent, boxShadow: `0 0 6px ${accent}80`,
+                  }} />
+                )}
+                <div style={{
+                  fontSize: 9, color: muted, letterSpacing: "0.18em", fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                  <span style={{ color: dim, fontSize: 8 }}>▸</span>
+                  {c.label}
+                </div>
+                <div className="num" style={{
+                  fontSize: c.isText ? 22 : 26, fontWeight: 600, color: c.color,
+                  marginTop: 8, fontFamily: "JetBrains Mono, Courier New",
+                  letterSpacing: "0.02em",
+                  textShadow: c.isPrimary ? `0 0 12px ${accent}40` : "none",
+                }}>{c.v}</div>
+                <div style={{ fontSize: 9, color: muted, marginTop: 5, letterSpacing: "0.12em" }}>{c.sub}</div>
               </div>
             ))}
           </div>
