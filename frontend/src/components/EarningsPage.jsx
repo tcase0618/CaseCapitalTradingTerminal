@@ -31,6 +31,7 @@ export default function EarningsPage() {
   const strongBeats = allRows.filter(r => r.beat_probability_pct >= 65).length;
   const weakBeats = allRows.filter(r => r.beat_probability_pct < 45).length;
   const axiomMatches = allRows.filter(r => r.axiom_match).length;
+  const top3 = [...allRows].sort((a, b) => b.beat_probability_pct - a.beat_probability_pct).slice(0, 3);
 
   return (
     <CrtShell title="EARNINGS · CURRENT WEEK">
@@ -41,6 +42,54 @@ export default function EarningsPage() {
         <Stat label="LIKELY MISSES" value={weakBeats} sub="<45% PROB" color="#f87171" />
         <Stat label="AXIOM MATCHES" value={axiomMatches} sub="IN SCAN" color={accent2} />
       </div>
+
+      {/* Hero: top 3 by beat probability */}
+      {top3.length > 0 && (
+        <Card title="🟢 TOP 3 EARNINGS PLAYS THIS WEEK" accentColor="#4ade80">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
+            {top3.map((r, i) => (
+              <div key={r.ticker} className="corner-brackets" style={{
+                padding: "14px 18px",
+                border: `0.5px solid ${beatColor(r.beat_probability_pct)}55`,
+                background: `linear-gradient(135deg, ${beatColor(r.beat_probability_pct)}10 0%, transparent 70%)`,
+              }}>
+                <div style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  fontSize: 9, color: muted, letterSpacing: "0.18em",
+                }}>
+                  <span>#{i+1} · {r.am_pm || "TBD"}</span>
+                  {r.axiom_match && (
+                    <span style={{
+                      color: accent2, padding: "1px 5px",
+                      border: `0.5px solid ${accent2}`, fontSize: 8,
+                    }}>AXIOM MATCH</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 30, color: accent, fontWeight: 700, marginTop: 6, letterSpacing: "0.04em" }}>
+                  ${r.ticker}
+                </div>
+                <div style={{ fontSize: 10, color: muted, marginTop: 3 }}>
+                  {(r.sector || "—").slice(0, 24)}
+                </div>
+                <div style={{
+                  fontSize: 36, color: beatColor(r.beat_probability_pct), fontWeight: 700,
+                  marginTop: 10, fontFamily: "JetBrains Mono",
+                  textShadow: `0 0 12px ${beatColor(r.beat_probability_pct)}40`,
+                }}>
+                  {r.beat_probability_pct?.toFixed(0)}%
+                </div>
+                <div style={{ fontSize: 9, color: muted, letterSpacing: "0.14em" }}>BEAT PROBABILITY</div>
+                <div style={{
+                  marginTop: 12, padding: "6px 10px",
+                  border: `0.5px solid ${stratColor(r.strategy)}66`,
+                  color: stratColor(r.strategy), fontSize: 11, fontWeight: 700,
+                  letterSpacing: "0.12em", textAlign: "center",
+                }}>{r.strategy}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {loading && (
         <div style={{ color: muted, padding: 30, textAlign: "center" }}>

@@ -41,6 +41,43 @@ function getMarketStatus() {
   return { state: "POST", color: "#fb923c" };
 }
 
+// Compute precise days/hours/minutes until a UTC midnight date string
+function timeUntilDate(targetDateStr) {
+  try {
+    const target = new Date(targetDateStr + "T13:30:00Z"); // 9:30 ET — market open
+    const diffMs = target - new Date();
+    if (diffMs <= 0) return null;
+    const days = Math.floor(diffMs / 86400000);
+    const hours = Math.floor((diffMs % 86400000) / 3600000);
+    const mins = Math.floor((diffMs % 3600000) / 60000);
+    if (days >= 1) return `${days}D ${hours}H`;
+    if (hours >= 1) return `${hours}H ${mins}M`;
+    return `${mins}M`;
+  } catch {
+    return null;
+  }
+}
+
+function useNextMacroEvent() {
+  const [next, setNext] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+        const r = await fetch(`${API}/v32/macro?days_ahead=14`);
+        const d = await r.json();
+        const ev = (d.events || []).find(e => e.days_until >= 0);
+        if (!cancelled) setNext(ev || null);
+      } catch {}
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000); // refresh every 5 min
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return next;
+}
+
 function useClock() {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
@@ -53,6 +90,7 @@ function useClock() {
 function SystemBar() {
   const now = useClock();
   const market = getMarketStatus();
+  const nextMacro = useNextMacroEvent();
   const dateStr = now.toLocaleDateString("en-US", {
     timeZone: "America/New_York",
     weekday: "short", month: "short", day: "2-digit",
@@ -61,10 +99,14 @@ function SystemBar() {
     timeZone: "America/New_York",
     hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
   });
+  const countdown = nextMacro ? timeUntilDate(nextMacro.date) : null;
+  const macroColor = nextMacro
+    ? (nextMacro.is_imminent ? "#fb923c" : (nextMacro.warns_sectors?.length ? "#fbbf24" : "#5eead4"))
+    : muted;
   return (
     <div data-testid="system-bar" style={{
-      display: "flex", alignItems: "center", gap: 20,
-      padding: "5px 16px", background: "#03030680",
+      display: "flex", alignItems: "center", gap: 18,
+      padding: "6px 18px", background: "#03030680",
       borderBottom: hairline, fontSize: 10, letterSpacing: "0.14em",
       color: muted, fontFamily: "JetBrains Mono, Courier New",
       backdropFilter: "blur(6px)",
@@ -80,18 +122,65 @@ function SystemBar() {
         {timeStr} ET<span className="blink">_</span>
       </span>
       <span style={{ color: dim }}>│</span>
-      <span style={{ color: muted }}>FEED · MASSIVE/FINNHUB</span>
+      {nextMacro ? (
+        <span data-testid="macro-countdown" style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "2px 10px",
+          border: `0.5px solid ${macroColor}55`,
+          background: `${macroColor}10`,
+        }}>
+          <span style={{ color: macroColor }}>🌐</span>
+          <span style={{ color: muted }}>NEXT:</span>
+          <span style={{ color: macroColor, fontWeight: 700 }}>{nextMacro.tag}</span>
+          <span style={{ color: muted }}>IN</span>
+          <span className="num" style={{ color: macroColor, fontWeight: 700 }}>{countdown}</span>
+        </span>
+      ) : (
+        <span style={{ color: muted }}>🌐 NO MACRO IN WINDOW</span>
+      )}
       <span style={{ marginLeft: "auto", display: "flex", gap: 14 }}>
-        <span><span className="dot dot-green" /> <span style={{ marginLeft: 6 }}>SCAN ENGINE</span></span>
+        <span><span className="dot dot-green" /> <span style={{ marginLeft: 6 }}>FEED</span></span>
         <span><span className="dot dot-teal" /> <span style={{ marginLeft: 6 }}>LEARNING</span></span>
-        <span><span className="dot dot-amber" /> <span style={{ marginLeft: 6 }}>BOT WEBHOOK</span></span>
+        <span><span className="dot dot-amber" /> <span style={{ marginLeft: 6 }}>BOT</span></span>
       </span>
     </div>
   );
 }
 
+function useLiveAlertCounts() {
+  const [counts, setCounts] = useState({ dh: 0, xf: 0, locks: 0, lottery_hot: 0 });
+  useEffect(() => {
+    let cancelled = false;
+    const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+    const load = async () => {
+      try {
+        const [dh, xf, conv, lot] = await Promise.all([
+          fetch(`${API}/v32/dark_horse?days=2`).then(r => r.json()).catch(() => []),
+          fetch(`${API}/v32/x_factor?days=2`).then(r => r.json()).catch(() => []),
+          fetch(`${API}/v32/conviction`).then(r => r.json()).catch(() => ({})),
+          fetch(`${API}/v32/lottery/current`).then(r => r.json()).catch(() => ({})),
+        ]);
+        if (cancelled) return;
+        const hot = (lot.picks || []).filter(p => p.tier === "JACKPOT" || p.tier === "HOT").length;
+        setCounts({
+          dh: (dh || []).length,
+          xf: (xf || []).length,
+          locks: ((conv && conv.narrative_locks_14d) || []).length,
+          lottery_hot: hot,
+        });
+      } catch {}
+    };
+    load();
+    const id = setInterval(load, 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return counts;
+}
+
 export function CrtShell({ title, children, headerRight = null }) {
   const loc = useLocation();
+  const nextMacro = useNextMacroEvent();
+  const alerts = useLiveAlertCounts();
   return (
     <>
       <div className="crt-vignette" />
@@ -100,7 +189,7 @@ export function CrtShell({ title, children, headerRight = null }) {
       <div style={{
         height: "100vh", overflow: "hidden",
         background: pageBg, color: "#e5e7eb",
-        display: "grid", gridTemplateColumns: "220px 1fr",
+        display: "grid", gridTemplateColumns: "230px 1fr",
         fontFamily: "JetBrains Mono, Courier New, monospace",
         position: "relative", zIndex: 1,
       }}>
@@ -108,36 +197,85 @@ export function CrtShell({ title, children, headerRight = null }) {
         <aside style={{
           background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 100%)`,
           borderRight: hairline,
-          padding: "18px 14px",
-          display: "flex", flexDirection: "column", gap: 22,
+          padding: "16px 12px 16px 14px",
+          display: "flex", flexDirection: "column", gap: 18,
           height: "100vh", overflowY: "auto",
         }}>
-          {/* Brand */}
+          {/* Brand block */}
           <Link to="/" style={{ textDecoration: "none" }}>
             <div className="corner-brackets" style={{
-              padding: "10px 8px",
+              padding: "14px 12px",
               border: hairlineAccent,
-              background: "rgba(200,168,75,0.025)",
+              background: `linear-gradient(135deg, rgba(200,168,75,0.06) 0%, transparent 70%)`,
+              position: "relative", overflow: "hidden",
             }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {/* animated scanline inside brand */}
+              <div style={{
+                position: "absolute", left: 0, right: 0, top: "30%", height: 1,
+                background: `linear-gradient(90deg, transparent, ${accent}80, transparent)`,
+                opacity: 0.4,
+              }} />
+              <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
                 <div style={{
-                  width: 24, height: 24, border: `1.5px solid ${accent}`,
+                  width: 32, height: 32, border: `1.5px solid ${accent}`,
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  boxShadow: `0 0 10px rgba(200,168,75,0.25), inset 0 0 6px rgba(200,168,75,0.1)`,
+                  boxShadow: `0 0 14px rgba(200,168,75,0.3), inset 0 0 8px rgba(200,168,75,0.12)`,
+                  position: "relative",
                 }}>
-                  <div style={{ width: 8, height: 8, background: accent }} />
+                  <div style={{ width: 10, height: 10, background: accent,
+                                boxShadow: `0 0 6px ${accent}` }} />
+                  {/* corner ticks on logo */}
+                  <span style={{ position: "absolute", top: -3, left: -3, width: 4, height: 4, borderTop: `1px solid ${accent}`, borderLeft: `1px solid ${accent}` }} />
+                  <span style={{ position: "absolute", bottom: -3, right: -3, width: 4, height: 4, borderBottom: `1px solid ${accent}`, borderRight: `1px solid ${accent}` }} />
                 </div>
-                <div>
+                <div style={{ flex: 1 }}>
                   <div className="glow-amber" style={{
-                    fontSize: 16, color: accent, letterSpacing: "0.18em", fontWeight: 800,
+                    fontSize: 18, color: accent, letterSpacing: "0.24em", fontWeight: 800,
+                    lineHeight: 1,
                   }}>AXIOM</div>
-                  <div style={{ fontSize: 8, color: muted, letterSpacing: "0.14em", marginTop: 1 }}>
-                    v3.0 · INTEL
+                  <div style={{ fontSize: 8, color: muted, letterSpacing: "0.16em", marginTop: 4 }}>
+                    INTELLIGENCE · v3.2
                   </div>
                 </div>
               </div>
+              {/* macro micro-row inside brand */}
+              {nextMacro && (
+                <div style={{
+                  marginTop: 10, paddingTop: 8, borderTop: hairline,
+                  fontSize: 9, color: muted, letterSpacing: "0.14em",
+                  display: "flex", justifyContent: "space-between", gap: 6,
+                }}>
+                  <span style={{ color: nextMacro.is_imminent ? "#fb923c" : accent2 }}>
+                    🌐 {nextMacro.tag}
+                  </span>
+                  <span className="num" style={{
+                    color: nextMacro.is_imminent ? "#fb923c" : labelLight, fontWeight: 700,
+                  }}>{timeUntilDate(nextMacro.date) || "—"}</span>
+                </div>
+              )}
             </div>
           </Link>
+
+          {/* Live alerts micro-panel */}
+          <div style={{
+            padding: "10px 10px",
+            border: hairline,
+            background: "rgba(255,255,255,0.012)",
+          }}>
+            <div style={{
+              fontSize: 8, color: dim, letterSpacing: "0.22em", marginBottom: 8,
+              display: "flex", alignItems: "center", gap: 6, fontWeight: 700,
+            }}>
+              <span className="dot dot-green pulse-dot" />
+              {"// LIVE ALERTS"}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <AlertChip icon="🐴" label="DARK HORSE" count={alerts.dh} color="#fb923c" to="/intel" />
+              <AlertChip icon="⚡" label="X FACTOR" count={alerts.xf} color={accent2} to="/intel" />
+              <AlertChip icon="🔒" label="N. LOCK" count={alerts.locks} color="#a78bfa" to="/intel" />
+              <AlertChip icon="🎰" label="LOTTERY HOT" count={alerts.lottery_hot} color={accent} to="/lottery" />
+            </div>
+          </div>
 
           {/* Navigation — grouped */}
           <nav style={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -145,17 +283,17 @@ export function CrtShell({ title, children, headerRight = null }) {
               const groupItems = NAV.filter(n => n.group === group);
               if (groupItems.length === 0) return null;
               return (
-                <div key={group} style={{ marginBottom: 10 }}>
+                <div key={group} style={{ marginBottom: 6 }}>
                   <div style={{
                     fontSize: 8, color: dim, letterSpacing: "0.22em",
-                    marginBottom: 6, marginTop: gi === 0 ? 0 : 8,
+                    marginBottom: 4, marginTop: gi === 0 ? 0 : 6,
                     paddingLeft: 4, fontWeight: 700,
                     display: "flex", alignItems: "center", gap: 8,
                   }}>
                     <span>{"// "+group}</span>
                     {group === "v3.2" && (
                       <span style={{
-                        fontSize: 8, padding: "1px 5px",
+                        fontSize: 7, padding: "1px 5px",
                         background: `${accent2}22`, color: accent2,
                         letterSpacing: "0.1em", border: `0.5px solid ${accent2}66`,
                       }}>NEW</span>
@@ -211,11 +349,12 @@ export function CrtShell({ title, children, headerRight = null }) {
           </nav>
 
           {/* Status block */}
-          <div style={{ borderTop: hairline, paddingTop: 14 }}>
+          <div style={{ borderTop: hairline, paddingTop: 12 }}>
             <div style={{
-              fontSize: 9, color: dim, letterSpacing: "0.18em", marginBottom: 8, paddingLeft: 4,
-            }}>{"// SYSTEM"}</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 10 }}>
+              fontSize: 8, color: dim, letterSpacing: "0.22em", marginBottom: 6,
+              paddingLeft: 4, fontWeight: 700,
+            }}>{"// SYSTEM HEALTH"}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10 }}>
               <StatusRow label="ENGINE" color="#4ade80" />
               <StatusRow label="LEARN" color={accent2} />
               <StatusRow label="BOT" color={accent} />
@@ -225,13 +364,13 @@ export function CrtShell({ title, children, headerRight = null }) {
 
           {/* Footer */}
           <div style={{
-            marginTop: "auto", fontSize: 9, color: dim, letterSpacing: "0.12em",
-            paddingTop: 14, borderTop: hairline,
+            marginTop: "auto", fontSize: 8, color: dim, letterSpacing: "0.14em",
+            paddingTop: 10, borderTop: hairline,
           }}>
-            <div>V3.0.0 · FEAT 3.0</div>
-            <div style={{ marginTop: 4, color: muted }}>@Quantninjabot</div>
-            <div style={{ marginTop: 8, color: accent2, opacity: 0.6 }}>
-              {"// MARKETS NEVER SLEEP"}
+            <div>BUILD 3.2.0 · STABLE</div>
+            <div style={{ marginTop: 3, color: muted }}>@Quantninjabot</div>
+            <div style={{ marginTop: 6, color: accent2, opacity: 0.6 }}>
+              {"// THE MARKET NEVER SLEEPS"}
             </div>
           </div>
         </aside>
@@ -291,6 +430,31 @@ function StatusRow({ label, color }) {
       <span style={{ flex: 1 }}>{label}</span>
       <span style={{ color: muted, fontSize: 8 }}>OK</span>
     </div>
+  );
+}
+
+function AlertChip({ icon, label, count, color, to }) {
+  return (
+    <Link to={to} style={{
+      display: "flex", alignItems: "center", gap: 8,
+      padding: "6px 8px",
+      background: count > 0 ? `${color}10` : "transparent",
+      border: `0.5px solid ${count > 0 ? color + "55" : "transparent"}`,
+      textDecoration: "none",
+      transition: "all 0.18s",
+    }}>
+      <span style={{ fontSize: 11, filter: count > 0 ? "none" : "grayscale(0.6) opacity(0.4)" }}>{icon}</span>
+      <span style={{
+        flex: 1, fontSize: 9.5, letterSpacing: "0.14em",
+        color: count > 0 ? color : muted, fontWeight: 600,
+      }}>{label}</span>
+      <span style={{
+        fontSize: 11, fontWeight: 700, fontFamily: "JetBrains Mono",
+        color: count > 0 ? color : muted,
+        textShadow: count > 0 ? `0 0 6px ${color}80` : "none",
+        minWidth: 16, textAlign: "right",
+      }}>{count}</span>
+    </Link>
   );
 }
 

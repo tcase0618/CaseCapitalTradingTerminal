@@ -490,18 +490,21 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
     # 2) Run independent modules in parallel
     dh_ctx_task = _build_dh_context()
     xf_task = x_factor.batch_evaluate(tickers)
+    xf_discovery_task = x_factor.discovery_candidates(set(tickers))
     macro_task = macro_pulse.upcoming_events()
     scan_set = set(tickers)
     earnings_task = earnings_engine.current_week_with_probability(scan_tickers=scan_set)
 
-    dh_ctx, xf_alerts, macro_events, earnings_week = await asyncio.gather(
-        dh_ctx_task, xf_task, macro_task, earnings_task,
+    dh_ctx, xf_alerts, xf_discoveries, macro_events, earnings_week = await asyncio.gather(
+        dh_ctx_task, xf_task, xf_discovery_task, macro_task, earnings_task,
         return_exceptions=True,
     )
     if isinstance(dh_ctx, Exception):
         dh_ctx = {}
     if isinstance(xf_alerts, Exception):
         xf_alerts = []
+    if isinstance(xf_discoveries, Exception):
+        xf_discoveries = []
     if isinstance(macro_events, Exception):
         macro_events = []
     if isinstance(earnings_week, Exception):
@@ -566,6 +569,7 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "dark_horse": dh_alerts,
         "x_factor": xf_alerts,
+        "x_factor_discoveries": xf_discoveries,
         "lottery": lottery_picks,
         "macro": {"events": macro_events,
                     "imminent": [e for e in macro_events if e.get("is_imminent")]},

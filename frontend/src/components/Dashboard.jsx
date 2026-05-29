@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
-import { SystemBar } from "./CrtShell";
+import { CrtShell, SystemBar, tokens as crtTokens } from "./CrtShell";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const cls = (...x) => x.filter(Boolean).join(" ");
@@ -221,179 +221,27 @@ export default function Dashboard() {
   [results]);
 
   return (
-    <>
-      <div className="scanline-overlay" />
-
-      {/* Sidebar toggle (mobile) */}
-      <button onClick={() => setSidebarOpen(o => !o)}
-        className="fixed left-0 top-1/2 -translate-y-1/2 z-30 lg:hidden"
-        style={{ background: cardBg, border: hairline, color: accent, padding: "8px 4px", fontSize: 10 }}>
-        {sidebarOpen ? "<" : ">"}
-      </button>
-
-      <div className="h-screen w-screen relative z-10" style={{
-        display: "grid",
-        gridTemplateColumns: "180px 1fr",
-        background: pageBg,
-      }}>
-        {/* === SIDEBAR === */}
-        <aside style={{
-          background: cardBg, borderRight: hairline,
-          padding: "16px 14px", overflowY: "auto",
-          display: "flex", flexDirection: "column", gap: 20,
-        }} className={cls("z-20", !sidebarOpen && "hidden lg:flex")}>
-
-          {/* Identity */}
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-              <div style={{ width: 20, height: 20, border: `1.5px solid ${accent}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <div style={{ width: 7, height: 7, background: accent }} />
-              </div>
-              <span style={{ fontSize: 14, color: accent, letterSpacing: "0.18em", fontWeight: 700 }}>AXIOM</span>
-            </div>
-            <div style={{ fontSize: 13, color: accent, fontWeight: 700, fontFamily: "Courier New" }}>{formatET(t)} ET</div>
-            <div style={{ fontSize: 9, color: dim, marginTop: 2 }}>{formatETDate(t)}</div>
-          </div>
-
-          {/* System status */}
-          <div>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>SYSTEM STATUS</div>
-            {[
-              { label: "BOT STATUS", color: "#4ade80", text: status ? "ONLINE" : "..." },
-              { label: "WEBHOOK", color: status?.webhook_url ? "#4ade80" : "#fb923c", text: status?.webhook_url ? "ACTIVE" : "PENDING" },
-              { label: "CLAUDE API", color: accent, text: status?.bot?.claude_configured ? "CONNECTED" : "OFFLINE" },
-            ].map((s, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "3px 0", fontSize: 9 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ width: 4, height: 4, borderRadius: "50%", background: s.color }} />
-                  <span style={{ color: labelLight }}>{s.label}</span>
-                </div>
-                <span style={{ color: s.color }}>{s.text}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Signal sources */}
-          <div>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>SIGNAL SOURCES</div>
-            {[
-              { label: "INSIDER", v: counts.insider },
-              { label: "SHORT", v: counts.short },
-              { label: "EARNINGS", v: counts.earnings },
-              { label: "GOV CONTRACTS", v: counts.gov },
-              { label: "CONGRESS", v: counts.congress },
-              { label: "PRE-AWARD", v: counts.pre_award },
-            ].map((s, i) => (
-              <div key={i} className="hover:bg-white/[0.03]"
-                style={{ display: "flex", justifyContent: "space-between", padding: "3px 4px", fontSize: 9 }}>
-                <span style={{ color: labelLight }}>{s.label}</span>
-                <span style={{ color: muted }}>{s.v}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Coverage */}
-          <div>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 8 }}>COVERAGE</div>
-            {[
-              { label: "TICKERS SCANNED", v: Math.min(100, ((scan?.pre_filter_passed || 0) / 50) * 100) },
-              { label: "SIGNALS FIRED", v: Math.min(100, (totalSignalsFired / 30) * 100) },
-              { label: "CACHE HIT RATE", v: cacheRate },
-            ].map((s, i) => (
-              <div key={i} style={{ marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                  <span style={{ fontSize: 8, color: labelLight }}>{s.label}</span>
-                  <span style={{ fontSize: 8, color: muted }}>{Math.round(s.v)}%</span>
-                </div>
-                <div style={{ height: 4, background: "#1a1a2e" }}>
-                  <div style={{ height: "100%", width: `${s.v}%`, background: accent, transition: "width 0.5s" }} />
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Next scan */}
-          <div>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em" }}>NEXT SCAN</div>
-            <div style={{ fontSize: 14, color: accent, fontFamily: "Courier New", marginTop: 2 }}>{nextScanCountdown(t)}</div>
-            <div style={{ fontSize: 8, color: dim }}>DAILY 08:00 ET</div>
-          </div>
-
-          {/* Watchlist */}
-          <div>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 6 }}>WATCHLIST · {watchlist.length}</div>
-            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-              <input data-testid="watchlist-input" value={tInput} onChange={e => setTInput(e.target.value.toUpperCase())}
-                onKeyDown={e => e.key === "Enter" && addWatch()}
-                placeholder="TICKER" style={{
-                  flex: 1, background: "transparent", border: "none", borderBottom: "0.5px solid rgba(255,255,255,0.1)",
-                  color: "#fff", fontSize: 9, fontFamily: "Courier New", outline: "none", padding: "3px 0",
-                }} />
-              <button data-testid="watchlist-add-btn" onClick={addWatch}
-                style={{ background: "transparent", border: "none", color: accent, fontSize: 9, cursor: "pointer" }}>+ ADD</button>
-            </div>
-            {watchlist.slice(0, 8).map(w => (
-              <div key={w.ticker} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", fontSize: 9 }}>
-                <span style={{ color: muted }}>${w.ticker}</span>
-                <button onClick={() => removeWatch(w.ticker)} style={{ background: "transparent", border: "none", color: dim, cursor: "pointer", fontSize: 9 }}>×</button>
-              </div>
-            ))}
-          </div>
-
-          {/* Alerts */}
-          <div>
-            <div style={{ fontSize: 8, color: dim, letterSpacing: "0.12em", marginBottom: 6 }}>PRICE ALERTS · {alerts.length}</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 4, marginBottom: 6 }}>
-              <input data-testid="alert-ticker-input" value={aTicker} onChange={e => setATicker(e.target.value.toUpperCase())}
-                placeholder="TICK" style={{ background: "transparent", border: "none", borderBottom: "0.5px solid rgba(255,255,255,0.1)", color: "#fff", fontSize: 9, fontFamily: "Courier New", outline: "none", padding: "3px 0" }} />
-              <input data-testid="alert-price-input" value={aPrice} onChange={e => setAPrice(e.target.value)}
-                placeholder="$" style={{ background: "transparent", border: "none", borderBottom: "0.5px solid rgba(255,255,255,0.1)", color: "#fff", fontSize: 9, fontFamily: "Courier New", outline: "none", padding: "3px 0" }} />
-              <button data-testid="alert-add-btn" onClick={addAlert}
-                style={{ background: "transparent", border: "none", color: accent, fontSize: 9, cursor: "pointer" }}>+</button>
-            </div>
-            {alerts.slice(0, 6).map(a => (
-              <div key={`${a.ticker}-${a.created_at}`} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", fontSize: 9 }}>
-                <span style={{ color: muted }}>${a.ticker} @ ${a.target_price}</span>
-                <button onClick={() => removeAlert(a.ticker)} style={{ background: "transparent", border: "none", color: dim, cursor: "pointer", fontSize: 9 }}>×</button>
-              </div>
-            ))}
-          </div>
-
-          {/* Quick commands (push to bottom) */}
-          <div style={{ marginTop: "auto" }}>
-            <div style={{ fontSize: 9, color: dim, letterSpacing: "0.14em", marginBottom: 8 }}>NAVIGATION</div>
-            {[
-              { to: "/performance", label: "[PERFORMANCE]" },
-              { to: "/learning",    label: "[LEARNING]" },
-              { to: "/settings",    label: "[SETTINGS]" },
-            ].map(n => (
-              <Link key={n.to} to={n.to} data-testid={`sidebar-nav-${n.label.replace(/[\[\]]/g, "").toLowerCase()}`} style={{
-                display: "block", fontSize: 11, color: accent, padding: "4px 0",
-                textDecoration: "none", letterSpacing: "0.08em", fontWeight: 700,
-              }}>{n.label}</Link>
-            ))}
-            <div style={{ fontSize: 9, color: dim, letterSpacing: "0.14em", marginTop: 14, marginBottom: 8 }}>COMMANDS</div>
-            {["/scan", "/scan_gov", "/contracts", "/congress", "/options", "/flow", "/iv", "/backtest", "/help"].map(c => (
-              <div key={c} onClick={() => fireToast(c)} className="hover:text-amber-400" style={{
-                fontSize: 10, color: labelLight, cursor: "pointer", padding: "3px 0", transition: "color 0.15s", letterSpacing: "0.04em",
-              }}>{c}</div>
-            ))}
-          </div>
-        </aside>
-
-        {/* === MAIN === */}
-        <main style={{ overflowY: "auto", display: "flex", flexDirection: "column" }}>
-          {/* Sticky system bar — matches Performance / Learning pages */}
-          <div style={{ position: "sticky", top: 0, zIndex: 10 }}>
-            <SystemBar />
-          </div>
-
-          {/* Metrics */}
-          <div className="fade-in" style={{
-            background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
-            borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(7, 1fr)",
-            position: "relative",
+    <CrtShell title="DASHBOARD"
+      headerRight={
+        <button data-testid="run-scan-button" onClick={runScan} disabled={scanning}
+          style={{
+            background: scanning ? "rgba(200,168,75,0.15)" : "transparent",
+            border: `0.5px solid ${accent}`, color: accent, fontSize: 12,
+            padding: "8px 18px", cursor: scanning ? "wait" : "pointer",
+            letterSpacing: "0.12em", fontFamily: "JetBrains Mono", fontWeight: 700,
+            boxShadow: scanning ? "none" : `0 0 16px ${accent}30`,
           }}>
+          {scanning ? "SCANNING..." : "[ RUN SCAN ]"}
+        </button>
+      }>
+      {/* === MAIN === */}
+      <div style={{ marginLeft: -30, marginRight: -30, marginTop: -22 }}>
+        {/* Metrics */}
+        <div className="fade-in" style={{
+          background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
+          borderBottom: hairline, display: "grid", gridTemplateColumns: "repeat(7, 1fr)",
+          position: "relative",
+        }}>
             {/* accent stripe along top */}
             <div style={{
               position: "absolute", top: 0, left: 0, right: 0, height: 1,
@@ -756,9 +604,8 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
-        </main>
       </div>
-    </>
+    </CrtShell>
   );
 }
 

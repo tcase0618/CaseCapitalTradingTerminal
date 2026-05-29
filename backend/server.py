@@ -484,6 +484,14 @@ async def v32_x_factor(days: int = 7):
     return await x_factor.recent_alerts(days=days)
 
 
+@api.get("/v32/x_factor/discoveries")
+async def v32_x_factor_discoveries(days: int = 7):
+    """Tickers OUTSIDE the scan universe that hit Yahoo trending or Barchart
+    unusual options — candidates to add to the universe."""
+    from services import x_factor
+    return await x_factor.recent_discoveries(days=days)
+
+
 @api.get("/v32/sentiment/{ticker}")
 async def v32_sentiment(ticker: str):
     from services import x_factor

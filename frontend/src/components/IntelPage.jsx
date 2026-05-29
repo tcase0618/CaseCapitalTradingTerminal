@@ -9,12 +9,14 @@ export default function IntelPage() {
   const [conviction, setConviction] = useState(null);
   const [dh, setDh] = useState([]);
   const [xf, setXf] = useState([]);
+  const [discoveries, setDiscoveries] = useState([]);
   const [macro, setMacro] = useState(null);
 
   useEffect(() => {
     axios.get(`${API}/v32/conviction`).then(r => setConviction(r.data)).catch(() => {});
     axios.get(`${API}/v32/dark_horse?days=14`).then(r => setDh(r.data || [])).catch(() => {});
     axios.get(`${API}/v32/x_factor?days=14`).then(r => setXf(r.data || [])).catch(() => {});
+    axios.get(`${API}/v32/x_factor/discoveries?days=7`).then(r => setDiscoveries(r.data || [])).catch(() => {});
     axios.get(`${API}/v32/macro`).then(r => setMacro(r.data)).catch(() => {});
   }, []);
 
@@ -103,6 +105,30 @@ export default function IntelPage() {
               ))}
             </tbody>
           </table>
+        )}
+      </Card>
+
+      <Card title={`🔭 X FACTOR DISCOVERIES · ${discoveries.length} TICKERS OUTSIDE UNIVERSE`} accentColor="#a78bfa">
+        {discoveries.length === 0 ? (
+          <div style={{ color: muted, padding: 16 }}>
+            No discoveries yet. When tickers OUTSIDE the scan universe trend on Yahoo or appear on Barchart unusual options, they surface here — candidates to add to your universe.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {discoveries.map((d, i) => (
+              <div key={i} className="row-hover" style={{
+                padding: "8px 12px",
+                border: `0.5px solid #a78bfa55`,
+                background: "rgba(167,139,250,0.05)",
+                display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <span style={{ color: "#a78bfa", fontWeight: 700, fontSize: 13 }}>${d.ticker}</span>
+                <span style={{ fontSize: 9, color: muted, letterSpacing: "0.14em" }}>
+                  {(d.sources || []).join(" · ")}
+                </span>
+              </div>
+            ))}
+          </div>
         )}
       </Card>
 
