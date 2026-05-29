@@ -160,7 +160,7 @@ P&L tracking, backtesting, and a progressive learning engine.
 - `services/x_factor.py` — Sentiment surge detector. StockTwits (mentions + bullish %) and Google Trends (search interest). Reddit disabled (now requires OAuth post-2023; reactivate when client_id/secret supplied). `evaluate_x_factor(ticker, fast=True)` skips Google Trends in scan-time path.
 - `services/macro_pulse.py` — FRED upcoming-events tracker. Live FRED key in `.env` as `FRED_API_KEY`. Tracks FOMC, CPI, PPI, Jobs, GDP, Retail. Each event maps to warned/boosted sectors. `should_block_long_call(industry)` is the recommendation gate.
 - `services/earnings_engine.py` — Full Mon-Fri earnings schedule + Beat Probability model (5-95%, clamped). 5 components: EPS streak, momentum 20D, revenue accel, short %, options-flow blend (60/40). Strategy selector emits LONG CALL / CALL SPREAD / AVOID / BEAR PUT SPREAD.
-- `services/lottery.py` — 4-factor lottery scorer (squeeze · flow · catalyst · cheap IV) + SI bonus. Tiers JACKPOT≥80 / HOT≥65 / WARM≥50 / COLD<50. Contract finder picks calls 10-20% OTM, $0.10-$0.75 premium, 14-28 DTE. EV math (P(2x), P(10x), P(loss)). Logs JACKPOT/HOT picks for nightly settlement tracking.
+- `services/lottery.py` — 4-factor lottery scorer (squeeze · flow · catalyst · cheap IV) + SI bonus. Tiers JACKPOT≥80 / HOT≥65 / WARM≥50 / COLD<50. Contract finder picks calls 10-20% OTM, $0.10-$0.75 premium, 14-28 DTE. EV math (P(2x), P(10x), P(loss)). **Auto-buys every pick scoring ≥ 50 (JACKPOT/HOT/WARM)** into `lottery_history` for live track-record tracking.
 - `services/conviction.py` — Max Conviction scoring (8 component flags), Top 3 daily designation, Narrative Lock detector (Dark Horse + X Factor + flow≥75 on same ticker — auto-elevates lottery tier to JACKPOT + adds 20 to AXIOM score).
 
 ### Scanner pipeline rewire
@@ -185,3 +185,16 @@ Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK 
 - All pages use new CrtShell — sticky SystemBar, corner brackets, fade-in animations.
 
 
+
+
+## Feb 2026 — v3.2.1: Lottery Auto-Buy + Track Record P&L
+- **Threshold lowered from JACKPOT/HOT (≥65) to score ≥ 50** (any WARM-or-better pick).
+  Every qualifying pick with a discovered contract is auto-logged into `lottery_history`
+  with `auto_bought: true`.
+- **`lottery.refresh_settlements()`** — re-fetches the live ask from yfinance for every
+  open lottery row; when the contract's expiration is past, freezes `settled_ask` (treats
+  no-data as $0 worthless). Wired into the nightly `_pnl_refresh_job`.
+- **`POST /api/v32/lottery/refresh`** — manual settlement trigger.
+- **`track_record()` extended** with `open`, `unrealized_avg_pct`, `unrealized_winners`.
+- **LotteryPage UI** — new `OPEN POSITIONS` + `UNREALIZED P&L` stat tiles; TRACK RECORD
+  table now shows `CURRENT` ask + `OPEN` status for live positions plus running P&L.

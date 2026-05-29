@@ -461,6 +461,13 @@ async def v32_lottery(days: int = 14, tier: str | None = None):
     return {"picks": picks, "track_record": track}
 
 
+@api.post("/v32/lottery/refresh")
+async def v32_lottery_refresh():
+    """Manually re-price every open lottery position + settle expired ones."""
+    from services import lottery
+    return await lottery.refresh_settlements()
+
+
 @api.get("/v32/lottery/current")
 async def v32_lottery_current():
     """Returns lottery picks attached to the latest scan."""

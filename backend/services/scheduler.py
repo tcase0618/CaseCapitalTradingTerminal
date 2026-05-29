@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import learning_engine, options_engine, pnl_tracker, scanner, telegram_service
+from . import learning_engine, lottery, options_engine, pnl_tracker, scanner, telegram_service
 from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
@@ -67,11 +67,15 @@ async def _flow_refresh_job():
 
 
 async def _pnl_refresh_job():
-    """Nightly: fill 7/30/90d returns, refresh options proxy + actual."""
+    """Nightly: fill 7/30/90d returns, refresh options proxy + actual,
+    refresh lottery track-record settlements (live ask + expired settle)."""
     try:
         sig = await pnl_tracker.refresh_due_returns()
         opt = await pnl_tracker.refresh_due_options_returns()
-        await log_activity(f"P&L refresh: signals={sig} options_rows={opt}", "info")
+        lot = await lottery.refresh_settlements()
+        await log_activity(
+            f"P&L refresh: signals={sig} options_rows={opt} lottery={lot}", "info",
+        )
     except Exception as e:
         logger.exception("P&L refresh job failed: %s", e)
 

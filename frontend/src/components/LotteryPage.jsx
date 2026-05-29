@@ -42,6 +42,9 @@ export default function LotteryPage() {
         <Stat label="HOT" value={tierCounts.HOT || 0} sub="MAX $200" color={TIER_COLOR.HOT} />
         <Stat label="WARM" value={tierCounts.WARM || 0} sub="MAX $100" color={TIER_COLOR.WARM} />
         <Stat label="COLD" value={tierCounts.COLD || 0} sub="MAX $50" color={TIER_COLOR.COLD} />
+        <Stat label="OPEN POSITIONS" value={tr.open || 0} sub={`${tr.unrealized_winners || 0} GREEN`} color={accent} />
+        <Stat label="UNREALIZED P&L" value={tr.unrealized_avg_pct != null ? `${tr.unrealized_avg_pct >= 0 ? "+" : ""}${tr.unrealized_avg_pct}%` : "—"}
+              sub="OPEN AVG" color={(tr.unrealized_avg_pct ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
         <Stat label="LIFETIME HIT RATE" value={tr.hit_rate != null ? `${(tr.hit_rate * 100).toFixed(0)}%` : "—"}
               sub={`${tr.winners || 0}/${tr.settled || 0} SETTLED`} color="#4ade80" />
         <Stat label="AVG WINNER" value={tr.avg_winner_pct != null ? `+${tr.avg_winner_pct}%` : "—"}
@@ -127,24 +130,26 @@ export default function LotteryPage() {
       )}
 
       {tab === "history" && (
-        <Card title={`TRACK RECORD · ${history?.picks?.length || 0} LOGGED PICKS · 14D`}>
+        <Card title={`TRACK RECORD · ${history?.picks?.length || 0} AUTO-BOUGHT PICKS · 14D`}>
           {!history?.picks?.length ? (
             <div style={{ color: muted, padding: 20 }}>
-              No JACKPOT/HOT picks logged yet — they'll appear here once the next scan produces them.
+              No picks scored ≥ 50/100 yet — they'll auto-log here once the next scan produces them.
             </div>
           ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ color: dim, letterSpacing: "0.14em", textAlign: "left" }}>
                   <th style={th}>DATE</th><th style={th}>TIER</th><th style={th}>TICKER</th>
-                  <th style={th}>STRIKE</th><th style={th}>ENTRY ASK</th>
-                  <th style={th}>SETTLED ASK</th><th style={th}>RETURN</th>
+                  <th style={th}>STRIKE</th><th style={th}>ENTRY</th>
+                  <th style={th}>CURRENT</th><th style={th}>SETTLED</th><th style={th}>P&L</th>
                 </tr>
               </thead>
               <tbody>
                 {history.picks.map((p, i) => {
-                  const ret = p.settled_ask && p.entry_ask
-                    ? ((p.settled_ask - p.entry_ask) / p.entry_ask * 100) : null;
+                  const cur = p.settled_ask != null ? p.settled_ask : p.current_ask;
+                  const ret = cur != null && p.entry_ask
+                    ? ((cur - p.entry_ask) / p.entry_ask * 100) : null;
+                  const isOpen = p.settled_ask == null;
                   return (
                     <tr key={i} className="row-hover" style={{ borderTop: hairline }}>
                       <td style={td}>{p.date}</td>
@@ -152,7 +157,10 @@ export default function LotteryPage() {
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
                       <td style={td}>${p.strike}C {p.exp?.slice(5)}</td>
                       <td style={td}>${p.entry_ask}</td>
-                      <td style={td}>{p.settled_ask != null ? `$${p.settled_ask}` : "PENDING"}</td>
+                      <td style={{ ...td, color: isOpen ? accent2 : muted }}>
+                        {p.current_ask != null ? `$${p.current_ask}` : "—"}
+                      </td>
+                      <td style={td}>{p.settled_ask != null ? `$${p.settled_ask}` : "OPEN"}</td>
                       <td style={{ ...td, color: ret == null ? muted : ret > 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
                         {ret != null ? `${ret >= 0 ? "+" : ""}${ret.toFixed(0)}%` : "—"}
                       </td>
