@@ -30,8 +30,6 @@ export default function ContractsPage() {
   const [agency, setAgency] = useState("");
   const [onlyWithSubs, setOnlyWithSubs] = useState(false);
   const [expanded, setExpanded] = useState(null);
-  const [subAwards, setSubAwards] = useState({}); // award_id -> rows
-  const [subsKnown, setSubsKnown] = useState({}); // award_id -> bool/null
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
@@ -50,21 +48,8 @@ export default function ContractsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const fetchSubs = async (id) => {
-    if (subAwards[id]) return;
-    try {
-      const r = await axios.get(`${API}/contracts/sub_awards?award_id=${encodeURIComponent(id)}`);
-      const rows = r.data.sub_awards || [];
-      setSubAwards(s => ({ ...s, [id]: rows }));
-      setSubsKnown(s => ({ ...s, [id]: rows.length > 0 }));
-    } catch {
-      setSubAwards(s => ({ ...s, [id]: [] }));
-      setSubsKnown(s => ({ ...s, [id]: false }));
-    }
-  };
-
   const filtered = onlyWithSubs
-    ? contracts.filter(c => subsKnown[c.generated_internal_id] === true)
+    ? contracts.filter(c => (c.sub_awards || []).length > 0)
     : contracts;
 
   return (
@@ -112,12 +97,13 @@ export default function ContractsPage() {
               {filtered.map(c => {
                 const id = c.generated_internal_id || c.award_id;
                 const open = expanded === id;
+                const subs = c.sub_awards || [];
                 return (
                   <>
                     <tr key={id} data-testid={`contract-${c.ticker}`}
                       className="row-hover"
                       style={{ borderTop: hairline, cursor: "pointer" }}
-                      onClick={() => { setExpanded(open ? null : id); if (!open) fetchSubs(id); }}>
+                      onClick={() => setExpanded(open ? null : id)}>
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${c.ticker}</td>
                       <td style={td}>
                         <span style={{
@@ -126,6 +112,12 @@ export default function ContractsPage() {
                           background: "#fbbf2408",
                           letterSpacing: "0.14em", fontSize: 10, fontWeight: 700,
                         }}>CONTRACT</span>
+                        {subs.length > 0 && (
+                          <span style={{
+                            marginLeft: 6, color: "#fbbf24", fontSize: 9,
+                            letterSpacing: "0.1em", fontWeight: 700,
+                          }}>· {subs.length} SUBS</span>
+                        )}
                       </td>
                       <td style={{ ...td, color: tierColor(c.amount), fontWeight: 700, fontSize: 14 }}>
                         {fmtMoney(c.amount)}
@@ -148,12 +140,12 @@ export default function ContractsPage() {
                             <Row k="PERIOD" v={`${c.period_start || "—"} → ${c.period_end || "—"}`} />
                           </div>
                           <div style={{ color: labelLight, fontSize: 11, letterSpacing: "0.14em", marginBottom: 10, fontWeight: 700 }}>
-                            // SUBCONTRACTORS · {(subAwards[id] || []).length} ROWS
+                            // SUBCONTRACTORS · {subs.length} ROWS
                           </div>
-                          {!subAwards[id] ? (
-                            <div style={{ color: muted, fontSize: 11 }}>Loading subcontractors...</div>
-                          ) : !subAwards[id].length ? (
-                            <div style={{ color: muted, fontSize: 11 }}>No subcontractors reported.</div>
+                          {!subs.length ? (
+                            <div style={{ color: muted, fontSize: 11 }}>
+                              No subcontractors reported by prime to USASpending.
+                            </div>
                           ) : (
                             <table style={{ width: "100%", borderCollapse: "collapse" }}>
                               <thead>
@@ -164,7 +156,7 @@ export default function ContractsPage() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {(subAwards[id] || [])
+                                {subs
                                   .slice()
                                   .sort((a, b) => (b.amount || 0) - (a.amount || 0))
                                   .map((s, i) => {

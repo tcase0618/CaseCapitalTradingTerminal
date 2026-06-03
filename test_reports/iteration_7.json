@@ -1,0 +1,39 @@
+{
+  "summary": "v3.5 AXIOM regression tested — 19/19 backend pytest pass; frontend Contracts (sub_awards inline + SUBCONTRACTOR_WIN badge), Macro Pulse dedup, and Pharma research panel all verified working. One real UI bug: X-Factor BULLISH column still shows dashes because stored alerts have stocktwits=null (backend not attaching stocktwits enrichment to alert payload).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/v32/x_factor", "issue": "All returned alerts have stocktwits=null — backend builds the alert without attaching the stocktwits {mentions_24h, bullish_pct} block. Frontend fallback (a.stocktwits.bullish_pct) cannot render anything because the field is null. Fix in services/x_factor.py batch_evaluate (or scanner attach step) to call get_sentiment(ticker) and embed result.stocktwits into each alert before persisting.", "priority": "HIGH"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "IntelPage X-Factor table", "issue": "BULLISH column renders '—' for all 4 alerts because stocktwits is null on the alert object (root cause is backend — see backend_issues)", "selector": "IntelPage.jsx X-Factor row · BULLISH cell", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v7_api.py",
+    "/app/test_reports/pytest/pytest_v7_results.xml"
+  ],
+  "action_items": [
+    "In services/x_factor.py, enrich each alert with stocktwits sentiment (mentions_24h + bullish_pct) at build-time so /api/v32/x_factor alerts carry a non-null stocktwits block; this unblocks the UI BULLISH column fallback.",
+    "Optionally backfill existing stored alerts via a one-time migration so historical rows also show bullish %."
+  ],
+  "critical_code_review_comments": [
+    "test_v7_api.py needed to handle /api/contracts response shape {contracts, fetched_at, filters} — contracts data is wrapped. Other endpoints (/api/v32/x_factor) return a bare list. Inconsistent envelope across endpoints — consider standardizing.",
+    "Pharma scan response shape also inconsistent (sometimes list, sometimes {results: list}). Recommend stable response envelope.",
+    "Sub-award row 'ticker' resolution still misses many large subs (e.g. Wisconsin Physicians Services Insurance Corp). Consider improving ticker resolution mapping for large insurers/contractors."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v7_api.py"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "~85% (X-Factor BULLISH still dashes; Contracts and Pharma 100%)"},
+  "test_credentials": "N/A — no auth required",
+  "seed_data_creation": "None",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test suite at /app/backend/tests/test_v7_api.py covers X-Factor (sentiment, seed_baseline idempotency, reddit subs, alerts endpoint), Contracts (sub_awards inline), Macro dedup, Pharma scan enrichment, plus 10-endpoint regression. All pass 19/19. The lone outstanding bug is x_factor alerts not embedding stocktwits sentiment — verify by: curl /api/v32/x_factor and check 'stocktwits' field is not null on returned alerts. Live /api/v32/sentiment/TSLA correctly returns stocktwits.bullish_pct (~0.58), confirming the StockTwits scraper works — it's just not wired into the alert builder.",
+  "rca of the issue": "BULLISH column empty on IntelPage X-Factor table — Root cause: /api/v32/x_factor returns alert objects with stocktwits=null. The live sentiment endpoint /api/v32/sentiment/{ticker} correctly returns {stocktwits: {mentions_24h, bullish_pct}}, proving the curl_cffi StockTwits scraper works. The defect is in the alert build/persist path (services/x_factor.py batch_evaluate or scanner.py ~line 498 attach step) which doesn't call get_sentiment() per ticker and attach the stocktwits block to the alert dict before save. Reproduction: GET /api/v32/x_factor → inspect first alert.stocktwits → null. Mitigation: enrich alerts with stocktwits at build time and re-trigger a scan; optionally backfill existing rows."
+}

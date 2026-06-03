@@ -291,6 +291,80 @@ async def fetch_quote(ticker: str) -> dict[str, Any] | None:
         return None
 
 
+async def fetch_finviz_short_for_ticker(ticker: str) -> float | None:
+    """Per-ticker Finviz short-float lookup. Used by the Pharma engine for
+    biotech tickers that don't surface in the high-short screener."""
+    url = f"https://finviz.com/quote.ashx?t={ticker.upper()}"
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT,
+                                       follow_redirects=True) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return None
+            soup = BeautifulSoup(r.text, "lxml")
+            # Finviz quote page: snapshot table cells; "Short Float" appears
+            # as a label in one td immediately followed by its value td.
+            for td in soup.find_all("td"):
+                if td.get_text(strip=True).lower() == "short float":
+                    nxt = td.find_next("td")
+                    if nxt:
+                        txt = nxt.get_text(strip=True).rstrip("%")
+                        try:
+                            return float(txt)
+                        except ValueError:
+                            return None
+    except Exception as e:
+        logger.debug("fetch_finviz_short_for_ticker %s: %s", ticker, e)
+    return None
+
+
+async def fetch_openinsider_for_ticker(ticker: str, days: int = 60) -> dict[str, Any] | None:
+    """Pull all insider buys for a given ticker in the trailing window.
+    Returns aggregated {buy_count, total_value_usd, latest_filing} or None."""
+    url = (
+        "http://openinsider.com/screener?"
+        f"s={ticker.upper()}&t=p&xp=1&xs=1&sortcol=0&maxresults=50&fd={days}"
+    )
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return None
+            soup = BeautifulSoup(r.text, "lxml")
+            table = soup.find("table", class_="tinytable")
+            if not table:
+                return None
+    except Exception as e:
+        logger.debug("openinsider_for_ticker %s: %s", ticker, e)
+        return None
+    buys: list[float] = []
+    latest_filing = None
+    for tr in (table.find("tbody") or table).find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 13:
+            continue
+        try:
+            filing = cells[1].get_text(strip=True)
+            value = cells[12].get_text(strip=True)
+            # Value column like "$1,234,567" or "($1,234,567)" — strip
+            v_clean = re.sub(r"[^\d.\-]", "", value.replace(",", ""))
+            v = float(v_clean) if v_clean else 0.0
+            buys.append(v)
+            if latest_filing is None or filing > latest_filing:
+                latest_filing = filing
+        except Exception:
+            continue
+    if not buys:
+        return None
+    return {
+        "ticker": ticker.upper(),
+        "buy_count": len(buys),
+        "total_value_usd": round(sum(buys), 2),
+        "latest_filing": latest_filing,
+    }
+
+
+
 async def collect_all_signals() -> dict[str, Any]:
     # OpenInsider + Yahoo can run concurrently with the Finviz chain.
     # All Finviz calls (short interest + 2 earnings windows) run sequentially

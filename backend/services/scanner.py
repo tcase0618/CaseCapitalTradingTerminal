@@ -495,6 +495,9 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
         return ctx
 
     # 2) Run independent modules in parallel
+    # X-Factor: seed baselines for any new tickers BEFORE evaluating so the
+    # multipliers have history to compare against
+    await x_factor.seed_baseline(tickers)
     dh_ctx_task = _build_dh_context()
     xf_task = x_factor.batch_evaluate(tickers)
     xf_discovery_task = x_factor.discovery_candidates(set(tickers))

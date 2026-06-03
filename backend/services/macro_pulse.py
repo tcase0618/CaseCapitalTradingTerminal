@@ -108,11 +108,20 @@ async def upcoming_events(days_ahead: int = 14, force: bool = False) -> list[dic
     raw = await _fetch_release_dates(days_ahead=days_ahead)
     today = _now().date()
     events: list[dict[str, Any]] = []
+    # Dedup by (release_id, year-month). FRED returns daily release rows for
+    # releases that update with each new data point — for our purposes we want
+    # at most one event per release per calendar month (the actual print date).
+    seen: set[tuple[int, str]] = set()
     for r in raw:
         rid = r.get("release_id")
         date_str = r.get("date")
         if rid not in RELEASES or not date_str:
             continue
+        ym = date_str[:7]  # YYYY-MM
+        key = (rid, ym)
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             d = datetime.fromisoformat(date_str).date()
         except Exception:
@@ -131,7 +140,7 @@ async def upcoming_events(days_ahead: int = 14, force: bool = False) -> list[dic
             "is_imminent": days_until <= 2,
             "release_id": rid,
         })
-    events.sort(key=lambda x: x["days_until"])
+    events.sort(key=lambda x: (x["days_until"], x["tag"]))
 
     await db.macro_cache.update_one(
         {"_id": "events"},

@@ -149,6 +149,11 @@ export default function IntelPage() {
             <tbody>
               {xf.map((a, i) => {
                 const p = a.primary_trigger || {};
+                const st = a.stocktwits || {};
+                // Bullish % falls back through: trigger payload → top-level StockTwits snapshot
+                const bull = p.bullish_pct != null ? p.bullish_pct
+                              : st.bullish_pct != null ? Math.round(st.bullish_pct * 100)
+                              : null;
                 return (
                   <tr key={i} className="row-hover" style={{ borderTop: hairline }}>
                     <td style={td}>{a.fired_at?.slice(0, 16).replace("T", " ")}</td>
@@ -158,7 +163,9 @@ export default function IntelPage() {
                     <td style={{ ...td, color: accent, fontWeight: 700 }}>
                       {p.spike_x ? `${p.spike_x}x` : p.ratio ? `${p.ratio}x` : "—"}
                     </td>
-                    <td style={{ ...td, color: "#4ade80" }}>{p.bullish_pct}%</td>
+                    <td style={{ ...td, color: bull != null && bull >= 60 ? "#4ade80" : bull != null && bull >= 40 ? labelLight : "#f87171" }}>
+                      {bull != null ? `${bull}%` : "—"}
+                    </td>
                   </tr>
                 );
               })}

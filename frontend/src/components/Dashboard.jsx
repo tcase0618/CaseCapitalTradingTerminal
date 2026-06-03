@@ -143,7 +143,9 @@ export default function Dashboard() {
     axios.get(`${API}/activity?limit=20`).then(r => setActivity(r.data)).catch(e => console.error("activity:", e));
     axios.get(`${API}/watchlist`).then(r => setWatchlist(r.data)).catch(e => console.error("wl:", e));
     axios.get(`${API}/alerts`).then(r => setAlerts(r.data)).catch(e => console.error("alerts:", e));
-    axios.get(`${API}/contracts/recent?limit=10`).then(r => setContracts(r.data)).catch(e => console.error("contracts:", e));
+    axios.get(`${API}/contracts?days=90&min_amount=1000000`)
+      .then(r => setContracts(r.data.contracts || []))
+      .catch(e => console.error("contracts:", e));
     axios.get(`${API}/congress/recent?days=30`).then(r => setCongress(r.data)).catch(e => console.error("congress:", e));
     axios.get(`${API}/squeeze/leaderboard/top?limit=10`).then(r => setSqueezeLb(r.data)).catch(e => console.error("squeeze:", e));
     axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
@@ -479,16 +481,24 @@ export default function Dashboard() {
             title={`GOVERNMENT CONTRACT FEED · ${contracts.length}`}
             isOpen={openPanel === "contracts"}
             onToggle={() => setOpenPanel(openPanel === "contracts" ? null : "contracts")}
+            action={
+              <Link to="/contracts" data-testid="contracts-view-all"
+                style={{ color: accent, fontSize: 9, letterSpacing: "0.14em",
+                          textDecoration: "none", fontWeight: 700 }}>
+                VIEW ALL ▸
+              </Link>
+            }
           >
-            {contracts.map((c, i) => (
-              <div key={i} data-testid={`contract-row-${c.ticker}`} style={{
+            {contracts.slice(0, 10).map((c, i) => (
+              <Link key={i} to="/contracts" data-testid={`contract-row-${c.ticker}`} style={{
                 display: "grid", gridTemplateColumns: "60px 1fr 100px",
                 padding: "8px 20px", borderBottom: hairlineLight, fontSize: 9,
+                textDecoration: "none",
               }}>
                 <span style={{ color: accent, fontWeight: 700 }}>${c.ticker}</span>
                 <span style={{ color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.agency}</span>
                 <span style={{ color: "#4ade80", textAlign: "right" }}>{fmtAmt(c.amount)}</span>
-              </div>
+              </Link>
             ))}
           </CollapsiblePanel>
 
@@ -609,7 +619,7 @@ export default function Dashboard() {
   );
 }
 
-function CollapsiblePanel({ title, children, isOpen, onToggle, testid }) {
+function CollapsiblePanel({ title, children, isOpen, onToggle, testid, action = null }) {
   return (
     <div data-testid={testid} style={{ borderBottom: hairlineLight }}>
       <div onClick={onToggle} style={{
@@ -619,6 +629,7 @@ function CollapsiblePanel({ title, children, isOpen, onToggle, testid }) {
       }}>
         <span style={{ fontSize: 8, color: dim, letterSpacing: "0.14em" }}>{title}</span>
         <div style={{ flex: 1, height: 1, margin: "0 16px", background: "rgba(200,168,75,0.15)" }} />
+        {action && <span onClick={e => e.stopPropagation()} style={{ marginRight: 12 }}>{action}</span>}
         <span style={{
           fontSize: 10, color: accent, transform: `rotate(${isOpen ? 90 : 0}deg)`,
           transition: "transform 0.2s", display: "inline-block",

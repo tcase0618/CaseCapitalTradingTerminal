@@ -36,7 +36,10 @@ from bs4 import BeautifulSoup
 
 from . import options_engine, pricer
 from .db import get_db, log_activity, stamped
-from .scrapers import fetch_openinsider_cluster_buys, fetch_finviz_high_short_interest
+from .scrapers import (
+    fetch_finviz_short_for_ticker,
+    fetch_openinsider_for_ticker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,37 +236,70 @@ def _parse_pdufa_html(html_text: str, source: str) -> list[dict[str, Any]]:
 
 # ─────── ClinicalTrials.gov ───────
 async def fetch_clinical_trial(drug: str, ticker: str | None = None) -> dict[str, Any] | None:
-    """Fetch latest Phase 3 study for a drug from ClinicalTrials.gov v2 API."""
+    """Fetch latest Phase 3 study for a drug from ClinicalTrials.gov v2 API.
+    Strategy:
+      1. Try `query.intr` (intervention search) — most accurate for drug names
+      2. Filter to Phase 3 status: RECRUITING, ACTIVE_NOT_RECRUITING, COMPLETED
+      3. If no Phase 3 hit, fall back to highest-phase study
+      4. As last resort, try `query.term` keyword search (catches NCT IDs +
+         brand vs generic names)"""
     if not drug:
         return None
-    url = "https://clinicaltrials.gov/api/v2/studies"
-    params = {
-        "query.term": drug,
-        "filter.overallStatus": "RECRUITING|ACTIVE_NOT_RECRUITING|COMPLETED",
-        "pageSize": 5,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.get(url, params=params)
+    base = "https://clinicaltrials.gov/api/v2/studies"
+    # Strip parenthetical/qualifier text from drug name (e.g. "Vutrisiran (ATTR)" → "Vutrisiran")
+    clean = re.sub(r"\s*\([^)]+\)\s*", " ", drug).strip()
+    primary = clean.split()[0] if clean else drug
+    try_queries = [
+        {"query.intr": primary, "pageSize": 10},
+        {"query.term": clean, "pageSize": 10},
+    ]
+    if ticker:
+        try_queries.append({"query.term": f"{clean} {ticker}", "pageSize": 10})
+
+    studies: list[dict] = []
+    # ClinicalTrials.gov is fronted by Cloudflare which blocks plain httpx
+    # via TLS fingerprinting. curl_cffi impersonates real Chrome and gets
+    # through reliably. Run in a thread executor to keep this async.
+    def _fetch_sync() -> list[dict]:
+        from curl_cffi import requests as cc_requests
+        for params in try_queries:
+            params = {**params, "filter.overallStatus":
+                        "RECRUITING|ACTIVE_NOT_RECRUITING|COMPLETED|TERMINATED"}
+            try:
+                r = cc_requests.get(base, params=params, impersonate="chrome120",
+                                     timeout=20)
+            except Exception:
+                continue
             if r.status_code != 200:
-                return None
-            data = r.json()
+                logger.debug("ClinicalTrials (cffi) %s -> %s", params, r.status_code)
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                continue
+            st = data.get("studies") or []
+            if st:
+                return st
+        return []
+    try:
+        loop = asyncio.get_event_loop()
+        studies = await loop.run_in_executor(None, _fetch_sync)
     except Exception as e:
         logger.debug("ClinicalTrials fetch failed for %s: %s", drug, e)
         return None
-    studies = data.get("studies") or []
-    # Prefer Phase 3
-    best = None
-    for s in studies:
-        proto = s.get("protocolSection") or {}
-        phases = (proto.get("designModule") or {}).get("phases") or []
-        if any("PHASE3" in (p or "").upper() for p in phases):
-            best = s
-            break
-    if not best and studies:
-        best = studies[0]
-    if not best:
+    if not studies:
         return None
+    # Rank: prefer Phase 3 active/completed with highest enrollment
+    def rank(s: dict) -> tuple[int, int]:
+        proto = s.get("protocolSection") or {}
+        phases = " ".join((proto.get("designModule") or {}).get("phases") or []).upper()
+        status = ((proto.get("statusModule") or {}).get("overallStatus") or "").upper()
+        enroll = ((proto.get("designModule") or {}).get("enrollmentInfo") or {}).get("count") or 0
+        phase_rank = 3 if ("PHASE3" in phases or "PHASE_3" in phases) else \
+                       2 if ("PHASE2" in phases or "PHASE_2" in phases) else 1
+        status_rank = 2 if status in ("ACTIVE_NOT_RECRUITING", "COMPLETED") else 1
+        return (phase_rank, status_rank, int(enroll))
+    best = max(studies, key=rank)
     proto = best.get("protocolSection") or {}
     return {
         "nct_id": (proto.get("identificationModule") or {}).get("nctId"),
@@ -271,7 +307,8 @@ async def fetch_clinical_trial(drug: str, ticker: str | None = None) -> dict[str
         "phases": (proto.get("designModule") or {}).get("phases") or [],
         "status": (proto.get("statusModule") or {}).get("overallStatus"),
         "enrollment": ((proto.get("designModule") or {}).get("enrollmentInfo") or {}).get("count"),
-        "primary_completion": (proto.get("statusModule") or {}).get("primaryCompletionDateStruct", {}).get("date"),
+        "primary_completion": ((proto.get("statusModule") or {}).get(
+                                  "primaryCompletionDateStruct") or {}).get("date"),
     }
 
 
@@ -446,15 +483,25 @@ async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "triggered_by": triggered_by,
         }
 
-    # Gather supporting data once for all tickers
+    # Gather supporting data once for all tickers — per-ticker for accuracy
     biotech_tickers = sorted({p["ticker"] for p in upcoming})
-    insider_clusters = await fetch_openinsider_cluster_buys()
-    insider_by_t = {c["ticker"]: c for c in insider_clusters}
-    short_rows = await fetch_finviz_high_short_interest(limit=400)
-    short_by_t = {s["ticker"]: s.get("short_float_pct") for s in short_rows}
 
-    # IV ranks in bounded parallel
+    insider_sem = asyncio.Semaphore(3)
+    short_sem = asyncio.Semaphore(3)
     iv_sem = asyncio.Semaphore(3)
+
+    async def _ins(t: str):
+        async with insider_sem:
+            try:
+                return await fetch_openinsider_for_ticker(t, days=60)
+            except Exception:
+                return None
+    async def _sh(t: str):
+        async with short_sem:
+            try:
+                return await fetch_finviz_short_for_ticker(t)
+            except Exception:
+                return None
     async def _iv(t: str):
         async with iv_sem:
             try:
@@ -462,8 +509,18 @@ async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
                 return iv.get("iv_rank") if iv else None
             except Exception:
                 return None
-    ivs = await asyncio.gather(*[_iv(t) for t in biotech_tickers], return_exceptions=True)
-    iv_by_t = {t: (v if not isinstance(v, Exception) else None) for t, v in zip(biotech_tickers, ivs)}
+
+    insider_results, short_results, iv_results = await asyncio.gather(
+        asyncio.gather(*[_ins(t) for t in biotech_tickers], return_exceptions=True),
+        asyncio.gather(*[_sh(t)  for t in biotech_tickers], return_exceptions=True),
+        asyncio.gather(*[_iv(t)  for t in biotech_tickers], return_exceptions=True),
+    )
+    insider_by_t = {t: (v if not isinstance(v, Exception) else None)
+                     for t, v in zip(biotech_tickers, insider_results)}
+    short_by_t = {t: (v if not isinstance(v, Exception) else None)
+                   for t, v in zip(biotech_tickers, short_results)}
+    iv_by_t = {t: (v if not isinstance(v, Exception) else None)
+                for t, v in zip(biotech_tickers, iv_results)}
 
     # Clinical trial lookups per drug
     ct_tasks = [fetch_clinical_trial(p["drug"], p["ticker"]) for p in upcoming]

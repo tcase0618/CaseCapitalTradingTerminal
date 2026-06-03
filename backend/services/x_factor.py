@@ -27,11 +27,12 @@ from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
 
-UA = "AxiomBot/3.2 (compatible; market-intel)"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+REDDIT_UA = "python:axiom-intel:v3.5 (by /u/axiombot)"
 STOCKTWITS_URL = "https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
 YAHOO_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
 YAHOO_TRENDING = "https://query1.finance.yahoo.com/v1/finance/trending/US?count=30"
-REDDIT_SUBS = ["wallstreetbets", "investing", "options", "SecurityAnalysis"]
+REDDIT_SUBS = ["wallstreetbets", "investing", "options", "SecurityAnalysis", "stocks", "StockMarket"]
 REDDIT_RSS = "https://www.reddit.com/r/{sub}/search.rss?q={query}&restrict_sr=1&sort=new&limit=25"
 FINVIZ_QUOTE = "https://finviz.com/quote.ashx?t={symbol}"
 BARCHART_UNUSUAL = "https://www.barchart.com/options/unusual-activity/stocks?orderBy=volumeOpenInterestRatio"
@@ -103,13 +104,22 @@ async def barchart_unusual_set() -> set[str]:
 
 # ────────────────────── Per-ticker fetchers ──────────────────────
 async def fetch_stocktwits(ticker: str) -> dict[str, Any] | None:
-    try:
-        async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": UA}) as c:
-            r = await c.get(STOCKTWITS_URL.format(symbol=ticker.upper()))
+    """Fetch StockTwits sentiment. StockTwits is Cloudflare-fronted and
+    blocks plain httpx via TLS fingerprinting, so we use curl_cffi to
+    impersonate Chrome (same library yfinance uses)."""
+    url = STOCKTWITS_URL.format(symbol=ticker.upper())
+    def _sync():
+        try:
+            from curl_cffi import requests as cc_requests
+            r = cc_requests.get(url, impersonate="chrome120", timeout=10,
+                                  headers={"User-Agent": UA})
             if r.status_code != 200:
                 return None
-            data = r.json()
-    except Exception:
+            return r.json()
+        except Exception:
+            return None
+    data = await asyncio.get_event_loop().run_in_executor(None, _sync)
+    if not data:
         return None
     msgs = data.get("messages") or []
     if not msgs:
@@ -169,19 +179,88 @@ async def fetch_news_velocity(ticker: str) -> int:
 
 
 async def fetch_reddit_mentions(ticker: str) -> int:
-    """Sum mention counts across REDDIT_SUBS using public .rss search."""
+    """Sum mention counts across REDDIT_SUBS.
+      • If REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET env vars are set, use the
+        official OAuth API (most reliable, never rate-limited at our volume).
+      • Otherwise fall back to public .rss search with a compliant UA.
+        Note: Reddit hard-blocks data-center IPs without auth — public
+        fallback may return 0 from cloud hosts but works from residential IPs."""
+    import os as _os
+    client_id = _os.environ.get("REDDIT_CLIENT_ID", "").strip()
+    client_secret = _os.environ.get("REDDIT_CLIENT_SECRET", "").strip()
+
+    # OAuth path
+    if client_id and client_secret:
+        try:
+            return await _fetch_reddit_oauth(ticker, client_id, client_secret)
+        except Exception as e:
+            logger.debug("reddit oauth failed: %s", e)
+
+    # Public RSS fallback (curl_cffi for TLS-friendly request)
     total = 0
-    try:
-        async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": UA}) as c:
-            for sub in REDDIT_SUBS:
-                try:
-                    r = await c.get(REDDIT_RSS.format(sub=sub, query=ticker.upper()))
-                    if r.status_code == 200:
-                        total += r.text.count("<entry>")
-                except Exception:
-                    continue
-    except Exception:
-        pass
+    def _sync_one(sub: str) -> int:
+        try:
+            from curl_cffi import requests as cc_requests
+            r = cc_requests.get(
+                REDDIT_RSS.format(sub=sub, query=ticker.upper()),
+                impersonate="chrome120", timeout=10,
+                headers={"User-Agent": REDDIT_UA,
+                          "Accept": "application/rss+xml,*/*"},
+            )
+            if r.status_code == 200:
+                return r.text.count("<entry>")
+        except Exception:
+            return 0
+        return 0
+    for sub in REDDIT_SUBS:
+        try:
+            n = await asyncio.get_event_loop().run_in_executor(None, _sync_one, sub)
+            total += n
+            await asyncio.sleep(0.25)  # gentle rate-limiting
+        except Exception:
+            continue
+    return total
+
+
+_reddit_token_cache: dict[str, Any] = {}
+
+
+async def _fetch_reddit_oauth(ticker: str, client_id: str, client_secret: str) -> int:
+    """Authenticated Reddit search across REDDIT_SUBS. Tokens cached 50min."""
+    now = _now().timestamp()
+    if _reddit_token_cache.get("expires_at", 0) < now + 60:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(
+                "https://www.reddit.com/api/v1/access_token",
+                auth=(client_id, client_secret),
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": REDDIT_UA},
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"reddit auth {r.status_code}")
+            tk = r.json()
+        _reddit_token_cache["token"] = tk["access_token"]
+        _reddit_token_cache["expires_at"] = now + tk.get("expires_in", 3600)
+
+    token = _reddit_token_cache["token"]
+    headers = {"User-Agent": REDDIT_UA, "Authorization": f"bearer {token}"}
+    total = 0
+    async with httpx.AsyncClient(timeout=15.0, headers=headers) as c:
+        for sub in REDDIT_SUBS:
+            try:
+                r = await c.get(
+                    f"https://oauth.reddit.com/r/{sub}/search",
+                    params={"q": ticker.upper(), "restrict_sr": "1",
+                             "sort": "new", "limit": 25, "t": "week"},
+                )
+                if r.status_code == 200:
+                    children = ((r.json() or {}).get("data") or {}).get("children") or []
+                    total += len(children)
+                elif r.status_code == 429:
+                    await asyncio.sleep(1.5)
+                    break
+            except Exception:
+                continue
     return total
 
 
@@ -215,13 +294,19 @@ async def fetch_google_trends(ticker: str) -> dict[str, Any] | None:
 
 # ────────────────────── Baseline ──────────────────────
 async def baseline_for_ticker(ticker: str) -> dict[str, float]:
+    """7-day rolling baseline of sentiment metrics. Excludes the snapshot
+    just inserted by `evaluate_x_factor` (rows from last 30 minutes) so the
+    multiplier doesn't always equal 1.0 on the first run."""
     db = get_db()
-    cutoff = (_now() - timedelta(days=7)).isoformat()
+    cutoff_old = (_now() - timedelta(days=7)).isoformat()
+    cutoff_recent = (_now() - timedelta(minutes=30)).isoformat()
     docs = await db.x_factor_history.find(
-        {"ticker": ticker.upper(), "ts": {"$gte": cutoff}}, {"_id": 0},
+        {"ticker": ticker.upper(),
+          "ts": {"$gte": cutoff_old, "$lt": cutoff_recent}}, {"_id": 0},
     ).to_list(200)
     if not docs:
-        return {"avg_st_mentions": 0, "avg_bull_pct": 0.5, "avg_reddit": 0}
+        return {"avg_st_mentions": 0, "avg_bull_pct": 0.5, "avg_reddit": 0,
+                 "has_baseline": False}
     sm = [d.get("stocktwits_mentions") for d in docs if d.get("stocktwits_mentions") is not None]
     bp = [d.get("stocktwits_bullish_pct") for d in docs if d.get("stocktwits_bullish_pct") is not None]
     rd = [d.get("reddit_mentions") for d in docs if d.get("reddit_mentions") is not None]
@@ -229,7 +314,42 @@ async def baseline_for_ticker(ticker: str) -> dict[str, float]:
         "avg_st_mentions": (sum(sm)/len(sm)) if sm else 0,
         "avg_bull_pct": (sum(bp)/len(bp)) if bp else 0.5,
         "avg_reddit": (sum(rd)/len(rd)) if rd else 0,
+        "has_baseline": True,
     }
+
+
+async def seed_baseline(tickers: list[str]) -> int:
+    """One-time per-ticker baseline seed used on startup so the multiplier
+    has something to compare against. Writes a synthetic snapshot dated 4d
+    ago for each ticker with the CURRENT live sentiment counts halved —
+    that way the first real scan can fire a >2x spike trigger.
+    Idempotent: only seeds tickers that don't already have any history."""
+    db = get_db()
+    seeded = 0
+    for t in tickers:
+        existing = await db.x_factor_history.count_documents({"ticker": t.upper()})
+        if existing:
+            continue
+        twits = await fetch_stocktwits(t)
+        reddit = await fetch_reddit_mentions(t) if not twits else 0
+        if not twits and not reddit:
+            continue
+        synth_ts = (_now() - timedelta(days=4)).isoformat()
+        await db.x_factor_history.insert_one(stamped({
+            "ticker": t.upper(),
+            "ts": synth_ts,
+            "stocktwits_mentions": int((twits.get("mentions_24h") or 0) / 2) if twits else 0,
+            "stocktwits_bullish_pct": (twits.get("bullish_pct") if twits else 0.5),
+            "news_velocity": 0,
+            "reddit_mentions": int(reddit / 2),
+            "google_trends_current": None,
+            "google_trends_baseline": None,
+            "_synthetic_seed": True,
+        }))
+        seeded += 1
+    if seeded:
+        await log_activity(f"X-Factor baseline seeded for {seeded} tickers", "info")
+    return seeded
 
 
 # ────────────────────── Main evaluator ──────────────────────
@@ -337,7 +457,17 @@ async def evaluate_x_factor(ticker: str, *, fast: bool = False,
         triggers.append({"platform": "BARCHART", "type": "UNUSUAL_OPTIONS"})
 
     if not triggers:
-        return None
+        # Cold-start: surface StockTwits sentiment as a passive observation
+        # so the UI shows the bullish % column even before a spike fires.
+        if twits and (twits.get("mentions_24h") or 0) >= 5 and not baseline.get("has_baseline"):
+            triggers.append({
+                "platform": "STOCKTWITS", "type": "BASELINE_SEEDING",
+                "mentions": twits["mentions_24h"],
+                "bullish_pct": round((twits.get("bullish_pct") or 0) * 100, 0),
+                "note": "establishing 7-day baseline",
+            })
+        else:
+            return None
 
     alert = {
         "ticker": t,

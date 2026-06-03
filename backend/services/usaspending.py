@@ -541,43 +541,37 @@ async def recent_wins_for_ticker(ticker: str, days: int = 7, min_amount: float =
 # ─────── Contracts view + subcontractor fetcher ───────
 async def fetch_sub_awards(prime_award_id: str) -> list[dict[str, Any]]:
     """Fetch subcontractor awards under a given prime award ID.
-    Returns [{recipient, ticker, amount, pct_of_prime, description, period}]."""
+    Uses the dedicated `/api/v2/subawards/` endpoint which takes a simpler
+    payload than `/search/spending_by_award/`. Returns [] when the prime
+    has no reported subs (USASpending sub_award reporting is optional)."""
     if not prime_award_id:
         return []
-    # USASpending v2 sub_awards endpoint — requires `subawards: true` AND
-    # the same filter shape as prime search (award_type_codes is required).
-    payload = {
-        "filters": {
-            "award_ids": [prime_award_id],
-            "award_type_codes": ["A", "B", "C", "D"],
-        },
-        "fields": ["Sub-Award ID", "Sub-Awardee Name", "Sub-Award Amount",
-                   "Sub-Award Description", "Sub-Award Date"],
-        "subawards": True,
-        "page": 1, "limit": 100, "sort": "Sub-Award Amount", "order": "desc",
-    }
+    payload = {"award_id": prime_award_id, "limit": 100, "page": 1, "sort": "amount", "order": "desc"}
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        data = await _post(client, "/search/spending_by_award/", payload)
+        data = await _post(client, "/subawards/", payload)
     rows = (data or {}).get("results", []) if data else []
     out: list[dict[str, Any]] = []
     for r in rows:
-        recipient = r.get("Sub-Awardee Name") or r.get("recipient_name") or ""
-        amt = float(r.get("Sub-Award Amount") or 0)
+        recipient = r.get("recipient_name") or r.get("subawardee_name") or ""
+        amt = float(r.get("subaward_amount") or r.get("amount") or 0)
         out.append({
-            "sub_award_id": r.get("Sub-Award ID") or r.get("internal_id"),
+            "sub_award_id": r.get("subaward_number") or r.get("internal_id") or r.get("id"),
             "recipient": recipient,
             "ticker": name_to_ticker(recipient),
             "amount": amt,
-            "description": r.get("Sub-Award Description") or "",
-            "date": r.get("Sub-Award Date"),
+            "description": r.get("description") or "",
+            "date": r.get("action_date") or r.get("subaward_date"),
         })
     return out
 
 
 async def list_prime_contracts(days: int = 90, min_amount: float = 1_000_000,
-                                 agency: str | None = None) -> list[dict[str, Any]]:
+                                 agency: str | None = None,
+                                 enrich_subs: bool = True) -> list[dict[str, Any]]:
     """Top-level contracts list for the Contracts tab. Returns prime awards
-    with ticker mapping. Subcontractors fetched on-demand via separate endpoint."""
+    with ticker mapping. When `enrich_subs=True`, the sub-awards endpoint
+    is called for each prime in bounded parallel (max 6 concurrent) and
+    embedded as `sub_awards` directly in each row + cached in MongoDB."""
     end = date.today()
     start = end - timedelta(days=days)
     filters: dict[str, Any] = {
@@ -615,6 +609,42 @@ async def list_prime_contracts(days: int = 90, min_amount: float = 1_000_000,
             "description": r.get("Description") or "",
             "period_start": r.get("Period of Performance Start Date"),
             "period_end": r.get("Period of Performance Current End Date"),
+            "sub_awards": [],
         })
+    if not enrich_subs or not out:
+        return out
+
+    # Enrich each prime with subcontractors (bounded parallel)
+    from .db import get_db as _gdb
+    db = _gdb()
+    sem = asyncio.Semaphore(6)
+
+    async def _enrich(prime: dict[str, Any]):
+        award_id = prime.get("generated_internal_id") or prime.get("award_id")
+        if not award_id:
+            return
+        # Check 24h cache first
+        cached = await db.subaward_cache.find_one({"_id": award_id})
+        if cached:
+            try:
+                age = (datetime.now(timezone.utc) -
+                        datetime.fromisoformat(cached["fetched_at"]))\
+                    .total_seconds() / 3600
+                if age < 24:
+                    prime["sub_awards"] = cached.get("sub_awards") or []
+                    return
+            except Exception:
+                pass
+        async with sem:
+            subs = await fetch_sub_awards(award_id)
+        prime["sub_awards"] = subs
+        await db.subaward_cache.update_one(
+            {"_id": award_id},
+            {"$set": {"sub_awards": subs,
+                       "fetched_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+
+    await asyncio.gather(*[_enrich(p) for p in out], return_exceptions=True)
     return out
 
