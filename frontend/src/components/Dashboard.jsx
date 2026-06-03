@@ -143,7 +143,7 @@ export default function Dashboard() {
     axios.get(`${API}/activity?limit=20`).then(r => setActivity(r.data)).catch(e => console.error("activity:", e));
     axios.get(`${API}/watchlist`).then(r => setWatchlist(r.data)).catch(e => console.error("wl:", e));
     axios.get(`${API}/alerts`).then(r => setAlerts(r.data)).catch(e => console.error("alerts:", e));
-    axios.get(`${API}/contracts?limit=10`).then(r => setContracts(r.data)).catch(e => console.error("contracts:", e));
+    axios.get(`${API}/contracts/recent?limit=10`).then(r => setContracts(r.data)).catch(e => console.error("contracts:", e));
     axios.get(`${API}/congress/recent?days=30`).then(r => setCongress(r.data)).catch(e => console.error("congress:", e));
     axios.get(`${API}/squeeze/leaderboard/top?limit=10`).then(r => setSqueezeLb(r.data)).catch(e => console.error("squeeze:", e));
     axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
