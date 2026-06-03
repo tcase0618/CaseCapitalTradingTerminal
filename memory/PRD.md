@@ -198,3 +198,11 @@ Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK 
 - **`track_record()` extended** with `open`, `unrealized_avg_pct`, `unrealized_winners`.
 - **LotteryPage UI** — new `OPEN POSITIONS` + `UNREALIZED P&L` stat tiles; TRACK RECORD
   table now shows `CURRENT` ask + `OPEN` status for live positions plus running P&L.
+
+
+## Feb 2026 — v3.3: Pharma + Contracts + Pipeline Criteria
+- **Settings: Pipeline Criteria** — two read-only boxes side-by-side. LEFT (`Pre-Filter Screener`): 10 hard-coded rules describing what gets a ticker into the scoring engine. RIGHT (`Final Screener`): 13 live AXIOM score weights pulled from learning engine via `GET /api/admin/pipeline_criteria`.
+- **PHARMA tab** — fully isolated biotech pipeline (`services/pharma.py`). FDA PDUFA calendar (biopharmcatalyst→streetinsider→rttnews scrapers + curated seed fallback), ClinicalTrials.gov v2 API, OpenInsider, Finviz short, yfinance IV, NIH/CDC prevalence map. Binary Event Score /100 (Phase 3:25 · insider:20 · short:15 · IV:15 · AdCom:15 · clean app:10). Tiers: STRONG ≥80 (auto-enter) · WATCH ≥65 · NEUTRAL ≥40 · WEAK <40. Telegram fires ≥70. Two triggers: parallel with main scan + dedicated `▶ PHARMA SCAN` button. Own collections: `pharma_pdufa`, `pharma_active_plays`, `pharma_track_record`, `pharma_pdufa_cache`. Endpoints: `/api/pharma/scan|pdufa|active|track_record|play|close`.
+- **CONTRACTS tab** — `GET /api/contracts?days=90&min_amount=1M&agency=` returns prime contracts mapped to public tickers. `GET /api/contracts/sub_awards?award_id=…` returns subcontractors with 24h cache. UI: collapsed rows color-coded by size, click expands subcontractor list (sorted by amount desc). Subcontractors with ticker get `SUBCONTRACTOR_WIN` badge linking to `/ticker/{T}`. Filter row: days, min amount, agency, only-with-subs toggle.
+- **Sidebar nav** — added `/contracts` (CORE) and `/pharma` (v3.2 NEW).
+- **Code review** — all 65 API endpoints respond 200. Legacy `/api/contracts` renamed to `/api/contracts/recent` to avoid conflict with the new list endpoint. USASpending `limit` capped at 100 (was hitting 422 at 200). Pharma `score_short` now coerces string short_pct values to float.
