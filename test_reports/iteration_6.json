@@ -1,0 +1,60 @@
+{
+  "summary": "v3.2 SETTINGS/PHARMA/CONTRACTS + parallel pharma dispatch full e2e. 20/20 backend pytests green; all UI flows render & expand correctly. Pharma seed fallback returns 7 PDUFAs, Contracts returns 27 prime rows in 90d, sub_awards endpoint returns 200 with empty array, /api/contracts/recent legacy still serves dashboard tile. Pharma fire-and-forget dispatched from main scan with no failure.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/contracts",
+        "issue": "period_start/period_end and description fields come back null/empty for every contract row → UI DATE column shows '—' on all 27 rows. USASpending v2 spending_by_award typically returns these fields; verify field mapping in services/usaspending.py list_prime_contracts. Workaround for now is that primary sort/filter is by amount."
+      },
+      {
+        "endpoint": "/api/pharma/scan",
+        "issue": "Earlier traceback present in backend.err.log (services/pharma.py line 316 score_short, line 372 compute_binary_event_score) that has since been hot-reloaded away. Final state is 200 OK, but worth a re-grep on next iteration to confirm no regressions."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "/pharma",
+        "issues": [
+          "All 7 PDUFA rows score 29/100 (WEAK tier) because biopharmcatalyst is blocked and seed fallback lacks insider/short/AdCom data. Tiles STRONG/WATCH/ACTIVE PLAYS therefore stay 0. Acceptable per agent context note but the UI never demonstrates the ≥80 green / ≥65 amber states without curated seed enrichment."
+        ]
+      },
+      {
+        "screen": "/pharma",
+        "issues": [
+          "Missing data-testid on PDUFA rows (pharma-row-<ticker>). Used generic table tbody tr click — works but reduces test stability."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v6_api.py",
+    "/app/test_reports/pytest/pytest_v6_results.xml"
+  ],
+  "action_items": [
+    "Populate period_start / period_end / description in /api/contracts response (USASpending spending_by_award returns period_of_performance_start_date, period_of_performance_current_end_date, description) — currently all null causing DATE column to show '—'",
+    "(Optional) Add data-testid='pharma-row-<ticker>' on each PDUFA row in PharmaPage.jsx for stable e2e",
+    "(Optional) Curate _seed_pdufa() with phase/insider/AdCom fields so demo shows STRONG/WATCH tiers"
+  ],
+  "critical_code_review_comments": [
+    "services/scanner.py:366 — asyncio.create_task fire-and-forget is correct for isolation; ensure run_pharma_scan internally catches all exceptions so a failure doesn't surface as an unhandled task warning (it does — try/except + log_activity wrap)",
+    "/api/contracts/sub_awards correctly returns empty list + 200 even when USASpending sub_awards endpoint returns nothing — defensive code path verified",
+    "/api/admin/pipeline_criteria final_screener weights are live (16.91 insider_cluster_buy, 11.85 CONTRACT_SURGE, etc.) confirming weights are read from learning_weights collection rather than hardcoded — good",
+    "Renamed legacy endpoint /api/contracts/recent doesn't conflict with new GET /api/contracts because FastAPI routes /api/contracts/recent more specifically — verified both 200",
+    "PHARMA isolation: writes only to pharma_* collections; no signal_first_seen/signal_performance/combo_stats writes spotted in services/pharma.py — isolation maintained"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v6_api.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "none required (public endpoints)",
+  "seed_data_creation": "none — used existing seed_pdufa fallback and live USASpending data",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest file at /app/backend/tests/test_v6_api.py covers pipeline_criteria + pharma + contracts + regression. Re-run via: pytest backend/tests/test_v6_api.py -v. Pharma scan POST takes ~30-40s due to per-ticker yfinance/finviz calls; bump pytest timeout for that test. The two minor issues (empty date/description on contracts, all-WEAK scores on pharma) are data/UX polish — neither blocks any flow.",
+  "rca of the issue": "N/A — no critical bugs found"
+}

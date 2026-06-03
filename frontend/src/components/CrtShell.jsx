@@ -18,8 +18,10 @@ const hairlineAccent = "0.5px solid rgba(200,168,75,0.18)";
 const NAV = [
   { to: "/",            label: "DASHBOARD",   icon: "▣", group: "CORE" },
   { to: "/intel",       label: "INTEL FEED",  icon: "◉", group: "CORE" },
+  { to: "/contracts",   label: "CONTRACTS",   icon: "▦", group: "CORE" },
   { to: "/earnings",    label: "EARNINGS",    icon: "▤", group: "v3.2" },
   { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "v3.2" },
+  { to: "/pharma",      label: "PHARMA",      icon: "🧬", group: "v3.2" },
   { to: "/performance", label: "PERFORMANCE", icon: "▶", group: "ANALYSIS" },
   { to: "/learning",    label: "LEARNING",    icon: "◆", group: "ANALYSIS" },
   { to: "/settings",    label: "SETTINGS",    icon: "▥", group: "SYSTEM" },

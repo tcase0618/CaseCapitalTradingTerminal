@@ -4,13 +4,15 @@ import { toast } from "sonner";
 import { CrtShell, Card, tokens } from "./CrtShell";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-const { accent, dim, muted, labelLight, hairline, cardBg } = tokens;
+const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 export default function SettingsPage() {
   const [status, setStatus] = useState(null);
+  const [criteria, setCriteria] = useState(null);
 
   useEffect(() => {
     axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => setStatus({}));
+    axios.get(`${API}/admin/pipeline_criteria`).then(r => setCriteria(r.data)).catch(() => {});
   }, []);
 
   const runLearning = async () => {
@@ -42,6 +44,61 @@ export default function SettingsPage() {
 
   return (
     <CrtShell title="SETTINGS & SYSTEM">
+      {/* ── Pipeline Criteria ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 4 }}>
+        <Card title="PIPELINE CRITERIA · PRE-FILTER SCREENER" accentColor={accent2}>
+          <div style={{ color: muted, fontSize: 11, marginBottom: 12, letterSpacing: "0.04em", lineHeight: 1.6 }}>
+            What has to be true about a ticker for it to get flagged and passed to the scoring engine.
+          </div>
+          {!criteria ? (
+            <div style={{ color: muted, padding: 10 }}>Loading...</div>
+          ) : (
+            criteria.pre_filter.map((r, i) => (
+              <div key={i} style={{
+                display: "grid", gridTemplateColumns: "180px 1fr",
+                padding: "8px 0", borderBottom: hairline, fontSize: 12, gap: 12,
+              }}>
+                <span style={{ color: accent2, letterSpacing: "0.08em", fontWeight: 700 }}>
+                  {r.rule}
+                </span>
+                <span style={{ color: labelLight, fontSize: 11, lineHeight: 1.5 }}>{r.detail}</span>
+              </div>
+            ))
+          )}
+        </Card>
+
+        <Card title="PIPELINE CRITERIA · FINAL SCREENER · LIVE WEIGHTS" accentColor={accent}>
+          <div style={{ color: muted, fontSize: 11, marginBottom: 12, letterSpacing: "0.04em", lineHeight: 1.6 }}>
+            AXIOM score formula components — weights live from the learning engine.
+          </div>
+          {!criteria ? (
+            <div style={{ color: muted, padding: 10 }}>Loading...</div>
+          ) : (
+            <>
+              {criteria.final_screener.map((w, i) => (
+                <div key={i} style={{
+                  display: "grid", gridTemplateColumns: "1.6fr 60px 1fr",
+                  padding: "8px 0", borderBottom: hairline, fontSize: 12, gap: 12, alignItems: "center",
+                }}>
+                  <span style={{ color: accent, letterSpacing: "0.06em", fontWeight: 700, fontSize: 11 }}>
+                    {w.key}
+                  </span>
+                  <span className="num" style={{
+                    color: accent, fontWeight: 700, fontSize: 14, textAlign: "right",
+                    fontFamily: "JetBrains Mono",
+                  }}>{w.weight?.toFixed(2)}</span>
+                  <span style={{ color: muted, fontSize: 10, lineHeight: 1.5 }}>{w.description}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: 12, padding: "10px 0", borderTop: `0.5px solid ${accent}33`,
+                              color: labelLight, fontSize: 10, letterSpacing: "0.08em", lineHeight: 1.6 }}>
+                <span style={{ color: dim }}>FORMULA:</span> {criteria.axiom_score_formula}
+              </div>
+            </>
+          )}
+        </Card>
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
         <div>
           <Card title="INTEGRATIONS STATUS">

@@ -194,7 +194,8 @@ async def _post(client: httpx.AsyncClient, path: str, payload: dict) -> dict | N
     try:
         r = await client.post(f"{BASE}{path}", json=payload, headers=HEADERS)
         if r.status_code != 200:
-            logger.warning("USASpending %s -> %s", path, r.status_code)
+            logger.warning("USASpending %s -> %s · body[:300]: %s",
+                            path, r.status_code, r.text[:300])
             return None
         return r.json()
     except Exception as e:
@@ -535,3 +536,85 @@ async def recent_wins_for_ticker(ticker: str, days: int = 7, min_amount: float =
         "amount": float(r.get("Award Amount") or 0),
         "award_id": r.get("Award ID"),
     } for r in rows]
+
+
+# ─────── Contracts view + subcontractor fetcher ───────
+async def fetch_sub_awards(prime_award_id: str) -> list[dict[str, Any]]:
+    """Fetch subcontractor awards under a given prime award ID.
+    Returns [{recipient, ticker, amount, pct_of_prime, description, period}]."""
+    if not prime_award_id:
+        return []
+    # USASpending v2 sub_awards endpoint — requires `subawards: true` AND
+    # the same filter shape as prime search (award_type_codes is required).
+    payload = {
+        "filters": {
+            "award_ids": [prime_award_id],
+            "award_type_codes": ["A", "B", "C", "D"],
+        },
+        "fields": ["Sub-Award ID", "Sub-Awardee Name", "Sub-Award Amount",
+                   "Sub-Award Description", "Sub-Award Date"],
+        "subawards": True,
+        "page": 1, "limit": 100, "sort": "Sub-Award Amount", "order": "desc",
+    }
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        data = await _post(client, "/search/spending_by_award/", payload)
+    rows = (data or {}).get("results", []) if data else []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        recipient = r.get("Sub-Awardee Name") or r.get("recipient_name") or ""
+        amt = float(r.get("Sub-Award Amount") or 0)
+        out.append({
+            "sub_award_id": r.get("Sub-Award ID") or r.get("internal_id"),
+            "recipient": recipient,
+            "ticker": name_to_ticker(recipient),
+            "amount": amt,
+            "description": r.get("Sub-Award Description") or "",
+            "date": r.get("Sub-Award Date"),
+        })
+    return out
+
+
+async def list_prime_contracts(days: int = 90, min_amount: float = 1_000_000,
+                                 agency: str | None = None) -> list[dict[str, Any]]:
+    """Top-level contracts list for the Contracts tab. Returns prime awards
+    with ticker mapping. Subcontractors fetched on-demand via separate endpoint."""
+    end = date.today()
+    start = end - timedelta(days=days)
+    filters: dict[str, Any] = {
+        "award_type_codes": ["A", "B", "C", "D"],
+        "time_period": [{"start_date": start.isoformat(), "end_date": end.isoformat()}],
+        "award_amounts": [{"lower_bound": min_amount}],
+    }
+    if agency:
+        filters["agencies"] = [{"type": "awarding", "tier": "toptier", "name": agency}]
+    payload = {
+        "filters": filters,
+        "fields": ["Award ID", "Recipient Name", "Awarding Agency", "Award Amount",
+                   "Description", "Period of Performance Start Date",
+                   "recipient_id"],
+        "page": 1, "limit": 100, "sort": "Award Amount", "order": "desc",
+    }
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        data = await _post(client, "/search/spending_by_award/", payload)
+    rows = (data or {}).get("results", []) if data else []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        recipient = r.get("Recipient Name") or ""
+        ticker = name_to_ticker(recipient)
+        if not ticker:
+            continue
+        amt = float(r.get("Award Amount") or 0)
+        out.append({
+            "award_id": r.get("Award ID"),
+            "generated_internal_id": r.get("generated_internal_id"),
+            "internal_id": r.get("internal_id"),
+            "ticker": ticker,
+            "recipient": recipient,
+            "agency": r.get("Awarding Agency"),
+            "amount": amt,
+            "description": r.get("Description") or "",
+            "period_start": r.get("Period of Performance Start Date"),
+            "period_end": r.get("Period of Performance Current End Date"),
+        })
+    return out
+

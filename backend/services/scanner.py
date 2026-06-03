@@ -359,6 +359,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         await learning_engine.refresh_combo_stats_live()
     except Exception as e:
         logger.warning("Live combo stats refresh failed: %s", e)
+    # AXIOM Pharma — fully isolated parallel pipeline. Errors here NEVER
+    # affect the main scan record.
+    try:
+        from . import pharma as _pharma
+        asyncio.create_task(_pharma.run_pharma_scan(triggered_by="main_scan"))
+    except Exception as e:
+        logger.warning("Pharma parallel scan dispatch failed: %s", e)
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

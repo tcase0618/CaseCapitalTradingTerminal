@@ -8,6 +8,8 @@ import SettingsPage from "@/components/SettingsPage";
 import EarningsPage from "@/components/EarningsPage";
 import LotteryPage from "@/components/LotteryPage";
 import IntelPage from "@/components/IntelPage";
+import PharmaPage from "@/components/PharmaPage";
+import ContractsPage from "@/components/ContractsPage";
 import { Toaster } from "sonner";
 
 function App() {
@@ -21,6 +23,8 @@ function App() {
           <Route path="/earnings" element={<EarningsPage />} />
           <Route path="/lottery" element={<LotteryPage />} />
           <Route path="/intel" element={<IntelPage />} />
+          <Route path="/pharma" element={<PharmaPage />} />
+          <Route path="/contracts" element={<ContractsPage />} />
           <Route path="/ticker/:ticker" element={<TickerPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

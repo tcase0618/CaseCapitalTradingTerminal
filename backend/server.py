@@ -107,8 +107,9 @@ async def scan_gov():
     return await scanner.run_gov_scan_only(triggered_by="admin_dashboard")
 
 
-@api.get("/contracts")
-async def contracts(limit: int = 5):
+@api.get("/contracts/recent")
+async def contracts_recent(limit: int = 5):
+    """Legacy compact view used by the Dashboard 'recent gov contracts' tile."""
     return await usaspending.list_recent_contracts_for_tickers(limit=limit)
 
 
@@ -714,6 +715,138 @@ async def telegram_info():
         me = await client.get(f"https://api.telegram.org/bot{token}/getMe")
         wh = await client.get(f"https://api.telegram.org/bot{token}/getWebhookInfo")
     return {"configured": True, "me": me.json(), "webhook": wh.json()}
+
+
+# ─────── Pipeline Criteria (Settings) ───────
+@api.get("/admin/pipeline_criteria")
+async def pipeline_criteria():
+    """Two-box descriptor for the Settings page.
+    LEFT: static pre-filter rules.
+    RIGHT: live final-screener weights from the learning engine."""
+    from services import learning_engine
+    weights = await learning_engine.get_weights()
+    # Static description of the pre-filter rules from scanner._aggregate +
+    # _finalize_signals_and_filter. Kept hard-coded because they ARE the
+    # source-of-truth in code and there is no DB row to read.
+    pre_filter = [
+        {"rule": "2+ signals required", "detail": "Ticker must hit ≥2 distinct signal types before it's enriched"},
+        {"rule": "Insider cluster buy", "detail": "≥2 insiders bought in last 90d (OpenInsider)"},
+        {"rule": "High short interest", "detail": "Short float ≥ 10% (Finviz)"},
+        {"rule": "Upcoming earnings", "detail": "Earnings within next 14 days (Finviz)"},
+        {"rule": "Gov contract surge", "detail": "30d award total ≥ 1.4× prior 90d avg (USASpending)"},
+        {"rule": "Congressional buy", "detail": "Recent Congress purchase (curated + Quiver scrape)"},
+        {"rule": "Unusual options flow", "detail": "Promoted to signal AFTER pre-filter passes; adds to score"},
+        {"rule": "Concentration win", "detail": "Single award > $20M to mkt-cap < $2B issuer"},
+        {"rule": "Momentum stack", "detail": "≥3 distinct agencies in 30d, cumulative > $20M"},
+        {"rule": "Budget surge", "detail": "Agency monthly obligations ≥ 1.5× 3-mo avg"},
+    ]
+    final_screener = [
+        {"key": k, "weight": v, "description": _WEIGHT_DESCRIPTIONS.get(k, "")}
+        for k, v in sorted(weights.items(), key=lambda x: -x[1])
+    ]
+    return {
+        "pre_filter": pre_filter,
+        "final_screener": final_screener,
+        "axiom_score_formula": "Σ (signal × live_weight) + bonuses (UNUSUAL_FLOW +2, CALL_SWEEP +3, NARRATIVE_LOCK +20)",
+    }
+
+
+_WEIGHT_DESCRIPTIONS = {
+    "insider_cluster_buy":   "Insiders buying in concert (3+ in 90d, > $500k)",
+    "high_short_interest":   "Short float > 10% — squeeze fuel",
+    "CONTRACT_SURGE":        "30d gov spend ≥ 1.4× prior 90d avg, > $10M",
+    "CONGRESSIONAL_BUY":     "Congress disclosure purchase in last 30 days",
+    "NEW_WINNER":            "First award from agency in 12 months, > $5M",
+    "CONCENTRATION_WIN":     "Single award > $20M to mkt-cap < $2B issuer",
+    "MOMENTUM_STACK":        "≥3 agencies in 30d, cumulative > $20M",
+    "BUDGET_SURGE":          "Agency monthly obligations ≥ 1.5× 3-mo avg",
+    "UNUSUAL_FLOW":          "Options volume ≥ 3× OI on any single strike",
+    "CALL_SWEEP":            "Multi-exchange aggressive call sweep detected",
+    "upcoming_earnings":     "Earnings within 14 days",
+    "squeeze_bonus":         "Squeeze score ≥ 65 triggers additional weight",
+    "committee_match_bonus": "Congressional buyer sits on directly relevant committee",
+}
+
+
+# ─────── PHARMA endpoints ───────
+@api.post("/pharma/scan")
+async def pharma_scan_endpoint():
+    from services import pharma
+    return await pharma.run_pharma_scan(triggered_by="api")
+
+
+@api.get("/pharma/pdufa")
+async def pharma_pdufa(days: int = 90):
+    from services import pharma
+    rows = await pharma.get_pdufa_within_days(days=days)
+    return {"results": rows, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
+@api.get("/pharma/active")
+async def pharma_active():
+    from services import pharma
+    return {"plays": await pharma.get_active_plays()}
+
+
+@api.get("/pharma/track_record")
+async def pharma_track_record():
+    from services import pharma
+    return await pharma.track_record()
+
+
+class PharmaManualPlay(BaseModel):
+    ticker: str
+    drug: str | None = None
+    pdufa_date: str | None = None
+    entry_price: float | None = None
+    notes: str | None = None
+
+
+@api.post("/pharma/play")
+async def pharma_add_manual_play(p: PharmaManualPlay):
+    from services import pharma
+    return await pharma.add_manual_play(p.ticker, p.drug, p.pdufa_date, p.entry_price, p.notes)
+
+
+@api.post("/pharma/close")
+async def pharma_close_play(ticker: str, pdufa_date: str, exit_price: float | None = None):
+    from services import pharma
+    ok = await pharma.close_play(ticker, pdufa_date, exit_price)
+    return {"closed": ok}
+
+
+# ─────── CONTRACTS endpoints ───────
+@api.get("/contracts")
+async def contracts_list(days: int = 90, min_amount: float = 1_000_000,
+                          agency: str | None = None):
+    rows = await usaspending.list_prime_contracts(days=days, min_amount=min_amount,
+                                                    agency=agency)
+    return {"contracts": rows, "fetched_at": datetime.now(timezone.utc).isoformat(),
+             "filters": {"days": days, "min_amount": min_amount, "agency": agency}}
+
+
+@api.get("/contracts/sub_awards")
+async def contracts_sub_awards(award_id: str):
+    """Returns subcontractors under a prime award. Cached 24h per prime."""
+    db = get_db()
+    cached = await db.subaward_cache.find_one({"_id": award_id})
+    if cached:
+        try:
+            age_hours = (datetime.now(timezone.utc) -
+                          datetime.fromisoformat(cached["fetched_at"])).total_seconds() / 3600
+        except Exception:
+            age_hours = 9999
+        if age_hours < 24:
+            return {"sub_awards": cached["sub_awards"], "cached": True}
+    rows = await usaspending.fetch_sub_awards(award_id)
+    await db.subaward_cache.update_one(
+        {"_id": award_id},
+        {"$set": {"sub_awards": rows,
+                   "fetched_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    return {"sub_awards": rows, "cached": False}
+
 
 
 # ---------- App wiring ----------
