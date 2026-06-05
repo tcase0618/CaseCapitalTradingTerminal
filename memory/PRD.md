@@ -287,3 +287,29 @@ Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK 
 - Extract LotteryPage tabs into per-tab components if file keeps growing
 - Add CI eslint react/jsx-key rule
 
+
+## Feb 2026 — v5.2: Trade Floor REFACTOR (limit-only · dedup · analytical stop · hard caps · learning hooks) — SHIPPED
+Critical refactor per user spec. All 6 sub-features verified live (iteration_13 — 17/17 pytest green, zero critical bugs).
+### Spec implemented
+- **Pre-submit dedup** — every TF order attempt fetches LIVE Alpaca open positions AND working open orders. If the ticker is already held OR has a queued/working order, the new order is silently rejected with reason `ticker_already_open_in_alpaca` or `ticker_has_pending_open_order`. Dedup happens at the gate AND once more immediately before submit (defense in depth). Verified live: scan #2 placed 0 trades after scan #1, blocking all 8 pending-order tickers.
+- **Limit DAY orders only — NEVER market** — new `submit_fractional_limit_buy(ticker, notional, limit_price)` sends `type=limit`, `time_in_force=day`. Initial limit price = current Alpaca ask via `get_latest_ask(ticker)`. New cron `stale_order_sweep` runs hourly :05 ET, cancels any TF buy older than 24h, stamps `tf_unfilled_log` and marks the trade `UNFILLED_CANCELLED`. Ticker is never re-attempted until it appears again in a future scan as a fresh signal.
+- **Analytical stop engine (no ATR, no yfinance for vol)** — new `services/stop_engine.py`. Default 10% below entry. Evolves with hold_window/sector/score_tier/instrument/signal_combo and Alpaca-only 30d realized volatility (`statistics.pstdev` of daily returns from `/v2/stocks/.../bars`). Clamped 5%–25%. Coefficients persisted in `tf_stop_engine` doc and recalibrated by the TF Learning Engine. Verified spec examples: gov contract 45d (12%) > squeeze 7d health (10%); volatile biotech 30d (17%) > stable defense 30d (12%).
+- **Per-trade entry+stop logging to TF Learning Engine** — new `log_trade_initiation` writes a snapshot of decision factors to `tf_trade_decisions` at submit time; new `log_trade_outcomes` stamps fill_status / fill_seconds / filled_avg_price / lowest_price_reached / exit_price / realized_pct on close. Recalibrator extended with `_recalibrate_stop_engine` (adjusts sector/score deltas per stop-hit rate × realized return) and `_recalibrate_entry_price` (adjusts limit-price offset in bps per signal-combo/score-tier based on fill rate × outcome). Stored in `tf_entry_engine`.
+- **Hard absolute risk caps** — fractional {20-24:$10, 25-29:$20, 30-49:$30, 50+:$50}, options {20-24:$50, 25-29:$70, 30-49:$80, 50+:$100}. `hard_cap_for(score, instrument)` returns the cap; sizing applies `notional = min(equity*risk_pct, hard_cap, equity*0.15)` and a second hard `min(notional, hard_cap)` to guarantee no overshoot ever. Side-bug found and fixed: `_risk_pct` parsed stored tier-keys via `eval("30-50")` which always failed → defaulted to 0.01 for every score. Replaced with hyphen split so 0.01/0.02/0.03/0.05 fire correctly.
+- **`manual_send` endpoint refactored** — removed ATR + yfinance, added dedup, uses stop_engine + limit_price + hard cap.
+- **Scheduled jobs** — was 7, now 8 (added `stale_order_sweep`). SettingsPage frontend renders this automatically via the existing `/api/admin/integration_status` payload.
+
+### v5.2 — Status of all spec items
+- ✅ Dedup against open Alpaca positions AND open orders, before EVERY order, no exceptions
+- ✅ Limit DAY orders only; ask-anchored; 24h auto-cancel; no re-attempt until fresh signal
+- ✅ Analytical stop engine — no ATR, no yfinance for vol; Alpaca-only; learnable; clamped
+- ✅ Per-trade entry+stop logging; weekly recalibration of stop coefficients + entry-price offsets
+- ✅ Hard absolute caps fractional + options (never exceeded under any circumstances)
+
+### P2 Backlog (carried forward)
+- Migrate the **regime gate** (SPY 200-EMA + VIX) off yfinance to Alpaca-only for full Alpaca consolidation (separate from stop engine — spec only mandated Alpaca-only for volatility/ATR, which is done).
+- Wire Alpaca options trading once account is approved for options.
+- Quiver Congress scraping → paid API.
+- Extract LotteryPage.jsx tabs into sub-components.
+- ESLint `react/jsx-key` CI rule.
+
