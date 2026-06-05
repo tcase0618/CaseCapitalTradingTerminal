@@ -262,9 +262,11 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             continue
         passed, reason = await _gate_check(row)
         if not passed:
+            _sig = row.get("signals") or {}
+            _sig_list = list(_sig.keys()) if isinstance(_sig, dict) else list(_sig)
             rejected.append({"ticker": ticker, "score": row.get("score"),
                               "trade_score": row.get("trade_score"),
-                              "reason": reason, "signals": list((row.get("signals") or {}).keys())})
+                              "reason": reason, "signals": _sig_list})
             continue
 
         # Decide instrument: contract recommendation > fractional fallback

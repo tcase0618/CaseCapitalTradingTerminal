@@ -1,0 +1,50 @@
+{
+  "summary": "v5.1 frontend visual + interaction regression complete. All 12 routes load with no white screens or pageerrors. Settings page renders all three v5.1 panels (INTEGRATION STATUS · 12, SCHEDULED JOBS · 7 with all expected job names, TELEGRAM COMMANDS · 11 with all expected commands). Performance page renders KPI row + ACTIVE POSITIONS / CLOSED POSITIONS collapsible split + OPTIONS PERFORMANCE · PEAK GAIN PER TRADE chart + legacy daily P/L tracker. Lottery page renders KPI row + LOTTERY SCAN button (POST /api/lottery/scan fires correctly, returned 5 screener candidates: MOBX/ZENA/LFVN/IIIV/TOYO) + 4 tabs (CURRENT SCAN / SCREENER / MANUAL / TRACK RECORD). Sidebar nav + build footer + CRT amber/cyan/green palette preserved. Two issues found: (1) HIGH — MANUAL tab does NOT contain the spec-required entry form (ticker/entry/score/risk + Add button); only path to add a manual play is from the SCREENER tab via a prompt() dialog that doesn't expose score/risk inputs; (2) MEDIUM — three legacy pages (ContractsPage, SECPage, PharmaPage) emit React 'unique key prop' console warnings.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "LotteryPage.jsx · MANUAL tab",
+        "issue": "Spec requires manual entry form fields (ticker, entry_price, lottery_score, risk_amount) + an Add button directly on the MANUAL tab. Current implementation only shows existing manual plays and a placeholder 'No manual plays. Add one from the Screener tab.' The ONLY way to add a manual play is from the SCREENER tab via window.prompt() — and even there the user can only override the entry_price; lottery_score and risk_amount are taken from the screener row (no UI to set them manually). Could not run the spec test case ticker=TESTUI/entry=4.20/score=70/risk=50 because there is no MANUAL-tab form. Existing rows on the MANUAL tab DO expose Settle (data-testid=settle-{ticker}) and → TRADE FLOOR buttons correctly.",
+        "selector": "[data-testid='lottery-tab-manual']",
+        "priority": "HIGH"
+      },
+      {
+        "component": "ContractsPage / SECPage / PharmaPage",
+        "issue": "React console warning: 'Each child in a list should have a unique key prop' on /contracts, /sec, /pharma. Non-blocking but pollutes console and indicates list rendering without stable keys.",
+        "selector": "n/a",
+        "priority": "MEDIUM"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Lottery scan loading-state UI feedback",
+        "issue": "The LOTTERY SCAN button text is wired `{scanning ? 'SCANNING...' : '▶ LOTTERY SCAN'}` but no visible disabled/loading state was observable in two attempts (button text reverted to default within 500ms even though network call completed in ~4s). The POST /api/lottery/scan call itself fires correctly and SCREENER populates with 5 candidates — so the bug is purely the missing/too-fast loading affordance.",
+        "affected_selectors": ["[data-testid='lottery-scan-btn']"]
+      }
+    ],
+    "design_issues": [
+      {"screen": "all", "issues": ["CRT aesthetic (amber/cyan/green on dark, monospace, scanlines) preserved. No purple/violet gradient leaks observed."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Add an inline entry form to the MANUAL tab in LotteryPage.jsx with four inputs (ticker, entry_price, lottery_score, risk_amount) and a green Add button that POSTs to /api/lottery/manual — backend endpoint already exists and was confirmed working in iteration_9.",
+    "Add stable `key` props to mapped list children on ContractsPage, SECPage, PharmaPage to silence React 'unique key prop' warnings.",
+    "Consider holding the LOTTERY SCAN button in a 'SCANNING…' / disabled state for the full duration of the POST /api/lottery/scan call (use the awaited Promise; currently the loading state may be unsetting before render commits).",
+    "Optional — surface the existing scan trigger via the LOTTERY SCAN button on the MANUAL tab too so users don't have to leave the tab to refresh candidates."
+  ],
+  "critical_code_review_comments": [
+    "LotteryPage.jsx lines 131-189: MANUAL tab branch never renders a `<form>` or input fields; spec-vs-impl drift. The Screener-only ADD flow uses window.prompt() (line 112) — replace with a proper inline form for accessibility and to expose all four spec fields.",
+    "LotteryPage.jsx settle flow (lines 158-170) uses window.prompt() + window.alert() — works, but inconsistent with the rest of the Bloomberg CRT design language which uses dedicated panels. Consider an inline 'EXIT PRICE' input row that appears on Settle click.",
+    "Three list-rendering React warnings (ContractsPage/SECPage/PharmaPage) — likely using array index as key or no key at all; trivial fix but indicates absence of an eslint react/jsx-key rule in CI."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (per request)", "frontend": "85% — 6/7 spec tasks pass; manual-tab form missing blocks 1 spec task"},
+  "test_credentials": "N/A — dashboard is public, no auth",
+  "seed_data_creation": "None — could not exercise the TESTUI manual-add path because the MANUAL-tab form is missing in the UI. Did NOT add anything via the Screener prompt path to avoid polluting prod manual_plays.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 12 routes verified non-blank. Settings v5.1 panels fully verified (data-testids integ-/job-/cmd- exist). Performance v5.1 layout verified — ACTIVE POSITIONS · 0 / CLOSED POSITIONS · 0 / OPTIONS PERFORMANCE · 0 TRADES rendered because the test environment has no closed trades yet; with seeded data you should see actual rows + bar chart. Lottery LOTTERY SCAN button confirmed POSTing to /api/lottery/scan and populating /api/lottery/screener (5 small-float candidates). To re-test the manual-add flow after E1 adds the form, use ticker=TESTUI, entry=4.20, score=70, risk=50, then exit_price=6.50, and assert the row appears in TRACK RECORD with realized_pct ≈ +54.76%. data-testids in use: lottery-scan-btn, lottery-tab-{current|screener|manual|history}, lottery-screener-{ticker}, add-{ticker}, manual-{ticker}, settle-{ticker}, send-tf-{ticker}, opts-bar-chart, refresh-prices-btn, integ-{key}, job-{id}, cmd-{cmd}.",
+  "rca of the issue": "Bug — Lottery MANUAL tab missing entry form: Repro: visit /lottery → click 'MANUAL · 0' tab → observe only a placeholder text 'No manual plays. Add one from the Screener tab.' (no form fields, no Add button). Source: /app/frontend/src/components/LotteryPage.jsx lines 131-189 — the {tab === 'manual'} branch only renders the ACTIVE MANUAL PLAYS table (empty-state OR existing rows) and the MANUAL TRACK RECORD card. There is no <form> for entry. The backend POST /api/lottery/manual endpoint exists and was verified live in iteration_9.json (test_v9_api.py::test_01_manual_add). Mitigation: add a small form Card above the ACTIVE MANUAL PLAYS card on the manual branch with 4 controlled inputs and a button calling axios.post(`${API}/lottery/manual`, {ticker, entry_price, lottery_score, risk_amount}) → reloadAll()."
+}
