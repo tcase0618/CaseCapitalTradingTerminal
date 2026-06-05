@@ -523,6 +523,7 @@ async def add_manual_play(ticker: str, entry_price: float,
     })
     await db.lottery_manual_plays.insert_one(doc)
     await log_activity(f"Lottery: manual play added · {ticker} @ ${entry_price}", "info")
+    doc.pop("_id", None)
     return doc
 
 

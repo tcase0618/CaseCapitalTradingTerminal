@@ -1,0 +1,44 @@
+{
+  "summary": "v5.1 backend regression — 30/30 pytest pass after one critical fix to /api/lottery/manual (ObjectId leak). All 12 integrations + 7 scheduled jobs + 11 telegram commands present in Settings. Lottery dedicated scan, manual add → settle → track-record flow verified end-to-end. Trade Floor AI Journal write-back confirmed live via direct invocation of services.trade_floor._write_journal_entries — Claude generated a 4-6 sentence entry and persisted it to tf_journal collection. Two spec-vs-impl gaps flagged (non-blocking, naming only).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/lottery/manual", "issue": "Returned 500 (ValueError: 'ObjectId' object is not iterable). Root cause: services/lottery.py:add_manual_play returned the inserted doc with Mongo _id ObjectId in it. FIXED by adding doc.pop('_id', None) before return.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/performance", "issue": "Endpoint does not exist (404). Spec asked for {active_positions, closed_positions} split. Only /api/performance/summary is implemented (returns {signals, options})."},
+      {"endpoint": "GET /api/performance/options", "issue": "Endpoint does not exist (404). Options performance data is currently available only inside /api/performance/summary -> 'options' sub-key."},
+      {"endpoint": "GET /api/sec/filings", "issue": "Spec asked for fields 'significance_score' and 'activist_filer' — actual fields are 'significance' and 'activist'. Naming gap only; data is present."},
+      {"endpoint": "POST /api/lottery/settle", "issue": "Spec said it must write a 'peak_gain' field on settlement — impl writes 'realized_pct' + retains the running 'peak_price' marker but does not emit a 'peak_gain' field on the settled doc."},
+      {"endpoint": "GET /api/lottery/manual_track_record", "issue": "Spec asked for {total_plays, win_rate, avg_pnl, best, worst}. Impl returns {total_plays, settled, winners, losers, win_rate, avg_winner_pct, avg_loser_pct, total_pnl_pct, history} — no 'best'/'worst' aggregates."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_v9_api.py",
+    "/app/test_reports/pytest/pytest_v9_results.xml"
+  ],
+  "action_items": [
+    "Decide whether to add /api/performance and /api/performance/options routes that return the v5.1-spec {active_positions, closed_positions} + options list — frontend Performance page is consuming /performance/summary today; if spec is the contract, add the routes (else update the spec).",
+    "Rename SEC filing fields to match v5.1 spec ('significance_score', 'activist_filer') OR update the spec to match impl ('significance', 'activist'). Frontend SECPage already renders them — confirm which name the UI uses before renaming.",
+    "Optionally extend lottery settle to also write a 'peak_gain' field = (peak_price - entry_price)/entry_price*100 — currently only realized_pct is recorded.",
+    "Optionally add 'best' and 'worst' realized_pct to /api/lottery/manual_track_record."
+  ],
+  "critical_code_review_comments": [
+    "services/lottery.py:add_manual_play used to return the Motor insert doc directly — leaked '_id' ObjectId → FastAPI 500. Pattern repeats; recommend a project-wide _clean_doc helper or apply find_one with {'_id': 0} projection style everywhere a write is followed by a return.",
+    "services/trade_floor.py:_write_journal_entries: works as designed — Claude was reached via claude_service._call_claude and produced a coherent 4-6 sentence journal entry. No retries/back-off if Claude returns None (silent skip). Consider logging skip count.",
+    "services/trade_floor.py:evaluate_and_execute (line 267): asyncio task is raising AttributeError('list' object has no attribute 'keys') when row.get('signals') is a list, not dict. Background task only — does not surface as HTTP error but pollutes logs and silently drops the gate-check signal trail. Fix: `(row.get('signals') or {}) if isinstance(row.get('signals'), dict) else dict.fromkeys(row.get('signals') or [])`.",
+    "services/db.py:get_db caches a single Motor client at module level; any test that constructs a new event loop hits 'attached to a different loop'. Tests must reset db._client = None when re-entering. Consider moving to a factory pattern or per-loop cache.",
+    "Endpoint shape drift between spec and impl (Performance, SEC field names, peak_gain) — recommend an OpenAPI/spec snapshot test that diffs response keys against expected v5.1 contract."
+  ],
+  "updated_files": [
+    "/app/backend/services/lottery.py",
+    "/app/backend/tests/test_v9_api.py"
+  ],
+  "success_rate": {"backend": "100% (30/30)", "frontend": "not tested (backend-only run per request)"},
+  "test_credentials": "N/A — admin dashboard has no auth",
+  "seed_data_creation": "Inserted/settled a single TEST play (TESTLOT @ $5.5 → $8.25) via lottery_manual_plays — cleaned up by autouse fixture before AND after the module. Inserted+deleted one fake closed trade (TESTJRN) in tf_trades + tf_journal during the AI write-back test — cleaned up inside the test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend regression at /app/backend/tests/test_v9_api.py covers: Settings (integrations + 7 jobs + telegram cmds), Lottery (dedicated scan + manual add/settle/track-record flow with TEST_ prefix cleanup), Performance (only /summary exists; /performance and /performance/options both 404 — flagged), TradeFloor (account/regime/positions/journal/history/orders/close no-op/sync), TF AI Journal (live Claude write-back simulated by direct call to _write_journal_entries — verified Claude commentary stored in tf_journal). SEC/Pharma/Contracts public-only sub_awards regression. Legacy regression: /scan/run, /quote/AAPL, /analyze/AAPL. All 30 tests pass. Lottery doc-return ObjectId fix applied to services/lottery.py. To re-run: pytest backend/tests/test_v9_api.py -v. Background asyncio AttributeError on trade_floor.evaluate_and_execute line 267 is still firing in logs — non-fatal but should be patched.",
+  "rca of the issue": "Bug — POST /api/lottery/manual returned HTTP 500: services/lottery.py add_manual_play() built a doc with services.db.stamped(), inserted via lottery_manual_plays.insert_one(doc) (which mutates doc in-place to attach the Mongo ObjectId at key '_id'), then returned doc. FastAPI's jsonable_encoder cannot serialize ObjectId → raises ValueError -> 500. Repro: curl -X POST .../api/lottery/manual -d '{ticker:TEST,entry_price:5.5}' → 500. Fix: doc.pop('_id', None) prior to return. Verified — test_01_manual_add now returns 200 with the play object; full lottery flow (add → list → settle → track-record) passes."
+}
