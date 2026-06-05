@@ -234,3 +234,29 @@ Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK 
 - Trade Floor Journal AI write-back via claude_service
 - Performance Peak Gain strictly within recommended hold window + rolling extension
 - Telegram digest 4×/day with new commands (/positions /account /regime /risk /journal /sec /pharma /contracts)
+
+
+## Feb 2026 — v5.1: Settings Status / Lottery Manual / Hold-Window Peak Gain / TF Journal AI — SHIPPED
+- **Settings tab v5.1 sections** — `services/integration_status.py` exposes `/api/admin/integration_status` returning 3 panels: INTEGRATION STATUS (12 services with LIVE/DOWN + last_check), SCHEDULED JOBS (7 cron entries), TELEGRAM COMMANDS (11 commands with descriptions). Rendered in SettingsPage.jsx as the top row.
+- **Lottery dedicated Finviz screener** — `POST /api/lottery/scan` triggers `lottery.run_dedicated_lottery_scan()` (float<20M · $1-20 · vol>2× · SI>15%). `GET /api/lottery/screener` returns candidates. UI: top-right `[ ► LOTTERY SCAN ]` button on /lottery + SCREENER tab.
+- **Lottery manual entry + Settle + per-play journal** — `POST /api/lottery/manual` (ticker, entry_price, lottery_score, risk_amount), `POST /api/lottery/settle?ticker&exit_price&play_date`, `GET /api/lottery/manual_plays`, `GET /api/lottery/manual_track_record`. UI: MANUAL tab has inline ADD MANUAL PLAY form (4 inputs + [+ ADD PLAY]) and inline Settle editor (no window.prompt). Settled plays land in MANUAL TRACK RECORD with realized_pct + winner/loser aggregates.
+- **Performance Peak Gain — hold-window strict** — `services/pnl_tracker.py` peak_gain only tracks within `recommended_hold_days` window; once window expires peak_gain locks. PerformancePage.jsx renders two collapsible bars (ACTIVE POSITIONS · within hold window / CLOSED POSITIONS · window expired — locked) + OPTIONS PERFORMANCE · PEAK GAIN PER TRADE bar chart.
+- **Trade Floor Journal AI write-back** — `sync_positions_and_close_settled()` (in trade_floor.py) detects newly-closed Alpaca positions and fires `asyncio.create_task(_write_journal_entries(newly_closed))` which calls Claude via `claude_service._call_claude` to generate a 4-6 sentence journal entry, then upserts into `tf_trades.journal_summary` AND inserts into `tf_journal` collection. Surfaced at `GET /api/trade_floor/journal`.
+- **Telegram digest 4×/day + new commands** — `/positions /account /regime /risk /journal /sec /pharma /contracts /checkup` registered in telegram_service.py; 4×/day digest schedule wired via APScheduler.
+- **Bugs fixed mid-test**: (a) `lottery.add_manual_play` returned doc with raw ObjectId → 500 on POST /api/lottery/manual. Fixed by `doc.pop('_id', None)`. (b) `trade_floor.evaluate_and_execute` line 267 raised AttributeError when `row.get('signals')` was a list instead of dict. Fixed with isinstance guard. (c) `ContractsPage`/`SECPage`/`PharmaPage` emitted React "unique key prop" warnings — wrapped expand-rows in `<Fragment key=...>` with stable composite keys.
+- **Testing**: backend 30/30 pytest green (iteration_9); frontend v5.1 retest 7/7 pass (iteration_11) — add+settle flow exercised live with TESTUI @ 4.20→6.50 (+54.76%), MANUAL TRACK RECORD counter incremented 1→2, zero React warnings on /contracts /sec /pharma, Settings 12/7/11 panels confirmed, Performance Active/Closed split + Options chart confirmed.
+
+### v5.1 — Status of all deferred items
+- ✅ Settings tab Integration Status / Scheduled Jobs / Telegram Commands UI sections
+- ✅ Lottery dedicated Finviz screener (float<20M / $1-20 / vol>2× / SI>15%)
+- ✅ Lottery manual entry + Settle button + per-play journal
+- ✅ Trade Floor Journal AI write-back via claude_service
+- ✅ Performance Peak Gain strictly within recommended hold window
+- ✅ Telegram digest 4×/day with new commands
+
+### P2 Backlog (carried forward)
+- Migrate Congressional scraping off fragile Quiver HTML to a paid API (needs token)
+- Monitor X-Factor Reddit / StockTwits rate limits over time
+- Consider extracting LotteryPage.jsx tabs into per-tab components if more features land
+- Add CI eslint react/jsx-key rule to catch future missing-key regressions
+- Inline toast/banner UX inside Cards instead of window.alert() in Lottery manual flow
