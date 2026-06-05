@@ -86,6 +86,7 @@ export default function LotteryPage() {
                   <th style={th}>P(10X)</th>
                   <th style={th}>P(LOSS)</th>
                   <th style={th}>MAX BET</th>
+                  <th style={th}></th>
                 </tr>
               </thead>
               <tbody>
@@ -120,6 +121,23 @@ export default function LotteryPage() {
                     </td>
                     <td style={{ ...td, color: TIER_COLOR[p.tier], fontWeight: 700 }}>
                       ${p.max_bet}
+                    </td>
+                    <td style={{ padding: "8px" }}>
+                      <button data-testid={`lottery-send-tf-${p.ticker}`}
+                        onClick={async () => {
+                          if (!confirm(`Send $${p.max_bet} of ${p.ticker} to Trade Floor (fractional, ATR stop)?`)) return;
+                          try {
+                            const r = await axios.post(
+                              `${API}/trade_floor/manual_send?ticker=${p.ticker}&risk_dollars=${p.max_bet}&source=lottery`
+                            );
+                            alert(r.data.ok ? `Sent → $${r.data.notional} notional · stop $${r.data.stop?.toFixed(2)}` : `Failed: ${r.data.reason}`);
+                          } catch { alert("Trade Floor send failed"); }
+                        }}
+                        style={{
+                          background: "transparent", border: `0.5px solid ${accent}`,
+                          color: accent, fontSize: 9, padding: "4px 8px", cursor: "pointer",
+                          fontWeight: 700, letterSpacing: "0.1em",
+                        }}>→ TRADE FLOOR</button>
                     </td>
                   </tr>
                 ))}

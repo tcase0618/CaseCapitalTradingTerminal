@@ -850,7 +850,7 @@ async def contracts_sub_awards(award_id: str):
 
 
 # ---------- App wiring ----------
-app.include_router(api)
+# (Router include moved to end of file so v5.0 endpoints register)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -877,8 +877,147 @@ async def on_startup():
         except Exception as e:
             logger.warning("Webhook setup failed: %s", e)
     await log_activity("Server started", "info")
+    # Trade Floor Engine — one-time fork from Signal Engine
+    try:
+        from services import trade_floor_learning
+        await trade_floor_learning.initialize_from_signal_engine()
+    except Exception as e:
+        logger.warning("Trade Floor Engine init: %s", e)
+
+
+# ─────── SEC FILINGS ───────
+@api.post("/sec/poll")
+async def sec_poll():
+    from services import sec_filings
+    return await sec_filings.poll_edgar_filings()
+
+
+@api.get("/sec/filings")
+async def sec_filings_list(days: int = 7, form: str | None = None):
+    from services import sec_filings
+    rows = await sec_filings.recent_filings(days=days, form=form)
+    return {"filings": rows, "count": len(rows)}
+
+
+# ─────── TRADE FLOOR ───────
+@api.get("/trade_floor/account")
+async def tf_account():
+    from services import trade_floor
+    return {"account": await trade_floor.get_account(),
+             "alpaca_configured": bool(
+                os.environ.get("APCA_API_KEY_ID") and
+                os.environ.get("APCA_API_SECRET_KEY"))}
+
+
+@api.get("/trade_floor/positions")
+async def tf_positions():
+    from services import trade_floor
+    db_pos = await trade_floor.open_positions_view()
+    live = await trade_floor.list_positions()
+    last_log = await trade_floor.latest_scan_log()
+    return {"db_positions": db_pos, "live_alpaca": live, "last_scan_log": last_log}
+
+
+@api.get("/trade_floor/regime")
+async def tf_regime():
+    from services import trade_floor
+    return await trade_floor.regime_status()
+
+
+@api.get("/trade_floor/orders")
+async def tf_orders(status: str = "all", limit: int = 50):
+    from services import trade_floor
+    return {"orders": await trade_floor.list_orders(status=status, limit=limit)}
+
+
+@api.post("/trade_floor/close")
+async def tf_close(ticker: str):
+    from services import trade_floor
+    res = await trade_floor.close_position(ticker)
+    return {"closed": res is not None, "result": res}
+
+
+@api.post("/trade_floor/sync")
+async def tf_sync():
+    from services import trade_floor
+    return await trade_floor.sync_positions_and_close_settled()
+
+
+@api.get("/trade_floor/history")
+async def tf_history():
+    from services import trade_floor
+    return {"trades": await trade_floor.trade_history()}
+
+
+@api.get("/trade_floor/journal")
+async def tf_journal(date: str | None = None):
+    from services import trade_floor
+    return {"journal": await trade_floor.daily_journal(date)}
+
+
+@api.post("/trade_floor/manual_send")
+async def tf_manual_send(ticker: str, risk_dollars: float, source: str = "manual"):
+    """Send a ticker straight to the Trade Floor with EXACT risk amount —
+    no gates, no recalc. Used by the Lottery 'Send to Trade Floor' button."""
+    from services import trade_floor, pricer
+    if not trade_floor._alpaca_ready():
+        return {"ok": False, "reason": "alpaca_not_configured"}
+    cur = await pricer.get_latest_close(ticker)
+    if not cur:
+        return {"ok": False, "reason": "no_price"}
+    atr = await trade_floor.fetch_atr_14d(ticker)
+    if not atr:
+        return {"ok": False, "reason": "no_atr_for_stop"}
+    stop = cur - 2 * atr
+    if stop <= 0 or stop >= cur:
+        return {"ok": False, "reason": "invalid_stop"}
+    notional = max(5.0, min(risk_dollars * (cur / (cur - stop)), risk_dollars * 5))
+    notional = round(notional, 2)
+    cli = f"tf-manual-{ticker}-{int(datetime.now(timezone.utc).timestamp())}"
+    order = await trade_floor.submit_fractional_buy(ticker, notional, client_order_id=cli)
+    if order:
+        from services.db import get_db, stamped
+        await get_db().tf_trades.insert_one(stamped({
+            "client_order_id": cli,
+            "order_id": order.get("id"),
+            "ticker": ticker.upper(),
+            "entry_score": None,
+            "signal_combo": [source.upper()],
+            "instrument": "fractional",
+            "notional": notional,
+            "entry_price_ref": cur,
+            "stop_price": stop,
+            "atr_14d": atr,
+            "status": "OPEN",
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+        }))
+    return {"ok": order is not None, "notional": notional, "stop": stop, "order": order}
+
+
+# ─────── Trade Floor Learning Engine ───────
+@api.get("/trade_floor/engine/status")
+async def tf_engine_status():
+    from services import trade_floor_learning
+    return await trade_floor_learning.status()
+
+
+@api.get("/trade_floor/engine/combos")
+async def tf_engine_combos():
+    from services import trade_floor_learning
+    return {"combos": await trade_floor_learning.combo_stats()}
+
+
+@api.post("/trade_floor/engine/recalibrate")
+async def tf_engine_recal():
+    from services import trade_floor_learning
+    return await trade_floor_learning.recalibrate()
+
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
     scheduler.shutdown_scheduler()
+
+# v5.0 — include router at end so all endpoints register
+app.include_router(api)

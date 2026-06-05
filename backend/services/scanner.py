@@ -366,6 +366,27 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         asyncio.create_task(_pharma.run_pharma_scan(triggered_by="main_scan"))
     except Exception as e:
         logger.warning("Pharma parallel scan dispatch failed: %s", e)
+
+    # v5.0 — attach Trade Score (computed from Trade Floor Engine weights)
+    try:
+        from . import trade_floor_learning as _tfle
+        for r in final:
+            sigs = r.get("signals") or {}
+            r["trade_score"] = await _tfle.get_trade_score(sigs)
+    except Exception as e:
+        logger.warning("trade_score attach failed: %s", e)
+
+    # v5.0 — SEC EDGAR poll + Trade Floor execution in background
+    try:
+        from . import sec_filings as _sec
+        asyncio.create_task(_sec.poll_edgar_filings())
+    except Exception as e:
+        logger.warning("SEC poll dispatch failed: %s", e)
+    try:
+        from . import trade_floor as _tf
+        asyncio.create_task(_tf.evaluate_and_execute(final))
+    except Exception as e:
+        logger.warning("Trade Floor dispatch failed: %s", e)
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

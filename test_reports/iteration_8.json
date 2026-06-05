@@ -1,0 +1,43 @@
+{
+  "summary": "v5.0 massive update tested end-to-end. 20/20 backend tests pass after one cached-subs filter fix. All 7 frontend surfaces (/sec, /trade-floor, /tf-engine, /lottery, /performance, /contracts, sidebar) render correctly. Two issues found and fixed (cached non-public subs leaking through contracts; TRADE FLOOR missing from sidebar nav). One open observation: Dashboard cards may not visually show Trade Score side-by-side with AXIOM (needs main-agent confirmation — see action_items).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/contracts", "issue": "subaward_cache stored pre-v5.0 entries with non-tickered subs; cache hit path was returning them unfiltered. Fixed by also filtering cache reads to ticker-only subs in usaspending.py _enrich."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CrtShell sidebar nav", "issue": "TRADE FLOOR nav item used group 'TRADE FLOOR' but the render loop only iterated ['CORE','v3.2','ANALYSIS','SYSTEM'] → /trade-floor link never rendered. FIXED by adding 'TRADE FLOOR' to the group list.", "selector": "nav", "priority": "HIGH"},
+      {"component": "SECPage / ContractsPage", "issue": "React warning: 'Each child in a list should have a unique key prop' — missing key={} on mapped rows in both pages.", "selector": "table tbody tr", "priority": "LOW"},
+      {"component": "TFEnginePage / TradeFloorPage charts", "issue": "Recharts warning: 'width(-1) and height(-1)' on chart containers — ResponsiveContainer without explicit minWidth/minHeight when tab hidden. Cosmetic.", "selector": "ResponsiveContainer", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard cards", "issues": ["Could not visually confirm TRADE score is rendered side-by-side with AXIOM score on every card. AXIOM 27.6/36.5/etc visible; no explicit TRADE: NN label observed. Main agent should verify Dashboard.jsx ~line 408 renders both scores when trade_score>0 (or shows '—' when missing) with green/red/amber coloring."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_v8_api.py", "/app/test_reports/pytest/pytest_v8_results.xml"],
+  "action_items": [
+    "Verify Dashboard.jsx ~line 408 actually renders TRADE score next to AXIOM score on every card (color: green higher, red lower, amber equal). I could not confirm it is visible in the current Dashboard render — main agent self-check recommended.",
+    "Add unique key={} props to SECPage and ContractsPage row maps (eliminates React key warning).",
+    "Optionally clear/migrate subaward_cache collection in MongoDB so cached pre-v5.0 entries with non-public subs are purged (current fix filters on read; one-time backfill would be cleaner)."
+  ],
+  "critical_code_review_comments": [
+    "usaspending.py:638 — cache reads bypassed the v5.0 public-subs filter; only the live-fetch path filtered. Now patched.",
+    "CrtShell.jsx NAV group list is a hardcoded array; any new group label silently drops items. Consider deriving groups from NAV: [...new Set(NAV.map(n=>n.group))] to avoid future regressions.",
+    "/api/trade_floor/regime first call after backend cold start returned status='unknown' with spy_last=None — subsequent calls returned green. Pricer chain may be lazy-initialised on first hit; consider warming Alpaca/SPY pricer on startup or add fallback in /regime to retry once on None."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v8_api.py",
+    "/app/backend/services/usaspending.py",
+    "/app/frontend/src/components/CrtShell.jsx"
+  ],
+  "success_rate": {"backend": "100% (20/20)", "frontend": "~95% (all pages render, sidebar nav fixed; Dashboard TRADE-vs-AXIOM side-by-side rendering needs confirmation)"},
+  "test_credentials": "N/A — no auth required",
+  "seed_data_creation": "None. SEC /api/sec/poll inserted live EDGAR filings (~39 in 7d window). Trade Floor manual_send was exercised with AAPL@$50 risk; returned ok=false (gates), no real order side-effects beyond Alpaca paper account.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend regression suite at /app/backend/tests/test_v8_api.py covers: Trade Floor (account/regime/engine status/recalibrate/positions/manual_send), SEC poll+list (ticker required), Contracts public-only sub_awards, Alpaca in price source priority, and 10-endpoint legacy regression. All 20/20 pass. UI verified: /sec renders 39 filings with 5 stat tiles (FILINGS/NARRATIVE/ACTIVIST/8-K/FORM 4); /trade-floor renders 5 tiles + 5 tabs (Risk Dashboard shows RISK ON/VIX/SPY/positions); /tf-engine renders PRE-ADJUSTMENT phase + 13 inherited weights + 'populates after first 5 closed trades' message; /lottery has 15 lottery-send-tf-{TICKER} buttons; /performance has perf-active + perf-closed testids; sidebar now correctly shows SEC FILINGS, TRADE FLOOR, TRADE ENGINE entries. Remaining open: confirm Dashboard.jsx renders TRADE score side-by-side with AXIOM. Activist 13D count was 0 today (Genco SC 13D was non-activist) — expected per spec.",
+  "rca of the issue": "Bug 1 — Sidebar missing TRADE FLOOR: CrtShell.jsx line 287 hardcoded a group iteration list ['CORE','v3.2','ANALYSIS','SYSTEM'] but the TRADE FLOOR nav row in NAV[] used group='TRADE FLOOR', which was filtered out → no sidebar link to /trade-floor. Repro: GET / → inspect sidebar → no TRADE FLOOR entry. Fix: added 'TRADE FLOOR' to the iterated groups (verified via re-render: nav now contains TRADE FLOOR). Bug 2 — Contracts cached subs not filtered: usaspending.py _enrich() cache-hit path at line 634 returned cached.sub_awards directly without applying the v5.0 public-subs filter, so historical cache entries surfaced 339/1420 non-tickered subs. Repro: GET /api/contracts?days=180&min_amount=100000000 → enumerate sub_awards → 339 lacked ticker. Fix: filter cached subs to s.get('ticker') truthy on read; verified — full backend suite passes 20/20."
+}

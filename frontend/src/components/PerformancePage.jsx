@@ -87,8 +87,35 @@ export default function PerformancePage() {
         <Stat label="SIGNAL COMBOS" value={(perf?.signals || []).length} sub="WITH 7/30/90D" />
       </div>
 
-      {/* ALL BUY SIGNALS — DAILY P/L */}
-      <Card title={`ALL BUY SIGNALS — DAILY P/L · BOUGHT-ON-SIGNAL · ${tracker?.tracked || 0} TRACKED`}>
+      {/* ACTIVE vs CLOSED — v5.0 split */}
+      {(() => {
+        const rows = tracker?.rows || [];
+        const today = new Date();
+        const splitRow = (r) => {
+          const days = r.recommended_hold_days ||
+            (Array.isArray(r.signals) && r.signals.includes("upcoming_earnings") ? 14 : 30);
+          const start = r.first_seen_date ? new Date(r.first_seen_date) : null;
+          if (!start) return { ...r, hold_end_date: null, is_active: false };
+          const end = new Date(start);
+          end.setDate(end.getDate() + days);
+          return { ...r, hold_end_date: end.toISOString().slice(0, 10),
+                    is_active: end >= today, hold_window_days: days };
+        };
+        const allRows = rows.map(splitRow);
+        const active = allRows.filter(r => r.is_active);
+        const closed = allRows.filter(r => !r.is_active);
+        return (
+          <>
+            <CollapsibleSection title={`ACTIVE POSITIONS · ${active.length} · WITHIN HOLD WINDOW`}
+              defaultOpen={false} rows={active} tag="active" />
+            <CollapsibleSection title={`CLOSED POSITIONS · ${closed.length} · WINDOW EXPIRED — LOCKED`}
+              defaultOpen={false} rows={closed} tag="closed" />
+          </>
+        );
+      })()}
+
+      {/* Legacy single-table view kept for backward compat (collapsed default) */}
+      <Card title={`LEGACY · ALL BUY SIGNALS — DAILY P/L · ${tracker?.tracked || 0} TRACKED`}>
         {!tracker || !tracker.rows || tracker.rows.length === 0 ? (
           <div style={{ color: muted, fontSize: 13, padding: "10px 0" }}>
             No signals tracked yet. Every scan now records the first time it surfaces a
@@ -431,3 +458,53 @@ function PerfCurve({ title, curve, days, setDays, gradId, strokeColor,
     </Card>
   );
 }
+
+
+function CollapsibleSection({ title, rows, tag, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div data-testid={`perf-${tag}`} style={{ border: hairline, marginBottom: 14 }}>
+      <div onClick={() => setOpen(!open)} style={{
+        padding: "12px 18px", cursor: "pointer", display: "flex",
+        justifyContent: "space-between", background: "#0a0a0d",
+      }}>
+        <span style={{ color: accent, letterSpacing: "0.14em", fontSize: 11, fontWeight: 700 }}>{title}</span>
+        <span style={{ color: accent, fontSize: 10 }}>{open ? "▼" : "▶"}</span>
+      </div>
+      {open && (
+        rows.length === 0 ? (
+          <div style={{ color: muted, padding: 16, fontSize: 11 }}>No rows.</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
+                <th style={{ padding: "10px 8px", fontSize: 10 }}>TICKER</th>
+                <th style={{ padding: "10px 8px", fontSize: 10 }}>SIGNAL COMBO</th>
+                <th style={{ padding: "10px 8px", fontSize: 10 }}>ENTRY DATE</th>
+                <th style={{ padding: "10px 8px", fontSize: 10 }}>HOLD WINDOW</th>
+                <th style={{ padding: "10px 8px", fontSize: 10 }}>PEAK GAIN %</th>
+                <th style={{ padding: "10px 8px", fontSize: 10 }}>OPT P&L %</th>
+              </tr>
+            </thead>
+            <tbody>{rows.map((r) => (
+              <tr key={r.ticker} style={{ borderTop: hairline }}>
+                <td style={{ padding: "8px", color: accent, fontWeight: 700 }}>${r.ticker}</td>
+                <td style={{ padding: "8px", fontSize: 10 }}>
+                  {(r.signals || []).slice(0, 3).join(" · ")}
+                </td>
+                <td style={{ padding: "8px" }}>{r.first_seen_date || "—"}</td>
+                <td style={{ padding: "8px", color: dim }}>{r.hold_window_days}d → {r.hold_end_date}</td>
+                <td style={{ padding: "8px", color: (r.gain_pct || 0) >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                  {r.gain_pct != null ? `${r.gain_pct >= 0 ? "+" : ""}${r.gain_pct.toFixed(2)}%` : "—"}
+                </td>
+                <td style={{ padding: "8px", color: (r.options_return_proxy_pct || 0) >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                  {r.options_return_proxy_pct != null ? `${r.options_return_proxy_pct >= 0 ? "+" : ""}${r.options_return_proxy_pct.toFixed(2)}%` : "—"}
+                </td>
+              </tr>))}</tbody>
+          </table>
+        )
+      )}
+    </div>
+  );
+}
+

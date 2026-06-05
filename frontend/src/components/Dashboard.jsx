@@ -404,6 +404,11 @@ export default function Dashboard() {
                     {tt.target_date && <span>HOLD <span style={{ color: labelLight }}>{tt.hold_period_low}–{tt.hold_period_high}d</span></span>}
                     {sq.score != null && <span>SQUEEZE <span style={{ color: labelLight }}>{sq.score}/100</span></span>}
                     {r.learning_score != null && <span>AXIOM <span style={{ color: accent, fontWeight: 700 }}>{r.learning_score}</span></span>}
+                    {r.trade_score != null && (() => {
+                      const ts = r.trade_score, ls = r.learning_score;
+                      const c = ls == null ? accent : ts > ls ? "#4ade80" : ts < ls ? "#f87171" : accent;
+                      return <span>TRADE <span style={{ color: c, fontWeight: 700 }}>{ts}</span></span>;
+                    })()}
                   </div>
                   {/* Options panel */}
                   {r.options && (r.options.contract || r.options.spread || r.options.strategy === "AVOID_OPTIONS") && (

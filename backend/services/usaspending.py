@@ -631,16 +631,20 @@ async def list_prime_contracts(days: int = 90, min_amount: float = 1_000_000,
                         datetime.fromisoformat(cached["fetched_at"]))\
                     .total_seconds() / 3600
                 if age < 24:
-                    prime["sub_awards"] = cached.get("sub_awards") or []
+                    # v5.0: also filter cached subs to public-only (handles legacy cache entries)
+                    cached_subs = cached.get("sub_awards") or []
+                    prime["sub_awards"] = [s for s in cached_subs if s.get("ticker")]
                     return
             except Exception:
                 pass
         async with sem:
             subs = await fetch_sub_awards(award_id)
-        prime["sub_awards"] = subs
+        # v5.0: only surface PUBLICLY TRADED subs (must have a mapped ticker)
+        public_subs = [s for s in subs if s.get("ticker")]
+        prime["sub_awards"] = public_subs
         await db.subaward_cache.update_one(
             {"_id": award_id},
-            {"$set": {"sub_awards": subs,
+            {"$set": {"sub_awards": public_subs,
                        "fetched_at": datetime.now(timezone.utc).isoformat()}},
             upsert=True,
         )

@@ -19,11 +19,14 @@ const NAV = [
   { to: "/",            label: "DASHBOARD",   icon: "▣", group: "CORE" },
   { to: "/intel",       label: "INTEL FEED",  icon: "◉", group: "CORE" },
   { to: "/contracts",   label: "CONTRACTS",   icon: "▦", group: "CORE" },
+  { to: "/sec",         label: "SEC FILINGS", icon: "§", group: "CORE" },
   { to: "/earnings",    label: "EARNINGS",    icon: "▤", group: "v3.2" },
   { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "v3.2" },
   { to: "/pharma",      label: "PHARMA",      icon: "🧬", group: "v3.2" },
+  { to: "/trade-floor", label: "TRADE FLOOR", icon: "⚡", group: "TRADE FLOOR" },
   { to: "/performance", label: "PERFORMANCE", icon: "▶", group: "ANALYSIS" },
   { to: "/learning",    label: "LEARNING",    icon: "◆", group: "ANALYSIS" },
+  { to: "/tf-engine",   label: "TRADE ENGINE", icon: "▼", group: "ANALYSIS" },
   { to: "/settings",    label: "SETTINGS",    icon: "▥", group: "SYSTEM" },
 ];
 
@@ -281,7 +284,7 @@ export function CrtShell({ title, children, headerRight = null }) {
 
           {/* Navigation — grouped */}
           <nav style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-            {["CORE", "v3.2", "ANALYSIS", "SYSTEM"].map((group, gi) => {
+            {["CORE", "v3.2", "TRADE FLOOR", "ANALYSIS", "SYSTEM"].map((group, gi) => {
               const groupItems = NAV.filter(n => n.group === group);
               if (groupItems.length === 0) return null;
               return (

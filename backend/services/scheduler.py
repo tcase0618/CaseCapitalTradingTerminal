@@ -13,6 +13,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from . import learning_engine, lottery, options_engine, pnl_tracker, scanner, telegram_service
 from .db import get_db, log_activity, stamped
 
+
+def _now_iso():
+    from datetime import timezone
+    return datetime.now(timezone.utc).isoformat()
+
 logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 ET = pytz.timezone("America/New_York")
@@ -85,12 +90,14 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return
     _scheduler = AsyncIOScheduler(timezone=ET)
-    _scheduler.add_job(
-        _daily_scan_job,
-        CronTrigger(hour=8, minute=0, timezone=ET),
-        id="daily_scan",
-        replace_existing=True,
-    )
+    # v5.0 — four fixed daily scans: midnight, 8am, 1pm, 6pm ET
+    for tag, hr in [("midnight_scan", 0), ("morning_scan", 8),
+                      ("midday_scan", 13), ("evening_scan", 18)]:
+        _scheduler.add_job(
+            _daily_scan_job,
+            CronTrigger(hour=hr, minute=0, timezone=ET),
+            id=tag, replace_existing=True,
+        )
     _scheduler.add_job(
         _alerts_job,
         IntervalTrigger(minutes=5),
@@ -122,7 +129,7 @@ def start_scheduler():
     _scheduler.add_job(
         _daily_scan_job,
         CronTrigger(day_of_week="mon-fri", hour=12, minute=1, timezone=ET),
-        id="midday_scan",
+        id="midday_scan_legacy",
         replace_existing=True,
     )
     # Pre-close scan — 15:30 ET Mon-Fri
@@ -131,6 +138,72 @@ def start_scheduler():
         CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=ET),
         id="preclose_scan",
         replace_existing=True,
+    )
+
+    # v5.0 — regime gate every 30 min during market hours
+    async def _regime_job():
+        try:
+            from . import trade_floor
+            r = await trade_floor.regime_status()
+            if r.get("halt_new_entries") and os.environ.get("TELEGRAM_CHAT_ID"):
+                await telegram_service.send_message(
+                    f"⛔ <b>REGIME HALT</b>\nVIX={r['vix']} · SPY={r['spy_last']} "
+                    f"vs EMA200={r['spy_ema200']}", chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+                )
+        except Exception as e:
+            logger.warning("regime job: %s", e)
+    _scheduler.add_job(
+        _regime_job,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/30", timezone=ET),
+        id="regime_gate", replace_existing=True,
+    )
+
+    # v5.0 — position monitor every 15 min during market hours
+    async def _position_monitor():
+        try:
+            from . import trade_floor
+            await trade_floor.sync_positions_and_close_settled()
+        except Exception as e:
+            logger.warning("position monitor: %s", e)
+    _scheduler.add_job(
+        _position_monitor,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15", timezone=ET),
+        id="position_monitor", replace_existing=True,
+    )
+
+    # v5.0 — daily database backup at 2am ET
+    async def _db_backup():
+        try:
+            from .db import get_db
+            db = get_db()
+            stats = await db.command("dbStats")
+            await db.bot_state.update_one(
+                {"_id": "last_backup"},
+                {"$set": {"timestamp": _now_iso(),
+                            "collections": stats.get("collections"),
+                            "data_size": stats.get("dataSize")}},
+                upsert=True,
+            )
+            await log_activity("Daily DB stats checkpoint stored", "info")
+        except Exception as e:
+            logger.warning("db backup: %s", e)
+    _scheduler.add_job(
+        _db_backup,
+        CronTrigger(hour=2, minute=0, timezone=ET),
+        id="db_backup", replace_existing=True,
+    )
+
+    # v5.0 — Trade Floor weekly recalibration — Sunday 03:00 ET
+    async def _tf_recal():
+        try:
+            from . import trade_floor_learning
+            await trade_floor_learning.recalibrate()
+        except Exception as e:
+            logger.warning("tf recal: %s", e)
+    _scheduler.add_job(
+        _tf_recal,
+        CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=ET),
+        id="tf_engine_recal", replace_existing=True,
     )
     # Learning cycle — Sunday 02:00 ET weekly
     async def _learning_job():

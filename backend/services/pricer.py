@@ -39,14 +39,43 @@ FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 FINNHUB_RATE_PER_MIN = 60  # free tier hard limit
 
+ALPACA_KEY = os.environ.get("APCA_API_KEY_ID", "").strip()
+ALPACA_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
+ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
+
 LATEST_TTL_MIN = 10
 HISTORY_TTL_HR = 24
 _SOURCE = (
-    "finnhub+massive" if FINNHUB_KEY and MASSIVE_KEY
+    "alpaca+finnhub+massive" if (ALPACA_KEY and FINNHUB_KEY and MASSIVE_KEY)
+    else "alpaca+finnhub" if (ALPACA_KEY and FINNHUB_KEY)
+    else "alpaca" if ALPACA_KEY
+    else "finnhub+massive" if FINNHUB_KEY and MASSIVE_KEY
     else "finnhub" if FINNHUB_KEY
     else "massive" if MASSIVE_KEY
     else "yfinance"
 )
+
+
+async def _alpaca_quote(ticker: str) -> float | None:
+    """Alpaca latest trade — primary source per v5.0 spec."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as c:
+            r = await c.get(
+                f"{ALPACA_DATA_BASE}/stocks/{ticker}/trades/latest",
+                headers={
+                    "APCA-API-KEY-ID": ALPACA_KEY,
+                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+                },
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            price = (data.get("trade") or {}).get("p")
+            return float(price) if price else None
+    except Exception:
+        return None
 
 # Shared HTTP client (created lazily)
 _client: httpx.AsyncClient | None = None
@@ -351,8 +380,8 @@ async def _store_history(ticker: str, closes: dict[str, float], src: str) -> Non
 
 # ───────────────────────────── Public API ─────────────────────────────────
 async def get_latest_close(ticker: str, force: bool = False) -> float | None:
-    """Single-ticker latest price. Order: Finnhub (real-time) → Massive
-    (EOD close) → yfinance (intraday-delayed)."""
+    """Single-ticker latest price. v5.0 order: Alpaca → Finnhub → yfinance.
+    Massive (EOD only) kept as ultra-fallback for grouped daily backfills."""
     ticker = (ticker or "").upper().strip()
     if not ticker:
         return None
@@ -360,23 +389,29 @@ async def get_latest_close(ticker: str, force: bool = False) -> float | None:
         c = await _cached_latest(ticker)
         if c is not None:
             return c
-    # Finnhub primary for current price (real-time)
+    # 1) Alpaca real-time (v5.0 primary)
+    price = await _alpaca_quote(ticker)
+    if price is not None:
+        await _store_latest(ticker, price, "alpaca")
+        return price
+    # 2) Finnhub
     price = await _finnhub_quote(ticker)
     if price is not None:
         await _store_latest(ticker, price, "finnhub")
         return price
-    # Massive grouped (yesterday close)
+    # 3) yfinance
+    price = await _yf_latest_close(ticker)
+    if price is not None:
+        await _store_latest(ticker, price, "yfinance")
+        return price
+    # 4) Massive grouped EOD as last resort
     if MASSIVE_KEY:
         _, grouped = await grouped_latest()
         if grouped and ticker in grouped:
             p = grouped[ticker]
             await _store_latest(ticker, p, "massive")
             return p
-    # yfinance final fallback
-    price = await _yf_latest_close(ticker)
-    if price is not None:
-        await _store_latest(ticker, price, "yfinance")
-    return price
+    return None
 
 
 async def _yf_batch_latest(tickers: list[str]) -> dict[str, float]:

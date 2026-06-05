@@ -10,6 +10,9 @@ import LotteryPage from "@/components/LotteryPage";
 import IntelPage from "@/components/IntelPage";
 import PharmaPage from "@/components/PharmaPage";
 import ContractsPage from "@/components/ContractsPage";
+import SECPage from "@/components/SECPage";
+import TradeFloorPage from "@/components/TradeFloorPage";
+import TFEnginePage from "@/components/TFEnginePage";
 import { Toaster } from "sonner";
 
 function App() {
@@ -19,12 +22,15 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/learning" element={<LearningPage />} />
+          <Route path="/tf-engine" element={<TFEnginePage />} />
           <Route path="/performance" element={<PerformancePage />} />
           <Route path="/earnings" element={<EarningsPage />} />
           <Route path="/lottery" element={<LotteryPage />} />
           <Route path="/intel" element={<IntelPage />} />
           <Route path="/pharma" element={<PharmaPage />} />
           <Route path="/contracts" element={<ContractsPage />} />
+          <Route path="/sec" element={<SECPage />} />
+          <Route path="/trade-floor" element={<TradeFloorPage />} />
           <Route path="/ticker/:ticker" element={<TickerPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
