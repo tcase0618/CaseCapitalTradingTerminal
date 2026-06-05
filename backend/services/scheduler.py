@@ -98,6 +98,25 @@ def start_scheduler():
             CronTrigger(hour=hr, minute=0, timezone=ET),
             id=tag, replace_existing=True,
         )
+    # v5.1 — auto-digest goes out 5 min after each scheduled scan
+    async def _telegram_digest_job():
+        try:
+            from . import telegram_service as _ts
+            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+            if not chat_id:
+                return
+            scan = await scanner.get_latest_scan() if hasattr(scanner, 'get_latest_scan') else None
+            if scan:
+                await _ts.send_message(_ts.format_scan_summary(scan), chat_id=chat_id)
+        except Exception as e:
+            logger.warning("digest job: %s", e)
+    for tag, hr in [("digest_midnight", 0), ("digest_morning", 8),
+                      ("digest_midday", 13), ("digest_evening", 18)]:
+        _scheduler.add_job(
+            _telegram_digest_job,
+            CronTrigger(hour=hr, minute=5, timezone=ET),
+            id=tag, replace_existing=True,
+        )
     _scheduler.add_job(
         _alerts_job,
         IntervalTrigger(minutes=5),

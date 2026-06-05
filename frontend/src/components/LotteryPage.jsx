@@ -23,11 +23,28 @@ export default function LotteryPage() {
   const [current, setCurrent] = useState(null);
   const [history, setHistory] = useState(null);
   const [tab, setTab] = useState("current");
+  const [screener, setScreener] = useState([]);
+  const [manualPlays, setManualPlays] = useState([]);
+  const [manualTR, setManualTR] = useState(null);
+  const [scanning, setScanning] = useState(false);
 
-  useEffect(() => {
+  const reloadAll = () => {
     axios.get(`${API}/v32/lottery/current`).then(r => setCurrent(r.data)).catch(() => {});
     axios.get(`${API}/v32/lottery`).then(r => setHistory(r.data)).catch(() => {});
-  }, []);
+    axios.get(`${API}/lottery/screener`).then(r => setScreener(r.data.candidates || []));
+    axios.get(`${API}/lottery/manual_plays`).then(r => setManualPlays(r.data.plays || []));
+    axios.get(`${API}/lottery/manual_track_record`).then(r => setManualTR(r.data));
+  };
+  useEffect(() => { reloadAll(); }, []);
+
+  const runLotteryScan = async () => {
+    setScanning(true);
+    try {
+      const r = await axios.post(`${API}/lottery/scan`);
+      alert(`Lottery scan complete: ${r.data.count} candidates`);
+      reloadAll();
+    } finally { setScanning(false); }
+  };
 
   const picks = current?.picks || [];
   const tr = history?.track_record || {};
@@ -36,7 +53,15 @@ export default function LotteryPage() {
   }, {});
 
   return (
-    <CrtShell title="LOTTERY PICKS">
+    <CrtShell title="LOTTERY PICKS"
+      headerRight={
+        <button data-testid="lottery-scan-btn" onClick={runLotteryScan} disabled={scanning}
+          style={{
+            background: "transparent", border: `0.5px solid ${accent}`, color: accent,
+            fontSize: 11, padding: "8px 16px", cursor: scanning ? "wait" : "pointer",
+            letterSpacing: "0.14em", fontFamily: "JetBrains Mono", fontWeight: 700,
+          }}>[ {scanning ? "SCANNING..." : "▶ LOTTERY SCAN"} ]</button>
+      }>
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="JACKPOT" value={tierCounts.JACKPOT || 0} sub="MAX $500" color={TIER_COLOR.JACKPOT} accentBar />
         <Stat label="HOT" value={tierCounts.HOT || 0} sub="MAX $200" color={TIER_COLOR.HOT} />
@@ -52,7 +77,9 @@ export default function LotteryPage() {
       </div>
 
       <div style={{ display: "flex", gap: 4, marginBottom: 18 }}>
-        {[["current", "CURRENT SCAN"], ["history", "TRACK RECORD"]].map(([k, l]) => (
+        {[["current", "CURRENT SCAN"], ["screener", "SCREENER"],
+            ["manual", `MANUAL · ${manualPlays.filter(p => p.is_active).length}`],
+            ["history", "TRACK RECORD"]].map(([k, l]) => (
           <button key={k} data-testid={`lottery-tab-${k}`} onClick={() => setTab(k)}
             style={{
               background: tab === k ? `${accent}15` : "transparent",
@@ -63,6 +90,138 @@ export default function LotteryPage() {
             }}>{l}</button>
         ))}
       </div>
+
+      {tab === "screener" && (
+        <Card title={`DEDICATED FINVIZ SCREENER · ${screener.length} CANDIDATES`}>
+          {!screener.length ? <div style={{ color: muted, padding: 20 }}>Click LOTTERY SCAN to run the dedicated Finviz screener (float&lt;20M · $1-$20 · vol&gt;2× · SI&gt;15%).</div> : (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={th}>TICKER</th><th style={th}>PRICE</th><th style={th}>SCORE</th>
+                <th style={th}>BONUSES</th><th style={th}>RISK $</th><th style={th}>ADD</th>
+              </tr></thead>
+              <tbody>{screener.map((c, i) => (
+                <tr key={i} className="row-hover" style={{ borderTop: hairline }}
+                  data-testid={`lottery-screener-${c.ticker}`}>
+                  <td style={{ ...td, color: accent, fontWeight: 700 }}>${c.ticker}</td>
+                  <td style={td}>${c.price?.toFixed(2)}</td>
+                  <td style={{ ...td, color: TIER_COLOR[c.tier], fontWeight: 700 }}>{c.lottery_score}</td>
+                  <td style={{ ...td, fontSize: 9, color: accent2 }}>{(c.bonuses || []).join(" · ") || "—"}</td>
+                  <td style={td}>${c.suggested_risk}</td>
+                  <td style={td}>
+                    <button data-testid={`add-${c.ticker}`} onClick={async () => {
+                      const entry = prompt(`Entry price for ${c.ticker}? (current $${c.price})`, c.price?.toFixed(2));
+                      if (!entry) return;
+                      await axios.post(`${API}/lottery/manual`, {
+                        ticker: c.ticker, entry_price: Number(entry),
+                        lottery_score: c.lottery_score, risk_amount: c.suggested_risk,
+                      });
+                      reloadAll();
+                    }} style={{ background: "transparent", border: `0.5px solid ${accent}`,
+                                  color: accent, fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700 }}>
+                      ADD
+                    </button>
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </Card>
+      )}
+
+      {tab === "manual" && (
+        <>
+          <Card title={`ACTIVE MANUAL PLAYS · ${manualPlays.filter(p => p.is_active).length}`}>
+            {!manualPlays.filter(p => p.is_active).length ? (
+              <div style={{ color: muted, padding: 20 }}>No manual plays. Add one from the Screener tab.</div>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={th}>TICKER</th><th style={th}>ENTRY</th><th style={th}>CURRENT</th>
+                  <th style={th}>P&L</th><th style={th}>PEAK</th><th style={th}>SCORE</th>
+                  <th style={th}>RISK $</th><th style={th}></th>
+                </tr></thead>
+                <tbody>{manualPlays.filter(p => p.is_active).map((p, i) => {
+                  const pnl = p.current_price ? ((p.current_price - p.entry_price) / p.entry_price * 100) : 0;
+                  const peak = p.peak_price ? ((p.peak_price - p.entry_price) / p.entry_price * 100) : 0;
+                  return (
+                    <tr key={i} style={{ borderTop: hairline }} data-testid={`manual-${p.ticker}`}>
+                      <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
+                      <td style={td}>${p.entry_price?.toFixed(2)}</td>
+                      <td style={td}>${p.current_price?.toFixed(2) || "—"}</td>
+                      <td style={{ ...td, color: pnl >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%
+                      </td>
+                      <td style={{ ...td, color: "#4ade80", fontWeight: 700 }}>+{peak.toFixed(2)}%</td>
+                      <td style={td}>{p.lottery_score}</td>
+                      <td style={td}>${p.risk_amount}</td>
+                      <td style={td}>
+                        <button data-testid={`settle-${p.ticker}`}
+                          onClick={async () => {
+                            const exit = prompt(`EXACT exit price for ${p.ticker}?`);
+                            if (!exit) return;
+                            const r = await axios.post(
+                              `${API}/lottery/settle?ticker=${p.ticker}&exit_price=${exit}&play_date=${p.date}`
+                            );
+                            alert(`Realized P/L: ${r.data.realized_pct?.toFixed(2)}%`);
+                            reloadAll();
+                          }}
+                          style={{ background: "transparent", border: `0.5px solid #f87171`, color: "#f87171",
+                                    fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700, marginRight: 6 }}>
+                          SETTLE
+                        </button>
+                        <button data-testid={`send-tf-${p.ticker}`}
+                          onClick={async () => {
+                            if (!confirm(`Send $${p.risk_amount} of ${p.ticker} to Trade Floor?`)) return;
+                            const r = await axios.post(
+                              `${API}/trade_floor/manual_send?ticker=${p.ticker}&risk_dollars=${p.risk_amount}&source=lottery_manual`
+                            );
+                            alert(r.data.ok ? `Sent · notional $${r.data.notional}` : `Failed: ${r.data.reason}`);
+                          }}
+                          style={{ background: "transparent", border: `0.5px solid ${accent}`, color: accent,
+                                    fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700 }}>
+                          → TRADE FLOOR
+                        </button>
+                      </td>
+                    </tr>);
+                })}</tbody>
+              </table>
+            )}
+          </Card>
+
+          <Card title={`MANUAL TRACK RECORD · ${manualTR?.settled || 0} SETTLED · ISOLATED`}>
+            <div style={{ display: "flex", gap: 24, padding: "10px 0", borderBottom: hairline, marginBottom: 12 }}>
+              <Stat label="WIN RATE" value={manualTR?.win_rate != null ? `${(manualTR.win_rate * 100).toFixed(0)}%` : "—"}
+                    sub={`${manualTR?.winners || 0}/${manualTR?.settled || 0}`} color="#4ade80" />
+              <Stat label="AVG WINNER" value={manualTR?.avg_winner_pct != null ? `+${manualTR.avg_winner_pct}%` : "—"} color="#4ade80" />
+              <Stat label="AVG LOSER" value={manualTR?.avg_loser_pct != null ? `${manualTR.avg_loser_pct}%` : "—"} color="#f87171" />
+              <Stat label="TOTAL P/L" value={manualTR?.total_pnl_pct != null ? `${manualTR.total_pnl_pct >= 0 ? "+" : ""}${manualTR.total_pnl_pct}%` : "—"}
+                    color={(manualTR?.total_pnl_pct ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
+            </div>
+            {!manualTR?.history?.length ? (
+              <div style={{ color: muted, padding: 14 }}>No settled plays yet.</div>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={th}>TICKER</th><th style={th}>ENTRY</th><th style={th}>EXIT</th>
+                  <th style={th}>P&L</th><th style={th}>SCORE</th><th style={th}>TF?</th>
+                </tr></thead>
+                <tbody>{manualTR.history.map((p, i) => (
+                  <tr key={i} style={{ borderTop: hairline }}>
+                    <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
+                    <td style={td}>${p.entry_price?.toFixed(2)}</td>
+                    <td style={td}>${p.exit_price?.toFixed(2)}</td>
+                    <td style={{ ...td, color: (p.realized_pct || 0) >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                      {p.realized_pct >= 0 ? "+" : ""}{p.realized_pct?.toFixed(2)}%
+                    </td>
+                    <td style={td}>{p.lottery_score || "—"}</td>
+                    <td style={{ ...td, color: p.sent_to_trade_floor ? accent : muted }}>{p.sent_to_trade_floor ? "YES" : "no"}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
+          </Card>
+        </>
+      )}
 
       {tab === "current" && (
         picks.length === 0 ? (

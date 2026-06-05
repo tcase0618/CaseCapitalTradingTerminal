@@ -626,6 +626,12 @@ async def daily_options_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
 
 
 async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
+    """v5.1 — adds hold-window tracking + peak-gain-within-window.
+    Peak Gain is capped at the recommended hold window's end. After the window
+    closes (or option expiry, whichever is first), tracking stops permanently.
+    Rolling extension: if the same ticker fires again BEFORE the window closes,
+    the window extends to the furthest end across all active signals.
+    """
     db = get_db()
     rows = await db.signal_first_seen.find({}, {"_id": 0}).sort("first_seen_date", -1).to_list(limit)
     out: list[dict[str, Any]] = []
@@ -633,14 +639,74 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
     if not tickers:
         return out
 
-    # Single pricer call routes through Massive first, yfinance fallback,
-    # with built-in 10-min cache.
     cur_prices = await pricer.batch_latest_closes(tickers)
+    today = datetime.now(timezone.utc).date()
 
     for r in rows:
         t = r["ticker"]
         entry = r.get("first_seen_price")
         current = cur_prices.get(t)
+        first_seen_iso = r.get("first_seen_date")
+        # Determine recommended hold window — derived from signal type
+        hold_days = r.get("recommended_hold_days")
+        if not hold_days:
+            sigs = r.get("first_signals") or []
+            if "upcoming_earnings" in sigs:
+                hold_days = 14
+            elif "CONTRACT_SURGE" in sigs or "MOMENTUM_STACK" in sigs:
+                hold_days = 45
+            else:
+                hold_days = 30
+        first_seen_dt = None
+        if first_seen_iso:
+            try:
+                first_seen_dt = datetime.fromisoformat(first_seen_iso).date()
+            except Exception:
+                first_seen_dt = None
+        hold_end = (first_seen_dt + timedelta(days=hold_days)) if first_seen_dt else None
+        # Rolling extension: if any other signal_first_seen row for same
+        # ticker was seen WITHIN current window, extend to its hold_end.
+        try:
+            others = await db.signal_first_seen.find(
+                {"ticker": t}, {"_id": 0, "first_seen_date": 1, "recommended_hold_days": 1, "first_signals": 1},
+            ).to_list(10)
+            for o in others:
+                o_date_str = o.get("first_seen_date")
+                if not o_date_str or o_date_str == first_seen_iso:
+                    continue
+                try:
+                    o_dt = datetime.fromisoformat(o_date_str).date()
+                except Exception:
+                    continue
+                if hold_end is None or o_dt > hold_end:
+                    continue  # outside current window
+                o_hold = o.get("recommended_hold_days") or 30
+                o_end = o_dt + timedelta(days=o_hold)
+                if hold_end is None or o_end > hold_end:
+                    hold_end = o_end
+        except Exception:
+            pass
+        is_active = bool(hold_end and hold_end >= today)
+
+        # Peak gain — strictly within window
+        peak_gain = None
+        if first_seen_dt and entry:
+            # Bound: from first_seen to MIN(today, hold_end)
+            cutoff = min(today, hold_end) if hold_end else today
+            try:
+                def _peak_in_window():
+                    import yfinance as yf
+                    df = yf.Ticker(t).history(start=first_seen_iso, end=(cutoff + timedelta(days=1)).isoformat())
+                    if df is None or df.empty:
+                        return None
+                    peak_high = float(df["High"].max())
+                    return round((peak_high - entry) / entry * 100, 2)
+                pg = await asyncio.get_event_loop().run_in_executor(None, _peak_in_window)
+                if pg is not None:
+                    peak_gain = pg
+            except Exception:
+                pass
+
         gain_pct = None
         gain_abs = None
         if entry and current and entry > 0:
@@ -649,8 +715,10 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
         delta = r.get("first_options_delta") or 0.0
         opt_premium = r.get("first_options_premium") or 0.0
         opt_proxy_pct = None
-        if gain_pct is not None and delta and opt_premium > 0 and current and entry:
-            premium_delta = (current - entry) * delta
+        # Options proxy uses peak gain when window is active
+        ref_gain = peak_gain if peak_gain is not None else gain_pct
+        if ref_gain is not None and delta and opt_premium > 0 and entry:
+            premium_delta = (entry * ref_gain / 100.0) * delta
             opt_proxy_pct = round(premium_delta / opt_premium * 100, 2)
         out.append({
             "ticker": t,
@@ -659,6 +727,10 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
             "current_price": current,
             "gain_pct": gain_pct,
             "gain_abs": gain_abs,
+            "peak_gain_pct": peak_gain,
+            "recommended_hold_days": hold_days,
+            "hold_end_date": hold_end.isoformat() if hold_end else None,
+            "is_active": is_active,
             "signals": r.get("first_signals") or [],
             "signal_score": r.get("first_signal_score"),
             "thesis": r.get("first_thesis", ""),
@@ -670,6 +742,7 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
             "options_premium_at_entry": opt_premium or None,
             "options_iv_rank_at_entry": r.get("first_options_iv_rank"),
             "options_return_proxy_pct": opt_proxy_pct,
+            "options_peak_return_pct": opt_proxy_pct,
             "risk_level": r.get("first_risk_level"),
         })
     return out

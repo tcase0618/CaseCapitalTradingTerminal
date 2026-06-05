@@ -9,10 +9,12 @@ const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 export default function SettingsPage() {
   const [status, setStatus] = useState(null);
   const [criteria, setCriteria] = useState(null);
+  const [admin, setAdmin] = useState(null);
 
   useEffect(() => {
     axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => setStatus({}));
     axios.get(`${API}/admin/pipeline_criteria`).then(r => setCriteria(r.data)).catch(() => {});
+    axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {});
   }, []);
 
   const runLearning = async () => {
@@ -44,6 +46,48 @@ export default function SettingsPage() {
 
   return (
     <CrtShell title="SETTINGS & SYSTEM">
+      {/* v5.1 — Integration Status / Scheduled Jobs / Telegram Commands */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 18 }}>
+        <Card title={`INTEGRATION STATUS · ${(admin?.integrations || []).length}`} accentColor={accent}>
+          {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
+            admin.integrations.map((i, idx) => (
+              <div key={idx} data-testid={`integ-${i.key}`} style={{
+                display: "grid", gridTemplateColumns: "1fr 60px 80px",
+                padding: "6px 0", borderBottom: hairline, fontSize: 10, gap: 8, alignItems: "center",
+              }}>
+                <span style={{ color: labelLight }}>{i.name}</span>
+                <span style={{ color: i.ok ? "#4ade80" : "#f87171", fontWeight: 700, fontSize: 9, letterSpacing: "0.1em" }}>
+                  {i.ok ? "● LIVE" : "○ DOWN"}
+                </span>
+                <span style={{ color: dim, fontSize: 9 }}>{(i.last || "").slice(5, 16) || "—"}</span>
+              </div>
+            ))}
+        </Card>
+        <Card title={`SCHEDULED JOBS · ${(admin?.jobs || []).length}`} accentColor={accent2}>
+          {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
+            admin.jobs.map((j, idx) => (
+              <div key={idx} data-testid={`job-${j.id}`} style={{
+                padding: "6px 0", borderBottom: hairline, fontSize: 10,
+              }}>
+                <div style={{ color: accent2, fontWeight: 700 }}>{j.name}</div>
+                <div style={{ color: dim, fontSize: 9, marginTop: 2 }}>{j.cron}</div>
+              </div>
+            ))}
+        </Card>
+        <Card title={`TELEGRAM COMMANDS · ${(admin?.commands || []).length}`} accentColor="#4ade80">
+          {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
+            admin.commands.map((c, idx) => (
+              <div key={idx} data-testid={`cmd-${c.cmd.replace('/', '')}`} style={{
+                display: "grid", gridTemplateColumns: "100px 1fr",
+                padding: "6px 0", borderBottom: hairline, fontSize: 10, gap: 8,
+              }}>
+                <span style={{ color: "#4ade80", fontFamily: "JetBrains Mono", fontWeight: 700 }}>{c.cmd}</span>
+                <span style={{ color: dim }}>{c.desc}</span>
+              </div>
+            ))}
+        </Card>
+      </div>
+
       {/* ── Pipeline Criteria ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 4 }}>
         <Card title="PIPELINE CRITERIA · PRE-FILTER SCREENER" accentColor={accent2}>

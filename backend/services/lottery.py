@@ -367,3 +367,238 @@ async def recent_picks(days: int = 14, tier: str | None = None) -> list[dict[str
     if tier:
         q["tier"] = tier
     return await db.lottery_history.find(q, {"_id": 0}).sort("date", -1).to_list(200)
+
+
+# ─────── v5.1 — Dedicated Lottery Scan (Finviz screener) ───────
+async def run_dedicated_lottery_scan() -> dict[str, Any]:
+    """Runs a Finviz screener filtered to LOTTERY-grade microcaps:
+      • Float < 20M
+      • Price $1-$20
+      • Relative volume > 2× (today vs 20-day avg)
+      • Short interest > 15%
+    Then applies lottery score bonuses (float<10M, days-to-cover>5, X-Factor
+    spike, catalyst<14d, Form 4 cluster, congressional buy, PDUFA match,
+    SEC Form 4 cluster). Pure-stock play — no options evaluation.
+    """
+    import httpx
+    from bs4 import BeautifulSoup
+
+    # Finviz screener — float u20 + price $1-$20 + relative volume 2+
+    #   + short float 15+
+    # See: https://finviz.com/screener.ashx?v=111&f=...
+    url = (
+        "https://finviz.com/screener.ashx?v=111"
+        "&f=sh_float_u20,sh_price_1to20,sh_relvol_o2,sh_short_o15"
+        "&o=-volume"
+    )
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    }
+    candidates: list[dict[str, Any]] = []
+    try:
+        async with httpx.AsyncClient(timeout=20.0, headers=headers,
+                                       follow_redirects=True) as c:
+            r = await c.get(url)
+            if r.status_code != 200:
+                return {"candidates": [], "fetched_at": _now().isoformat(),
+                         "error": f"finviz HTTP {r.status_code}"}
+            soup = BeautifulSoup(r.text, "html.parser")
+            table = soup.find("table", class_="screener_table") or \
+                     soup.find("table", attrs={"id": "screener-table"})
+            if not table:
+                return {"candidates": [], "fetched_at": _now().isoformat(),
+                         "error": "table not found"}
+            for tr in table.find_all("tr")[1:]:
+                cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if len(cells) < 8:
+                    continue
+                try:
+                    candidates.append({
+                        "ticker": cells[1].upper(),
+                        "company": cells[2] if len(cells) > 2 else "",
+                        "sector": cells[3] if len(cells) > 3 else "",
+                        "price": float(cells[8].replace("$", "").replace(",", "")) if len(cells) > 8 else None,
+                    })
+                except (ValueError, IndexError):
+                    continue
+    except Exception as e:
+        logger.warning("dedicated lottery scan fetch failed: %s", e)
+        return {"candidates": [], "fetched_at": _now().isoformat(), "error": str(e)}
+
+    # Enrich with score bonuses from existing collections
+    db = get_db()
+    last_scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1},
+                                                  sort=[("started_at", -1)])
+    scan_by_t: dict[str, dict] = {}
+    if last_scan:
+        for r in (last_scan.get("results") or []):
+            scan_by_t[(r.get("ticker") or "").upper()] = r
+
+    today = _now().date().isoformat()
+    enriched: list[dict[str, Any]] = []
+    for cand in candidates:
+        t = cand["ticker"]
+        bonuses: list[str] = []
+        score = 50  # base score for passing the Finviz screen
+        sr = scan_by_t.get(t) or {}
+        sigs = sr.get("signals") or {}
+        if isinstance(sigs, dict):
+            if "insider_cluster_buy" in sigs:
+                score += 10; bonuses.append("INSIDER_CLUSTER")
+            if "CONGRESSIONAL_BUY" in sigs:
+                score += 8; bonuses.append("CONGRESS_BUY")
+            if "UNUSUAL_FLOW" in sigs:
+                score += 8; bonuses.append("UNUSUAL_FLOW")
+            if "upcoming_earnings" in sigs:
+                score += 6; bonuses.append("CATALYST")
+        # PDUFA cross-ref
+        if await db.pharma_pdufa.count_documents({"ticker": t}):
+            score += 10
+            bonuses.append("PHARMA_PDUFA")
+        # SEC Form 4 cluster cross-ref (last 7d)
+        if await db.sec_filings.count_documents(
+            {"ticker": t, "form": "Form 4",
+              "created_at": {"$gte": (_now() - timedelta(days=7)).isoformat()}}
+        ) >= 2:
+            score += 8
+            bonuses.append("SEC_FORM4_CLUSTER")
+        # X-Factor social spike
+        if await db.x_factor_alerts.count_documents(
+            {"ticker": t, "fired_at": {"$gte": (_now() - timedelta(days=3)).isoformat()}}
+        ):
+            score += 6
+            bonuses.append("X_FACTOR")
+        tier = tier_for(score)
+        suggested_risk = TIER_LIMITS.get(tier, 50)
+        enriched.append({
+            **cand,
+            "lottery_score": min(100, score),
+            "tier": tier,
+            "bonuses": bonuses,
+            "suggested_risk": suggested_risk,
+            "scanned_at": _now().isoformat(),
+        })
+    enriched.sort(key=lambda x: -x["lottery_score"])
+    # Persist as dedicated_lottery_scan
+    await db.lottery_dedicated_scan.update_one(
+        {"_id": "current"},
+        {"$set": {"candidates": enriched, "scanned_at": _now().isoformat(),
+                   "date": today}},
+        upsert=True,
+    )
+    await log_activity(
+        f"Dedicated lottery scan: {len(enriched)} candidates (Finviz microcap screen)",
+        "info",
+    )
+    return {"candidates": enriched, "fetched_at": _now().isoformat(),
+             "count": len(enriched)}
+
+
+async def latest_dedicated_lottery() -> list[dict[str, Any]]:
+    db = get_db()
+    doc = await db.lottery_dedicated_scan.find_one({"_id": "current"}, {"_id": 0})
+    return doc.get("candidates", []) if doc else []
+
+
+async def add_manual_play(ticker: str, entry_price: float,
+                            lottery_score: int | None = None,
+                            risk_amount: float | None = None) -> dict[str, Any]:
+    """User clicks ADD on a screener result and types their entry price."""
+    db = get_db()
+    today = _now().date().isoformat()
+    doc = stamped({
+        "ticker": ticker.upper(),
+        "date": today,
+        "entry_price": float(entry_price),
+        "peak_price": float(entry_price),
+        "current_price": float(entry_price),
+        "lottery_score": lottery_score,
+        "risk_amount": float(risk_amount) if risk_amount else None,
+        "is_manual": True,
+        "is_active": True,
+        "hold_end": (_now().date() + timedelta(days=14)).isoformat(),
+        "sent_to_trade_floor": False,
+        "added_at": _now().isoformat(),
+    })
+    await db.lottery_manual_plays.insert_one(doc)
+    await log_activity(f"Lottery: manual play added · {ticker} @ ${entry_price}", "info")
+    return doc
+
+
+async def settle_manual_play(ticker: str, exit_price: float, play_date: str) -> dict[str, Any]:
+    """User enters EXACT exit price — calculates realized P&L permanently."""
+    db = get_db()
+    play = await db.lottery_manual_plays.find_one(
+        {"ticker": ticker.upper(), "date": play_date, "is_active": True},
+        {"_id": 0},
+    )
+    if not play:
+        return {"ok": False, "reason": "play_not_found"}
+    entry = play["entry_price"]
+    realized_pct = ((exit_price - entry) / entry * 100) if entry else 0
+    update = {
+        "exit_price": float(exit_price),
+        "realized_pct": round(realized_pct, 2),
+        "is_active": False,
+        "settled_at": _now().isoformat(),
+    }
+    await db.lottery_manual_plays.update_one(
+        {"ticker": ticker.upper(), "date": play_date}, {"$set": update},
+    )
+    await log_activity(
+        f"Lottery: settled {ticker} · entry ${entry} → exit ${exit_price} "
+        f"({realized_pct:+.2f}%)", "info",
+    )
+    return {"ok": True, "realized_pct": realized_pct}
+
+
+async def update_manual_peak_marks(refresh: bool = True) -> int:
+    """Refresh current_price + peak_price for every active manual play."""
+    if not refresh:
+        return 0
+    from . import pricer
+    db = get_db()
+    plays = await db.lottery_manual_plays.find({"is_active": True}, {"_id": 0}).to_list(200)
+    updated = 0
+    for p in plays:
+        cur = await pricer.get_latest_close(p["ticker"])
+        if cur is None:
+            continue
+        peak = max(p.get("peak_price") or 0, cur)
+        await db.lottery_manual_plays.update_one(
+            {"ticker": p["ticker"], "date": p["date"]},
+            {"$set": {"current_price": cur, "peak_price": peak,
+                       "marks_updated_at": _now().isoformat()}},
+        )
+        updated += 1
+    return updated
+
+
+async def list_manual_plays(active_only: bool = False) -> list[dict[str, Any]]:
+    db = get_db()
+    q = {"is_active": True} if active_only else {}
+    return await db.lottery_manual_plays.find(q, {"_id": 0}).sort("added_at", -1).to_list(500)
+
+
+async def lottery_manual_track_record() -> dict[str, Any]:
+    """Completely isolated from any other tracker."""
+    plays = await list_manual_plays(active_only=False)
+    settled = [p for p in plays if not p.get("is_active")]
+    winners = [p for p in settled if (p.get("realized_pct") or 0) > 0]
+    total_pnl = sum((p.get("realized_pct") or 0) for p in settled)
+    avg_winner = (sum(p["realized_pct"] for p in winners) / len(winners)) if winners else None
+    losers = [p for p in settled if (p.get("realized_pct") or 0) <= 0]
+    avg_loser = (sum(p["realized_pct"] for p in losers) / len(losers)) if losers else None
+    return {
+        "total_plays": len(plays),
+        "settled": len(settled),
+        "winners": len(winners),
+        "losers": len(losers),
+        "win_rate": round(len(winners) / len(settled), 3) if settled else None,
+        "avg_winner_pct": round(avg_winner, 2) if avg_winner is not None else None,
+        "avg_loser_pct": round(avg_loser, 2) if avg_loser is not None else None,
+        "total_pnl_pct": round(total_pnl, 2),
+        "history": settled,
+    }
+

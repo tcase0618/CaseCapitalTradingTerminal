@@ -27,7 +27,12 @@ export default function PerformancePage() {
     axios.get(`${API}/signals/options_curve?days=${curveDays}`).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
     axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
   };
-  useEffect(() => { refresh(); }, [curveDays]);
+  useEffect(() => {
+    refresh();
+    // v5.1 — auto-refresh every 30s so charts update in real-time without manual reload
+    const t = setInterval(() => refresh(), 30000);
+    return () => clearInterval(t);
+  }, [curveDays]);
 
   const seedBacktest = async () => {
     setSeeding(true);
@@ -115,7 +120,62 @@ export default function PerformancePage() {
       })()}
 
       {/* Legacy single-table view kept for backward compat (collapsed default) */}
-      <Card title={`LEGACY · ALL BUY SIGNALS — DAILY P/L · ${tracker?.tracked || 0} TRACKED`}>
+      <CollapsibleSection title={`LEGACY · ALL BUY SIGNALS — DAILY P/L · ${tracker?.tracked || 0} TRACKED`}
+        defaultOpen={false} rows={(tracker?.rows || []).map(r => ({
+          ...r, hold_window_days: r.recommended_hold_days, hold_end_date: r.hold_end_date,
+        }))} tag="legacy-all" />
+
+      {/* v5.1 — Options Performance bar chart (peak option gain per trade) */}
+      <Card title={`OPTIONS PERFORMANCE · PEAK GAIN PER TRADE · ${(tracker?.rows || []).filter(r => (r.options_peak_return_pct ?? r.options_return_proxy_pct) != null).length} TRADES`}>
+        {(() => {
+          const opts = (tracker?.rows || [])
+            .filter(r => (r.options_peak_return_pct ?? r.options_return_proxy_pct) != null)
+            .sort((a, b) => new Date(a.first_seen_date) - new Date(b.first_seen_date));
+          if (opts.length === 0) {
+            return <div style={{ color: muted, padding: 20, fontSize: 11 }}>No options trades yet.</div>;
+          }
+          const vals = opts.map(o => o.options_peak_return_pct ?? o.options_return_proxy_pct);
+          const maxAbs = Math.max(...vals.map(Math.abs), 10);
+          return (
+            <div data-testid="opts-bar-chart" style={{ padding: "14px 18px" }}>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 220,
+                              borderBottom: `1px solid ${tokens.dim}`, borderLeft: `1px solid ${tokens.dim}`,
+                              padding: "8px 0 0 4px" }}>
+                {opts.slice(-60).map((o, i) => {
+                  const v = o.options_peak_return_pct ?? o.options_return_proxy_pct;
+                  const h = Math.abs(v) / maxAbs * 200;
+                  return (
+                    <div key={i} style={{
+                      flex: 1, height: "100%", display: "flex",
+                      flexDirection: v >= 0 ? "column-reverse" : "column",
+                      alignItems: "center", justifyContent: "flex-end",
+                    }} title={`${o.ticker} ${v >= 0 ? "+" : ""}${v.toFixed(1)}% (${o.first_seen_date})`}>
+                      <div style={{
+                        width: "100%", maxWidth: 12,
+                        height: `${h}px`,
+                        background: v >= 0 ? "#4ade80" : "#f87171",
+                        opacity: 0.85,
+                      }} />
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6,
+                              fontSize: 9, color: tokens.dim, letterSpacing: "0.12em" }}>
+                <span>{opts.slice(-60)[0]?.first_seen_date?.slice(5) || ""}</span>
+                <span>{opts.slice(-1)[0]?.first_seen_date?.slice(5) || ""}</span>
+              </div>
+              <div style={{ fontSize: 9, color: muted, marginTop: 10, letterSpacing: "0.06em" }}>
+                Each bar = peak options gain for ONE trade within its recommended hold window.
+                Green positive · red negative. Updates every 30s.
+              </div>
+            </div>
+          );
+        })()}
+      </Card>
+
+      {/* Legacy detailed table — DEPRECATED replaced by Active/Closed split + Options bar chart above */}
+      <Card title={`LEGACY DETAIL · ${tracker?.tracked || 0} TRACKED · COLLAPSED BY DEFAULT`}>
         {!tracker || !tracker.rows || tracker.rows.length === 0 ? (
           <div style={{ color: muted, fontSize: 13, padding: "10px 0" }}>
             No signals tracked yet. Every scan now records the first time it surfaces a

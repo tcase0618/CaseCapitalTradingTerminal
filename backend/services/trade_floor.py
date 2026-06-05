@@ -360,6 +360,7 @@ async def sync_positions_and_close_settled():
 
     open_trades = await db.tf_trades.find({"status": "OPEN"}, {"_id": 0}).to_list(200)
     closed = 0
+    newly_closed: list[dict[str, Any]] = []
     for t in open_trades:
         ticker = t.get("ticker", "").upper()
         p = pos_by_t.get(ticker)
@@ -390,7 +391,58 @@ async def sync_positions_and_close_settled():
                 }},
             )
             closed += 1
+            newly_closed.append({**t, "exit_price": cur_price,
+                                  "realized_pct": realized_pct})
+    # v5.1 — fire-and-forget journal AI write-back for newly-closed trades
+    if newly_closed:
+        asyncio.create_task(_write_journal_entries(newly_closed))
     return {"updated": len(open_trades) - closed, "closed": closed}
+
+
+async def _write_journal_entries(trades: list[dict[str, Any]]):
+    """Generate plain-language journal entries via Claude for closed trades.
+    Stored in tf_trades.journal_summary and tf_journal collection."""
+    db = get_db()
+    try:
+        from . import claude_service
+    except Exception:
+        return
+    for t in trades:
+        try:
+            ret = t.get("realized_pct") or 0
+            combo = " · ".join(t.get("signal_combo") or [])
+            prompt = (
+                f"In 4-6 conversational sentences, write a plain-language journal entry "
+                f"for the AXIOM Trade Floor's closed paper trade. "
+                f"Facts: ticker {t.get('ticker')}, signal combo [{combo}], "
+                f"entry ${t.get('entry_price_ref'):.2f}, exit ${t.get('exit_price', 0):.2f}, "
+                f"return {ret:+.2f}%, instrument {t.get('instrument')}, "
+                f"stop ${t.get('stop_price', 0):.2f}, regime {t.get('regime')}. "
+                f"Cover: WHY we took it, WHAT we were targeting, WHAT happened, "
+                f"WHAT we learned, WHAT we'll do differently. No raw data dumps — "
+                f"speak like an analyst writing in their own journal."
+            )
+            summary = await claude_service._call_claude(
+                "You write concise, candid trade journal entries.",
+                prompt,
+            )
+            if summary:
+                await db.tf_trades.update_one(
+                    {"client_order_id": t["client_order_id"]},
+                    {"$set": {"journal_summary": summary[:1500]}},
+                )
+                await db.tf_journal.insert_one(stamped({
+                    "ticker": t.get("ticker"),
+                    "date": _now().date().isoformat(),
+                    "client_order_id": t["client_order_id"],
+                    "signal_combo": t.get("signal_combo"),
+                    "entry_price": t.get("entry_price_ref"),
+                    "exit_price": t.get("exit_price"),
+                    "realized_pct": ret,
+                    "journal": summary,
+                }))
+        except Exception as e:
+            logger.warning("journal write-back for %s: %s", t.get("ticker"), e)
 
 
 async def _last_close_via_pricer(ticker: str) -> float | None:

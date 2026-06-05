@@ -1020,4 +1020,58 @@ async def on_shutdown():
     scheduler.shutdown_scheduler()
 
 # v5.0 — include router at end so all endpoints register
+# ─────── v5.1 — Lottery dedicated scan + manual entry + settle ───────
+@api.post("/lottery/scan")
+async def lottery_dedicated_scan():
+    from services import lottery
+    return await lottery.run_dedicated_lottery_scan()
+
+
+@api.get("/lottery/screener")
+async def lottery_screener():
+    from services import lottery
+    return {"candidates": await lottery.latest_dedicated_lottery()}
+
+
+class LotteryManualEntry(BaseModel):
+    ticker: str
+    entry_price: float
+    lottery_score: int | None = None
+    risk_amount: float | None = None
+
+
+@api.post("/lottery/manual")
+async def lottery_manual_add(p: LotteryManualEntry):
+    from services import lottery
+    return await lottery.add_manual_play(p.ticker, p.entry_price, p.lottery_score, p.risk_amount)
+
+
+@api.post("/lottery/settle")
+async def lottery_settle(ticker: str, exit_price: float, play_date: str):
+    from services import lottery
+    return await lottery.settle_manual_play(ticker, exit_price, play_date)
+
+
+@api.get("/lottery/manual_plays")
+async def lottery_manual_plays(active_only: bool = False):
+    from services import lottery
+    await lottery.update_manual_peak_marks(refresh=True)
+    return {"plays": await lottery.list_manual_plays(active_only=active_only)}
+
+
+@api.get("/lottery/manual_track_record")
+async def lottery_manual_tracker():
+    from services import lottery
+    return await lottery.lottery_manual_track_record()
+
+
+# ─────── v5.1 — Settings: integrations + jobs + commands ───────
+@api.get("/admin/integration_status")
+async def admin_integration_status():
+    from services import integration_status as svc
+    return {"integrations": await svc.integration_status(),
+             "jobs": svc.scheduled_jobs(),
+             "commands": svc.telegram_commands()}
+
+
 app.include_router(api)

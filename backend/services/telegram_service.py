@@ -553,6 +553,149 @@ async def handle_update(update: dict[str, Any]) -> None:
     args = parts[1:]
     db = get_db()
 
+    if cmd == "/positions":
+        from . import trade_floor as _tf
+        live = await _tf.list_positions()
+        if not live:
+            await send_message("📊 No open Trade Floor positions.", chat_id=chat_id)
+            return
+        lines = ["🎯 <b>OPEN POSITIONS</b>"]
+        for p in live[:20]:
+            sym = p.get("symbol")
+            pct = float(p.get("unrealized_plpc") or 0) * 100
+            mark = float(p.get("market_value") or 0)
+            color = "🟢" if pct >= 0 else "🔴"
+            lines.append(f"{color} <b>${sym}</b> · ${mark:.0f} · {pct:+.2f}%")
+        await send_message("\n".join(lines), chat_id=chat_id); return
+
+    if cmd == "/account":
+        from . import trade_floor as _tf
+        a = await _tf.get_account() or {}
+        equity = float(a.get("equity") or 0)
+        cash = float(a.get("cash") or 0)
+        bp = float(a.get("buying_power") or 0)
+        history = await _tf.trade_history()
+        wins = sum(1 for h in history if (h.get("realized_pct") or 0) > 0)
+        wr = (wins / len(history) * 100) if history else 0
+        await send_message(
+            f"💼 <b>ACCOUNT</b>\n"
+            f"Equity ${equity:.2f} · Cash ${cash:.2f} · BP ${bp:.2f}\n"
+            f"Closed trades {len(history)} · win rate {wr:.0f}%",
+            chat_id=chat_id); return
+
+    if cmd == "/regime":
+        from . import trade_floor as _tf
+        r = await _tf.regime_status()
+        e = "🟢" if r["status"] == "green" else "🟡" if r["status"] == "yellow" else "🔴"
+        await send_message(
+            f"{e} <b>REGIME · {r['status'].upper()}</b>\n"
+            f"VIX {r['vix']} · SPY {r['spy_last']} · EMA200 {r['spy_ema200']}\n"
+            f"Halt: {'YES' if r['halt_new_entries'] else 'no'}",
+            chat_id=chat_id); return
+
+    if cmd == "/risk":
+        from . import trade_floor as _tf, trade_floor_learning as _tfl
+        regime = await _tf.regime_status()
+        engine = await _tfl.status()
+        positions = await _tf.list_positions()
+        await send_message(
+            f"🛡 <b>RISK · {regime['status'].upper()}</b>\n"
+            f"VIX {regime['vix']} · Circuit: "
+            f"{'HALTED' if regime['halt_new_entries'] else 'OK'}\n"
+            f"Positions {len(positions)}/10 · Engine phase: {engine['phase']}",
+            chat_id=chat_id); return
+
+    if cmd == "/journal":
+        from . import trade_floor as _tf
+        history = await _tf.trade_history()
+        if not history:
+            await send_message("📓 No closed trades yet.", chat_id=chat_id); return
+        lines = ["📓 <b>LAST 3 JOURNAL ENTRIES</b>"]
+        for h in history[:3]:
+            ret = h.get("realized_pct") or 0
+            color = "🟢" if ret >= 0 else "🔴"
+            sigs = " · ".join(h.get("signal_combo") or [])[:60]
+            j = h.get("journal_summary") or ""
+            lines.append(
+                f"\n{color} <b>${h.get('ticker')}</b> · {ret:+.2f}%\n"
+                f"<i>{sigs}</i>\n{_esc(j[:300]) if j else ''}"
+            )
+        await send_message("\n".join(lines), chat_id=chat_id); return
+
+    if cmd == "/sec":
+        from . import sec_filings as _s
+        rows = await _s.recent_filings(days=7)
+        if not rows:
+            await send_message("§ No SEC filings to report.", chat_id=chat_id); return
+        lines = ["§ <b>SEC FILINGS · TOP 5</b>"]
+        for r in rows[:5]:
+            badge = "🔒" if r.get("narrative_lock_badge") else " "
+            lines.append(
+                f"{badge} <b>${_esc(r.get('ticker',''))}</b> "
+                f"{_esc(r.get('form',''))} · sig {r.get('significance')} · "
+                f"nls {r.get('narrative_lock_score')}"
+            )
+        await send_message("\n".join(lines), chat_id=chat_id); return
+
+    if cmd == "/pharma":
+        from . import pharma as _p
+        rows = await _p.get_pdufa_within_days(days=90)
+        rows = sorted(rows, key=lambda r: -(r.get('binary_event_score') or 0))[:3]
+        if not rows:
+            await send_message("🧬 No PDUFA in next 90d.", chat_id=chat_id); return
+        lines = ["🧬 <b>TOP PHARMA · BINARY EVENT SCORE</b>"]
+        for r in rows:
+            lines.append(
+                f"<b>${_esc(r.get('ticker',''))}</b> · "
+                f"{r.get('binary_event_score'):.0f}/100 · "
+                f"{_esc(r.get('drug',''))[:30]} · "
+                f"PDUFA {r.get('pdufa_date')} ({r.get('days_until')}d)"
+            )
+        await send_message("\n".join(lines), chat_id=chat_id); return
+
+    if cmd == "/contracts":
+        from . import usaspending as _u
+        rows = await _u.list_recent_contracts_for_tickers(limit=5)
+        if not rows:
+            await send_message("🏛 No recent contracts.", chat_id=chat_id); return
+        lines = ["🏛 <b>RECENT CONTRACTS</b>"]
+        for r in rows:
+            amt = r.get("amount") or 0
+            lines.append(
+                f"<b>${_esc(r.get('ticker',''))}</b> · ${amt/1e6:.1f}M · "
+                f"{_esc(r.get('agency',''))[:30]}"
+            )
+        await send_message("\n".join(lines), chat_id=chat_id); return
+
+    if cmd == "/checkup":
+        # Portfolio check-up: buys+sells + unrealized/realized since last checkup
+        from . import trade_floor as _tf
+        last_check = await db.bot_state.find_one({"_id": "last_checkup"}) or {}
+        last_ts = last_check.get("timestamp", "")
+        since_filter = {"submitted_at": {"$gte": last_ts}} if last_ts else {}
+        new_trades = await db.tf_trades.find(since_filter, {"_id": 0})\
+            .sort("submitted_at", -1).to_list(100)
+        live = await _tf.list_positions()
+        a = await _tf.get_account() or {}
+        unrealized = sum(float(p.get("unrealized_pl") or 0) for p in live)
+        realized_today = sum(
+            (t.get("realized_pct") or 0) for t in new_trades
+            if t.get("status") == "CLOSED"
+        )
+        buys = [t for t in new_trades if t.get("status") == "OPEN"]
+        sells = [t for t in new_trades if t.get("status") == "CLOSED"]
+        lines = [f"📋 <b>CHECK-UP · since {last_ts[:10] if last_ts else 'launch'}</b>"]
+        lines.append(f"Buys: {len(buys)} · Sells: {len(sells)}")
+        lines.append(f"Unrealized P/L: ${unrealized:+.2f}")
+        lines.append(f"Realized P/L (avg): {realized_today:+.2f}%")
+        lines.append(f"Account equity: ${a.get('equity', '—')}")
+        await db.bot_state.update_one(
+            {"_id": "last_checkup"},
+            {"$set": {"timestamp": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+        await send_message("\n".join(lines), chat_id=chat_id); return
+
     if cmd in ("/start", "/help"):
         await send_message(
             "⚡ <b>AXIOM INTELLIGENCE</b> · v3.0\n"
