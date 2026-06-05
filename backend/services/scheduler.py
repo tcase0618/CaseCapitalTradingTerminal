@@ -190,6 +190,19 @@ def start_scheduler():
         id="position_monitor", replace_existing=True,
     )
 
+    # v5.2 — stale-order sweep every hour: cancel any TF buy still unfilled > 24h
+    async def _stale_order_sweep():
+        try:
+            from . import trade_floor
+            await trade_floor.cancel_stale_orders(max_age_hours=24)
+        except Exception as e:
+            logger.warning("stale order sweep: %s", e)
+    _scheduler.add_job(
+        _stale_order_sweep,
+        CronTrigger(minute="5", timezone=ET),  # top of every hour + 5 min
+        id="stale_order_sweep", replace_existing=True,
+    )
+
     # v5.0 — daily database backup at 2am ET
     async def _db_backup():
         try:

@@ -72,6 +72,63 @@ async def get_trade_score(signals: list[str] | dict[str, Any]) -> float:
     return round(sum(weights.get(k, 0) for k in keys), 2)
 
 
+# ─────── Per-trade learning hooks ───────
+async def log_trade_initiation(trade_doc: dict[str, Any]) -> None:
+    """Persist a snapshot of the per-trade decision factors at submit
+    time. Used later by `recalibrate()` to evolve entry-price and stop
+    logic based on actual outcomes."""
+    db = get_db()
+    await db.tf_trade_decisions.insert_one(stamped({
+        "client_order_id": trade_doc.get("client_order_id"),
+        "ticker": trade_doc.get("ticker"),
+        "signal_combo": trade_doc.get("signal_combo"),
+        "trade_score": trade_doc.get("trade_score"),
+        "score_tier": _score_tier(trade_doc.get("trade_score") or 0),
+        "sector": trade_doc.get("sector"),
+        "hold_window_days": trade_doc.get("hold_window_days"),
+        "instrument": trade_doc.get("instrument"),
+        "limit_price": trade_doc.get("limit_price"),
+        "stop_price": trade_doc.get("stop_price"),
+        "stop_pct": trade_doc.get("stop_pct"),
+        "stop_breakdown": trade_doc.get("stop_breakdown"),
+        "hard_cap_applied": trade_doc.get("hard_cap_applied"),
+        "notional": trade_doc.get("notional"),
+        "submitted_at": trade_doc.get("submitted_at"),
+    }))
+
+
+async def log_trade_outcomes(closed_trades: list[dict[str, Any]]) -> None:
+    """Called on every position close. Stamps the final fill/outcome data
+    back onto the decision record so the recalibrator can analyse it."""
+    db = get_db()
+    for t in closed_trades:
+        try:
+            await db.tf_trade_decisions.update_one(
+                {"client_order_id": t.get("client_order_id")},
+                {"$set": {
+                    "fill_status": t.get("fill_status"),
+                    "fill_seconds": t.get("fill_seconds"),
+                    "filled_avg_price": t.get("filled_avg_price"),
+                    "lowest_price_reached": t.get("lowest_price_reached"),
+                    "exit_price": t.get("exit_price"),
+                    "realized_pct": t.get("realized_pct"),
+                    "closed_at": t.get("closed_at"),
+                }},
+            )
+        except Exception as e:
+            logger.warning("log_trade_outcomes %s: %s", t.get("ticker"), e)
+
+
+def _score_tier(score: float) -> str:
+    if score >= 50:
+        return "50+"
+    if score >= 30:
+        return "30-49"
+    if score >= 25:
+        return "25-29"
+    return "20-24"
+
+
 async def closed_trade_count() -> int:
     db = get_db()
     return await db.tf_trades.count_documents({"status": "CLOSED"})
@@ -209,6 +266,18 @@ async def recalibrate() -> dict[str, Any]:
                 {"$set": {"tiers": tiers, "last_adjusted_at": _now().isoformat()}},
             )
 
+    # Phase ≥5: evolve the stop engine coefficients based on observed outcomes
+    try:
+        await _recalibrate_stop_engine(trades)
+    except Exception as e:
+        logger.warning("recalibrate_stop_engine: %s", e)
+
+    # Phase ≥5: evolve entry-price logic (fill rate + outcome per signal/score tier)
+    try:
+        await _recalibrate_entry_price(trades)
+    except Exception as e:
+        logger.warning("recalibrate_entry_price: %s", e)
+
     await db.tf_recalibration_log.insert_one(stamped({
         "ran_at": _now().isoformat(),
         "phase": p, "closed_trades": n,
@@ -219,3 +288,139 @@ async def recalibrate() -> dict[str, Any]:
         f"Trade Floor Engine recalibration · {p} · {len(changes)} weight changes", "info",
     )
     return {"phase": p, "changes": len(changes), "combos": len(combos)}
+
+
+
+async def _recalibrate_stop_engine(trades: list[dict[str, Any]]) -> None:
+    """Compare calculated stop_pct vs lowest_price_reached vs realized_pct per
+    signal-tier/sector. Adjust the stop_engine coefficient table so future
+    stops are tighter where stops are rarely hit and outcomes are positive,
+    and wider where stops were prematurely hit on otherwise good setups.
+
+    The recalibration nudges each coefficient by ±0.005, clamped to its
+    sensible range. Real movement requires ≥10 closed trades in the bucket;
+    otherwise the bucket is held."""
+    db = get_db()
+    closed = [t for t in trades
+                if t.get("stop_breakdown") and t.get("lowest_price_reached") is not None
+                and t.get("entry_price_ref")]
+    if len(closed) < 5:
+        return
+    # Aggregate by sector & score_tier
+    buckets: dict[tuple, dict[str, Any]] = {}
+    for t in closed:
+        bd = t.get("stop_breakdown") or {}
+        key = (bd.get("sector") or "unknown", bd.get("score_tier") or "20-24")
+        b = buckets.setdefault(key, {"n": 0, "stopped_out": 0, "ret_sum": 0.0,
+                                          "drawdown_sum": 0.0})
+        b["n"] += 1
+        b["ret_sum"] += (t.get("realized_pct") or 0)
+        entry = float(t.get("entry_price_ref") or 0)
+        low = float(t.get("lowest_price_reached") or 0)
+        if entry > 0 and low > 0:
+            dd = (entry - low) / entry  # max drawdown during the hold
+            b["drawdown_sum"] += dd
+            stop_pct = float(t.get("stop_pct") or 0)
+            if dd >= stop_pct:
+                b["stopped_out"] += 1
+
+    coef_doc = await db.tf_stop_engine.find_one({"_id": "current"}) or {}
+    coef = dict(coef_doc.get("coefficients") or {})
+    if not coef:
+        return
+    sector_delta = dict(coef.get("sector_delta") or {})
+    score_delta = dict(coef.get("score_tier_delta") or {})
+    changes: list[dict[str, Any]] = []
+    for (sector, tier), s in buckets.items():
+        if s["n"] < 10:
+            continue
+        avg_ret = s["ret_sum"] / s["n"]
+        stop_rate = s["stopped_out"] / s["n"]
+        # Heuristic: if avg_ret > 0 and stop_rate < 0.3 → tighten (-0.005)
+        #            if avg_ret <= 0 and stop_rate >= 0.5 → widen (+0.005)
+        delta = 0.0
+        if avg_ret > 0 and stop_rate < 0.3:
+            delta = -0.005
+        elif avg_ret <= 0 and stop_rate >= 0.5:
+            delta = 0.005
+        if delta == 0.0:
+            continue
+        old_sec = float(sector_delta.get(sector, 0.0))
+        new_sec = round(max(-0.05, min(0.08, old_sec + delta)), 4)
+        if new_sec != old_sec:
+            sector_delta[sector] = new_sec
+            changes.append({"factor": "sector_delta", "key": sector,
+                              "from": old_sec, "to": new_sec, "n": s["n"]})
+        old_sc = float(score_delta.get(tier, 0.0))
+        new_sc = round(max(-0.03, min(0.05, old_sc + delta * 0.5)), 4)
+        if new_sc != old_sc:
+            score_delta[tier] = new_sc
+            changes.append({"factor": "score_tier_delta", "key": tier,
+                              "from": old_sc, "to": new_sc, "n": s["n"]})
+    if changes:
+        coef["sector_delta"] = sector_delta
+        coef["score_tier_delta"] = score_delta
+        await db.tf_stop_engine.update_one(
+            {"_id": "current"},
+            {"$set": {"coefficients": coef, "last_recalibrated_at": _now().isoformat()}},
+        )
+        await db.tf_recalibration_log.insert_one(stamped({
+            "ran_at": _now().isoformat(),
+            "subsystem": "stop_engine",
+            "changes": changes,
+            "buckets": len(buckets),
+        }))
+
+
+async def _recalibrate_entry_price(trades: list[dict[str, Any]]) -> None:
+    """Adjust the entry-price offset (vs current ask) per signal-combo/score-tier
+    based on observed fill rate AND outcome. Stored in tf_entry_engine."""
+    db = get_db()
+    by_bucket: dict[tuple, dict[str, Any]] = {}
+    for t in trades:
+        if not t.get("limit_price") or not t.get("ticker"):
+            continue
+        combo = "+".join(sorted(t.get("signal_combo") or []))
+        tier = _score_tier(t.get("trade_score") or 0)
+        key = (combo, tier)
+        b = by_bucket.setdefault(key, {"n": 0, "filled": 0, "fill_secs_sum": 0.0,
+                                            "ret_sum": 0.0})
+        b["n"] += 1
+        if t.get("fill_status") == "FILLED":
+            b["filled"] += 1
+            b["fill_secs_sum"] += float(t.get("fill_seconds") or 0)
+        b["ret_sum"] += (t.get("realized_pct") or 0)
+    if not by_bucket:
+        return
+    offsets: dict[str, dict[str, Any]] = {}
+    for (combo, tier), s in by_bucket.items():
+        if s["n"] < 5:
+            continue
+        fill_rate = s["filled"] / s["n"]
+        avg_ret = s["ret_sum"] / max(1, s["filled"])
+        # If fill rate < 60% → bid 0.1% above ask (positive offset)
+        # If fill rate > 90% AND avg_ret negative → bid 0.2% below ask (negative offset)
+        # Otherwise keep at 0 (ask).
+        offset_bps = 0
+        if fill_rate < 0.6:
+            offset_bps = 10  # +0.10%
+        elif fill_rate > 0.9 and avg_ret < 0:
+            offset_bps = -20  # -0.20%
+        if offset_bps == 0:
+            continue
+        offsets.setdefault(combo, {})[tier] = {
+            "offset_bps": offset_bps, "fill_rate": round(fill_rate, 3),
+            "avg_ret_pct": round(avg_ret, 2), "n": s["n"],
+        }
+    if offsets:
+        await db.tf_entry_engine.update_one(
+            {"_id": "current"},
+            {"$set": {"offsets_by_combo": offsets,
+                       "last_recalibrated_at": _now().isoformat()}},
+            upsert=True,
+        )
+        await db.tf_recalibration_log.insert_one(stamped({
+            "ran_at": _now().isoformat(),
+            "subsystem": "entry_price",
+            "buckets_with_offsets": sum(len(v) for v in offsets.values()),
+        }))

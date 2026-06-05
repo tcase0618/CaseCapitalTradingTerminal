@@ -958,41 +958,81 @@ async def tf_journal(date: str | None = None):
 @api.post("/trade_floor/manual_send")
 async def tf_manual_send(ticker: str, risk_dollars: float, source: str = "manual"):
     """Send a ticker straight to the Trade Floor with EXACT risk amount —
-    no gates, no recalc. Used by the Lottery 'Send to Trade Floor' button."""
-    from services import trade_floor, pricer
+    no scan gates, no recalc. Still enforces: (a) dedup vs Alpaca open
+    positions AND open orders; (b) limit DAY order at current ask;
+    (c) absolute risk hard cap by score tier; (d) analytical stop engine."""
+    from services import trade_floor, stop_engine, trade_floor_learning as tfle
     if not trade_floor._alpaca_ready():
         return {"ok": False, "reason": "alpaca_not_configured"}
-    cur = await pricer.get_latest_close(ticker)
-    if not cur:
-        return {"ok": False, "reason": "no_price"}
-    atr = await trade_floor.fetch_atr_14d(ticker)
-    if not atr:
-        return {"ok": False, "reason": "no_atr_for_stop"}
-    stop = cur - 2 * atr
-    if stop <= 0 or stop >= cur:
-        return {"ok": False, "reason": "invalid_stop"}
-    notional = max(5.0, min(risk_dollars * (cur / (cur - stop)), risk_dollars * 5))
-    notional = round(notional, 2)
+    ticker = ticker.upper()
+    # Dedup
+    held = {p.get("symbol", "").upper() for p in await trade_floor.list_positions()}
+    pending = {o.get("symbol", "").upper() for o in await trade_floor.list_orders(status="open")}
+    if ticker in held:
+        return {"ok": False, "reason": "ticker_already_open_in_alpaca"}
+    if ticker in pending:
+        return {"ok": False, "reason": "ticker_has_pending_open_order"}
+    # Entry price = Alpaca ask
+    ask = await trade_floor.get_latest_ask(ticker)
+    if not ask:
+        from services import pricer
+        ask = await pricer.get_latest_close(ticker)
+    if not ask or ask <= 0:
+        return {"ok": False, "reason": "no_ask_quote"}
+    # Stop via analytical engine (assume score 30 if not provided so manual
+    # plays land in the middle tier of stop adjustment)
+    stop_calc = await stop_engine.compute_stop(
+        ticker=ticker, entry_price=ask,
+        signal_combo=[source.upper()], score=30, hold_window_days=30,
+        sector=None, instrument="fractional",
+    )
+    # Hard cap by score (manual = treated as 30-49 tier unless explicitly higher)
+    hard_cap = trade_floor.hard_cap_for(30, "fractional")
+    notional = round(min(float(risk_dollars), hard_cap), 2)
+    if notional < 1.0:
+        return {"ok": False, "reason": f"notional_too_small (cap=${hard_cap})"}
     cli = f"tf-manual-{ticker}-{int(datetime.now(timezone.utc).timestamp())}"
-    order = await trade_floor.submit_fractional_buy(ticker, notional, client_order_id=cli)
+    order = await trade_floor.submit_fractional_limit_buy(
+        ticker, notional, limit_price=round(ask, 4), client_order_id=cli,
+    )
     if order:
         from services.db import get_db, stamped
-        await get_db().tf_trades.insert_one(stamped({
+        trade_doc = stamped({
             "client_order_id": cli,
             "order_id": order.get("id"),
-            "ticker": ticker.upper(),
+            "ticker": ticker,
             "entry_score": None,
+            "trade_score": 30,
             "signal_combo": [source.upper()],
             "instrument": "fractional",
             "notional": notional,
-            "entry_price_ref": cur,
-            "stop_price": stop,
-            "atr_14d": atr,
+            "hard_cap_applied": hard_cap,
+            "limit_price": round(ask, 4),
+            "entry_price_ref": round(ask, 4),
+            "stop_price": stop_calc["stop_price"],
+            "stop_pct": stop_calc["stop_pct"],
+            "stop_breakdown": stop_calc["breakdown"],
+            "hold_window_days": 30,
             "status": "OPEN",
+            "fill_status": "PENDING",
             "submitted_at": datetime.now(timezone.utc).isoformat(),
             "source": source,
-        }))
-    return {"ok": order is not None, "notional": notional, "stop": stop, "order": order}
+        })
+        await get_db().tf_trades.insert_one(trade_doc)
+        try:
+            await tfle.log_trade_initiation(trade_doc)
+        except Exception:
+            pass
+    return {"ok": order is not None, "notional": notional,
+             "stop": stop_calc["stop_price"], "limit_price": round(ask, 4),
+             "hard_cap": hard_cap, "order": order}
+
+
+@api.post("/trade_floor/sweep_stale_orders")
+async def tf_sweep_stale():
+    """Manually trigger the 24h stale-order cancel sweep."""
+    from services import trade_floor
+    return await trade_floor.cancel_stale_orders(max_age_hours=24)
 
 
 # ─────── Trade Floor Learning Engine ───────

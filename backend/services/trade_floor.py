@@ -10,11 +10,21 @@ Execution Gates (ALL must pass simultaneously):
   • Regime gate clear (VIX < 25, SPY > 200-d EMA)
   • No earnings in 10d (unless beat_prob > 65% AND spread structure)
   • < 10 open positions
+  • Ticker NOT already in Alpaca open positions OR open orders
+    (checked twice: at gate AND immediately before submission)
 
-Initial risk profile (overridden by Trade Floor Learning Engine after
-10 closed trades):
-  Fractional shares: 20-24 → 1% · 25-29 → 2% · 30-49 → 3% · 50+ → 5%
-  Options:           20-24 → 5% · 25-29 → 7% · 30-49 → 8% · 50+ → 10%
+Orders are ALL **limit DAY orders** at the current ask price (the
+Trade Floor Learning Engine will adapt the entry-price logic over
+time). Unfilled orders auto-cancel after 24 hours via
+`cancel_stale_orders()` and the ticker only gets another order when it
+appears in a future scan as a fresh signal.
+
+Stops are produced by `stop_engine.compute_stop(...)` — analytical,
+learnable, NO ATR, NO yfinance.
+
+Hard absolute risk caps (NEVER exceeded):
+  Fractional: 20-24=$10 · 25-29=$20 · 30-49=$30 · 50+=$50
+  Options:    20-24=$50 · 25-29=$70 · 30-49=$80 · 50+=$100
 """
 from __future__ import annotations
 import asyncio
@@ -92,16 +102,18 @@ async def list_orders(status: str = "all", limit: int = 100) -> list[dict[str, A
         return []
 
 
-async def submit_fractional_buy(ticker: str, notional: float,
-                                   client_order_id: str | None = None) -> dict[str, Any] | None:
-    if not _alpaca_ready() or notional <= 0:
+async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price: float,
+                                          client_order_id: str | None = None) -> dict[str, Any] | None:
+    """Limit DAY order for fractional notional. NEVER market."""
+    if not _alpaca_ready() or notional <= 0 or limit_price <= 0:
         return None
     payload: dict[str, Any] = {
         "symbol": ticker.upper(),
         "notional": round(notional, 2),
         "side": "buy",
-        "type": "market",
+        "type": "limit",
         "time_in_force": "day",
+        "limit_price": round(limit_price, 4),
     }
     if client_order_id:
         payload["client_order_id"] = client_order_id
@@ -110,10 +122,100 @@ async def submit_fractional_buy(ticker: str, notional: float,
             r = await c.post(f"{ALPACA_TRADE_BASE}/v2/orders", json=payload)
             if r.status_code in (200, 201):
                 return r.json()
-            logger.warning("alpaca buy %s: %s %s", ticker, r.status_code, r.text[:200])
+            logger.warning("alpaca limit buy %s: %s %s", ticker, r.status_code, r.text[:200])
     except Exception as e:
-        logger.warning("alpaca buy exception %s: %s", ticker, e)
+        logger.warning("alpaca limit buy exception %s: %s", ticker, e)
     return None
+
+
+# Backwards-compatible alias used by legacy code paths
+submit_fractional_buy = submit_fractional_limit_buy
+
+
+async def get_latest_ask(ticker: str) -> float | None:
+    """Sole source for the limit price at order-submission time: Alpaca."""
+    if not _alpaca_ready():
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers={
+            "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET,
+        }) as c:
+            r = await c.get(f"{ALPACA_DATA_BASE}/stocks/{ticker.upper()}/quotes/latest",
+                              params={"feed": "iex"})
+            if r.status_code != 200:
+                return None
+            q = (r.json() or {}).get("quote") or {}
+            ask = float(q.get("ap") or 0)
+            return ask if ask > 0 else None
+    except Exception:
+        return None
+
+
+async def cancel_order(order_id: str) -> bool:
+    """Cancel a single Alpaca order by id."""
+    if not _alpaca_ready() or not order_id:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=HEADERS) as c:
+            r = await c.delete(f"{ALPACA_TRADE_BASE}/v2/orders/{order_id}")
+            return r.status_code in (200, 204, 207)
+    except Exception:
+        return False
+
+
+async def cancel_stale_orders(max_age_hours: int = 24) -> dict[str, Any]:
+    """Cancel any TF buy order that has been unfilled for > max_age_hours.
+    Logs each cancellation into `tf_unfilled_log` so the ticker is marked
+    'never re-attempted until a fresh signal appears'."""
+    if not _alpaca_ready():
+        return {"checked": 0, "cancelled": 0}
+    db = get_db()
+    open_orders = await list_orders(status="open", limit=200)
+    now = _now()
+    cancelled: list[dict[str, Any]] = []
+    for o in open_orders:
+        try:
+            cli = o.get("client_order_id") or ""
+            if not cli.startswith("tf-"):
+                continue
+            submitted = o.get("submitted_at") or o.get("created_at")
+            if not submitted:
+                continue
+            ts = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
+            if (now - ts).total_seconds() < max_age_hours * 3600:
+                continue
+            ok = await cancel_order(o.get("id"))
+            if not ok:
+                continue
+            await db.tf_trades.update_one(
+                {"client_order_id": cli},
+                {"$set": {
+                    "status": "UNFILLED_CANCELLED",
+                    "fill_status": "UNFILLED",
+                    "cancelled_at": now.isoformat(),
+                    "cancel_reason": f"day_order_expired_after_{max_age_hours}h",
+                }},
+            )
+            await db.tf_unfilled_log.insert_one(stamped({
+                "ticker": o.get("symbol"),
+                "client_order_id": cli,
+                "alpaca_order_id": o.get("id"),
+                "submitted_at": submitted,
+                "cancelled_at": now.isoformat(),
+                "limit_price": float(o.get("limit_price") or 0),
+                "notional": float(o.get("notional") or 0),
+                "age_hours": round((now - ts).total_seconds() / 3600, 2),
+            }))
+            cancelled.append({"ticker": o.get("symbol"), "order_id": o.get("id")})
+        except Exception as e:
+            logger.warning("cancel_stale_orders: %s", e)
+            continue
+    if cancelled:
+        await log_activity(
+            f"Trade Floor: cancelled {len(cancelled)} stale order(s) "
+            f"(>{max_age_hours}h unfilled).", "info")
+    return {"checked": len(open_orders), "cancelled": len(cancelled),
+             "details": cancelled}
 
 
 async def close_position(ticker: str) -> dict[str, Any] | None:
@@ -166,6 +268,21 @@ DEFAULT_RISK_TIERS = {
     "options":    {(20, 25): 0.05, (25, 30): 0.07, (30, 50): 0.08, (50, 999): 0.10},
 }
 
+# ─────── HARD ABSOLUTE risk caps (per-trade dollar ceiling — never exceeded) ───────
+FRACTIONAL_HARD_CAPS = [(20, 25, 10.0), (25, 30, 20.0), (30, 50, 30.0), (50, 999, 50.0)]
+OPTIONS_HARD_CAPS    = [(20, 25, 50.0), (25, 30, 70.0), (30, 50, 80.0), (50, 999, 100.0)]
+
+
+def hard_cap_for(score: float, instrument: str) -> float:
+    """Absolute dollar cap for a single Trade Floor trade. The position
+    sizer reduces any larger calculated notional down to this cap. There
+    are no exceptions and no overrides."""
+    table = OPTIONS_HARD_CAPS if instrument == "options" else FRACTIONAL_HARD_CAPS
+    for lo, hi, cap in table:
+        if lo <= score < hi:
+            return cap
+    return table[0][2]
+
 
 async def _risk_pct(score: float, instrument: str) -> float:
     """Lookup from learning-engine-managed table, default to baseline."""
@@ -173,12 +290,18 @@ async def _risk_pct(score: float, instrument: str) -> float:
     tier_doc = await db.tf_risk_tiers.find_one({"_id": "current"})
     table = tier_doc.get("tiers") if tier_doc else None
     if not table:
-        table = {k: {str(rng): v for rng, v in tiers.items()}
+        table = {k: {f"{rng[0]}-{rng[1]}": v for rng, v in tiers.items()}
                   for k, tiers in DEFAULT_RISK_TIERS.items()}
     band = table.get(instrument) or {}
     for k, pct in band.items():
         try:
-            lo, hi = eval(k) if isinstance(k, str) else k
+            if isinstance(k, str) and "-" in k:
+                lo_s, hi_s = k.split("-", 1)
+                lo, hi = int(lo_s), int(hi_s)
+            elif isinstance(k, (list, tuple)):
+                lo, hi = int(k[0]), int(k[1])
+            else:
+                continue
         except Exception:
             continue
         if lo <= score < hi:
@@ -186,37 +309,28 @@ async def _risk_pct(score: float, instrument: str) -> float:
     return 0.01
 
 
-# ─────── ATR helper ───────
-async def fetch_atr_14d(ticker: str) -> float | None:
-    """14-day ATR via yfinance for stop calculation."""
-    def _sync():
-        try:
-            import yfinance as yf
-            df = yf.Ticker(ticker).history(period="30d")
-            if df is None or len(df) < 15:
-                return None
-            tr = (df["High"] - df["Low"]).abs()
-            tr2 = (df["High"] - df["Close"].shift()).abs()
-            tr3 = (df["Low"] - df["Close"].shift()).abs()
-            true_range = tr.combine(tr2, max).combine(tr3, max)
-            atr = true_range.rolling(14).mean().iloc[-1]
-            return float(atr) if atr and atr > 0 else None
-        except Exception:
-            return None
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+# ─────── Stop engine ───────
+# Stops are produced by services.stop_engine.compute_stop(...). No ATR.
+# No yfinance for volatility. Alpaca is the sole price/volatility source.
 
 
 # ─────── Execution gates ───────
-async def _gate_check(scan_row: dict[str, Any]) -> tuple[bool, str | None]:
-    """Returns (passed, rejection_reason)."""
-    ticker = scan_row.get("ticker")
+async def _gate_check(scan_row: dict[str, Any], *,
+                       held_tickers: set[str] | None = None,
+                       pending_tickers: set[str] | None = None,
+                       position_count: int | None = None,
+                       regime: dict[str, Any] | None = None) -> tuple[bool, str | None]:
+    """Returns (passed, rejection_reason). Optional kwargs let callers
+    pass pre-fetched Alpaca state to avoid hitting the API per-row."""
+    ticker = (scan_row.get("ticker") or "").upper()
     trade_score = scan_row.get("trade_score") or scan_row.get("score") or 0
     if trade_score < TRADE_SCORE_MIN:
         return False, f"trade_score {trade_score:.1f} < {TRADE_SCORE_MIN}"
     signals = scan_row.get("signals") or {}
     if len(signals) < 2:
         return False, f"only {len(signals)} signal type(s) firing"
-    regime = await regime_status()
+    if regime is None:
+        regime = await regime_status()
     if regime.get("halt_new_entries"):
         return False, f"regime halt (vix={regime.get('vix')}, spy_ema_break={regime.get('spy_last',0) < regime.get('spy_ema200',0)})"
     # Earnings within 10d gate
@@ -224,22 +338,36 @@ async def _gate_check(scan_row: dict[str, Any]) -> tuple[bool, str | None]:
     days_to_er = earnings.get("days_until")
     if days_to_er is not None and 0 <= days_to_er <= 10:
         beat_prob = (earnings.get("beat_probability") or 0)
-        # Allow only if beat_prob > 0.65 AND options used (handled at instrument selection)
         if beat_prob < 0.65:
             return False, f"earnings in {days_to_er}d · beat_prob {beat_prob*100:.0f}% < 65%"
     # Max open positions
-    positions = await list_positions()
-    if len(positions) >= MAX_OPEN_POSITIONS:
+    if position_count is None:
+        position_count = len(await list_positions())
+    if position_count >= MAX_OPEN_POSITIONS:
         return False, f"max positions reached ({MAX_OPEN_POSITIONS})"
-    # Ticker not already open
-    if any(p.get("symbol", "").upper() == (ticker or "").upper() for p in positions):
-        return False, "position already open"
+    # Ticker already open OR has a pending order
+    if held_tickers is None or pending_tickers is None:
+        positions = await list_positions()
+        held_tickers = {p.get("symbol", "").upper() for p in positions}
+        open_orders = await list_orders(status="open")
+        pending_tickers = {o.get("symbol", "").upper() for o in open_orders}
+    if ticker in held_tickers:
+        return False, "ticker_already_open_in_alpaca"
+    if ticker in pending_tickers:
+        return False, "ticker_has_pending_open_order"
     return True, None
 
 
 # ─────── Main execution ───────
 async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Walk scan results, apply gates, execute trades that pass."""
+    """Walk scan results, apply gates, execute limit DAY orders for any
+    candidate that clears every gate.
+
+    CRITICAL: a fresh check against Alpaca's live open positions AND open
+    orders happens immediately before EVERY single submit attempt. A
+    ticker that already has a position or a queued/working order will
+    never receive a duplicate order."""
+    from . import stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -256,78 +384,134 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
                  "alpaca_ready": False}
     equity = float(account.get("equity") or 0)
 
+    # Pre-fetch live Alpaca state once for the per-row gate (then re-check
+    # right before each submit for absolute safety).
+    positions = await list_positions()
+    held_tickers = {p.get("symbol", "").upper() for p in positions}
+    open_orders = await list_orders(status="open")
+    pending_tickers = {o.get("symbol", "").upper() for o in open_orders}
+    regime = await regime_status()
+
     for row in scan_results:
-        ticker = row.get("ticker")
+        ticker = (row.get("ticker") or "").upper()
         if not ticker:
             continue
         _sig = row.get("signals") or {}
         _sig_list = list(_sig.keys()) if isinstance(_sig, dict) else list(_sig)
-        passed, reason = await _gate_check(row)
+        passed, reason = await _gate_check(
+            row, held_tickers=held_tickers, pending_tickers=pending_tickers,
+            position_count=len(positions), regime=regime,
+        )
         if not passed:
             rejected.append({"ticker": ticker, "score": row.get("score"),
                               "trade_score": row.get("trade_score"),
                               "reason": reason, "signals": _sig_list})
             continue
 
-        # Decide instrument: contract recommendation > fractional fallback
-        score = row.get("trade_score") or row.get("score") or 0
-        contract = row.get("recommended_contract") or {}
-        used_option = False
-        order = None
-        if contract.get("symbol") and contract.get("ask"):
-            risk_pct = await _risk_pct(score, "options")
-            premium_per_contract = float(contract["ask"]) * 100  # OCC = 100 shares
-            risk_budget = equity * risk_pct
-            if premium_per_contract <= risk_budget:
-                # Future enhancement: place options limit order on Alpaca options
-                # For now we deliberately skip and fall back to fractional shares
-                # because Alpaca options requires explicit options account approval
-                pass
+        score = float(row.get("trade_score") or row.get("score") or 0)
+        instrument = "fractional"
+        # NOTE: Alpaca options trading not yet enabled on this account; the
+        # recommended_contract field on the scan row is logged but not used.
 
-        if not used_option:
-            risk_pct = await _risk_pct(score, "fractional")
-            risk_budget = equity * risk_pct
-            # Determine stop distance
-            cur_price = row.get("current_price") or row.get("price") or 0
-            atr = await fetch_atr_14d(ticker)
-            stop_price = row.get("recommended_stop")
-            if stop_price is None and atr and cur_price:
-                stop_price = cur_price - 2 * atr
-            if not stop_price or stop_price <= 0 or stop_price >= cur_price:
-                rejected.append({"ticker": ticker, "score": score,
-                                  "reason": f"no_stop_calculable (cur={cur_price}, atr={atr})"})
-                continue
-            stop_dist = cur_price - stop_price
-            # position size $ = risk_budget (cap at risk_budget itself which IS the
-            # max loss when sized as risk / stop_distance * cur_price)
-            # Notional = risk_budget * (cur_price / stop_dist)
-            notional = min(risk_budget * (cur_price / stop_dist), equity * 0.15)
-            notional = round(max(notional, 5.0), 2)
-            cli_id = f"tf-{ticker}-{int(_now().timestamp())}"
-            order = await submit_fractional_buy(ticker, notional, client_order_id=cli_id)
-            if not order:
-                rejected.append({"ticker": ticker, "score": score,
-                                  "reason": "alpaca_rejected"})
-                continue
-            await db.tf_trades.insert_one(stamped({
-                "client_order_id": cli_id,
-                "order_id": order.get("id"),
-                "ticker": ticker,
-                "entry_score": score,
-                "trade_score": row.get("trade_score") or score,
-                "signal_combo": sorted(_sig_list),
-                "instrument": "fractional",
-                "notional": notional,
-                "entry_price_ref": cur_price,
-                "stop_price": stop_price,
-                "atr_14d": atr,
-                "regime": (await regime_status()).get("status"),
-                "status": "OPEN",
-                "submitted_at": _now().isoformat(),
-            }))
-            executed.append({"ticker": ticker, "notional": notional,
-                              "score": score, "stop_price": stop_price,
-                              "order_id": order.get("id")})
+        # Risk %  →  notional  →  HARD cap
+        risk_pct = await _risk_pct(score, instrument)
+        risk_budget_pct_notional = equity * risk_pct
+        hard_cap = hard_cap_for(score, instrument)
+        # Determine entry price = current Alpaca ask (sole source).
+        ask = await get_latest_ask(ticker)
+        if not ask:
+            # Fallback: scanner-known price for sizing only.
+            ask = float(row.get("price") or row.get("current_price") or 0)
+        if not ask or ask <= 0:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "no_ask_quote_from_alpaca"})
+            continue
+
+        # Compute analytical stop (NO ATR)
+        hold_days = (row.get("targets") or {}).get("hold_period_high") \
+                       or row.get("hold_period_high") \
+                       or row.get("recommended_hold_days") or 30
+        sector = row.get("sector")
+        stop_calc = await stop_engine.compute_stop(
+            ticker=ticker, entry_price=ask, signal_combo=_sig_list,
+            score=score, hold_window_days=int(hold_days or 30), sector=sector,
+            instrument=instrument,
+        )
+        stop_price = float(stop_calc["stop_price"])
+
+        # Sizing: min(percent-based, hard cap, $15% of equity safety floor)
+        notional = min(risk_budget_pct_notional, hard_cap, equity * 0.15)
+        # Apply hard cap absolutely — never exceed under any circumstance
+        notional = round(min(notional, hard_cap), 2)
+        if notional < 1.0:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": f"notional<${notional}_too_small"})
+            continue
+
+        # FINAL dedup check immediately before submission — fresh fetch
+        try:
+            live_positions_now = await list_positions()
+            live_orders_now = await list_orders(status="open")
+            live_held = {p.get("symbol", "").upper() for p in live_positions_now}
+            live_pending = {o.get("symbol", "").upper() for o in live_orders_now}
+        except Exception:
+            live_held, live_pending = held_tickers, pending_tickers
+        if ticker in live_held:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "ticker_already_open_in_alpaca (final check)"})
+            continue
+        if ticker in live_pending:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "ticker_has_pending_open_order (final check)"})
+            continue
+
+        cli_id = f"tf-{ticker}-{int(_now().timestamp())}"
+        limit_price = round(ask, 4)
+        order = await submit_fractional_limit_buy(
+            ticker, notional, limit_price=limit_price, client_order_id=cli_id,
+        )
+        if not order:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "alpaca_rejected"})
+            continue
+
+        # Update local sets so subsequent rows in the same scan don't double-submit.
+        pending_tickers.add(ticker)
+
+        # Log to TF Learning Engine via the standard tf_trades record + the
+        # learning helper (records limit_price/stop/breakdown for recal).
+        trade_doc = stamped({
+            "client_order_id": cli_id,
+            "order_id": order.get("id"),
+            "ticker": ticker,
+            "entry_score": score,
+            "trade_score": row.get("trade_score") or score,
+            "signal_combo": sorted(_sig_list),
+            "instrument": instrument,
+            "notional": notional,
+            "risk_pct_used": risk_pct,
+            "hard_cap_applied": hard_cap,
+            "limit_price": limit_price,
+            "entry_price_ref": limit_price,        # initial entry = ask
+            "stop_price": stop_price,
+            "stop_pct": stop_calc["stop_pct"],
+            "stop_breakdown": stop_calc["breakdown"],
+            "hold_window_days": int(hold_days or 30),
+            "sector": sector,
+            "regime": regime.get("status"),
+            "status": "OPEN",
+            "fill_status": "PENDING",
+            "submitted_at": _now().isoformat(),
+        })
+        await db.tf_trades.insert_one(trade_doc)
+        try:
+            await tfle.log_trade_initiation(trade_doc)
+        except Exception as e:
+            logger.warning("tfle.log_trade_initiation: %s", e)
+        executed.append({"ticker": ticker, "notional": notional,
+                          "score": score, "limit_price": limit_price,
+                          "stop_price": stop_price, "stop_pct": stop_calc["stop_pct"],
+                          "order_id": order.get("id")})
 
     compression = (len(executed) / max(1, len(scan_results)))
     finished = _now()
@@ -352,36 +536,72 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
 
 # ─────── Position monitoring & journaling ───────
 async def sync_positions_and_close_settled():
-    """Pull live positions + closed orders from Alpaca. Update tf_trades
-    with marks; move filled-then-closed trades into tf_journal."""
+    """Pull live positions + open orders from Alpaca. Update tf_trades with
+    marks, fill timing, running lowest_price_reached; mark filled-then-closed
+    trades into tf_journal and log them to the Trade Floor Learning Engine."""
     if not _alpaca_ready():
         return {"updated": 0, "closed": 0}
     db = get_db()
     positions = await list_positions()
     pos_by_t = {p.get("symbol", "").upper(): p for p in positions}
 
-    open_trades = await db.tf_trades.find({"status": "OPEN"}, {"_id": 0}).to_list(200)
+    # Detect fills by pulling recent filled orders.
+    filled_orders = await list_orders(status="all", limit=200)
+    fills_by_cli = {o.get("client_order_id"): o for o in filled_orders
+                      if o.get("client_order_id", "").startswith("tf-") and o.get("filled_at")}
+
+    open_trades = await db.tf_trades.find(
+        {"status": {"$in": ["OPEN", "UNFILLED_CANCELLED"]}},
+        {"_id": 0},
+    ).to_list(200)
     closed = 0
     newly_closed: list[dict[str, Any]] = []
     for t in open_trades:
+        if t.get("status") != "OPEN":
+            continue
         ticker = t.get("ticker", "").upper()
         p = pos_by_t.get(ticker)
-        if p:
+        # ── Mark fill timing once ──
+        if t.get("fill_status") in (None, "PENDING") and t.get("client_order_id") in fills_by_cli:
+            o = fills_by_cli[t["client_order_id"]]
+            try:
+                sub = datetime.fromisoformat((t.get("submitted_at") or "").replace("Z", "+00:00"))
+                fill_at = datetime.fromisoformat(o["filled_at"].replace("Z", "+00:00"))
+                secs = (fill_at - sub).total_seconds()
+            except Exception:
+                secs = None
             await db.tf_trades.update_one(
                 {"client_order_id": t["client_order_id"]},
                 {"$set": {
-                    "current_mark": float(p.get("current_price") or 0),
+                    "fill_status": "FILLED",
+                    "filled_at": o.get("filled_at"),
+                    "fill_seconds": secs,
+                    "filled_avg_price": float(o.get("filled_avg_price") or t.get("limit_price") or 0),
+                }},
+            )
+        if p:
+            cur = float(p.get("current_price") or 0)
+            new_low = cur
+            existing_low = t.get("lowest_price_reached")
+            if existing_low is not None and cur > 0:
+                new_low = min(float(existing_low), cur)
+            await db.tf_trades.update_one(
+                {"client_order_id": t["client_order_id"]},
+                {"$set": {
+                    "current_mark": cur,
                     "qty": float(p.get("qty") or 0),
                     "market_value": float(p.get("market_value") or 0),
                     "unrealized_pl": float(p.get("unrealized_pl") or 0),
                     "unrealized_plpc": float(p.get("unrealized_plpc") or 0),
+                    "lowest_price_reached": new_low if cur > 0 else existing_low,
                     "last_synced_at": _now().isoformat(),
                 }},
             )
         else:
-            # No longer in positions → closed by Alpaca (sold/expired)
+            # No longer in positions → either never filled (handled by stale-order
+            # sweep) OR sold by Alpaca / manual close.
             cur_price = await _last_close_via_pricer(ticker)
-            entry = t.get("entry_price_ref") or 0
+            entry = t.get("entry_price_ref") or t.get("limit_price") or 0
             realized_pct = ((cur_price - entry) / entry * 100) if (entry and cur_price) else None
             await db.tf_trades.update_one(
                 {"client_order_id": t["client_order_id"]},
@@ -395,9 +615,14 @@ async def sync_positions_and_close_settled():
             closed += 1
             newly_closed.append({**t, "exit_price": cur_price,
                                   "realized_pct": realized_pct})
-    # v5.1 — fire-and-forget journal AI write-back for newly-closed trades
+    # v5.1 — fire-and-forget journal AI + Trade Floor learning write-back
     if newly_closed:
         asyncio.create_task(_write_journal_entries(newly_closed))
+        try:
+            from . import trade_floor_learning as tfle
+            asyncio.create_task(tfle.log_trade_outcomes(newly_closed))
+        except Exception as e:
+            logger.warning("tfle.log_trade_outcomes dispatch: %s", e)
     return {"updated": len(open_trades) - closed, "closed": closed}
 
 

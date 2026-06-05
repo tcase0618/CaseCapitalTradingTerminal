@@ -108,6 +108,8 @@ def scheduled_jobs() -> list[dict]:
           "cron": "Every 30 min (Mon-Fri, 09:00-16:30 ET)"},
         {"id": "position_monitor", "name": "Position Monitor",
           "cron": "Every 15 min (Mon-Fri, 09:00-16:30 ET)"},
+        {"id": "stale_order_sweep", "name": "Stale Order Sweep · 24h Day-Order Cancel",
+          "cron": "Hourly :05 ET"},
         {"id": "pharma_scrape", "name": "Pharma PDUFA Calendar Scrape",
           "cron": "Weekly (auto on first scan of week)"},
         {"id": "learning_recal", "name": "Signal Learning Engine Recalibration",
