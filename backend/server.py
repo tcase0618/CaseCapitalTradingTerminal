@@ -1065,6 +1065,21 @@ async def lottery_manual_tracker():
     return await lottery.lottery_manual_track_record()
 
 
+@api.post("/lottery/track/settle")
+async def lottery_track_settle(ticker: str, exit_ask: float, play_date: str):
+    """Manually lock the realized P&L on an auto-tracked lottery pick using
+    the user's actual exit ask price."""
+    from services import lottery
+    return await lottery.manual_settle_track_pick(ticker, exit_ask, play_date)
+
+
+@api.post("/lottery/track/delete")
+async def lottery_track_delete(ticker: str, play_date: str):
+    """Delete an auto-tracked lottery pick from the track record."""
+    from services import lottery
+    return await lottery.delete_track_pick(ticker, play_date)
+
+
 # ─────── v5.1 — Settings: integrations + jobs + commands ───────
 @api.get("/admin/integration_status")
 async def admin_integration_status():

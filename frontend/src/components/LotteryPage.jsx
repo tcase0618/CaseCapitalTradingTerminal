@@ -30,6 +30,9 @@ export default function LotteryPage() {
   const [mForm, setMForm] = useState({ ticker: "", entry_price: "", lottery_score: "", risk_amount: "50" });
   const [mAdding, setMAdding] = useState(false);
   const [settleRow, setSettleRow] = useState(null);  // {ticker, date, exit_price}
+  const [trackSettleRow, setTrackSettleRow] = useState(null);  // {ticker, date, exit_ask}
+  const [toast, setToast] = useState(null);  // {kind:"ok"|"err"|"info", msg}
+  const showToast = (kind, msg) => { setToast({ kind, msg }); setTimeout(() => setToast(null), 4500); };
 
   const reloadAll = () => {
     axios.get(`${API}/v32/lottery/current`).then(r => setCurrent(r.data)).catch(() => {});
@@ -44,13 +47,15 @@ export default function LotteryPage() {
     setScanning(true);
     try {
       const r = await axios.post(`${API}/lottery/scan`);
-      alert(`Lottery scan complete: ${r.data.count} candidates`);
+      showToast("ok", `Lottery scan complete · ${r.data.count} candidates`);
       reloadAll();
+    } catch (e) {
+      showToast("err", `Lottery scan failed: ${e?.message || "unknown"}`);
     } finally { setScanning(false); }
   };
 
   const addManual = async () => {
-    if (!mForm.ticker || !mForm.entry_price) { alert("Ticker + Entry Price required"); return; }
+    if (!mForm.ticker || !mForm.entry_price) { showToast("err", "Ticker + Entry Price required"); return; }
     setMAdding(true);
     try {
       await axios.post(`${API}/lottery/manual`, {
@@ -60,23 +65,48 @@ export default function LotteryPage() {
         risk_amount: mForm.risk_amount ? Number(mForm.risk_amount) : 50,
       });
       setMForm({ ticker: "", entry_price: "", lottery_score: "", risk_amount: "50" });
+      showToast("ok", `${mForm.ticker.toUpperCase()} added`);
       reloadAll();
     } catch (e) {
-      alert(`Add failed: ${e?.response?.data?.detail || e.message}`);
+      showToast("err", `Add failed: ${e?.response?.data?.detail || e.message}`);
     } finally { setMAdding(false); }
   };
 
   const submitSettle = async () => {
-    if (!settleRow?.exit_price) { alert("Exit price required"); return; }
+    if (!settleRow?.exit_price) { showToast("err", "Exit price required"); return; }
     try {
       const r = await axios.post(
         `${API}/lottery/settle?ticker=${settleRow.ticker}&exit_price=${settleRow.exit_price}&play_date=${settleRow.date}`
       );
-      alert(`Realized P/L: ${r.data.realized_pct?.toFixed(2)}%`);
+      showToast("ok", `${settleRow.ticker} settled · ${r.data.realized_pct?.toFixed(2)}%`);
       setSettleRow(null);
       reloadAll();
     } catch (e) {
-      alert(`Settle failed: ${e?.response?.data?.detail || e.message}`);
+      showToast("err", `Settle failed: ${e?.response?.data?.detail || e.message}`);
+    }
+  };
+
+  const submitTrackSettle = async () => {
+    if (!trackSettleRow?.exit_ask) { showToast("err", "Exit ask required"); return; }
+    try {
+      const r = await axios.post(
+        `${API}/lottery/track/settle?ticker=${trackSettleRow.ticker}&exit_ask=${trackSettleRow.exit_ask}&play_date=${trackSettleRow.date}`
+      );
+      showToast("ok", `${trackSettleRow.ticker} locked · ${r.data.realized_pct != null ? r.data.realized_pct + "%" : "—"}`);
+      setTrackSettleRow(null);
+      reloadAll();
+    } catch (e) {
+      showToast("err", `Track settle failed: ${e?.response?.data?.detail || e.message}`);
+    }
+  };
+
+  const deleteTrackPick = async (ticker, date) => {
+    try {
+      const r = await axios.post(`${API}/lottery/track/delete?ticker=${ticker}&play_date=${date}`);
+      if (r.data.ok) { showToast("ok", `${ticker} removed from track record`); reloadAll(); }
+      else showToast("err", `${ticker} not found`);
+    } catch (e) {
+      showToast("err", `Delete failed: ${e?.response?.data?.detail || e.message}`);
     }
   };
 
@@ -230,11 +260,13 @@ export default function LotteryPage() {
                         )}
                         <button data-testid={`send-tf-${p.ticker}`}
                           onClick={async () => {
-                            if (!confirm(`Send $${p.risk_amount} of ${p.ticker} to Trade Floor?`)) return;
-                            const r = await axios.post(
-                              `${API}/trade_floor/manual_send?ticker=${p.ticker}&risk_dollars=${p.risk_amount}&source=lottery_manual`
-                            );
-                            alert(r.data.ok ? `Sent · notional $${r.data.notional}` : `Failed: ${r.data.reason}`);
+                            try {
+                              const r = await axios.post(
+                                `${API}/trade_floor/manual_send?ticker=${p.ticker}&risk_dollars=${p.risk_amount}&source=lottery_manual`
+                              );
+                              showToast(r.data.ok ? "ok" : "err",
+                                r.data.ok ? `Sent · notional $${r.data.notional}` : `Failed: ${r.data.reason}`);
+                            } catch { showToast("err", "Trade Floor send failed"); }
                           }}
                           style={{ background: "transparent", border: `0.5px solid ${accent}`, color: accent,
                                     fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700 }}>
@@ -343,13 +375,13 @@ export default function LotteryPage() {
                     <td style={{ padding: "8px" }}>
                       <button data-testid={`lottery-send-tf-${p.ticker}`}
                         onClick={async () => {
-                          if (!confirm(`Send $${p.max_bet} of ${p.ticker} to Trade Floor (fractional, ATR stop)?`)) return;
                           try {
                             const r = await axios.post(
                               `${API}/trade_floor/manual_send?ticker=${p.ticker}&risk_dollars=${p.max_bet}&source=lottery`
                             );
-                            alert(r.data.ok ? `Sent → $${r.data.notional} notional · stop $${r.data.stop?.toFixed(2)}` : `Failed: ${r.data.reason}`);
-                          } catch { alert("Trade Floor send failed"); }
+                            showToast(r.data.ok ? "ok" : "err",
+                              r.data.ok ? `Sent → $${r.data.notional} notional · stop $${r.data.stop?.toFixed(2)}` : `Failed: ${r.data.reason}`);
+                          } catch { showToast("err", "Trade Floor send failed"); }
                         }}
                         style={{
                           background: "transparent", border: `0.5px solid ${accent}`,
@@ -378,6 +410,7 @@ export default function LotteryPage() {
                   <th style={th}>DATE</th><th style={th}>TIER</th><th style={th}>TICKER</th>
                   <th style={th}>STRIKE</th><th style={th}>ENTRY</th>
                   <th style={th}>CURRENT</th><th style={th}>SETTLED</th><th style={th}>P&L</th>
+                  <th style={th}>ACTIONS</th>
                 </tr>
               </thead>
               <tbody>
@@ -386,8 +419,10 @@ export default function LotteryPage() {
                   const ret = cur != null && p.entry_ask
                     ? ((cur - p.entry_ask) / p.entry_ask * 100) : null;
                   const isOpen = p.settled_ask == null;
+                  const isSettling = trackSettleRow?.ticker === p.ticker && trackSettleRow?.date === p.date;
                   return (
-                    <tr key={i} className="row-hover" style={{ borderTop: hairline }}>
+                    <tr key={`${p.ticker}-${p.date}-${i}`} className="row-hover" style={{ borderTop: hairline }}
+                      data-testid={`track-${p.ticker}-${p.date}`}>
                       <td style={td}>{p.date}</td>
                       <td style={{ ...td, color: TIER_COLOR[p.tier], fontWeight: 700 }}>{p.tier}</td>
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
@@ -396,9 +431,43 @@ export default function LotteryPage() {
                       <td style={{ ...td, color: isOpen ? accent2 : muted }}>
                         {p.current_ask != null ? `$${p.current_ask}` : "—"}
                       </td>
-                      <td style={td}>{p.settled_ask != null ? `$${p.settled_ask}` : "OPEN"}</td>
+                      <td style={td}>
+                        {p.settled_ask != null ? `$${p.settled_ask}` : "OPEN"}
+                        {p.manual_settle && <span style={{ marginLeft: 6, color: accent2, fontSize: 9 }}>MANUAL</span>}
+                      </td>
                       <td style={{ ...td, color: ret == null ? muted : ret > 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
                         {ret != null ? `${ret >= 0 ? "+" : ""}${ret.toFixed(0)}%` : "—"}
+                      </td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>
+                        {isSettling ? (
+                          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                            <input data-testid={`track-settle-input-${p.ticker}`}
+                              placeholder="EXIT ASK $" value={trackSettleRow.exit_ask}
+                              onChange={e => setTrackSettleRow(s => ({ ...s, exit_ask: e.target.value }))}
+                              style={inputCss(85)} />
+                            <button data-testid={`track-settle-confirm-${p.ticker}`}
+                              onClick={submitTrackSettle} style={btnCss("#4ade80")}>OK</button>
+                            <button data-testid={`track-settle-cancel-${p.ticker}`}
+                              onClick={() => setTrackSettleRow(null)} style={btnCss(muted)}>X</button>
+                          </span>
+                        ) : (
+                          <>
+                            <button data-testid={`track-settle-${p.ticker}`}
+                              onClick={() => setTrackSettleRow({ ticker: p.ticker, date: p.date, exit_ask: p.current_ask ?? "" })}
+                              style={{ background: "transparent", border: `0.5px solid #4ade80`, color: "#4ade80",
+                                        fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700,
+                                        marginRight: 6, letterSpacing: "0.08em" }}>
+                              SETTLE
+                            </button>
+                            <button data-testid={`track-delete-${p.ticker}`}
+                              onClick={() => deleteTrackPick(p.ticker, p.date)}
+                              style={{ background: "transparent", border: `0.5px solid #f87171`, color: "#f87171",
+                                        fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700,
+                                        letterSpacing: "0.08em" }}>
+                              DELETE
+                            </button>
+                          </>
+                        )}
                       </td>
                     </tr>
                   );
@@ -408,7 +477,25 @@ export default function LotteryPage() {
           )}
         </Card>
       )}
+      <Toast toast={toast} />
     </CrtShell>
+  );
+}
+
+function Toast({ toast }) {
+  if (!toast) return null;
+  const c = toast.kind === "ok" ? "#4ade80" : toast.kind === "err" ? "#f87171" : "#5eead4";
+  return (
+    <div data-testid="lottery-toast" style={{
+      position: "fixed", bottom: 22, right: 22, zIndex: 1000,
+      background: "#03030680", border: `0.5px solid ${c}`, color: c,
+      padding: "10px 18px", fontSize: 11, letterSpacing: "0.12em",
+      fontFamily: "JetBrains Mono", fontWeight: 700,
+      boxShadow: `0 0 16px ${c}33`, maxWidth: 420,
+    }}>
+      <span style={{ marginRight: 8, color: c }}>{toast.kind === "ok" ? "▸" : toast.kind === "err" ? "✕" : "·"}</span>
+      {toast.msg}
+    </div>
   );
 }
 

@@ -369,6 +369,45 @@ async def recent_picks(days: int = 14, tier: str | None = None) -> list[dict[str
     return await db.lottery_history.find(q, {"_id": 0}).sort("date", -1).to_list(200)
 
 
+async def manual_settle_track_pick(ticker: str, exit_ask: float, play_date: str) -> dict[str, Any]:
+    """Manually lock realized P&L on an auto-tracked lottery pick. Overrides
+    any auto-fetched settled_ask with the user's actual exit ask price."""
+    db = get_db()
+    row = await db.lottery_history.find_one({"ticker": ticker.upper(), "date": play_date}, {"_id": 0})
+    if not row:
+        return {"ok": False, "reason": "pick not found"}
+    realized_pct = None
+    entry = row.get("entry_ask") or 0
+    if entry > 0:
+        realized_pct = round((exit_ask - entry) / entry * 100, 2)
+    await db.lottery_history.update_one(
+        {"ticker": ticker.upper(), "date": play_date},
+        {"$set": {
+            "settled_ask": round(exit_ask, 4),
+            "manual_settle": True,
+            "manual_settled_at": _now().isoformat(),
+            "realized_pct": realized_pct,
+        }},
+    )
+    await log_activity(
+        f"Lottery track: manual settle {ticker} @ ${exit_ask} → {realized_pct}%",
+        "info",
+    )
+    return {"ok": True, "ticker": ticker.upper(), "exit_ask": exit_ask, "realized_pct": realized_pct}
+
+
+async def delete_track_pick(ticker: str, play_date: str) -> dict[str, Any]:
+    """Remove an auto-tracked lottery pick from the track record entirely
+    (e.g. if it was entered in error)."""
+    db = get_db()
+    res = await db.lottery_history.delete_one({"ticker": ticker.upper(), "date": play_date})
+    if res.deleted_count:
+        await log_activity(f"Lottery track: deleted {ticker} {play_date}", "info")
+    return {"ok": bool(res.deleted_count), "deleted": res.deleted_count}
+
+
+
+
 # ─────── v5.1 — Dedicated Lottery Scan (Finviz screener) ───────
 async def run_dedicated_lottery_scan() -> dict[str, Any]:
     """Runs a Finviz screener filtered to LOTTERY-grade microcaps:
@@ -445,13 +484,17 @@ async def run_dedicated_lottery_scan() -> dict[str, Any]:
         sigs = sr.get("signals") or {}
         if isinstance(sigs, dict):
             if "insider_cluster_buy" in sigs:
-                score += 10; bonuses.append("INSIDER_CLUSTER")
+                score += 10
+                bonuses.append("INSIDER_CLUSTER")
             if "CONGRESSIONAL_BUY" in sigs:
-                score += 8; bonuses.append("CONGRESS_BUY")
+                score += 8
+                bonuses.append("CONGRESS_BUY")
             if "UNUSUAL_FLOW" in sigs:
-                score += 8; bonuses.append("UNUSUAL_FLOW")
+                score += 8
+                bonuses.append("UNUSUAL_FLOW")
             if "upcoming_earnings" in sigs:
-                score += 6; bonuses.append("CATALYST")
+                score += 6
+                bonuses.append("CATALYST")
         # PDUFA cross-ref
         if await db.pharma_pdufa.count_documents({"ticker": t}):
             score += 10

@@ -260,10 +260,10 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
         ticker = row.get("ticker")
         if not ticker:
             continue
+        _sig = row.get("signals") or {}
+        _sig_list = list(_sig.keys()) if isinstance(_sig, dict) else list(_sig)
         passed, reason = await _gate_check(row)
         if not passed:
-            _sig = row.get("signals") or {}
-            _sig_list = list(_sig.keys()) if isinstance(_sig, dict) else list(_sig)
             rejected.append({"ticker": ticker, "score": row.get("score"),
                               "trade_score": row.get("trade_score"),
                               "reason": reason, "signals": _sig_list})
@@ -288,14 +288,14 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             risk_pct = await _risk_pct(score, "fractional")
             risk_budget = equity * risk_pct
             # Determine stop distance
-            cur_price = row.get("current_price") or 0
+            cur_price = row.get("current_price") or row.get("price") or 0
             atr = await fetch_atr_14d(ticker)
             stop_price = row.get("recommended_stop")
             if stop_price is None and atr and cur_price:
                 stop_price = cur_price - 2 * atr
             if not stop_price or stop_price <= 0 or stop_price >= cur_price:
                 rejected.append({"ticker": ticker, "score": score,
-                                  "reason": "no_stop_calculable"})
+                                  "reason": f"no_stop_calculable (cur={cur_price}, atr={atr})"})
                 continue
             stop_dist = cur_price - stop_price
             # position size $ = risk_budget (cap at risk_budget itself which IS the
@@ -315,7 +315,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
                 "ticker": ticker,
                 "entry_score": score,
                 "trade_score": row.get("trade_score") or score,
-                "signal_combo": sorted(list((row.get("signals") or {}).keys())),
+                "signal_combo": sorted(_sig_list),
                 "instrument": "fractional",
                 "notional": notional,
                 "entry_price_ref": cur_price,

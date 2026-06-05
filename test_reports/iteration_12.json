@@ -1,0 +1,33 @@
+{
+  "summary": "AXIOM v5.1 hotfix verification — ALL 8 spec items PASS on https://stock-scout-bot.preview.emergentagent.com. (Issue 1) Trade Floor: GET /api/trade_floor/positions last_scan_log returned scanned=16 executed=2 rejected=14 with coherent rejection_details (ATR=None for most, trade_score<20 for some). No more AttributeError. (Issue 2) Dashboard signal cards — all 16/16 cards display BOTH 'AXIOM <score>' and 'TRADE <score>' side by side; TRADE color is red (rgb(248,113,113)) when ts<ls (verified on SMMT 36.9>36.8, DELL 33.8>33.7, etc). AXIOM uses learning_score (36.9, 33.8, ...) and TRADE uses trade_score from scan_doc — fix confirmed (trade_score attached BEFORE DB insert). (Issue 3) TRACK RECORD tab has SETTLE (green) + DELETE (red) buttons on all 7 auto-bought rows with correct data-testids (track-settle-<T>, track-delete-<T>). Live settle on LDOS @ 1.20 → inline editor (track-settle-input-LDOS + OK + X) appeared in-row → toast '▸LDOS locked · 60%' appeared bottom-right → auto-dismissed after ~4-5s → row's SETTLED col now shows '$1.2 MANUAL' badge + P/L +60%. Live delete on first SAIC row → toast '▸SAIC removed from track record' → row count went 7→6. (P2) ZERO native browser alert/confirm dialogs fired during entire /lottery session (LOTTERY SCAN click, manual add, settle, delete all use inline toast). (Regression) MANUAL add+settle TESTREG/4.00/65/50 → settle@5.00 → MANUAL TRACK RECORD counter went 2→3 SETTLED, TESTREG row visible with +25.00% P/L. /settings shows INTEGRATION STATUS·12, SCHEDULED JOBS·7, TELEGRAM COMMANDS·11. /performance shows ACTIVE POSITIONS·0, CLOSED POSITIONS·0, OPTIONS PERFORMANCE·0 TRADES, AXIOM STOCK PERFORMANCE chart. Sidebar nav intact (Dashboard, Intel Feed, Contracts, SEC Filings, Earnings, Lottery, Pharma, Trade Floor, Performance, Learning, Trade Engine). Zero pageerrors across all routes tested.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/trade_floor/positions", "issue": "14/16 rejections cite 'no_stop_calculable (cur=X, atr=None)' — ATR computation is failing for most tickers. Issue 1 patch added ATR debug info in rejection reason so this is properly surfaced, but the underlying ATR source returning None should be investigated. Not blocking — 2 trades still executed (LDOS+CPB) as expected."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "LotteryPage TRACK RECORD", "issue": "Multiple track rows with the same ticker (e.g. 6 SAIC rows) all share the same data-testid (track-settle-SAIC, track-delete-SAIC), causing duplicate testids in DOM. Buttons still work via .first locator. Recommend keying testids by row index or pick_id (e.g. track-settle-SAIC-0, track-settle-SAIC-1) for unambiguous test automation.", "selector": "[data-testid^='track-settle-'], [data-testid^='track-delete-']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(LOW) Disambiguate data-testid for duplicate-ticker rows in TRACK RECORD (use ticker+index or pick_id).",
+    "(LOW/Investigation) Most Trade Floor scan rejections cite atr=None — verify ATR data source (Finnhub/Alpaca historical bars) is returning data for the affected tickers. Not blocking hotfix."
+  ],
+  "critical_code_review_comments": [
+    "LotteryPage TRACK RECORD button keys use only ticker — collides on multi-row same-ticker scenarios. Pass pick_id or row index into data-testid.",
+    "Color rule for TRADE score: when learning_score and trade_score differ by <0.05 they round to the same displayed value but trigger red/green coloring (e.g. LDOS displays AXIOM 26.9 = TRADE 26.9 but colored red because raw 26.85 < 26.85+epsilon). Consider rounding both to 1 decimal BEFORE color comparison, or using a small epsilon."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (2/2 spec endpoints)", "frontend": "100% (7/7 spec items)"},
+  "test_credentials": "N/A — no auth required",
+  "seed_data_creation": "Created and partially cleaned: (1) LDOS auto-pick was settled @ exit 1.20 (now MANUAL-tagged @ +60% in TRACK RECORD). (2) One SAIC track row was deleted (count 7→6). (3) TESTREG manual play added, settled @ 5.00, now sits in MANUAL TRACK RECORD as 3rd settled entry — cannot be deleted from MANUAL TRACK RECORD (no delete UI there; harmless). All actions match the spec's destructive intent and live on the production preview as expected.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Hotfix v5.1 verified. data-testids in use: lottery-toast (bottom-right toast), track-settle-<TICKER>, track-settle-input-<TICKER>, track-settle-confirm-<TICKER>, track-settle-cancel-<TICKER>, track-delete-<TICKER>. Toast auto-dismisses after ~4-5s. NOTE: Duplicate-ticker rows share testids → use .first or pick_id-based selector. The LDOS row in TRACK RECORD is now in SETTLED state (this run's seed). 5 SAIC rows remain (was 6). MANUAL TRACK RECORD has 3 settled entries (TESTUI, prior tests, TESTREG). Sample Dashboard score-pair colors validated: ls=36.9, ts=36.8 → red; equal-raw → amber/accent. Trade Floor backend executed 2 trades on latest scan as expected.",
+  "rca of the issue": "All three iteration_11→iteration_12 hotfix root causes confirmed mitigated. (1) Trade Floor row.get('signals').keys() AttributeError + cur_price=None silent reject: backend /api/trade_floor/positions now returns last_scan_log with executed=2 and structured rejection_details (no traceback, ATR debug surfaced). (2) trade_score absent from cards: scanner moved trade_score attach BEFORE DB insert (services/scanner.py L350-389) — confirmed via /api/scan/latest returning trade_score as numeric on all 16 results, and Dashboard rendering 16/16 cards with TRADE label. (3) TRACK RECORD missing per-row actions: new POST /api/lottery/track/settle and /api/lottery/track/delete endpoints + ACTIONS column with green SETTLE + red DELETE — live settle on LDOS and delete on SAIC both worked end-to-end with proper inline editor, CRT toast, auto-dismiss, and row mutation. (P2) window.alert/confirm replaced with toast — verified zero native dialogs across LOTTERY SCAN, manual add, settle, and delete actions."
+}
