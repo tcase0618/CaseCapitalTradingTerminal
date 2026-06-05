@@ -404,14 +404,13 @@ export default function Dashboard() {
                     {tt.target_date && <span>HOLD <span style={{ color: labelLight }}>{tt.hold_period_low}–{tt.hold_period_high}d</span></span>}
                     {sq.score != null && <span>SQUEEZE <span style={{ color: labelLight }}>{sq.score}/100</span></span>}
                     {r.learning_score != null && <span>AXIOM <span style={{ color: accent, fontWeight: 700 }}>{r.learning_score}</span></span>}
-                    {r.trade_score != null && r.trade_score !== r.learning_score && (() => {
-                      const ts = r.trade_score, ls = r.learning_score;
-                      const c = ls == null ? accent : ts > ls ? "#4ade80" : ts < ls ? "#f87171" : accent;
+                    {r.trade_score != null && (() => {
+                      const ts = Number(r.trade_score), ls = r.learning_score != null ? Number(r.learning_score) : null;
+                      // Compare at 1-decimal precision to match displayed values
+                      const tsR = Math.round(ts * 10), lsR = ls != null ? Math.round(ls * 10) : null;
+                      const c = lsR == null ? accent : tsR > lsR ? "#4ade80" : tsR < lsR ? "#f87171" : accent;
                       return <span style={{ marginLeft: 10 }}>TRADE <span style={{ color: c, fontWeight: 700 }}>{ts.toFixed(1)}</span></span>;
                     })()}
-                    {r.trade_score != null && r.trade_score === r.learning_score && (
-                      <span style={{ marginLeft: 10, color: dim }}>TRADE <span style={{ color: accent, fontWeight: 700 }}>{r.trade_score.toFixed(1)}</span></span>
-                    )}
                   </div>
                   {/* Options panel */}
                   {r.options && (r.options.contract || r.options.spread || r.options.strategy === "AVOID_OPTIONS") && (

@@ -260,3 +260,30 @@ Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK 
 - Consider extracting LotteryPage.jsx tabs into per-tab components if more features land
 - Add CI eslint react/jsx-key rule to catch future missing-key regressions
 - Inline toast/banner UX inside Cards instead of window.alert() in Lottery manual flow
+
+## Feb 2026 — v5.1 HOTFIX: TF auto-execute / Dashboard Trade Score / Lottery Track actions — SHIPPED
+- **Issue 1 — Trade Floor was NOT auto-executing on main scans.** Root cause #1: `evaluate_and_execute` crashed on `row.get('signals').keys()` because scanner emits `signals` as a list (already fixed in prior cycle via isinstance guard, but signal_combo line still used .keys()). Root cause #2: `cur_price = row.get('current_price') or 0` returned 0 because scanner stores under field `price`, not `current_price` — so all stop calculations silently failed with `stop_price >= cur_price` (0). FIX in services/trade_floor.py: (a) compute `_sig_list` at top of loop iteration so it's available for both execution rows and rejection rows; (b) fallback chain `cur_price = row.get('current_price') or row.get('price') or 0`; (c) include `(cur=X, atr=Y)` in rejection reason for observability. RESULT: tf_scan_log went 0→2 entries; latest scan placed 2 real Alpaca trades (LDOS notional $147.90, CPB notional $150.00).
+- **Issue 2 — AXIOM Trade Score missing from every Dashboard signal card.** Root cause: `scanner.py` saved `scan_doc` to DB at line 350, then attached `trade_score` to each row at lines 370-377 (AFTER insert). Since MongoDB copies data at insert time, the DB never saw trade_score. FIX: moved the trade_score attach block BEFORE `db.scan_results.insert_one(dict(scan_doc))`. RESULT: `/api/scan/latest` now returns trade_score as numeric on all 16 results (e.g. SMMT=36.82, DELL=33.68); Dashboard renders TRADE side-by-side with AXIOM on every card with green/red/amber per-card color based on comparison.
+- **Issue 3 — Lottery TRACK RECORD tab missing Settle + Delete buttons.** Added `services/lottery.manual_settle_track_pick(ticker, exit_ask, play_date)` (overrides auto-settled price + marks `manual_settle=true`) and `delete_track_pick(ticker, play_date)`. Wired to API: `POST /api/lottery/track/settle?ticker&exit_ask&play_date` and `POST /api/lottery/track/delete?ticker&play_date`. LotteryPage TRACK RECORD tab now has an ACTIONS column with inline SETTLE (green border, expands to in-row input+OK+X editor) and DELETE (red border) on every row. data-testids index-scoped to disambiguate multi-row same-ticker.
+- **P2 — Replaced all window.alert/confirm in LotteryPage with inline CRT-styled Toast** (bottom-right, color-coded ok/err/info, auto-dismiss 4.5s). Zero native browser dialogs across entire /lottery experience.
+- **Polish:** color compare for TRADE vs AXIOM now uses 1-decimal-rounded values so displayed-equal scores (e.g. both render as 26.9) don't trigger red-tinting from a sub-decimal raw delta.
+- **Testing**: backend smoke + frontend Playwright regression — iteration_12 PASS 8/8 with live destructive ops (LDOS settled @+60%, SAIC delete, TESTREG manual add+settle); zero native dialogs; zero pageerrors.
+
+### v5.1 — All shipped items
+- ✅ Settings Integration Status / Scheduled Jobs / Telegram Commands panels
+- ✅ Lottery dedicated Finviz screener + scan button
+- ✅ Lottery manual entry / inline Settle / per-play journal
+- ✅ Lottery TRACK RECORD per-row Settle + Delete (NEW hotfix)
+- ✅ Trade Floor Journal AI write-back via Claude
+- ✅ Performance Peak Gain strictly within recommended hold window
+- ✅ Trade Floor auto-execute fired by main scan (HOTFIX)
+- ✅ Dashboard AXIOM + TRADE score side-by-side on every card (HOTFIX)
+- ✅ CRT toast UX replacing window.alert/confirm (P2)
+- ✅ Telegram digest 4×/day + 11 commands
+
+### P2 Backlog (carried forward)
+- ATR data source returning None for many tickers — most TF rejections are `no_stop_calculable (atr=None)`. Investigate yfinance/Alpaca historical-bars fallback so more candidates can clear the stop gate.
+- Migrate Congressional scraping off fragile Quiver HTML to a paid API
+- Extract LotteryPage tabs into per-tab components if file keeps growing
+- Add CI eslint react/jsx-key rule
+

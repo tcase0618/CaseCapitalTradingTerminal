@@ -422,7 +422,7 @@ export default function LotteryPage() {
                   const isSettling = trackSettleRow?.ticker === p.ticker && trackSettleRow?.date === p.date;
                   return (
                     <tr key={`${p.ticker}-${p.date}-${i}`} className="row-hover" style={{ borderTop: hairline }}
-                      data-testid={`track-${p.ticker}-${p.date}`}>
+                      data-testid={`track-row-${p.ticker}-${i}`}>
                       <td style={td}>{p.date}</td>
                       <td style={{ ...td, color: TIER_COLOR[p.tier], fontWeight: 700 }}>{p.tier}</td>
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
@@ -441,25 +441,25 @@ export default function LotteryPage() {
                       <td style={{ ...td, whiteSpace: "nowrap" }}>
                         {isSettling ? (
                           <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                            <input data-testid={`track-settle-input-${p.ticker}`}
+                            <input data-testid={`track-settle-input-${p.ticker}-${i}`}
                               placeholder="EXIT ASK $" value={trackSettleRow.exit_ask}
                               onChange={e => setTrackSettleRow(s => ({ ...s, exit_ask: e.target.value }))}
                               style={inputCss(85)} />
-                            <button data-testid={`track-settle-confirm-${p.ticker}`}
+                            <button data-testid={`track-settle-confirm-${p.ticker}-${i}`}
                               onClick={submitTrackSettle} style={btnCss("#4ade80")}>OK</button>
-                            <button data-testid={`track-settle-cancel-${p.ticker}`}
+                            <button data-testid={`track-settle-cancel-${p.ticker}-${i}`}
                               onClick={() => setTrackSettleRow(null)} style={btnCss(muted)}>X</button>
                           </span>
                         ) : (
                           <>
-                            <button data-testid={`track-settle-${p.ticker}`}
+                            <button data-testid={`track-settle-${p.ticker}-${i}`}
                               onClick={() => setTrackSettleRow({ ticker: p.ticker, date: p.date, exit_ask: p.current_ask ?? "" })}
                               style={{ background: "transparent", border: `0.5px solid #4ade80`, color: "#4ade80",
                                         fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700,
                                         marginRight: 6, letterSpacing: "0.08em" }}>
                               SETTLE
                             </button>
-                            <button data-testid={`track-delete-${p.ticker}`}
+                            <button data-testid={`track-delete-${p.ticker}-${i}`}
                               onClick={() => deleteTrackPick(p.ticker, p.date)}
                               style={{ background: "transparent", border: `0.5px solid #f87171`, color: "#f87171",
                                         fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700,
