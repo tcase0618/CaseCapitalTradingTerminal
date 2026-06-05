@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import axios from "axios";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
@@ -80,8 +80,8 @@ export default function SECPage() {
               {filings.map((f, i) => {
                 const open = expanded === i;
                 return (
-                  <>
-                    <tr key={i} className="row-hover" style={{ borderTop: hairline, cursor: "pointer" }}
+                  <Fragment key={`${f.ticker}-${f.form}-${f.filed_at || i}`}>
+                    <tr className="row-hover" style={{ borderTop: hairline, cursor: "pointer" }}
                       onClick={() => setExpanded(open ? null : i)} data-testid={`sec-${f.ticker}`}>
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${f.ticker}</td>
                       <td style={td}>
@@ -126,7 +126,7 @@ export default function SECPage() {
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 );
               })}
             </tbody>

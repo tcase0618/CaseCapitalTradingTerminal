@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -103,8 +103,8 @@ export default function PharmaPage() {
                 const open = expanded === `${p.ticker}-${p.pdufa_date}`;
                 const sc = p.binary_event_score;
                 return (
-                  <>
-                    <tr key={`${p.ticker}-${p.pdufa_date}`}
+                  <Fragment key={`${p.ticker}-${p.pdufa_date}`}>
+                    <tr
                       data-testid={`pdufa-${p.ticker}`}
                       className="row-hover"
                       style={{ borderTop: hairline, cursor: "pointer" }}
@@ -143,7 +143,7 @@ export default function PharmaPage() {
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -168,7 +168,7 @@ export default function PharmaPage() {
             </thead>
             <tbody>
               {active.map((p, i) => (
-                <tr key={i} className="row-hover" style={{ borderTop: hairline }}>
+                <tr key={`${p.ticker}-${p.pdufa_date || i}`} className="row-hover" style={{ borderTop: hairline }}>
                   <td style={td}>
                     <span style={{
                       color: p.source === "auto" ? "#4ade80" : accent2,
@@ -209,7 +209,7 @@ export default function PharmaPage() {
             </thead>
             <tbody>
               {track.history.map((r, i) => (
-                <tr key={i} className="row-hover" style={{ borderTop: hairline }}>
+                <tr key={`${r.ticker}-${r.exit_date || r.pdufa_date || i}`} className="row-hover" style={{ borderTop: hairline }}>
                   <td style={{ ...td, color: accent, fontWeight: 700 }}>${r.ticker}</td>
                   <td style={td}>{r.drug}</td>
                   <td style={td}>{r.pdufa_date}</td>

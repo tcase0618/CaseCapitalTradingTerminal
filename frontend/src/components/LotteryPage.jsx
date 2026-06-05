@@ -27,6 +27,9 @@ export default function LotteryPage() {
   const [manualPlays, setManualPlays] = useState([]);
   const [manualTR, setManualTR] = useState(null);
   const [scanning, setScanning] = useState(false);
+  const [mForm, setMForm] = useState({ ticker: "", entry_price: "", lottery_score: "", risk_amount: "50" });
+  const [mAdding, setMAdding] = useState(false);
+  const [settleRow, setSettleRow] = useState(null);  // {ticker, date, exit_price}
 
   const reloadAll = () => {
     axios.get(`${API}/v32/lottery/current`).then(r => setCurrent(r.data)).catch(() => {});
@@ -44,6 +47,37 @@ export default function LotteryPage() {
       alert(`Lottery scan complete: ${r.data.count} candidates`);
       reloadAll();
     } finally { setScanning(false); }
+  };
+
+  const addManual = async () => {
+    if (!mForm.ticker || !mForm.entry_price) { alert("Ticker + Entry Price required"); return; }
+    setMAdding(true);
+    try {
+      await axios.post(`${API}/lottery/manual`, {
+        ticker: mForm.ticker.toUpperCase().trim(),
+        entry_price: Number(mForm.entry_price),
+        lottery_score: mForm.lottery_score ? Number(mForm.lottery_score) : null,
+        risk_amount: mForm.risk_amount ? Number(mForm.risk_amount) : 50,
+      });
+      setMForm({ ticker: "", entry_price: "", lottery_score: "", risk_amount: "50" });
+      reloadAll();
+    } catch (e) {
+      alert(`Add failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setMAdding(false); }
+  };
+
+  const submitSettle = async () => {
+    if (!settleRow?.exit_price) { alert("Exit price required"); return; }
+    try {
+      const r = await axios.post(
+        `${API}/lottery/settle?ticker=${settleRow.ticker}&exit_price=${settleRow.exit_price}&play_date=${settleRow.date}`
+      );
+      alert(`Realized P/L: ${r.data.realized_pct?.toFixed(2)}%`);
+      setSettleRow(null);
+      reloadAll();
+    } catch (e) {
+      alert(`Settle failed: ${e?.response?.data?.detail || e.message}`);
+    }
   };
 
   const picks = current?.picks || [];
@@ -130,9 +164,28 @@ export default function LotteryPage() {
 
       {tab === "manual" && (
         <>
+          <Card title="ADD MANUAL PLAY · INSIDER OR EARNINGS RUNNER">
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", padding: 12, flexWrap: "wrap" }}>
+              <FormInput label="TICKER" placeholder="ABCD" value={mForm.ticker}
+                onChange={v => setMForm(f => ({ ...f, ticker: v }))} testid="manual-form-ticker" width={110} />
+              <FormInput label="ENTRY PRICE $" placeholder="4.20" value={mForm.entry_price}
+                onChange={v => setMForm(f => ({ ...f, entry_price: v }))} testid="manual-form-entry" width={130} />
+              <FormInput label="LOTTERY SCORE" placeholder="70" value={mForm.lottery_score}
+                onChange={v => setMForm(f => ({ ...f, lottery_score: v }))} testid="manual-form-score" width={130} />
+              <FormInput label="RISK $" placeholder="50" value={mForm.risk_amount}
+                onChange={v => setMForm(f => ({ ...f, risk_amount: v }))} testid="manual-form-risk" width={100} />
+              <button data-testid="manual-form-submit" onClick={addManual} disabled={mAdding}
+                style={{ background: "transparent", border: `0.5px solid ${accent}`, color: accent,
+                          fontSize: 11, padding: "8px 22px", cursor: mAdding ? "wait" : "pointer", fontWeight: 700,
+                          letterSpacing: "0.12em", fontFamily: "JetBrains Mono" }}>
+                [ {mAdding ? "ADDING…" : "+ ADD PLAY"} ]
+              </button>
+            </div>
+          </Card>
+
           <Card title={`ACTIVE MANUAL PLAYS · ${manualPlays.filter(p => p.is_active).length}`}>
             {!manualPlays.filter(p => p.is_active).length ? (
-              <div style={{ color: muted, padding: 20 }}>No manual plays. Add one from the Screener tab.</div>
+              <div style={{ color: muted, padding: 20 }}>No active manual plays yet. Use the form above to add one.</div>
             ) : (
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead><tr>
@@ -140,11 +193,12 @@ export default function LotteryPage() {
                   <th style={th}>P&L</th><th style={th}>PEAK</th><th style={th}>SCORE</th>
                   <th style={th}>RISK $</th><th style={th}></th>
                 </tr></thead>
-                <tbody>{manualPlays.filter(p => p.is_active).map((p, i) => {
+                <tbody>{manualPlays.filter(p => p.is_active).map((p) => {
                   const pnl = p.current_price ? ((p.current_price - p.entry_price) / p.entry_price * 100) : 0;
                   const peak = p.peak_price ? ((p.peak_price - p.entry_price) / p.entry_price * 100) : 0;
+                  const isSettling = settleRow?.ticker === p.ticker && settleRow?.date === p.date;
                   return (
-                    <tr key={i} style={{ borderTop: hairline }} data-testid={`manual-${p.ticker}`}>
+                    <tr key={`${p.ticker}-${p.date}`} style={{ borderTop: hairline }} data-testid={`manual-${p.ticker}`}>
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
                       <td style={td}>${p.entry_price?.toFixed(2)}</td>
                       <td style={td}>${p.current_price?.toFixed(2) || "—"}</td>
@@ -155,20 +209,25 @@ export default function LotteryPage() {
                       <td style={td}>{p.lottery_score}</td>
                       <td style={td}>${p.risk_amount}</td>
                       <td style={td}>
-                        <button data-testid={`settle-${p.ticker}`}
-                          onClick={async () => {
-                            const exit = prompt(`EXACT exit price for ${p.ticker}?`);
-                            if (!exit) return;
-                            const r = await axios.post(
-                              `${API}/lottery/settle?ticker=${p.ticker}&exit_price=${exit}&play_date=${p.date}`
-                            );
-                            alert(`Realized P/L: ${r.data.realized_pct?.toFixed(2)}%`);
-                            reloadAll();
-                          }}
-                          style={{ background: "transparent", border: `0.5px solid #f87171`, color: "#f87171",
-                                    fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700, marginRight: 6 }}>
-                          SETTLE
-                        </button>
+                        {isSettling ? (
+                          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                            <input data-testid={`settle-input-${p.ticker}`}
+                              placeholder="EXIT $" value={settleRow.exit_price}
+                              onChange={e => setSettleRow(s => ({ ...s, exit_price: e.target.value }))}
+                              style={inputCss(80)} />
+                            <button data-testid={`settle-confirm-${p.ticker}`} onClick={submitSettle}
+                              style={btnCss("#4ade80")}>OK</button>
+                            <button data-testid={`settle-cancel-${p.ticker}`} onClick={() => setSettleRow(null)}
+                              style={btnCss(muted)}>X</button>
+                          </span>
+                        ) : (
+                          <button data-testid={`settle-${p.ticker}`}
+                            onClick={() => setSettleRow({ ticker: p.ticker, date: p.date, exit_price: "" })}
+                            style={{ background: "transparent", border: `0.5px solid #f87171`, color: "#f87171",
+                                      fontSize: 9, padding: "4px 10px", cursor: "pointer", fontWeight: 700, marginRight: 6 }}>
+                            SETTLE
+                          </button>
+                        )}
                         <button data-testid={`send-tf-${p.ticker}`}
                           onClick={async () => {
                             if (!confirm(`Send $${p.risk_amount} of ${p.ticker} to Trade Floor?`)) return;
@@ -206,7 +265,7 @@ export default function LotteryPage() {
                   <th style={th}>P&L</th><th style={th}>SCORE</th><th style={th}>TF?</th>
                 </tr></thead>
                 <tbody>{manualTR.history.map((p, i) => (
-                  <tr key={i} style={{ borderTop: hairline }}>
+                  <tr key={`${p.ticker}-${p.exit_date || p.date || i}`} style={{ borderTop: hairline }}>
                     <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
                     <td style={td}>${p.entry_price?.toFixed(2)}</td>
                     <td style={td}>${p.exit_price?.toFixed(2)}</td>
@@ -355,3 +414,25 @@ export default function LotteryPage() {
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400 };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em" };
+
+const inputCss = (w = 110) => ({
+  background: "rgba(0,0,0,0.4)", border: `0.5px solid ${dim}`, color: labelLight,
+  padding: "5px 8px", fontSize: 11, fontFamily: "JetBrains Mono", letterSpacing: "0.06em",
+  width: w, outline: "none",
+});
+
+const btnCss = (c) => ({
+  background: "transparent", border: `0.5px solid ${c}`, color: c,
+  fontSize: 9, padding: "4px 8px", cursor: "pointer", fontWeight: 700,
+  fontFamily: "JetBrains Mono", letterSpacing: "0.08em",
+});
+
+function FormInput({ label, placeholder, value, onChange, testid, width }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ color: dim, fontSize: 9, letterSpacing: "0.14em" }}>{label}</span>
+      <input data-testid={testid} placeholder={placeholder} value={value}
+        onChange={e => onChange(e.target.value)} style={inputCss(width)} />
+    </div>
+  );
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, Fragment } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import { CrtShell, Card, tokens } from "./CrtShell";
@@ -99,8 +99,8 @@ export default function ContractsPage() {
                 const open = expanded === id;
                 const subs = c.sub_awards || [];
                 return (
-                  <>
-                    <tr key={id} data-testid={`contract-${c.ticker}`}
+                  <Fragment key={id}>
+                    <tr data-testid={`contract-${c.ticker}`}
                       className="row-hover"
                       style={{ borderTop: hairline, cursor: "pointer" }}
                       onClick={() => setExpanded(open ? null : id)}>
@@ -162,7 +162,7 @@ export default function ContractsPage() {
                                   .map((s, i) => {
                                     const pct = c.amount ? (s.amount / c.amount * 100) : 0;
                                     return (
-                                      <tr key={i} style={{ borderTop: hairline }}>
+                                      <tr key={`${s.recipient || "x"}-${s.amount || 0}-${i}`} style={{ borderTop: hairline }}>
                                         <td style={td}>{s.recipient}</td>
                                         <td style={{ ...td, color: s.ticker ? accent : muted, fontWeight: 700 }}>
                                           {s.ticker ? (
@@ -193,7 +193,7 @@ export default function ContractsPage() {
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 );
               })}
             </tbody>

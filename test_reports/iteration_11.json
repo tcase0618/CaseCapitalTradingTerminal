@@ -1,0 +1,24 @@
+{
+  "summary": "AXIOM v5.1 retest after fixes — ALL THREE regression items PASS. (1) MANUAL tab now renders inline ADD MANUAL PLAY card with four inputs (manual-form-ticker/entry/score/risk) + [+ ADD PLAY] button (manual-form-submit) — verified visible on /lottery → MANUAL tab. (2) Full add-then-settle flow exercised live: typed TESTUI/4.20/70/50 → click [+ ADD PLAY] → row manual-TESTUI appeared in ACTIVE MANUAL PLAYS, form cleared. Clicked SETTLE on the row → inline editor (settle-input-TESTUI + settle-confirm-TESTUI + settle-cancel-TESTUI) appeared IN-ROW with NO browser prompt. Typed 6.50 → click OK → alert showed 'Realized P/L: 54.76%' (exact spec value). Row vanished from ACTIVE list, MANUAL TRACK RECORD counter incremented from 1 to 2 SETTLED. (3) Visited /contracts, /sec, /pharma — console scanned with capture_logs and pageerror handlers: ZERO 'unique key' React warnings on all three pages (down from 3+ in iteration_10). (4) Regression spot — /settings still renders INTEGRATION STATUS · 12, SCHEDULED JOBS · 7, TELEGRAM COMMANDS · 11. /performance still renders ACTIVE POSITIONS / CLOSED POSITIONS splits + OPTIONS PERFORMANCE chart. Zero page errors across the entire run. Lottery scan loading-state UI feedback was NOT specifically re-tested this iteration (not in fix scope per the request — flagged as integration polish item in iteration_10 but not blocking).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "LotteryPage.jsx is now 439 lines — still under the 700-line threshold, but tab-branch rendering is getting dense. Consider extracting ManualTab into its own component if more features are added.",
+    "settle and add flows still use window.alert() to surface success/failure (lines 47, 75, 79). Non-blocking but inconsistent with the rest of the CRT panel design; consider an inline toast/banner row inside the Card.",
+    "The /contracts, /sec, /pharma key warnings are silenced via React.Fragment + stable composite keys — good fix. Recommend adding an eslint react/jsx-key rule in CI to catch future regressions automatically."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (per request)", "frontend": "100% — 7/7 spec items pass"},
+  "test_credentials": "N/A — dashboard is public, no auth",
+  "seed_data_creation": "TESTUI manual play was added and settled @ exit 6.50 (+54.76%) as part of the spec test — it is now in the MANUAL TRACK RECORD (settled bucket, not active). It is NOT polluting the active plays list. The previous TESTLOT play from prior iterations is also settled and harmless. No cleanup needed; TESTUI auto-cleaned itself by completing the settle flow.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All v5.1 fixes verified live on https://stock-scout-bot.preview.emergentagent.com. data-testids confirmed working: manual-form-ticker, manual-form-entry, manual-form-score, manual-form-risk, manual-form-submit, manual-{ticker}, settle-{ticker}, settle-input-{ticker}, settle-confirm-{ticker}, settle-cancel-{ticker}. The Settle inline editor replaces the prior window.prompt() flow correctly. Settled plays land in MANUAL TRACK RECORD (counter went 1 → 2 during this test). For future retests of the Settle flow, use a NEW ticker (TESTUI from this run is already settled and will be in the track record). Ticker can collide if reused on the same date — backend keys on (ticker, date).",
+  "rca of the issue": "N/A — all three iteration_10 bugs are resolved. (a) Manual entry form: present at LotteryPage.jsx lines 167-184 with all four FormInput components + manual-form-submit button. (b) Inline Settle editor: present at LotteryPage.jsx lines 212-230 — conditional render based on settleRow state, no window.prompt/alert in the settle path except the success P/L confirmation alert. (c) React key warnings: ContractsPage/SECPage/PharmaPage wrapped in React.Fragment with stable composite keys — verified zero warnings on all three routes via Playwright console capture."
+}
