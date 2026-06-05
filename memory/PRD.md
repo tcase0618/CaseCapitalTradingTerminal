@@ -214,3 +214,23 @@ Footer: 🎰 LOTTERY · 📅 EARNINGS · 🐴 DARK HORSE · 🔒 NARRATIVE LOCK 
 - **Fix 3 — Macro Pulse dedup:** FRED returns daily release rows for some releases (release_id 101 is daily H.15 Rates, not monthly FOMC). Dedup key changed from `(release_id, date)` to `(release_id, YYYY-MM)`. Output went 17 noisy rows → 5 clean events.
 - **Fix 4 — Pharma research panel:** ClinicalTrials.gov was 403'd via plain httpx — switched to `curl_cffi` Chrome impersonation. Bulk Finviz/OpenInsider screeners replaced with per-ticker `fetch_finviz_short_for_ticker` and `fetch_openinsider_for_ticker(t, days=60)`. NCT IDs, phases, enrollment, short %, IV rank, insider buy_count all populate now.
 - **Testing:** 19/19 backend pytests green; 4 stale alerts auto-backfilled.
+
+
+## Feb 2026 — v5.0: Trade Floor + SEC Filings + Forked Learning Engine + Public-Only Subs
+- **Alpaca paper trading** — `services/trade_floor.py`: thin REST client, gates (Trade Score >20, ≥2 signals, regime green, <10 positions, no earnings <10d unless beat>65%), risk tiers per spec (frac 1-5%, options 5-10%). ATR(14d) stop. Endpoints `/api/trade_floor/{account|regime|positions|orders|close|sync|history|journal|manual_send}`.
+- **Trade Floor Learning Engine** (FORKED from Signal Engine at startup; never syncs back) — `services/trade_floor_learning.py`. Own collections (`tf_weights`/`tf_combo_stats`/`tf_risk_tiers`/`tf_recalibration_log`/`tf_trades`/`tf_scan_log`/`tf_journal`). Phases: <5 pre_adjustment · 5-29 signal_weight_adjustment · 30+ full_adjustment. Weekly recalibrate Sun 03:00 ET.
+- **SEC Filings monitor** — EDGAR `getcurrent` Atom feed → 5 form types (SC 13D, SC 13G, 8-K, Form 4, 13F-HR). Public-ticker-only via SEC `company_tickers.json`. Significance score + activist filer detection (Elliott/Starboard/Icahn/ValueAct/Third Point/Pershing/Corvex/Jana/Sachem/Legion). Narrative Lock Score = base + 15×concurrent_signals. Activist 13D + lock ≥70 fire immediate Telegram.
+- **Price priority Alpaca → Finnhub → yfinance → Massive** — applies system-wide.
+- **Scanner v5.0** — attaches `trade_score` to every result, dispatches Pharma + SEC + Trade Floor in fire-and-forget tasks.
+- **Scheduler v5.0** — 4 fixed scans (00/08/13/18 ET), regime gate 30min, position monitor 15min, DB checkpoint 02:00, TF recal Sun 03:00.
+- **Contracts subs public-only filter** — drops any sub_award lacking a mapped ticker; cache reads filter too.
+- **Frontend** — `/sec`, `/trade-floor` (5 sub-tabs), `/tf-engine` pages added. Dashboard cards show AXIOM + TRADE side-by-side (green if TRADE higher, red if lower). Performance gets Active/Closed collapsible split. Lottery picks get `→ TRADE FLOOR` button. Sidebar adds CORE/SEC FILINGS + TRADE FLOOR group + ANALYSIS/TRADE ENGINE.
+- **Testing**: 20/20 backend pytests pass; 2 minor frontend bugs auto-fixed (cached non-public subs filter on read path; sidebar group missing TRADE FLOOR).
+
+### Deferred to v5.1
+- Settings tab Integration Status / Scheduled Jobs / Telegram Commands UI sections
+- Lottery dedicated Finviz screener (float<20M / $1-20 / vol>2× / SI>15%)
+- Lottery manual entry + Settle button + per-play journal
+- Trade Floor Journal AI write-back via claude_service
+- Performance Peak Gain strictly within recommended hold window + rolling extension
+- Telegram digest 4×/day with new commands (/positions /account /regime /risk /journal /sec /pharma /contracts)
