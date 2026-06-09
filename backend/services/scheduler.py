@@ -180,8 +180,10 @@ def start_scheduler():
     # v5.0 — position monitor every 15 min during market hours
     async def _position_monitor():
         try:
-            from . import trade_floor
+            from . import trade_floor, trade_floor_phases
             await trade_floor.sync_positions_and_close_settled()
+            # v5.3 — run the three-phase exit logic on every sync
+            await trade_floor_phases.process_phase_exits()
         except Exception as e:
             logger.warning("position monitor: %s", e)
     _scheduler.add_job(

@@ -278,6 +278,12 @@ async def recalibrate() -> dict[str, Any]:
     except Exception as e:
         logger.warning("recalibrate_entry_price: %s", e)
 
+    # Phase ≥5: evolve three-phase exit parameters per signal combo
+    try:
+        await _recalibrate_phase_engine()
+    except Exception as e:
+        logger.warning("recalibrate_phase_engine: %s", e)
+
     await db.tf_recalibration_log.insert_one(stamped({
         "ran_at": _now().isoformat(),
         "phase": p, "closed_trades": n,
@@ -423,4 +429,107 @@ async def _recalibrate_entry_price(trades: list[dict[str, Any]]) -> None:
             "ran_at": _now().isoformat(),
             "subsystem": "entry_price",
             "buckets_with_offsets": sum(len(v) for v in offsets.values()),
+        }))
+
+
+
+async def _recalibrate_phase_engine() -> None:
+    """Tune the three-phase exit parameters per signal combo, based on
+    actual phase outcomes (tf_phase_outcomes collection).
+
+    Heuristics:
+      • phase2_multiplier — if a combo's phase-2 hit rate is high (≥60%)
+        AND avg final return ≥ 25%, widen the multiplier (slower, longer-
+        running combos like gov contracts). If hit rate is low (≤20%) AND
+        avg return ≤ 10%, tighten the multiplier (squeezes that reverse).
+      • trail_pct_normal — if final return on phase-3 closes is positive
+        and high relative to peak, loosen trail (more room). If most
+        phase-3 closes give back >50% of peak, tighten trail.
+
+    Real movement requires ≥10 closed trades per combo. Bumps capped at
+    ±0.1 (phase2_multiplier) and ±0.10 (trail_pct).
+    """
+    db = get_db()
+    outcomes = await db.tf_phase_outcomes.find({}, {"_id": 0}).to_list(2000)
+    if len(outcomes) < 5:
+        return
+    buckets: dict[str, dict[str, Any]] = {}
+    for o in outcomes:
+        key = "+".join(sorted(o.get("signal_combo") or []))
+        if not key:
+            continue
+        b = buckets.setdefault(key, {"n": 0, "p1": 0, "p2": 0, "p3": 0,
+                                            "ret_sum": 0.0, "peak_sum": 0.0,
+                                            "given_back_sum": 0.0,
+                                            "given_back_n": 0})
+        b["n"] += 1
+        if o.get("phase1_hit"):
+            b["p1"] += 1
+        if o.get("phase2_hit"):
+            b["p2"] += 1
+        b["ret_sum"] += float(o.get("final_realized_pct") or 0)
+        peak_pct = float(o.get("peak_gain_pct") or 0)
+        b["peak_sum"] += peak_pct
+        # How much of the peak did we give back on the phase-3 close?
+        p3 = o.get("phase3") or {}
+        p3_pct = float(p3.get("realized_pct_on_slice") or 0)
+        if peak_pct > 0:
+            given_back = (peak_pct - p3_pct) / peak_pct
+            b["given_back_sum"] += given_back
+            b["given_back_n"] += 1
+
+    doc = await db.tf_phase_engine.find_one({"_id": "current"}) or {}
+    params_by_combo = dict(doc.get("params_by_combo") or {})
+    defaults = doc.get("defaults") or {
+        "phase1_close_pct": 0.40, "phase2_close_pct": 0.30,
+        "phase2_multiplier": 1.5, "trail_pct_normal": 0.50,
+        "trail_pct_tight": 0.25, "tight_hold_threshold": 0.90,
+    }
+    changes: list[dict[str, Any]] = []
+    for combo, b in buckets.items():
+        if b["n"] < 10:
+            continue
+        cur = dict(params_by_combo.get(combo) or {})
+        # Phase 2 multiplier tuning
+        p2_rate = b["p2"] / b["n"]
+        avg_ret = b["ret_sum"] / b["n"]
+        old_m = float(cur.get("phase2_multiplier", defaults["phase2_multiplier"]))
+        new_m = old_m
+        if p2_rate >= 0.60 and avg_ret >= 25:
+            new_m = min(old_m + 0.1, 2.5)   # gov-style runners — widen
+        elif p2_rate <= 0.20 and avg_ret <= 10:
+            new_m = max(old_m - 0.1, 1.1)   # squeezers — tighten
+        if abs(new_m - old_m) > 1e-6:
+            cur["phase2_multiplier"] = round(new_m, 3)
+            changes.append({"combo": combo, "param": "phase2_multiplier",
+                              "from": old_m, "to": new_m, "n": b["n"]})
+
+        # Trailing stop tuning
+        if b["given_back_n"] >= 5:
+            avg_give = b["given_back_sum"] / b["given_back_n"]
+            old_t = float(cur.get("trail_pct_normal", defaults["trail_pct_normal"]))
+            new_t = old_t
+            if avg_give > 0.50:
+                new_t = min(old_t + 0.05, 0.80)  # giving back too much → tighten
+            elif avg_give < 0.20 and avg_ret >= 20:
+                new_t = max(old_t - 0.05, 0.20)  # rarely gives back → loosen
+            if abs(new_t - old_t) > 1e-6:
+                cur["trail_pct_normal"] = round(new_t, 3)
+                changes.append({"combo": combo, "param": "trail_pct_normal",
+                                  "from": old_t, "to": new_t, "n": b["n"]})
+        if cur:
+            params_by_combo[combo] = cur
+
+    if changes:
+        await db.tf_phase_engine.update_one(
+            {"_id": "current"},
+            {"$set": {"params_by_combo": params_by_combo,
+                       "last_recalibrated_at": _now().isoformat()}},
+            upsert=True,
+        )
+        await db.tf_recalibration_log.insert_one(stamped({
+            "ran_at": _now().isoformat(),
+            "subsystem": "phase_engine",
+            "changes": changes,
+            "buckets": len(buckets),
         }))

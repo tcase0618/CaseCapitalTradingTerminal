@@ -1035,6 +1035,23 @@ async def tf_sweep_stale():
     return await trade_floor.cancel_stale_orders(max_age_hours=24)
 
 
+@api.post("/trade_floor/process_phases")
+async def tf_process_phases():
+    """Manually trigger the three-phase exit processor (normally runs every
+    15 min via position_monitor)."""
+    from services import trade_floor_phases
+    return await trade_floor_phases.process_phase_exits()
+
+
+@api.get("/trade_floor/phase_outcomes")
+async def tf_phase_outcomes(limit: int = 60):
+    """Return the closed-trade phase records used by the learning engine."""
+    from services.db import get_db
+    docs = await get_db().tf_phase_outcomes.find({}, {"_id": 0}) \
+                  .sort("closed_at", -1).to_list(limit)
+    return {"outcomes": docs, "count": len(docs)}
+
+
 # ─────── Trade Floor Learning Engine ───────
 @api.get("/trade_floor/engine/status")
 async def tf_engine_status():

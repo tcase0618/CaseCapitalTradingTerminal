@@ -343,8 +343,9 @@ async def _gate_check(scan_row: dict[str, Any], *,
     # Max open positions
     if position_count is None:
         position_count = len(await list_positions())
-    if position_count >= MAX_OPEN_POSITIONS:
-        return False, f"max positions reached ({MAX_OPEN_POSITIONS})"
+    # v5.3 — Position-count cap removed per spec. The Trade Floor now opens
+    # every signal that clears the other gates; risk is bounded by hard
+    # per-trade dollar caps and per-tier % of equity instead.
     # Ticker already open OR has a pending order
     if held_tickers is None or pending_tickers is None:
         positions = await list_positions()
@@ -439,6 +440,19 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
         )
         stop_price = float(stop_calc["stop_price"])
 
+        # AXIOM target: prefer scan blended target; fall back to signal uplift.
+        axiom_target = row.get("target_blended") or row.get("target_high")
+        if not axiom_target:
+            try:
+                from . import risk_target as _rt
+                uplift, _label = _rt._signal_uplift(_sig_list)
+                axiom_target = round(ask * (1 + max(uplift, 0.15)), 2)
+            except Exception:
+                axiom_target = round(ask * 1.20, 2)
+        axiom_target = float(axiom_target)
+        # Phase 2 target = entry + 1.5 × (AXIOM target − entry)
+        phase2_target = round(ask + 1.5 * (axiom_target - ask), 4)
+
         # Sizing: min(percent-based, hard cap, $15% of equity safety floor)
         notional = min(risk_budget_pct_notional, hard_cap, equity * 0.15)
         # Apply hard cap absolutely — never exceed under any circumstance
@@ -494,6 +508,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             "limit_price": limit_price,
             "entry_price_ref": limit_price,        # initial entry = ask
             "stop_price": stop_price,
+            "current_stop": stop_price,            # mutable — moves up on phase hits
             "stop_pct": stop_calc["stop_pct"],
             "stop_breakdown": stop_calc["breakdown"],
             "hold_window_days": int(hold_days or 30),
@@ -502,6 +517,15 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             "status": "OPEN",
             "fill_status": "PENDING",
             "submitted_at": _now().isoformat(),
+            # v5.3 — three-phase exit system
+            "axiom_target": axiom_target,
+            "phase1_target": axiom_target,
+            "phase2_target": phase2_target,
+            "phase": 1,                             # active phase: 1, 2, or 3
+            "phases_hit": {},
+            "qty_total": None,                      # set on fill
+            "qty_remaining": None,                  # set on fill
+            "peak_price_since_entry": None,
         })
         await db.tf_trades.insert_one(trade_doc)
         try:
@@ -570,15 +594,23 @@ async def sync_positions_and_close_settled():
                 secs = (fill_at - sub).total_seconds()
             except Exception:
                 secs = None
+            qty_filled = float(o.get("filled_qty") or 0)
+            avg_fill = float(o.get("filled_avg_price") or t.get("limit_price") or 0)
             await db.tf_trades.update_one(
                 {"client_order_id": t["client_order_id"]},
                 {"$set": {
                     "fill_status": "FILLED",
                     "filled_at": o.get("filled_at"),
                     "fill_seconds": secs,
-                    "filled_avg_price": float(o.get("filled_avg_price") or t.get("limit_price") or 0),
+                    "filled_avg_price": avg_fill,
+                    "qty_total": qty_filled,
+                    "qty_remaining": qty_filled,
+                    "peak_price_since_entry": avg_fill,
                 }},
             )
+            t["filled_avg_price"] = avg_fill
+            t["qty_total"] = qty_filled
+            t["qty_remaining"] = qty_filled
         if p:
             cur = float(p.get("current_price") or 0)
             new_low = cur
