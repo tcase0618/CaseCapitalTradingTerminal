@@ -203,3 +203,62 @@ body {
         @apply border-border;
     }
 }
+
+/* ── v5.4 · Mobile responsive rules ── */
+@media (max-width: 768px) {
+  /* Horizontal scroll for any wide table instead of overflowing viewport */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  /* System bar: compress and wrap items */
+  [data-testid="system-bar"] {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    padding: 6px 12px !important;
+    font-size: 9px !important;
+  }
+  [data-testid="system-bar"] > span:last-child {
+    margin-left: 0 !important;
+    order: 3;
+  }
+  [data-testid="macro-countdown"] {
+    padding: 2px 6px !important;
+    font-size: 9px !important;
+  }
+  /* Cards: reduce internal padding */
+  .corner-brackets > div {
+    padding: 12px 14px 14px !important;
+  }
+  /* Force any flex row of Stat tiles to wrap instead of overflow */
+  [data-testid="dashboard-kpis"],
+  [data-testid="performance-kpis"],
+  [data-testid="lottery-kpis"] {
+    flex-wrap: wrap !important;
+  }
+  /* KPI Stat tiles — 2 per row on mobile */
+  [data-testid="dashboard-kpis"] > *,
+  [data-testid="performance-kpis"] > *,
+  [data-testid="lottery-kpis"] > * {
+    flex: 1 1 45% !important;
+    min-width: 45% !important;
+    border-right: none !important;
+    border-bottom: 0.5px solid rgba(255,255,255,0.06);
+    padding: 12px 14px !important;
+  }
+  /* Titles / headers */
+  h1, h2, h3 { letter-spacing: 0.04em; }
+  /* Signal cards on dashboard become full-width */
+  [data-testid^="signal-card-"] {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+  /* Buttons stay tappable */
+  button, a[role="button"] {
+    min-height: 34px;
+  }
+}
+

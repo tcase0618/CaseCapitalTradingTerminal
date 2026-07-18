@@ -13,19 +13,21 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_WEIGHTS = {
-    "insider_cluster_buy":   {"value": 15.0, "min": 6.0,  "max": 25.0},
-    "high_short_interest":   {"value": 10.0, "min": 4.0,  "max": 18.0},
-    "CONTRACT_SURGE":        {"value": 12.0, "min": 5.0,  "max": 20.0},
-    "CONGRESSIONAL_BUY":     {"value": 10.0, "min": 4.0,  "max": 18.0},
-    "NEW_WINNER":            {"value": 8.0,  "min": 3.0,  "max": 15.0},
-    "CONCENTRATION_WIN":     {"value": 6.0,  "min": 2.0,  "max": 12.0},
-    "MOMENTUM_STACK":        {"value": 7.0,  "min": 3.0,  "max": 14.0},
-    "BUDGET_SURGE":          {"value": 5.0,  "min": 2.0,  "max": 10.0},
-    "UNUSUAL_FLOW":          {"value": 6.0,  "min": 2.0,  "max": 12.0},
-    "CALL_SWEEP":            {"value": 8.0,  "min": 3.0,  "max": 14.0},
-    "upcoming_earnings":     {"value": 4.0,  "min": 1.0,  "max": 8.0},
-    "squeeze_bonus":         {"value": 10.0, "min": 4.0,  "max": 18.0},
-    "committee_match_bonus": {"value": 3.0,  "min": 1.0,  "max": 6.0},
+    # ── Hard-catalyst / institutional signals (weighted UP) ──
+    "insider_cluster_buy":   {"value": 18.0, "min": 8.0,  "max": 28.0},
+    "CONGRESSIONAL_BUY":     {"value": 15.0, "min": 6.0,  "max": 24.0},
+    "CONTRACT_SURGE":        {"value": 15.0, "min": 6.0,  "max": 22.0},
+    "CALL_SWEEP":            {"value": 12.0, "min": 5.0,  "max": 18.0},
+    "NEW_WINNER":            {"value": 10.0, "min": 4.0,  "max": 16.0},
+    "BUDGET_SURGE":          {"value": 8.0,  "min": 3.0,  "max": 14.0},
+    "upcoming_earnings":     {"value": 6.0,  "min": 2.0,  "max": 10.0},
+    # ── Retail / technical / pattern signals (weighted DOWN) ──
+    "high_short_interest":   {"value": 6.0,  "min": 2.0,  "max": 12.0},
+    "squeeze_bonus":         {"value": 6.0,  "min": 2.0,  "max": 12.0},
+    "UNUSUAL_FLOW":          {"value": 5.0,  "min": 2.0,  "max": 10.0},
+    "MOMENTUM_STACK":        {"value": 4.0,  "min": 1.0,  "max": 9.0},
+    "CONCENTRATION_WIN":     {"value": 4.0,  "min": 1.0,  "max": 9.0},
+    "committee_match_bonus": {"value": 2.0,  "min": 1.0,  "max": 5.0},
 }
 
 BASELINE_WR = 0.50    # 50% win rate baseline

@@ -186,6 +186,16 @@ export function CrtShell({ title, children, headerRight = null }) {
   const loc = useLocation();
   const nextMacro = useNextMacroEvent();
   const alerts = useLiveAlertCounts();
+  const [isMobile, setIsMobile] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth <= 768);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
+  // Close drawer on route change
+  useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
   return (
     <>
       <div className="crt-vignette" />
@@ -194,10 +204,20 @@ export function CrtShell({ title, children, headerRight = null }) {
       <div style={{
         height: "100vh", overflow: "hidden",
         background: pageBg, color: "#e5e7eb",
-        display: "grid", gridTemplateColumns: "230px 1fr",
+        display: "grid",
+        gridTemplateColumns: isMobile ? "1fr" : "230px 1fr",
         fontFamily: "JetBrains Mono, Courier New, monospace",
         position: "relative", zIndex: 1,
       }}>
+        {/* Mobile drawer backdrop */}
+        {isMobile && drawerOpen && (
+          <div data-testid="drawer-backdrop"
+            onClick={() => setDrawerOpen(false)}
+            style={{
+              position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+              zIndex: 90, backdropFilter: "blur(2px)",
+            }} />
+        )}
         {/* ── Sidebar ── */}
         <aside style={{
           background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 100%)`,
@@ -205,6 +225,12 @@ export function CrtShell({ title, children, headerRight = null }) {
           padding: "16px 12px 16px 14px",
           display: "flex", flexDirection: "column", gap: 18,
           height: "100vh", overflowY: "auto",
+          position: isMobile ? "fixed" : "static",
+          top: 0, left: 0, width: isMobile ? 260 : "auto",
+          transform: isMobile && !drawerOpen ? "translateX(-100%)" : "translateX(0)",
+          transition: "transform 0.28s ease-out",
+          zIndex: 100,
+          boxShadow: isMobile && drawerOpen ? "6px 0 30px rgba(0,0,0,0.6)" : "none",
         }}>
           {/* Brand block */}
           <Link to="/" style={{ textDecoration: "none" }}>
@@ -389,25 +415,46 @@ export function CrtShell({ title, children, headerRight = null }) {
 
           {/* Page header */}
           <div style={{
-            padding: "22px 30px",
+            padding: isMobile ? "14px 14px" : "22px 30px",
             borderBottom: hairline,
             display: "flex", alignItems: "center", justifyContent: "space-between",
             background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 100%)`,
+            gap: 10,
           }}>
-            <div className="fade-in">
+            {isMobile && (
+              <button
+                data-testid="mobile-menu-toggle"
+                onClick={() => setDrawerOpen(v => !v)}
+                aria-label="Toggle nav"
+                style={{
+                  background: "transparent", border: `0.5px solid ${accent}66`,
+                  color: accent, padding: "8px 10px", cursor: "pointer",
+                  fontSize: 14, letterSpacing: "0.14em", fontFamily: "inherit",
+                  lineHeight: 1,
+                }}>
+                ☰
+              </button>
+            )}
+            <div className="fade-in" style={{ flex: 1, minWidth: 0 }}>
               <div style={{
                 fontSize: 9, color: muted, letterSpacing: "0.22em",
                 display: "flex", alignItems: "center", gap: 8,
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               }}>
                 <span style={{ color: accent }}>▣</span>
-                AXIOM INTELLIGENCE PLATFORM
-                <span style={{ color: dim }}>│</span>
+                {!isMobile && (
+                  <>
+                    AXIOM INTELLIGENCE PLATFORM
+                    <span style={{ color: dim }}>│</span>
+                  </>
+                )}
                 <span style={{ color: accent2 }}>{loc.pathname.toUpperCase()}</span>
               </div>
               <div style={{
-                fontSize: 26, color: accent, fontWeight: 700,
+                fontSize: isMobile ? 18 : 26, color: accent, fontWeight: 700,
                 letterSpacing: "0.08em", marginTop: 6,
                 textShadow: "0 0 12px rgba(200,168,75,0.15)",
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               }}>
                 {title}
               </div>
@@ -416,7 +463,8 @@ export function CrtShell({ title, children, headerRight = null }) {
           </div>
 
           {/* Page body */}
-          <div style={{ padding: "22px 30px", flex: 1 }} className="fade-in fade-in-2">
+          <div style={{ padding: isMobile ? "14px 12px" : "22px 30px", flex: 1 }}
+                className="fade-in fade-in-2">
             {children}
           </div>
         </main>

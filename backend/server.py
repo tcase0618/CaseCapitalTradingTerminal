@@ -1035,6 +1035,36 @@ async def tf_sweep_stale():
     return await trade_floor.cancel_stale_orders(max_age_hours=24)
 
 
+@api.post("/admin/reset_learning_engines")
+async def reset_learning_engines(confirm: str = ""):
+    """Wipe all learned state on BOTH engines so they restart from the
+    rebalanced DEFAULT_WEIGHTS. Requires ?confirm=RESET to protect against
+    accidental firing."""
+    if confirm != "RESET":
+        return {"ok": False, "hint": "Pass ?confirm=RESET to actually wipe."}
+    from services.db import get_db
+    db = get_db()
+    wiped: dict[str, int] = {}
+    collections = [
+        "combo_stats",           # main learning engine per-combo stats
+        "tf_weights", "tf_combo_stats", "tf_risk_tiers",
+        "tf_stop_engine", "tf_phase_engine", "tf_entry_engine",
+        "tf_trade_decisions", "tf_recalibration_log",
+    ]
+    for c in collections:
+        r = await db[c].delete_many({})
+        wiped[c] = r.deleted_count
+    # Re-seed by calling the proper reset function on the main engine
+    from services import trade_floor_learning as tfle
+    from services import learning_engine as sle
+    reset_n = await sle.reset_weights()   # overwrites learning_weights to defaults
+    wiped["learning_weights_reset"] = reset_n
+    await tfle.initialize_from_signal_engine()
+    return {"ok": True, "wiped": wiped,
+             "note": "Both learning engines reset. Main engine reseeded from new "
+                        "DEFAULT_WEIGHTS; TF engine inherited from main baseline."}
+
+
 @api.post("/trade_floor/process_phases")
 async def tf_process_phases():
     """Manually trigger the three-phase exit processor (normally runs every
