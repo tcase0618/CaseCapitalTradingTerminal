@@ -3,6 +3,23 @@
 // status dots, micro-animations.
 import { Link, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
+import {
+  Activity,
+  Archive,
+  Banknote,
+  BriefcaseBusiness,
+  ClipboardPenLine,
+  Cog,
+  Globe2,
+  GraduationCap,
+  LampDesk,
+  Landmark,
+  Monitor,
+  Phone,
+  Pill,
+  Radar,
+  Video,
+} from "lucide-react";
 import terminalLogo from "../assets/case-terminal-logo.png";
 
 const accent = "#c8a84b";
@@ -44,24 +61,24 @@ if (!NAV.some(n => n.to === "/macro")) {
 }
 
 const NAV_LOGOS = {
-  "/portfolio-manager": { logo: "PM", color: "#c8a84b" },
-  "/": { logo: "CC", color: "#ef4444" },
-  "/scanner": { logo: "SC", color: "#5eead4" },
-  "/intel": { logo: "IF", color: "#60a5fa" },
-  "/contracts": { logo: "CT", color: "#f59e0b" },
-  "/sec": { logo: "SEC", color: "#a78bfa" },
-  "/earnings": { logo: "ER", color: "#4ade80" },
-  "/lottery": { logo: "LT", color: "#facc15" },
-  "/pharma": { logo: "RX", color: "#f472b6" },
-  "/georisk": { logo: "GR", color: "#fb7185" },
-  "/macro": { logo: "MX", color: "#38bdf8" },
-  "/trade-floor": { logo: "TF", color: "#4ade80" },
-  "/options-desk": { logo: "OD", color: "#c8a84b" },
-  "/performance": { logo: "PX", color: "#22c55e" },
-  "/learning": { logo: "LN", color: "#5eead4" },
-  "/tf-engine": { logo: "TE", color: "#f97316" },
-  "/audit-logs": { logo: "AL", color: "#e879f9" },
-  "/settings": { logo: "ST", color: "#9ca3af" },
+  "/portfolio-manager": { logo: "PM", Icon: BriefcaseBusiness, color: "#c8a84b" },
+  "/": { logo: "CC", Icon: CommandCapIcon, color: "#ef4444" },
+  "/scanner": { logo: "SC", Icon: Radar, color: "#5eead4" },
+  "/intel": { logo: "IF", Icon: Monitor, color: "#60a5fa" },
+  "/contracts": { logo: "CT", Icon: ClipboardPenLine, color: "#f59e0b" },
+  "/sec": { logo: "SEC", Icon: Landmark, color: "#a78bfa" },
+  "/earnings": { logo: "ER", Icon: Banknote, color: "#4ade80" },
+  "/lottery": { logo: "LT", Icon: SlotMachineIcon, color: "#facc15" },
+  "/pharma": { logo: "RX", Icon: Pill, color: "#f472b6" },
+  "/georisk": { logo: "GR", Icon: Video, color: "#fb7185" },
+  "/macro": { logo: "MX", Icon: Globe2, color: "#38bdf8" },
+  "/trade-floor": { logo: "TF", Icon: Phone, color: "#4ade80" },
+  "/options-desk": { logo: "OD", Icon: LampDesk, color: "#c8a84b" },
+  "/performance": { logo: "PX", Icon: Activity, color: "#22c55e" },
+  "/learning": { logo: "LN", Icon: GraduationCap, color: "#5eead4" },
+  "/tf-engine": { logo: "TE", Icon: Cog, color: "#f97316" },
+  "/audit-logs": { logo: "AL", Icon: Archive, color: "#e879f9" },
+  "/settings": { logo: "ST", Icon: Cog, color: "#9ca3af" },
 };
 
 NAV.forEach(item => Object.assign(item, NAV_LOGOS[item.to] || { logo: item.icon, color: accent }));
@@ -398,6 +415,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                           }
                         }}>
                         <span style={{
+                          display: "none",
                           color: isActive ? hue : dim,
                           fontSize: 10, width: 12,
                           textShadow: isActive ? `0 0 6px ${hue}` : "none",
@@ -510,20 +528,21 @@ export function CrtShell({ title, children, headerRight = null }) {
 function NavLogo({ item, active }) {
   const color = item.color || accent;
   const logo = item.logo || item.icon || "";
+  const Icon = item.Icon;
   return (
     <span style={{
-      width: 24,
-      height: 20,
-      minWidth: 24,
+      width: 26,
+      height: 22,
+      minWidth: 26,
       border: `0.5px solid ${active ? color : "rgba(255,255,255,0.12)"}`,
       background: active ? `${color}18` : "rgba(255,255,255,0.025)",
       color: active ? color : muted,
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
-      fontSize: logo.length > 2 ? 6.5 : 8,
+      fontSize: 8,
       fontWeight: 900,
-      letterSpacing: logo.length > 2 ? "0.02em" : "0.06em",
+      letterSpacing: "0.06em",
       boxShadow: active ? `0 0 10px ${color}33, inset 0 0 8px ${color}14` : "none",
       position: "relative",
     }}>
@@ -536,8 +555,34 @@ function NavLogo({ item, active }) {
         background: color,
         opacity: active ? 1 : 0.45,
       }} />
-      {logo}
+      {Icon ? <Icon size={14} strokeWidth={1.9} /> : logo}
     </span>
+  );
+}
+
+function CommandCapIcon({ size = 14, strokeWidth = 1.9 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M5 12.5c3.4-1.7 10.6-1.7 14 0" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <path d="M7.5 12.2 9.2 7h5.6l1.7 5.2" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 7c1.8-1.1 4.2-1.1 6 0" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <path d="M4 14.5c4.3 1.7 11.7 1.7 16 0" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <circle cx="12" cy="9.7" r="1.1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SlotMachineIcon({ size = 14, strokeWidth = 1.9 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="5" y="6" width="12" height="13" rx="1.8" stroke="currentColor" strokeWidth={strokeWidth} />
+      <path d="M17 9h2.2v5" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="19.2" cy="7" r="1.4" stroke="currentColor" strokeWidth={strokeWidth} />
+      <path d="M7.5 11h7M7.5 15h7" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <circle cx="8.4" cy="11" r=".65" fill="currentColor" />
+      <circle cx="11" cy="11" r=".65" fill="currentColor" />
+      <circle cx="13.6" cy="11" r=".65" fill="currentColor" />
+    </svg>
   );
 }
 
