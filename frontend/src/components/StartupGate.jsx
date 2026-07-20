@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { CheckCircle2, LockKeyhole, Power, ShieldCheck, UserPlus, Wifi, WifiOff } from "lucide-react";
+import {
+  CheckCircle2,
+  LoaderCircle,
+  LockKeyhole,
+  Power,
+  ShieldCheck,
+  UserPlus,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import startupLogo from "../assets/case-capital-startup-logo.png";
 
 const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
@@ -17,7 +26,8 @@ const label = "#c9d0dc";
 export default function StartupGate({ children }) {
   const [auth, setAuth] = useState(() => readAuth());
   const [sessionReady, setSessionReady] = useState(() => sessionStorage.getItem(SESSION_KEY) === "open");
-  const [mode, setMode] = useState(() => (readAuth() ? "login" : "setup"));
+  const [bootOpened, setBootOpened] = useState(() => sessionStorage.getItem(SESSION_KEY) === "open");
+  const [mode] = useState(() => (readAuth() ? "login" : "setup"));
   const [name, setName] = useState(() => readAuth()?.name || "CASE CAPITAL OPERATOR");
   const [code, setCode] = useState("");
   const [confirmCode, setConfirmCode] = useState("");
@@ -25,18 +35,24 @@ export default function StartupGate({ children }) {
   const [backend, setBackend] = useState({ state: "checking", message: "Checking backend link" });
   const [launching, setLaunching] = useState(false);
 
+  const isDesktop = useMemo(() => Boolean(window.__TAURI_INTERNALS__), []);
+
   useEffect(() => {
     checkBackend(setBackend);
   }, []);
 
   useEffect(() => {
+    if (bootOpened || backend.state === "online") return;
+    const id = setInterval(() => checkBackend(setBackend), 2500);
+    return () => clearInterval(id);
+  }, [backend.state, bootOpened]);
+
+  useEffect(() => {
     if (!sessionReady) return;
     setLaunching(true);
-    const id = setTimeout(() => setLaunching(false), 1300);
+    const id = setTimeout(() => setLaunching(false), 1200);
     return () => clearTimeout(id);
   }, [sessionReady]);
-
-  const isDesktop = useMemo(() => Boolean(window.__TAURI_INTERNALS__), []);
 
   if (sessionReady && !launching) {
     return children;
@@ -97,96 +113,38 @@ export default function StartupGate({ children }) {
 
   return (
     <div style={styles.root}>
+      <style>{startupAnimations}</style>
       <div className="crt-vignette" />
       <div className="scanline-overlay" />
       <div className="crt-grain" />
       <div style={styles.grid} />
 
-      <section style={styles.stage}>
-        <div style={styles.brandColumn}>
-          <img src={startupLogo} alt="Case Capital Automated Management" style={styles.logo} />
-          <div style={styles.terminalLine}>
-            <span>CASE CAPITAL TRADING TERMINAL</span>
-            <span style={{ color: accent2 }}>SECURE BOOT</span>
-          </div>
-        </div>
-
-        <form onSubmit={submit} style={styles.panel}>
-          <div style={styles.panelTop}>
-            <div>
-              <div style={styles.kicker}>{mode === "setup" ? "FIRST RUN SECURITY" : "SECURE TERMINAL LOGIN"}</div>
-              <h1 style={styles.title}>{mode === "setup" ? "Create Operator Access" : "Operator Verification"}</h1>
-            </div>
-            <div style={styles.lockBadge}>
-              {mode === "setup" ? <UserPlus size={22} /> : <LockKeyhole size={22} />}
-            </div>
-          </div>
-
-          <div style={styles.bootRail}>
-            <StatusItem icon={<ShieldCheck size={14} />} label="AUTH" value={mode === "setup" ? "FIRST RUN" : "ARMED"} tone={accent} />
-            <StatusItem icon={backend.state === "online" ? <Wifi size={14} /> : <WifiOff size={14} />} label="BACKEND" value={backend.state.toUpperCase()} tone={backend.state === "online" ? "#4ade80" : backend.state === "checking" ? accent : "#f87171"} />
-            <StatusItem icon={<Power size={14} />} label="SHELL" value={isDesktop ? "DESKTOP" : "BROWSER"} tone={accent2} />
-          </div>
-
-          <div style={styles.backendStrip}>
-            <span style={{ color: backend.state === "online" ? "#4ade80" : backend.state === "checking" ? accent : "#f87171" }}>
-              {backend.state === "online" ? "●" : backend.state === "checking" ? "◆" : "■"}
-            </span>
-            <span>{backend.message}</span>
-            <button type="button" onClick={() => checkBackend(setBackend)} style={styles.textButton}>REFRESH</button>
-          </div>
-
-          {mode === "setup" && (
-            <label style={styles.field}>
-              <span>OPERATOR NAME</span>
-              <input value={name} onChange={event => setName(event.target.value)} style={styles.input} autoComplete="username" />
-            </label>
-          )}
-
-          <label style={styles.field}>
-            <span>{mode === "setup" ? "CREATE ACCESS CODE" : "ACCESS CODE"}</span>
-            <input
-              value={code}
-              onChange={event => setCode(event.target.value)}
-              style={styles.input}
-              type="password"
-              autoComplete={mode === "setup" ? "new-password" : "current-password"}
-              autoFocus
-            />
-          </label>
-
-          {mode === "setup" && (
-            <label style={styles.field}>
-              <span>CONFIRM ACCESS CODE</span>
-              <input
-                value={confirmCode}
-                onChange={event => setConfirmCode(event.target.value)}
-                style={styles.input}
-                type="password"
-                autoComplete="new-password"
-              />
-            </label>
-          )}
-
-          {error && <div style={styles.error}>{error}</div>}
-
-          <div style={styles.actions}>
-            <button type="submit" style={styles.primaryButton}>
-              {mode === "setup" ? "CREATE LOGIN" : "UNLOCK TERMINAL"}
-            </button>
-            <button type="button" onClick={forceBoot} style={styles.secondaryButton}>
-              FORCE BACKEND BOOT
-            </button>
-          </div>
-
-          {auth && mode === "login" && (
-            <div style={styles.identity}>
-              <CheckCircle2 size={14} />
-              <span>{auth.name || "CASE CAPITAL OPERATOR"}</span>
-            </div>
-          )}
-        </form>
-      </section>
+      {!bootOpened ? (
+        <BootSplash
+          backend={backend}
+          isDesktop={isDesktop}
+          onRefresh={() => checkBackend(setBackend)}
+          onForceBoot={forceBoot}
+          onOpen={() => setBootOpened(true)}
+        />
+      ) : (
+        <LoginPanel
+          auth={auth}
+          mode={mode}
+          name={name}
+          code={code}
+          confirmCode={confirmCode}
+          error={error}
+          backend={backend}
+          isDesktop={isDesktop}
+          onName={setName}
+          onCode={setCode}
+          onConfirmCode={setConfirmCode}
+          onRefresh={() => checkBackend(setBackend)}
+          onForceBoot={forceBoot}
+          onSubmit={submit}
+        />
+      )}
 
       {launching && (
         <div style={styles.launchOverlay}>
@@ -195,6 +153,152 @@ export default function StartupGate({ children }) {
         </div>
       )}
     </div>
+  );
+}
+
+function BootSplash({ backend, isDesktop, onRefresh, onForceBoot, onOpen }) {
+  const online = backend.state === "online";
+  return (
+    <section style={styles.splashStage}>
+      <div style={styles.heroLogoWrap}>
+        <div style={styles.logoBackdrop} />
+        <img src={startupLogo} alt="Case Capital Automated Management" style={styles.heroLogo} />
+      </div>
+
+      <div style={styles.bootConsole}>
+        <div style={styles.bootHeader}>
+          <span style={{ color: accent2 }}>SYSTEM BOOT</span>
+          <span style={{ color: online ? "#4ade80" : accent }}>{online ? "READY" : "LOADING"}</span>
+        </div>
+        <div style={styles.bootProgress}>
+          <span className={online ? "" : "startup-progress"} style={{ ...styles.progressFill, width: online ? "100%" : "70%" }} />
+        </div>
+        <div style={styles.bootMessage}>
+          <LoaderCircle className={online ? "" : "startup-spin"} size={15} />
+          <span>{online ? "Backend is up and firing." : backend.message}</span>
+        </div>
+        <div style={styles.bootMeta}>
+          <span>{isDesktop ? "DESKTOP SHELL DETECTED" : "BROWSER DEVELOPMENT MODE"}</span>
+          <button type="button" onClick={onRefresh} style={styles.textButton}>REFRESH LINK</button>
+        </div>
+        <div style={styles.splashActions}>
+          <button
+            type="button"
+            onClick={onOpen}
+            disabled={!online}
+            style={{ ...styles.openButton, opacity: online ? 1 : 0.42, cursor: online ? "pointer" : "not-allowed" }}
+          >
+            OPEN TERMINAL
+          </button>
+          {!online && (
+            <button type="button" onClick={onForceBoot} style={styles.secondaryButton}>
+              FORCE BACKEND BOOT
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function LoginPanel({
+  auth,
+  mode,
+  name,
+  code,
+  confirmCode,
+  error,
+  backend,
+  isDesktop,
+  onName,
+  onCode,
+  onConfirmCode,
+  onRefresh,
+  onForceBoot,
+  onSubmit,
+}) {
+  return (
+    <section style={styles.loginStage}>
+      <div style={styles.loginMark}>
+        <img src={startupLogo} alt="Case Capital Automated Management" style={styles.loginLogo} />
+      </div>
+
+      <form onSubmit={onSubmit} style={styles.panel}>
+        <div style={styles.panelTop}>
+          <div>
+            <div style={styles.kicker}>{mode === "setup" ? "FIRST RUN SECURITY" : "SECURE TERMINAL LOGIN"}</div>
+            <h1 style={styles.title}>{mode === "setup" ? "Create Operator Access" : "Operator Verification"}</h1>
+          </div>
+          <div style={styles.lockBadge}>
+            {mode === "setup" ? <UserPlus size={22} /> : <LockKeyhole size={22} />}
+          </div>
+        </div>
+
+        <div style={styles.bootRail}>
+          <StatusItem icon={<ShieldCheck size={14} />} label="AUTH" value={mode === "setup" ? "FIRST RUN" : "ARMED"} tone={accent} />
+          <StatusItem icon={backend.state === "online" ? <Wifi size={14} /> : <WifiOff size={14} />} label="BACKEND" value={backend.state.toUpperCase()} tone={backend.state === "online" ? "#4ade80" : backend.state === "checking" ? accent : "#f87171"} />
+          <StatusItem icon={<Power size={14} />} label="SHELL" value={isDesktop ? "DESKTOP" : "BROWSER"} tone={accent2} />
+        </div>
+
+        <div style={styles.backendStrip}>
+          <span style={{ color: backend.state === "online" ? "#4ade80" : backend.state === "checking" ? accent : "#f87171" }}>
+            {backend.state === "online" ? "ONLINE" : backend.state === "checking" ? "SYNC" : "OFFLINE"}
+          </span>
+          <span>{backend.message}</span>
+          <button type="button" onClick={onRefresh} style={styles.textButton}>REFRESH</button>
+        </div>
+
+        {mode === "setup" && (
+          <label style={styles.field}>
+            <span>OPERATOR NAME</span>
+            <input value={name} onChange={event => onName(event.target.value)} style={styles.input} autoComplete="username" />
+          </label>
+        )}
+
+        <label style={styles.field}>
+          <span>{mode === "setup" ? "CREATE ACCESS CODE" : "ACCESS CODE"}</span>
+          <input
+            value={code}
+            onChange={event => onCode(event.target.value)}
+            style={styles.input}
+            type="password"
+            autoComplete={mode === "setup" ? "new-password" : "current-password"}
+            autoFocus
+          />
+        </label>
+
+        {mode === "setup" && (
+          <label style={styles.field}>
+            <span>CONFIRM ACCESS CODE</span>
+            <input
+              value={confirmCode}
+              onChange={event => onConfirmCode(event.target.value)}
+              style={styles.input}
+              type="password"
+              autoComplete="new-password"
+            />
+          </label>
+        )}
+
+        {error && <div style={styles.error}>{error}</div>}
+
+        <div style={styles.actions}>
+          <button type="submit" style={styles.primaryButton}>
+            {mode === "setup" ? "CREATE LOGIN" : "UNLOCK TERMINAL"}
+          </button>
+          <button type="button" onClick={onForceBoot} style={styles.secondaryButton}>
+            FORCE BACKEND BOOT
+          </button>
+        </div>
+
+        {auth && mode === "login" && (
+          <div style={styles.identity}>
+            <CheckCircle2 size={14} />
+            <span>{auth.name || "CASE CAPITAL OPERATOR"}</span>
+          </div>
+        )}
+      </form>
+    </section>
   );
 }
 
@@ -232,6 +336,20 @@ async function checkBackend(setBackend) {
   }
 }
 
+const startupAnimations = `
+@keyframes startupSpin { to { transform: rotate(360deg); } }
+@keyframes bootPulse { 0%, 100% { opacity: 0.65; } 50% { opacity: 1; } }
+@keyframes progressSweep { 0% { transform: translateX(-70%); } 100% { transform: translateX(70%); } }
+.startup-spin { animation: startupSpin 1.1s linear infinite; }
+.startup-progress::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  animation: progressSweep 1.35s ease-in-out infinite;
+}
+`;
+
 const styles = {
   root: {
     minHeight: "100vh",
@@ -249,7 +367,105 @@ const styles = {
     opacity: 0.55,
     maskImage: "radial-gradient(circle at center, black 0%, black 48%, transparent 78%)",
   },
-  stage: {
+  splashStage: {
+    position: "relative",
+    zIndex: 3,
+    minHeight: "100vh",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 22,
+    padding: "32px 24px",
+  },
+  heroLogoWrap: {
+    width: "min(940px, 88vw)",
+    position: "relative",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  logoBackdrop: {
+    position: "absolute",
+    inset: "-8% -4%",
+    background: "radial-gradient(circle at 50% 50%, rgba(200,168,75,0.14), transparent 44%)",
+    filter: "blur(18px)",
+  },
+  heroLogo: {
+    width: "100%",
+    objectFit: "contain",
+    position: "relative",
+    opacity: 0.9,
+    filter: "contrast(1.05) saturate(0.9) drop-shadow(0 28px 70px rgba(0,0,0,0.65))",
+  },
+  bootConsole: {
+    width: "min(640px, 90vw)",
+    border: "1px solid rgba(200,168,75,0.2)",
+    background: "linear-gradient(180deg, rgba(5,7,12,0.86), rgba(2,4,8,0.92))",
+    boxShadow: "0 24px 90px rgba(0,0,0,0.54)",
+    padding: 18,
+  },
+  bootHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    color: muted,
+    fontSize: 10,
+    letterSpacing: "0.22em",
+    fontWeight: 900,
+    marginBottom: 12,
+  },
+  bootProgress: {
+    height: 8,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.025)",
+    overflow: "hidden",
+    marginBottom: 12,
+  },
+  progressFill: {
+    display: "block",
+    height: "100%",
+    background: `linear-gradient(90deg, ${accent}, ${accent2})`,
+    boxShadow: `0 0 18px ${accent}66`,
+    position: "relative",
+    transition: "width 0.35s ease",
+  },
+  bootMessage: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    color: label,
+    fontSize: 12,
+    letterSpacing: "0.08em",
+    minHeight: 22,
+  },
+  bootMeta: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTop: hairline,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    color: muted,
+    fontSize: 10,
+    letterSpacing: "0.16em",
+  },
+  splashActions: {
+    marginTop: 16,
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 10,
+  },
+  openButton: {
+    background: `linear-gradient(180deg, ${accent}, #9b7a22)`,
+    color: "#05070b",
+    border: `1px solid ${accent}`,
+    minHeight: 46,
+    fontFamily: "JetBrains Mono, Courier New, monospace",
+    fontWeight: 900,
+    letterSpacing: "0.12em",
+  },
+  loginStage: {
     position: "relative",
     zIndex: 3,
     minHeight: "100vh",
@@ -260,25 +476,15 @@ const styles = {
     gap: 14,
     padding: "28px 24px",
   },
-  brandColumn: {
-    width: "min(560px, 76vw)",
+  loginMark: {
+    width: "min(520px, 76vw)",
     textAlign: "center",
   },
-  logo: {
+  loginLogo: {
     width: "100%",
     display: "block",
     objectFit: "contain",
     filter: "contrast(1.04) saturate(0.94) drop-shadow(0 22px 42px rgba(0,0,0,0.45))",
-  },
-  terminalLine: {
-    marginTop: 6,
-    display: "flex",
-    justifyContent: "center",
-    gap: 18,
-    color: muted,
-    fontSize: 9,
-    letterSpacing: "0.22em",
-    fontWeight: 800,
   },
   bootRail: {
     marginBottom: 14,
@@ -352,7 +558,7 @@ const styles = {
   },
   backendStrip: {
     display: "grid",
-    gridTemplateColumns: "16px 1fr auto",
+    gridTemplateColumns: "58px 1fr auto",
     gap: 8,
     alignItems: "center",
     border: hairline,
