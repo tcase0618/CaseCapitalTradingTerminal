@@ -356,7 +356,8 @@ const styles = {
     background: `radial-gradient(circle at 50% 18%, rgba(200,168,75,0.13), transparent 20%), radial-gradient(circle at 50% 70%, rgba(94,234,212,0.055), transparent 26%), linear-gradient(180deg, #06111f 0%, ${pageBg} 52%, #030306 100%)`,
     color: "#f8fafc",
     position: "relative",
-    overflow: "hidden",
+    overflowX: "hidden",
+    overflowY: "auto",
     fontFamily: "JetBrains Mono, Courier New, monospace",
   },
   grid: {
@@ -468,13 +469,14 @@ const styles = {
   loginStage: {
     position: "relative",
     zIndex: 3,
-    minHeight: "100vh",
+    minHeight: "100dvh",
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
     alignItems: "center",
     gap: 14,
-    padding: "28px 24px",
+    padding: "28px 24px 44px",
+    boxSizing: "border-box",
   },
   loginMark: {
     width: "min(520px, 76vw)",
