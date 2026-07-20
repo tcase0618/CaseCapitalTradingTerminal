@@ -137,7 +137,7 @@ function IndicatorTile({ row }) {
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
         <div style={{ color: labelLight, fontSize: 12, fontWeight: 900, letterSpacing: "0.08em" }}>{row.label}</div>
         <div style={{ color, fontSize: 10, fontWeight: 900, letterSpacing: "0.12em" }}>
-          {row.bias.toUpperCase()} / {row.freshness.toUpperCase()}
+          {row.bias.toUpperCase()} / {row.freshness.toUpperCase()}{row.proxy ? " / PROXY" : ""}
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "end" }}>
@@ -163,7 +163,7 @@ function MacroTable({ rows }) {
           {rows.map(row => (
             <tr key={row.key} style={{ borderTop: hairline }}>
               <td style={{ ...td, color: labelLight, fontWeight: 900 }}>{row.label}</td>
-              <td style={{ ...td, color: biasColor(row.bias, row.freshness), fontWeight: 900 }}>{row.freshness.toUpperCase()}</td>
+              <td style={{ ...td, color: biasColor(row.bias, row.freshness), fontWeight: 900 }}>{row.freshness.toUpperCase()}{row.proxy ? " / PROXY" : ""}</td>
               <td style={td}>{formatValue(row)}</td>
               <td style={td}>{row.date || "-"}</td>
               <td style={td}>{row.source}</td>

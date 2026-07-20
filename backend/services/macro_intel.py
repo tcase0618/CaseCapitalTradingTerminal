@@ -68,15 +68,41 @@ INDICATOR_META = {
 }
 
 FRED_REGION_SERIES = {
+    ("CHINA", "ppi"): "CHNPIEATI01GYM",
+    ("GERMANY", "ppi"): "DEUPPDMMINMEI",
     ("GERMANY", "bond_yield"): "IRLTLT01DEM156N",
+    ("INDIA", "bond_yield"): "INDIRLTLT01STM",
+    ("JAPAN", "ppi"): "JPNPPDMMINMEI",
     ("JAPAN", "bond_yield"): "IRLTLT01JPM156N",
+    ("SOUTH_KOREA", "ppi"): "KORPPDMMINMEI",
     ("SOUTH_KOREA", "bond_yield"): "IRLTLT01KRM156N",
     ("TAIWAN", "gdp_growth"): "RGDPNATWA666NRUG",
+    ("TAIWAN", "cpi"): "TWNPCPIPCPPPT",
     ("TAIWAN", "debt_to_gdp"): "GGGDTATWA188N",
 }
 
 FRED_REGION_TRANSFORMS = {
+    ("GERMANY", "ppi"): "yoy",
+    ("JAPAN", "ppi"): "yoy",
+    ("SOUTH_KOREA", "ppi"): "yoy",
     ("TAIWAN", "gdp_growth"): "yoy",
+}
+
+WB_PROXY_SERIES = {
+    "pmi": {"indicator": "IC.BUS.EASE.XQ", "label": "Business Conditions Proxy"},
+    "wage_growth": {"indicator": "NY.GDP.PCAP.KD.ZG", "label": "Real GDP Per Capita Growth Proxy"},
+    "job_creation": {"indicator": "SL.EMP.TOTL.SP.ZS", "label": "Employment Ratio Proxy", "unit": "%"},
+    "policy_rate": {"indicator": "FR.INR.RINR", "label": "Real Interest Rate Proxy"},
+    "bond_yield": {"indicator": "FR.INR.LEND", "label": "Lending Rate Proxy"},
+    "ppi": {"indicator": "FP.WPI.TOTL.ZG", "label": "Wholesale Price Inflation Proxy"},
+    "debt_to_gdp": {"indicator": "GC.DOD.TOTL.GD.ZS", "label": "Central Government Debt Proxy"},
+}
+
+REGION_PROXY_SERIES = {
+    ("WORLD", "policy_rate"): {"indicator": "FR.INR.RINR", "label": "World Real Interest Rate Proxy"},
+    ("WORLD", "bond_yield"): {"indicator": "FR.INR.LEND", "label": "World Lending Rate Proxy"},
+    ("WORLD", "current_account"): {"indicator": "BN.CAB.XOKA.GD.ZS", "label": "World Current Account Proxy"},
+    ("WORLD", "debt_to_gdp"): {"indicator": "GC.DOD.TOTL.GD.ZS", "label": "World Government Debt Proxy"},
 }
 
 
@@ -131,6 +157,23 @@ async def _world_bank_latest(country: str, indicator: str) -> dict[str, Any] | N
     except Exception:
         return None
     return None
+
+
+async def _world_bank_proxy(region: dict[str, Any], indicator_key: str) -> dict[str, Any] | None:
+    country = region.get("wb")
+    if not country or country == "TWN":
+        return None
+    proxy = REGION_PROXY_SERIES.get((region["key"], indicator_key)) or WB_PROXY_SERIES.get(indicator_key)
+    if not proxy:
+        return None
+    row = await _world_bank_latest(country, proxy["indicator"])
+    if not row:
+        return None
+    row["source"] = f"World Bank proxy:{proxy['label']}"
+    row["proxy"] = True
+    if proxy.get("unit"):
+        row["unit"] = proxy["unit"]
+    return row
 
 
 def _transform_fred(rows: list[dict[str, Any]], transform: str | None) -> float | None:
@@ -241,12 +284,107 @@ def _indicator_row(indicator_key: str, data: dict[str, Any] | None) -> dict[str,
         "key": indicator_key,
         "label": meta["label"],
         "value": round(value, 2) if value is not None else None,
-        "unit": meta["unit"],
+        "unit": (data or {}).get("unit") or meta["unit"],
         "date": date_value,
         "source": source,
         "freshness": fresh,
         "bias": bias,
+        "proxy": bool((data or {}).get("proxy")),
     }
+
+
+def _latest_date(rows: list[dict[str, Any]]) -> str | None:
+    dates = sorted([str(row.get("date")) for row in rows if row.get("date")], reverse=True)
+    return dates[0] if dates else None
+
+
+def _row_value(rows_by_key: dict[str, dict[str, Any]], key: str) -> float | None:
+    return _to_float((rows_by_key.get(key) or {}).get("value"))
+
+
+def _case_proxy_row(indicator_key: str, rows_by_key: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    source_rows = [row for row in rows_by_key.values() if row.get("value") is not None and row.get("freshness") != "stale"]
+    if not source_rows:
+        return None
+    gdp = _row_value(rows_by_key, "gdp_growth")
+    industrial = _row_value(rows_by_key, "industrial_production")
+    retail = _row_value(rows_by_key, "retail_sales")
+    unemployment = _row_value(rows_by_key, "unemployment")
+    cpi = _row_value(rows_by_key, "cpi")
+    ppi = _row_value(rows_by_key, "ppi")
+    current_account = _row_value(rows_by_key, "current_account")
+    debt = _row_value(rows_by_key, "debt_to_gdp")
+    bond = _row_value(rows_by_key, "bond_yield")
+    date = _latest_date(source_rows)
+    value = None
+    unit = INDICATOR_META[indicator_key]["unit"]
+    source = "Case macro model proxy from official rows"
+    if indicator_key == "pmi":
+        parts = [v for v in (gdp, industrial, retail) if v is not None]
+        if parts:
+            value = max(35.0, min(65.0, 50.0 + (sum(parts) / len(parts))))
+    elif indicator_key == "wage_growth":
+        if gdp is not None and cpi is not None:
+            value = max(-5.0, min(12.0, (gdp * 0.45) + cpi))
+        elif gdp is not None:
+            value = max(-5.0, min(12.0, gdp * 0.65))
+    elif indicator_key == "job_creation":
+        unit = "score"
+        if unemployment is not None:
+            value = max(-250.0, min(250.0, (5.0 - unemployment) * 60.0))
+        elif gdp is not None:
+            value = max(-250.0, min(250.0, gdp * 25.0))
+    elif indicator_key == "ppi":
+        if cpi is not None:
+            value = cpi
+            source = "Case macro model proxy from CPI"
+    elif indicator_key == "policy_rate":
+        if bond is not None:
+            value = bond
+            source = "Case macro model proxy from sovereign yield"
+        elif cpi is not None:
+            value = max(0.0, cpi + 1.0)
+            source = "Case macro model proxy from inflation"
+    elif indicator_key == "current_account":
+        if current_account is not None:
+            value = current_account
+        elif gdp is not None and retail is not None:
+            value = max(-8.0, min(8.0, (gdp - retail) * 0.4))
+    elif indicator_key == "debt_to_gdp":
+        if debt is not None:
+            value = debt
+        elif current_account is not None:
+            value = max(25.0, min(180.0, 90.0 - (current_account * 5.0)))
+            source = "Case macro model proxy from current account balance"
+        elif gdp is not None:
+            value = max(25.0, min(180.0, 95.0 - (gdp * 4.0)))
+    elif indicator_key == "bond_yield":
+        if bond is not None:
+            value = bond
+        elif cpi is not None and gdp is not None:
+            value = max(0.0, min(15.0, cpi + (gdp * 0.25) + 1.0))
+            source = "Case macro model proxy from inflation and growth"
+    elif indicator_key == "industrial_production" and gdp is not None:
+        value = gdp
+        source = "Case macro model proxy from GDP growth"
+    elif indicator_key == "retail_sales" and gdp is not None:
+        value = max(-10.0, min(15.0, gdp * 0.85))
+        source = "Case macro model proxy from GDP growth"
+    elif indicator_key == "unemployment" and gdp is not None:
+        value = max(2.0, min(12.0, 6.0 - (gdp * 0.25)))
+        source = "Case macro model proxy from GDP growth"
+    elif indicator_key == "cpi" and gdp is not None:
+        value = max(-3.0, min(12.0, gdp * 0.35))
+        source = "Case macro model proxy from GDP growth"
+    if value is None:
+        return None
+    return _indicator_row(indicator_key, {
+        "value": value,
+        "date": date,
+        "source": source,
+        "unit": unit,
+        "proxy": True,
+    })
 
 
 async def _build_indicator(region: dict[str, Any], indicator_key: str) -> dict[str, Any]:
@@ -260,6 +398,9 @@ async def _build_indicator(region: dict[str, Any], indicator_key: str) -> dict[s
         wb = await _world_bank_latest(wb_country, wb_code)
         if wb:
             return _indicator_row(indicator_key, wb)
+    proxy = await _world_bank_proxy(region, indicator_key)
+    if proxy:
+        return _indicator_row(indicator_key, proxy)
     return _indicator_row(indicator_key, None)
 
 
@@ -268,20 +409,25 @@ def _region_signal(indicators: list[dict[str, Any]]) -> dict[str, Any]:
     fresh_count = 0
     missing_count = 0
     stale_count = 0
+    proxy_count = 0
     for row in indicators:
         if row["freshness"] == "fresh":
             fresh_count += 1
         if row["freshness"] == "stale":
             stale_count += 1
+        if row.get("proxy"):
+            proxy_count += 1
         if row["bias"] == "missing":
             missing_count += 1
             continue
         if row["bias"] == "bullish":
-            score += 7 if row["freshness"] == "fresh" else 3
+            score += 2 if row.get("proxy") else (7 if row["freshness"] == "fresh" else 3)
         elif row["bias"] == "bearish":
-            score -= 8 if row["freshness"] == "fresh" else 4
+            score -= 3 if row.get("proxy") else (8 if row["freshness"] == "fresh" else 4)
     if missing_count > 5:
         score -= 4
+    if proxy_count >= 6:
+        score -= 6
     score = max(0, min(100, score))
     if score >= 58:
         label, icon, color = "BULLISH", "UP", "#4ade80"
@@ -294,13 +440,19 @@ def _region_signal(indicators: list[dict[str, Any]]) -> dict[str, Any]:
         "icon": icon,
         "color": color,
         "score": score,
-        "reason": f"{fresh_count} fresh, {stale_count} stale, {missing_count} missing indicators. Score uses growth, labor, inflation, policy, external balance, debt, and bond-yield signals.",
+        "reason": f"{fresh_count} fresh, {stale_count} stale, {missing_count} missing, {proxy_count} proxy indicators. Score uses growth, labor, inflation, policy, external balance, debt, and bond-yield signals.",
     }
 
 
 async def _build_region(region: dict[str, Any]) -> dict[str, Any]:
     rows = await asyncio.gather(*[_build_indicator(region, key) for group in CATEGORIES for key in group["indicators"]])
     by_key = {row["key"]: row for row in rows}
+    for key, row in list(by_key.items()):
+        if row.get("bias") == "missing":
+            proxy_row = _case_proxy_row(key, by_key)
+            if proxy_row:
+                by_key[key] = proxy_row
+    rows = [by_key[key] for group in CATEGORIES for key in group["indicators"]]
     categories = [
         {
             "key": group["key"],
