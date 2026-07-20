@@ -27,6 +27,33 @@ def _now() -> datetime:
 async def _fetch_close_on_or_after(ticker: str, target_date: datetime) -> float | None:
     """Get the closing price on `target_date` or the next trading day."""
     try:
+        from . import london_strategic_edge as lse_svc
+
+        if lse_svc.configured():
+            payload = await lse_svc.candles(
+                ticker,
+                timeframe="1d",
+                start=(target_date - timedelta(days=2)).date().isoformat(),
+                end=(target_date + timedelta(days=10)).date().isoformat(),
+                limit=20,
+                order="asc",
+            )
+            for row in payload.get("rows") or []:
+                raw_ts = row.get("timestamp") or row.get("time") or row.get("date") or row.get("datetime")
+                if not raw_ts:
+                    continue
+                try:
+                    row_date = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).date()
+                except Exception:
+                    row_date = datetime.fromisoformat(str(raw_ts)[:10]).date()
+                if row_date >= target_date.date():
+                    close = row.get("close") or row.get("c") or row.get("Close")
+                    if close is not None:
+                        return float(close)
+    except Exception as e:
+        logger.warning("LSE close lookup %s @ %s failed: %s", ticker, target_date, e)
+
+    try:
         import yfinance as yf
 
         def _sync():

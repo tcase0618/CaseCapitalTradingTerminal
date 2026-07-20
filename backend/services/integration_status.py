@@ -159,6 +159,19 @@ async def integration_status() -> list[dict[str, Any]]:
             reason=str(exc)[:120],
         ))
 
+    from . import london_strategic_edge as lse_svc
+
+    lse_probe = await lse_svc.health_probe()
+    out.append(_row(
+        "london_strategic_edge",
+        "London Strategic Edge",
+        bool(lse_probe.get("ok")),
+        last=_now_iso() if lse_probe.get("ok") else None,
+        detail="candles/options/flow/fundamentals/macro provider",
+        quality="live" if lse_probe.get("ok") else "down",
+        reason=None if lse_probe.get("ok") else lse_probe.get("reason"),
+    ))
+
     sec_last = await _latest("sec_filings", ["accepted_at", "updated", "created_at"])
     sec_last = sec_last or await _last_activity(["EDGAR poll"])
     sec_ok = await _ping(

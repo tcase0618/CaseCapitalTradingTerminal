@@ -123,6 +123,68 @@ async def admin_backend_refresh():
     return payload
 
 
+@api.get("/data/lse/applicability")
+async def lse_applicability():
+    from services import london_strategic_edge as lse_svc
+    return {"provider": "london_strategic_edge", "uses": lse_svc.applicability_map()}
+
+
+@api.get("/data/lse/health")
+async def lse_health():
+    from services import london_strategic_edge as lse_svc
+    return await lse_svc.health_probe()
+
+
+@api.get("/data/lse/candles/{symbol}")
+async def lse_candles(
+    symbol: str,
+    timeframe: str = "1d",
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 5000,
+    order: str = "asc",
+    dataset: str | None = None,
+):
+    from services import london_strategic_edge as lse_svc
+    return await lse_svc.candles(symbol, timeframe, start, end, limit, order, dataset)
+
+
+@api.get("/data/lse/options/{underlying}")
+async def lse_options(
+    underlying: str,
+    option_type: str | None = None,
+    min_dte: int | None = None,
+    max_dte: int | None = None,
+    limit: int = 5000,
+):
+    from services import london_strategic_edge as lse_svc
+    return await lse_svc.options_chain(underlying, option_type, min_dte, max_dte, limit)
+
+
+@api.get("/data/lse/options_flow")
+async def lse_options_flow(
+    underlying: str | None = None,
+    option_type: str | None = None,
+    min_premium: float | None = None,
+    max_dte: int | None = None,
+    limit: int = 5000,
+):
+    from services import london_strategic_edge as lse_svc
+    return await lse_svc.options_flow(underlying, option_type, min_premium, max_dte, limit)
+
+
+@api.get("/data/lse/ticker/{symbol}")
+async def lse_ticker(symbol: str):
+    from services import london_strategic_edge as lse_svc
+    return await lse_svc.ticker_context(symbol)
+
+
+@api.get("/data/lse/macro")
+async def lse_macro(limit: int = 100):
+    from services import london_strategic_edge as lse_svc
+    return await lse_svc.macro_context(limit)
+
+
 @api.get("/data/free/catalog")
 async def free_data_catalog():
     from services import free_data
