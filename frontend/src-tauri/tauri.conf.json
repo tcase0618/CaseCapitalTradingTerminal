@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.casecapital.tradingterminal",
   "build": {
-    "beforeDevCommand": "set \"REACT_APP_BACKEND_URL=http://localhost:8001\" && npm start",
+    "beforeDevCommand": "set \"REACT_APP_BACKEND_URL=http://127.0.0.1:8001\" && npm start",
     "devUrl": "http://localhost:3000",
-    "beforeBuildCommand": "set \"REACT_APP_BACKEND_URL=http://localhost:8001\" && npm run build",
+    "beforeBuildCommand": "set \"REACT_APP_BACKEND_URL=http://127.0.0.1:8001\" && npm run build",
     "frontendDist": "../build"
   },
   "app": {

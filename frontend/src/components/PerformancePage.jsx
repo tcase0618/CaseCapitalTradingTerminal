@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid } from "recharts";
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, LineChart, Line, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
@@ -13,6 +13,7 @@ export default function PerformancePage() {
   const [tracker, setTracker] = useState(null);
   const [curve, setCurve] = useState(null);
   const [optionsCurve, setOptionsCurve] = useState(null);
+  const [benchmarkCurve, setBenchmarkCurve] = useState(null);
   const [curveDays, setCurveDays] = useState(90);
   const [seeding, setSeeding] = useState(false);
   const [refreshingPrices, setRefreshingPrices] = useState(false);
@@ -25,6 +26,7 @@ export default function PerformancePage() {
     axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
     axios.get(`${API}/signals/curve?days=${curveDays}`).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
     axios.get(`${API}/signals/options_curve?days=${curveDays}`).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
+    axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
     axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
   }, [curveDays]);
   useEffect(() => {
@@ -267,6 +269,13 @@ export default function PerformancePage() {
       />
 
 
+      <BenchmarkCurve
+        data={benchmarkCurve}
+        days={curveDays}
+        setDays={setCurveDays}
+      />
+
+
       <Card title="SIGNAL PERFORMANCE — RETURNS BY COMBINATION">
         {signals.length === 0 ? (
           <div style={{ color: muted, fontSize: 13, padding: "8px 0" }}>
@@ -422,6 +431,95 @@ const btnGhost = (loading) => ({
   padding: "8px 12px", cursor: loading ? "wait" : "pointer",
   letterSpacing: "0.12em", fontFamily: "Courier New", fontWeight: 700,
 });
+
+function BenchmarkCurve({ data, days, setDays }) {
+  const curve = data?.curve || [];
+  const latest = curve[curve.length - 1] || {};
+  return (
+    <Card title={`TOTAL PERFORMANCE VS S&P 500 — ${days}D · BENCHMARK ${data?.benchmark || "SPY"}`}
+      action={
+        <div style={{ display: "flex", gap: 6 }}>
+          {[30, 60, 90, 180].map(d => (
+            <button key={d} data-testid={`benchmark-curve-range-${d}`} onClick={() => setDays(d)}
+              style={{
+                background: days === d ? "rgba(200,168,75,0.12)" : "transparent",
+                border: `0.5px solid ${days === d ? accent : tokens.dim}`,
+                color: days === d ? accent : tokens.muted,
+                fontSize: 10, padding: "4px 10px", cursor: "pointer",
+                letterSpacing: "0.1em", fontFamily: "Courier New", fontWeight: 700,
+              }}>{d}D</button>
+          ))}
+        </div>
+      }>
+      {curve.length === 0 ? (
+        <div style={{ color: muted, fontSize: 13, padding: "12px 0" }}>
+          Benchmark comparison is waiting on terminal performance history and SPY price history.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 32, marginBottom: 14, paddingLeft: 8, flexWrap: "wrap" }}>
+            <Metric label="TERMINAL TOTAL" value={`${fmt(latest.terminal_total_pct)}%`} color={pctColor(latest.terminal_total_pct)} />
+            <Metric label="S&P 500 / SPY" value={`${fmt(latest.spy_return_pct)}%`} color={pctColor(latest.spy_return_pct)} />
+            <Metric
+              label="RELATIVE EDGE"
+              value={`${fmt(latest.relative_pct)}%`}
+              color={pctColor(latest.relative_pct)}
+            />
+            <Metric
+              label="POSITIONS"
+              value={`${(latest.stock_positions || 0) + (latest.options_positions || 0)}`}
+              color="#fff"
+            />
+          </div>
+          <div style={{ width: "100%", height: 310, marginLeft: -8 }}>
+            <ResponsiveContainer>
+              <LineChart data={curve} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
+                <XAxis dataKey="date" stroke="#374151"
+                  tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                  tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                  interval="preserveStartEnd" minTickGap={50} />
+                <YAxis stroke="#374151" tickFormatter={(v) => `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}%`}
+                  tick={{ fill: "#4a5568", fontSize: 10, fontFamily: "Courier New" }}
+                  tickLine={false} axisLine={{ stroke: "rgba(255,255,255,0.05)" }}
+                  width={70} />
+                <ReferenceLine y={0} stroke="#374151" strokeDasharray="3 3" />
+                <Tooltip
+                  contentStyle={{
+                    background: "#0c0c12", border: `0.5px solid ${accent}66`,
+                    fontSize: 11, fontFamily: "Courier New", color: "#e5e7eb",
+                    letterSpacing: "0.04em",
+                  }}
+                  formatter={(v, name) => [
+                    v == null ? "—" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`,
+                    name === "terminal_total_pct" ? "TERMINAL TOTAL" : name === "spy_return_pct" ? "S&P 500 / SPY" : "RELATIVE EDGE",
+                  ]}
+                  labelFormatter={(l) => `${l}`}
+                />
+                <Legend wrapperStyle={{ color: tokens.labelLight, fontSize: 10, letterSpacing: "0.1em" }} />
+                <Line type="monotone" dataKey="terminal_total_pct" name="TERMINAL TOTAL" stroke={accent} strokeWidth={2.4} dot={false} connectNulls />
+                <Line type="monotone" dataKey="spy_return_pct" name="S&P 500 / SPY" stroke="#9ca3af" strokeWidth={1.8} dot={false} connectNulls />
+                <Line type="monotone" dataKey="relative_pct" name="RELATIVE EDGE" stroke="#5eead4" strokeWidth={1.4} strokeDasharray="5 5" dot={false} connectNulls />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ fontSize: 9, color: muted, marginTop: 10, letterSpacing: "0.06em" }}>
+            Terminal total blends available equity and options performance curves by date. Benchmark uses SPY as the free S&P 500 proxy.
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function Metric({ label, value, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 9, color: tokens.dim, letterSpacing: "0.14em" }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color, fontFamily: "Courier New" }}>{value}</div>
+    </div>
+  );
+}
 
 function PerfCurve({ title, curve, days, setDays, gradId, strokeColor,
                      testidPrefix, emptyMsg, extraStats }) {

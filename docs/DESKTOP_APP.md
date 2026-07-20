@@ -7,7 +7,7 @@ The desktop app is a Tauri shell around the existing React frontend.
 - Name: `CaseCapitalTradingTerminal`
 - Identifier: `com.casecapital.tradingterminal`
 - Frontend: React/CRACO build from `frontend/build`
-- Backend V1: local FastAPI process at `http://localhost:8001`
+- Backend V1: local FastAPI process at `http://127.0.0.1:8001`
 
 ## Commands
 

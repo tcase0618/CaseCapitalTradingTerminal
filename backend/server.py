@@ -356,6 +356,13 @@ async def signals_options_curve(days: int = 90):
     return {"days": days, "curve": await pnl_tracker.daily_options_pnl_curve(days=days)}
 
 
+@api.get("/signals/benchmark_curve")
+async def signals_benchmark_curve(days: int = 90):
+    """Total terminal performance versus SPY as the S&P 500 proxy."""
+    from services import pnl_tracker
+    return await pnl_tracker.daily_total_vs_spy_curve(days=days)
+
+
 @api.post("/admin/refresh_prices")
 async def admin_refresh_prices():
     """Refresh CURRENT prices for every tracked ticker (yfinance batch +

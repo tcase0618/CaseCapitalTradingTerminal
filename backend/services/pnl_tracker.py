@@ -625,6 +625,71 @@ async def daily_options_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
     return out
 
 
+async def daily_total_vs_spy_curve(days: int = 90) -> dict[str, Any]:
+    """Compare total terminal performance against SPY as the S&P 500 proxy.
+
+    The terminal line blends the available equity signal curve and options
+    proxy curve by date. SPY is normalized to the first available close in the
+    same chart window.
+    """
+    stock_curve = await daily_pnl_curve(days=days)
+    options_curve = await daily_options_pnl_curve(days=days)
+    if not stock_curve and not options_curve:
+        return {"benchmark": "SPY", "curve": [], "source": pricer.source_label()}
+
+    by_date: dict[str, dict[str, Any]] = {}
+    for row in stock_curve:
+        by_date.setdefault(row["date"], {})["stock_gain_pct"] = row.get("avg_gain_pct")
+        by_date[row["date"]]["stock_positions"] = row.get("positions", 0)
+    for row in options_curve:
+        by_date.setdefault(row["date"], {})["options_gain_pct"] = row.get("avg_gain_pct")
+        by_date[row["date"]]["options_positions"] = row.get("positions", 0)
+
+    dates = sorted(by_date.keys())
+    if not dates:
+        return {"benchmark": "SPY", "curve": [], "source": pricer.source_label()}
+
+    spy_history = await pricer.get_history("SPY", days=days + 10)
+    spy_dates = sorted(d for d in spy_history.keys() if dates[0] <= d <= dates[-1])
+    spy_base = spy_history.get(spy_dates[0]) if spy_dates else None
+
+    out: list[dict[str, Any]] = []
+    latest_spy_close = None
+    for d in dates:
+        if d in spy_history:
+            latest_spy_close = spy_history[d]
+        vals = [
+            v for v in [
+                by_date[d].get("stock_gain_pct"),
+                by_date[d].get("options_gain_pct"),
+            ]
+            if v is not None
+        ]
+        total = sum(vals) / len(vals) if vals else None
+        spy_return = (
+            ((latest_spy_close - spy_base) / spy_base * 100.0)
+            if spy_base and latest_spy_close
+            else None
+        )
+        out.append({
+            "date": d,
+            "terminal_total_pct": round(total, 2) if total is not None else None,
+            "spy_return_pct": round(spy_return, 2) if spy_return is not None else None,
+            "relative_pct": round(total - spy_return, 2) if total is not None and spy_return is not None else None,
+            "stock_gain_pct": by_date[d].get("stock_gain_pct"),
+            "options_gain_pct": by_date[d].get("options_gain_pct"),
+            "stock_positions": by_date[d].get("stock_positions", 0),
+            "options_positions": by_date[d].get("options_positions", 0),
+        })
+
+    return {
+        "benchmark": "SPY",
+        "source": pricer.source_label(),
+        "days": days,
+        "curve": out,
+    }
+
+
 async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
     """v5.1 — adds hold-window tracking + peak-gain-within-window.
     Peak Gain is capped at the recommended hold window's end. After the window

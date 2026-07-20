@@ -27,7 +27,7 @@ http://localhost:3000
 Backend API:
 
 ```text
-http://localhost:8001/api/status
+http://127.0.0.1:8001/api/status
 ```
 
 ## Manual Local Run
@@ -57,7 +57,7 @@ yarn start
 For local frontend development, `frontend/.env` should contain:
 
 ```text
-REACT_APP_BACKEND_URL=http://localhost:8001
+REACT_APP_BACKEND_URL=http://127.0.0.1:8001
 ```
 
 For a same-domain cloud deployment behind a proxy, leave

@@ -18,6 +18,7 @@ import {
   Phone,
   Pill,
   Radar,
+  RefreshCw,
   Video,
 } from "lucide-react";
 import terminalLogo from "../assets/case-terminal-logo.png";
@@ -511,7 +512,31 @@ export function CrtShell({ title, children, headerRight = null }) {
                 {title}
               </div>
             </div>
-            <div className="fade-in fade-in-1">{headerRight}</div>
+            <div className="fade-in fade-in-1" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                data-testid="global-refresh-tab"
+                title="Refresh this terminal page"
+                onClick={() => window.location.reload()}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  minHeight: 34,
+                  background: "rgba(255,255,255,0.018)",
+                  border: `0.5px solid ${accent2}66`,
+                  color: accent2,
+                  padding: "8px 11px",
+                  cursor: "pointer",
+                  fontSize: 10,
+                  letterSpacing: "0.12em",
+                  fontFamily: "JetBrains Mono, Courier New",
+                  fontWeight: 800,
+                }}>
+                <RefreshCw size={13} strokeWidth={2} />
+                REFRESH
+              </button>
+              {headerRight}
+            </div>
           </div>
 
           {/* Page body */}
