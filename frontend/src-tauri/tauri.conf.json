@@ -1,0 +1,43 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "CaseCapitalTradingTerminal",
+  "version": "0.1.0",
+  "identifier": "com.casecapital.tradingterminal",
+  "build": {
+    "beforeDevCommand": "set \"REACT_APP_BACKEND_URL=http://localhost:8001\" && npm start",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "set \"REACT_APP_BACKEND_URL=http://localhost:8001\" && npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "CaseCapitalTradingTerminal",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1180,
+        "minHeight": 760,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Case Capital",
+    "category": "Finance",
+    "shortDescription": "Case Capital trading terminal",
+    "longDescription": "CaseCapitalTradingTerminal desktop shell for the Case Capital local trading platform.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

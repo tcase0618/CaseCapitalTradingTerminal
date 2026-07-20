@@ -58,7 +58,9 @@
   "scripts": {
     "start": "craco start",
     "build": "craco build",
-    "test": "craco test"
+    "test": "craco test",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
   },
   "browserslist": {
     "production": [
@@ -76,6 +78,7 @@
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@craco/craco": "^7.1.0",
     "@eslint/js": "9.23.0",
+    "@tauri-apps/cli": "^2.11.4",
     "ajv": "^8.20.0",
     "autoprefixer": "^10.4.20",
     "dotenv": "^16.4.7",
