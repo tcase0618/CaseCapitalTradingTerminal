@@ -141,8 +141,14 @@ function IndicatorTile({ row }) {
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "end" }}>
-        <div style={{ color, fontSize: 26, fontWeight: 900, fontFamily: "Courier New" }}>
-          {formatValue(row)}
+        <div>
+          <div style={{ color, fontSize: 26, fontWeight: 900, fontFamily: "Courier New", display: "flex", alignItems: "center", gap: 8 }}>
+            {formatValue(row)}
+            <TrendArrow row={row} />
+          </div>
+          <div style={{ color: muted, fontSize: 10, marginTop: 4 }}>
+            {row.previous_value != null ? `PRIOR ${formatValue({ ...row, value: row.previous_value })}${row.previous_date ? ` | ${row.previous_date}` : ""}` : "NO PRIOR PRINT"}
+          </div>
         </div>
         <div style={{ textAlign: "right", color: muted, fontSize: 10, lineHeight: 1.5 }}>
           <div>{row.date || "NO DATE"}</div>
@@ -158,13 +164,14 @@ function MacroTable({ rows }) {
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
-        <thead><tr>{["INDICATOR", "STATUS", "VALUE", "DATE", "SOURCE", "WHY IT MATTERS"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+        <thead><tr>{["INDICATOR", "STATUS", "VALUE", "TREND", "DATE", "SOURCE", "WHY IT MATTERS"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
         <tbody>
           {rows.map(row => (
             <tr key={row.key} style={{ borderTop: hairline }}>
               <td style={{ ...td, color: labelLight, fontWeight: 900 }}>{row.label}</td>
               <td style={{ ...td, color: biasColor(row.bias, row.freshness), fontWeight: 900 }}>{row.freshness.toUpperCase()}{row.proxy ? " / PROXY" : ""}</td>
               <td style={td}>{formatValue(row)}</td>
+              <td style={{ ...td, color: trendColor(row.trend) }}>{trendLabel(row)}</td>
               <td style={td}>{row.date || "-"}</td>
               <td style={td}>{row.source}</td>
               <td style={{ ...td, color: muted }}>{explain(row.key)}</td>
@@ -174,6 +181,34 @@ function MacroTable({ rows }) {
       </table>
     </div>
   );
+}
+
+function TrendArrow({ row }) {
+  const color = trendColor(row.trend);
+  return (
+    <span title={trendLabel(row)} style={{
+      color,
+      fontSize: 18,
+      lineHeight: 1,
+      fontWeight: 900,
+      textShadow: row.trend === "unknown" ? "none" : `0 0 8px ${color}66`,
+    }}>
+      {row.trend === "up" ? "↑" : row.trend === "down" ? "↓" : row.trend === "flat" ? "→" : "·"}
+    </span>
+  );
+}
+
+function trendColor(trend) {
+  if (trend === "up") return "#4ade80";
+  if (trend === "down") return "#f87171";
+  if (trend === "flat") return "#fbbf24";
+  return muted;
+}
+
+function trendLabel(row) {
+  if (row.delta == null) return "NO PRIOR";
+  const sign = Number(row.delta) > 0 ? "+" : "";
+  return `${row.trend?.toUpperCase() || "FLAT"} ${sign}${row.delta}`;
 }
 
 function staleRows(region) {

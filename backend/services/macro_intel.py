@@ -147,13 +147,25 @@ async def _world_bank_latest(country: str, indicator: str) -> dict[str, Any] | N
     try:
         data = await _get_json(
             f"{WORLD_BANK_BASE}/country/{country}/indicator/{indicator}",
-            {"format": "json", "per_page": 8, "mrnev": 1},
+            {"format": "json", "per_page": 8},
         )
         rows = data[1] if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list) else []
+        numeric_rows = []
         for row in rows:
             value = _to_float(row.get("value"))
             if value is not None:
-                return {"value": value, "date": str(row.get("date")), "source": "World Bank", "raw": row}
+                numeric_rows.append(row)
+        if numeric_rows:
+            row = numeric_rows[0]
+            previous = _to_float(numeric_rows[1].get("value")) if len(numeric_rows) > 1 else None
+            return {
+                "value": _to_float(row.get("value")),
+                "previous_value": previous,
+                "previous_date": str(numeric_rows[1].get("date")) if len(numeric_rows) > 1 else None,
+                "date": str(row.get("date")),
+                "source": "World Bank",
+                "raw": row,
+            }
     except Exception:
         return None
     return None
@@ -199,6 +211,12 @@ def _transform_fred(rows: list[dict[str, Any]], transform: str | None) -> float 
     return latest
 
 
+def _fred_value_at(rows: list[dict[str, Any]], index: int, transform: str | None) -> float | None:
+    if index < 0 or index >= len(rows):
+        return None
+    return _transform_fred(rows[index:], transform)
+
+
 async def _fred_indicator(region_key: str, indicator_key: str, meta: dict[str, Any]) -> dict[str, Any] | None:
     series = FRED_REGION_SERIES.get((region_key, indicator_key))
     if region_key == "US":
@@ -207,11 +225,14 @@ async def _fred_indicator(region_key: str, indicator_key: str, meta: dict[str, A
         return None
     try:
         rows = await _fred_observations(series, limit=30)
-        value = _transform_fred(rows, FRED_REGION_TRANSFORMS.get((region_key, indicator_key), meta.get("transform")))
+        transform = FRED_REGION_TRANSFORMS.get((region_key, indicator_key), meta.get("transform"))
+        value = _transform_fred(rows, transform)
         if value is None:
             return None
         return {
             "value": value,
+            "previous_value": _fred_value_at(rows, 1, transform),
+            "previous_date": str(rows[1].get("date") or "") if len(rows) > 1 else None,
             "date": str(rows[0].get("date") or ""),
             "source": f"FRED:{series}",
             "raw": rows[0],
@@ -257,6 +278,7 @@ def _bias(indicator_key: str, value: float | None) -> str:
 def _indicator_row(indicator_key: str, data: dict[str, Any] | None) -> dict[str, Any]:
     meta = INDICATOR_META[indicator_key]
     value = _to_float((data or {}).get("value"))
+    previous_value = _to_float((data or {}).get("previous_value"))
     fresh = _freshness((data or {}).get("date"))
     source = (data or {}).get("source") or "Needs provider"
     date_value = (data or {}).get("date")
@@ -280,10 +302,20 @@ def _indicator_row(indicator_key: str, data: dict[str, Any] | None) -> dict[str,
         bias = "neutral"
     if value is None:
         bias = "missing"
+    delta = (value - previous_value) if value is not None and previous_value is not None else None
+    trend = "flat"
+    if delta is None:
+        trend = "unknown"
+    elif abs(delta) >= 0.01:
+        trend = "up" if delta > 0 else "down"
     return {
         "key": indicator_key,
         "label": meta["label"],
         "value": round(value, 2) if value is not None else None,
+        "previous_value": round(previous_value, 2) if previous_value is not None else None,
+        "previous_date": (data or {}).get("previous_date"),
+        "delta": round(delta, 2) if delta is not None else None,
+        "trend": trend,
         "unit": (data or {}).get("unit") or meta["unit"],
         "date": date_value,
         "source": source,
