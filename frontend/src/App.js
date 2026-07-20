@@ -19,35 +19,38 @@ import OptionsDeskPage from "@/components/OptionsDeskPage";
 import TFEnginePage from "@/components/TFEnginePage";
 import PortfolioManagerPage from "@/components/PortfolioManagerPage";
 import AuditLogsPage from "@/components/AuditLogsPage";
+import StartupGate from "@/components/StartupGate";
 import { Toaster } from "sonner";
 
 function App() {
   return (
     <div className="App min-h-screen bg-slate-950 text-slate-50">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<CommandCenterPage />} />
-          <Route path="/command-center" element={<CommandCenterPage />} />
-          <Route path="/scanner" element={<Dashboard />} />
-          <Route path="/learning" element={<LearningPage />} />
-          <Route path="/tf-engine" element={<TFEnginePage />} />
-          <Route path="/performance" element={<PerformancePage />} />
-          <Route path="/earnings" element={<EarningsPage />} />
-          <Route path="/lottery" element={<LotteryPage />} />
-          <Route path="/intel" element={<IntelPage />} />
-          <Route path="/pharma" element={<PharmaPage />} />
-          <Route path="/contracts" element={<ContractsPage />} />
-          <Route path="/sec" element={<SECPage />} />
-          <Route path="/georisk" element={<GeoRiskPage />} />
-          <Route path="/macro" element={<MacroPage />} />
-          <Route path="/trade-floor" element={<TradeFloorPage />} />
-          <Route path="/options-desk" element={<OptionsDeskPage />} />
-          <Route path="/portfolio-manager" element={<PortfolioManagerPage />} />
-          <Route path="/ticker/:ticker" element={<TickerPage />} />
-          <Route path="/audit-logs" element={<AuditLogsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Routes>
-      </BrowserRouter>
+      <StartupGate>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<CommandCenterPage />} />
+            <Route path="/command-center" element={<CommandCenterPage />} />
+            <Route path="/scanner" element={<Dashboard />} />
+            <Route path="/learning" element={<LearningPage />} />
+            <Route path="/tf-engine" element={<TFEnginePage />} />
+            <Route path="/performance" element={<PerformancePage />} />
+            <Route path="/earnings" element={<EarningsPage />} />
+            <Route path="/lottery" element={<LotteryPage />} />
+            <Route path="/intel" element={<IntelPage />} />
+            <Route path="/pharma" element={<PharmaPage />} />
+            <Route path="/contracts" element={<ContractsPage />} />
+            <Route path="/sec" element={<SECPage />} />
+            <Route path="/georisk" element={<GeoRiskPage />} />
+            <Route path="/macro" element={<MacroPage />} />
+            <Route path="/trade-floor" element={<TradeFloorPage />} />
+            <Route path="/options-desk" element={<OptionsDeskPage />} />
+            <Route path="/portfolio-manager" element={<PortfolioManagerPage />} />
+            <Route path="/ticker/:ticker" element={<TickerPage />} />
+            <Route path="/audit-logs" element={<AuditLogsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </BrowserRouter>
+      </StartupGate>
       <Toaster
         theme="dark"
         position="bottom-right"
