@@ -225,6 +225,34 @@ async def _telegram_events(limit: int) -> list[dict[str, Any]]:
     return out
 
 
+async def _lse_health_events() -> list[dict[str, Any]]:
+    try:
+        from . import london_strategic_edge as lse_svc
+        health = await lse_svc.health_probe()
+        ok = bool(health.get("ok"))
+        return [_event(
+            ts=_now(),
+            source="london_strategic_edge",
+            event_type="provider_health",
+            title="London Strategic Edge provider health",
+            severity="info" if ok else "warn",
+            status="live" if ok else "degraded",
+            summary=health.get("reason"),
+            payload=health,
+        )]
+    except Exception as exc:
+        return [_event(
+            ts=_now(),
+            source="london_strategic_edge",
+            event_type="provider_health",
+            title="London Strategic Edge provider health",
+            severity="warn",
+            status="down",
+            summary=str(exc)[:180],
+            payload={"ok": False, "reason": str(exc)[:180]},
+        )]
+
+
 async def list_events(
     limit: int = 250,
     source: str | None = None,
@@ -263,6 +291,7 @@ async def _collect(limit: int) -> list[list[dict[str, Any]]]:
         await _options_trade_events(limit),
         await _options_risk_events(limit),
         await _telegram_events(limit),
+        await _lse_health_events(),
     ]
 
 

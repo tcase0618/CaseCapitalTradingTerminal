@@ -13,6 +13,7 @@ import PharmaPage from "@/components/PharmaPage";
 import ContractsPage from "@/components/ContractsPage";
 import SECPage from "@/components/SECPage";
 import GeoRiskPage from "@/components/GeoRiskPage";
+import MacroPage from "@/components/MacroPage";
 import TradeFloorPage from "@/components/TradeFloorPage";
 import OptionsDeskPage from "@/components/OptionsDeskPage";
 import TFEnginePage from "@/components/TFEnginePage";
@@ -38,6 +39,7 @@ function App() {
           <Route path="/contracts" element={<ContractsPage />} />
           <Route path="/sec" element={<SECPage />} />
           <Route path="/georisk" element={<GeoRiskPage />} />
+          <Route path="/macro" element={<MacroPage />} />
           <Route path="/trade-floor" element={<TradeFloorPage />} />
           <Route path="/options-desk" element={<OptionsDeskPage />} />
           <Route path="/portfolio-manager" element={<PortfolioManagerPage />} />

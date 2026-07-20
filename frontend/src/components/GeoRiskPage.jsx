@@ -48,6 +48,7 @@ export default function GeoRiskPage() {
   const [showChokepoints, setShowChokepoints] = useState(true);
   const [showHoldings, setShowHoldings] = useState(true);
   const [tradeFloor, setTradeFloor] = useState(null);
+  const [lseMacro, setLseMacro] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +64,9 @@ export default function GeoRiskPage() {
     });
     axios.get(`${API}/trade_floor/positions`).then(r => {
       if (!cancelled) setTradeFloor(r.data || null);
+    }).catch(() => {});
+    axios.get(`${API}/data/lse/macro?limit=150`).then(r => {
+      if (!cancelled) setLseMacro(r.data || null);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -163,6 +167,7 @@ export default function GeoRiskPage() {
         <Stat label="CRITICAL" value={severityCounts.CRITICAL} color="#ef4444" />
         <Stat label="HIGH" value={severityCounts.HIGH} color="#fb923c" />
         <Stat label="WATCH" value={severityCounts.WATCH} color="#facc15" />
+        <Stat label="LSE MACRO" value={(lseMacro?.economic_calendar || []).length} sub={(lseMacro?.bond_yields || []).length ? `${lseMacro.bond_yields.length} YIELD ROWS` : "CROSS-ASSET"} color={lseMacro?.provider ? "#38bdf8" : muted} />
         <Stat label="HOT ROUTE" value={hotChokepoint?.active_events ? hotChokepoint.name : "CLEAR"} sub={hotChokepoint?.active_events ? `${hotChokepoint.active_events} EVENTS` : "NO ACTIVE MATCH"} color={accent2} />
         <Stat label="CACHE" value={data?.cache_status || "-"} sub={data?.cache_age_minutes != null ? `${data.cache_age_minutes}M OLD` : ""} color={accent2} />
       </div>

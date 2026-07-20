@@ -40,6 +40,7 @@ export default function EarningsPage() {
   const [weekOffset, setWeekOffset] = useState(0);
   const [dispatching, setDispatching] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState("");
+  const [lseHealth, setLseHealth] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,6 +56,16 @@ export default function EarningsPage() {
     return () => { cancelled = true; };
   }, [weekOffset]);
 
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`${API}/data/lse/health`).then(r => {
+      if (!cancelled) setLseHealth(r.data);
+    }).catch(() => {
+      if (!cancelled) setLseHealth({ ok: false });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const byDay = useMemo(() => data?.by_day || {}, [data]);
   const allRows = useMemo(() => Object.values(byDay).flat(), [byDay]);
   const total = data?.total || 0;
@@ -63,6 +74,7 @@ export default function EarningsPage() {
     .filter(([, count]) => Number(count) > 0)
     .map(([source, count]) => `${shortSource(source)} ${count}`)
     .join(" | ");
+  const sourceSummaryWithLse = [lseHealth?.ok ? "LSE LIVE" : "LSE DEGRADED", sourceSummary].filter(Boolean).join(" | ");
   const tradeable = allRows.filter(r => r.earnings_setup_rating === "TRADEABLE").length;
   const avoid = allRows.filter(r => r.earnings_setup_rating === "AVOID").length;
   const underpriced = allRows.filter(r => r.options_pricing_signal === "OPTIONS UNDERPRICED").length;
@@ -118,7 +130,7 @@ export default function EarningsPage() {
       </div>
 
       <div style={sourceStrip}>
-        <span>SOURCES: {sourceSummary || "NO LIVE SOURCE ROWS"}</span>
+        <span>SOURCES: {sourceSummaryWithLse || "NO LIVE SOURCE ROWS"}</span>
         <span>CACHE: {data?.cache_status || "PENDING"}{data?.cache_age_minutes != null ? ` | ${data.cache_age_minutes}M OLD` : ""}</span>
       </div>
 

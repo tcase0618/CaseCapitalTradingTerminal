@@ -19,6 +19,7 @@ export default function OptionsDeskPage() {
   const [trades, setTrades] = useState(null);
   const [selected, setSelected] = useState(null);
   const [selectedPosition, setSelectedPosition] = useState(null);
+  const [lseContext, setLseContext] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -66,6 +67,30 @@ export default function OptionsDeskPage() {
     (risk?.checks || []).forEach(c => { if (c.symbol) map[c.symbol] = c; });
     return map;
   }, [risk]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ticker = selectedTicket?.ticker;
+    if (!ticker) {
+      setLseContext(null);
+      return () => { cancelled = true; };
+    }
+    setLseContext({ loading: true, ticker });
+    Promise.all([
+      axios.get(`${API}/data/lse/options/${ticker}?limit=24&max_dte=90`).catch(e => ({ data: { error: e.message, rows: [] } })),
+      axios.get(`${API}/data/lse/options_flow?underlying=${ticker}&limit=24&max_dte=90`).catch(e => ({ data: { error: e.message, rows: [] } })),
+    ]).then(([chain, flowSet]) => {
+      if (!cancelled) {
+        setLseContext({
+          loading: false,
+          ticker,
+          chain: chain.data,
+          flow: flowSet.data,
+        });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [selectedTicket?.ticker]);
 
   const refresh = async () => {
     setBusy(true);
@@ -156,7 +181,7 @@ export default function OptionsDeskPage() {
           <CandidateTable rows={deskRows} selected={selectedTicket} onSelect={setSelected} />
         </Card>
         <Card title="MANUAL EXECUTION TICKET" accentColor="#fbbf24">
-          <ExecutionTicket ticket={selectedTicket} account={account} busy={busy} onExecute={execute} />
+          <ExecutionTicket ticket={selectedTicket} account={account} busy={busy} onExecute={execute} lseContext={lseContext} />
         </Card>
       </div>
 
@@ -271,7 +296,7 @@ function CandidateTable({ rows, selected, onSelect }) {
   );
 }
 
-function ExecutionTicket({ ticket, account, busy, onExecute }) {
+function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
   if (!ticket) return <div style={{ color: muted, padding: 20 }}>Select a candidate.</div>;
   const instrument = ticket.instrument || {};
   const exit = ticket.exit_policy || {};
@@ -296,6 +321,7 @@ function ExecutionTicket({ ticket, account, busy, onExecute }) {
       <PlanRow k="IV" v={`${ticket.iv_rank ?? "-"} ${ticket.iv_label || ""}`} />
       <PlanRow k="Data" v={`${ticket.data_provider || instrument.data_provider || "UNKNOWN"} / ${ticket.data_quality || instrument.data_quality || "-"}`} color={ticket.data_provider === "ALPACA_OPTIONS" ? accent2 : "#fbbf24"} />
       <PlanRow k="Feed" v={ticket.data_feed || instrument.data_feed || "-"} />
+      <LseOptionsIntel context={lseContext} ticket={ticket} />
       <PlanRow k="Exit" v={exit.policy ? "NO TP / RATCHET" : "-"} color="#4ade80" />
       <PlanRow k="Initial Floor" v={exit.initial_stop_pct != null ? `${exit.initial_stop_pct}%` : "-"} color="#f87171" />
       <PlanRow k="Locked Floor" v={exit.locked_floor_pct != null ? `${exit.locked_floor_pct}%` : "-"} color={accent} />
@@ -318,6 +344,55 @@ function ExecutionTicket({ ticket, account, busy, onExecute }) {
       </button>
     </div>
   );
+}
+
+function LseOptionsIntel({ context, ticket }) {
+  const chainRows = Array.isArray(context?.chain?.rows) ? context.chain.rows : [];
+  const flowRows = Array.isArray(context?.flow?.rows) ? context.flow.rows : [];
+  const sample = bestLseOptionRow(chainRows, ticket);
+  if (context?.loading) {
+    return <PlanRow k="LSE Options" v="SYNCING..." color={accent2} />;
+  }
+  if (!context || (context.chain?.error && context.flow?.error)) {
+    return <PlanRow k="LSE Options" v="UNAVAILABLE" color="#fbbf24" />;
+  }
+  return (
+    <div style={{ marginTop: 10, marginBottom: 8, paddingTop: 10, borderTop: hairline }}>
+      <div style={{ color: accent2, fontSize: 10, letterSpacing: "0.14em", marginBottom: 7 }}>
+        LSE OPTION BATTLE DATA
+      </div>
+      <PlanRow k="Chain Rows" v={chainRows.length} color={accent2} />
+      <PlanRow k="Flow Prints" v={flowRows.length} color={flowRows.length ? accent : muted} />
+      <PlanRow k="Nearest Contract" v={sample ? compactContract(sample) : "-"} color={sample ? labelLight : muted} />
+      <PlanRow k="LSE IV / Delta" v={sample ? `${fieldValue(sample, ["iv", "implied_volatility"]) || "-"} / ${fieldValue(sample, ["delta"]) || "-"}` : "-"} />
+      <PlanRow k="LSE Bid / Ask" v={sample ? `${fieldValue(sample, ["bid"]) || "-"} / ${fieldValue(sample, ["ask"]) || "-"}` : "-"} />
+    </div>
+  );
+}
+
+function bestLseOptionRow(rows, ticket) {
+  const instrument = ticket?.instrument || {};
+  const targetStrike = Number(instrument.strike || instrument.buy_strike || ticket?.strike);
+  if (!rows.length) return null;
+  if (!Number.isFinite(targetStrike)) return rows[0];
+  return [...rows].sort((a, b) => {
+    const av = Math.abs(Number(fieldValue(a, ["strike", "strike_price"])) - targetStrike);
+    const bv = Math.abs(Number(fieldValue(b, ["strike", "strike_price"])) - targetStrike);
+    return (Number.isFinite(av) ? av : 999999) - (Number.isFinite(bv) ? bv : 999999);
+  })[0];
+}
+
+function fieldValue(row, keys) {
+  const found = Object.keys(row || {}).find(k => keys.some(key => k.toLowerCase() === key || k.toLowerCase().includes(key)));
+  const value = found ? row[found] : null;
+  return value == null || value === "" ? null : value;
+}
+
+function compactContract(row) {
+  const exp = fieldValue(row, ["expiration", "expiration_date", "expiry"]);
+  const strike = fieldValue(row, ["strike", "strike_price"]);
+  const type = fieldValue(row, ["type", "option_type", "right"]);
+  return [exp, strike ? `$${strike}` : null, type].filter(Boolean).join(" / ") || "-";
 }
 
 function OpenPositionsTable({ positions, selected, riskBySymbol, onSelect }) {

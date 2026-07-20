@@ -170,6 +170,7 @@ export default function IntelPage() {
       tradeFloor: "/trade_floor/positions",
       georisk: "/georisk/live",
       freeCatalog: "/data/free/catalog",
+      lseMacro: "/data/lse/macro?limit=100",
       fredVix: "/data/free/fred/latest/VIXCLS",
       fredTenYear: "/data/free/fred/latest/DGS10",
       fredHighYield: "/data/free/fred/latest/BAMLH0A0HYM2",
@@ -354,6 +355,7 @@ export default function IntelPage() {
     { label: "Contracts", ok: Boolean(payloads?.contracts), count: payloads?.contracts?.contracts?.length || 0 },
     { label: "X Factor", ok: Boolean(payloads?.xFactor), count: xFactorTape.length },
     { label: "GeoRisk", ok: Boolean(payloads?.georisk), count: georiskEvents.length },
+    { label: "LSE", ok: Boolean(payloads?.lseMacro?.provider), count: (payloads?.lseMacro?.economic_calendar || []).length + (payloads?.lseMacro?.bond_yields || []).length },
     { label: "FRED", ok: macroSeries.some(item => item.source?.ok), count: macroSeries.filter(item => item.source?.ok).length },
   ];
   const criticalGeo = georiskEvents.filter(event => ["CRITICAL", "HIGH"].includes(event.severity)).slice(0, 6);

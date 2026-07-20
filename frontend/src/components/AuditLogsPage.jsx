@@ -161,7 +161,7 @@ function formatTime(value) {
 }
 
 function sourceColor(source) {
-  return source === "options_desk" ? accent : source === "trade_floor" ? accent2 : source === "telegram" ? "#4ade80" : labelLight;
+  return source === "options_desk" ? accent : source === "trade_floor" ? accent2 : source === "telegram" ? "#4ade80" : source === "london_strategic_edge" ? "#38bdf8" : labelLight;
 }
 
 function buttonStyle(color) {

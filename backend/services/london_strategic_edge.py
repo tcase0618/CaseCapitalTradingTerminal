@@ -22,7 +22,7 @@ def applicability_map() -> list[dict[str, str]]:
         {"area": "Options Desk", "use": "Options chains, greeks, IV, contract candles, and historical options flow before Alpaca execution."},
         {"area": "Portfolio Manager", "use": "Regime scoring from macro series, bond yields, multi-asset correlations, and realized volatility."},
         {"area": "Ticker Profiles", "use": "Candles, company profiles, fundamentals, financial reports, dividends, splits, and insider trades."},
-        {"area": "Scanner", "use": "Cleaner OHLCV history and cross-asset confirmation before a ticker reaches PM."},
+        {"area": "Scanner", "use": "Reserved for later; current scanner routing is unchanged."},
         {"area": "Earnings", "use": "Pre/post earnings price reaction history, fundamentals, reports, and macro backdrop."},
         {"area": "Intel Feed", "use": "Insider trades, economic calendar, dividends, splits, and market-wide unusual options flow."},
         {"area": "Performance", "use": "Reprice historical signals from an independent source and audit Alpaca/yfinance drift."},

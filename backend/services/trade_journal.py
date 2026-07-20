@@ -274,6 +274,7 @@ async def overview(limit_scans: int = 120, limit_trades: int = 200) -> dict[str,
         recommendations.append("Ratchet events are available; compare stop raises against final exits.")
 
     credible_data_sources = [
+        {"name": "London Strategic Edge", "use": "Primary historical candles, macro context, option chains, flow, financial reports, and ratio enrichment.", "cost": "configured API key"},
         {"name": "SEC EDGAR", "use": "Official filings, company facts, insider forms, share count, debt, revenue history.", "cost": "free"},
         {"name": "FRED", "use": "Macro regime: rates, CPI, labor, credit spreads, yield curve.", "cost": "free API key"},
         {"name": "Alpha Vantage", "use": "Daily indicators and backup quote/fundamental fields with strict caching.", "cost": "free tier"},

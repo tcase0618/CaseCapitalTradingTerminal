@@ -90,6 +90,7 @@ export default function PerformancePage() {
         <Stat label="WORST PICK" value={tracker?.worst ? `${tracker.worst.ticker} ${fmt(tracker.worst.gain_pct)}%` : "—"}
               color="#f87171" sub="LOWEST GAIN" />
         <Stat label="SIGNAL COMBOS" value={(perf?.signals || []).length} sub="WITH 7/30/90D" />
+        <Stat label="REPLAY SOURCE" value="LSE" sub="ALPACA BACKUP" color={accent} />
       </div>
 
       {/* ACTIVE vs CLOSED — v5.0 split */}

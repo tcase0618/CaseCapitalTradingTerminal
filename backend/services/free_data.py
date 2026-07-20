@@ -420,6 +420,54 @@ def _ratio_meta(sec_facts: dict[str, Any], alpha: dict[str, Any]) -> dict[str, A
     }
 
 
+def _flatten_lse_rows(lse_payload: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for bucket in ("fundamentals", "financial_reports", "company_profiles"):
+        rows = lse_payload.get(bucket) if isinstance(lse_payload, dict) else None
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    merged.update({str(k).lower(): v for k, v in row.items() if v not in (None, "")})
+    return merged
+
+
+def _lse_pick(flat: dict[str, Any], *names: str) -> float | None:
+    lowered = [n.lower() for n in names]
+    for key, value in flat.items():
+        key_l = str(key).lower()
+        if any(key_l == name or name in key_l for name in lowered):
+            parsed = _to_float(value)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _lse_pct(flat: dict[str, Any], *names: str) -> float | None:
+    value = _lse_pick(flat, *names)
+    if value is None:
+        return None
+    return value / 100.0 if abs(value) > 1 else value
+
+
+def _lse_ratio_rows(lse_payload: dict[str, Any]) -> dict[str, Any]:
+    flat = _flatten_lse_rows(lse_payload)
+    if not flat:
+        return {}
+    return {
+        "current_ratio": _ratio_row("current_ratio", "Current Ratio", _lse_pick(flat, "current_ratio")),
+        "quick_ratio": _ratio_row("quick_ratio", "Quick Ratio", _lse_pick(flat, "quick_ratio")),
+        "debt_to_equity": _ratio_row("debt_to_equity", "Debt-to-Equity", _lse_pick(flat, "debt_to_equity", "debt_equity")),
+        "gross_profit_margin": _ratio_row("gross_profit_margin", "Gross Profit Margin", _lse_pct(flat, "gross_margin", "gross_profit_margin"), unit="pct"),
+        "operating_margin": _ratio_row("operating_margin", "Operating Margin", _lse_pct(flat, "operating_margin"), unit="pct"),
+        "ebitda_margin": _ratio_row("ebitda_margin", "EBITDA Margin", _lse_pct(flat, "ebitda_margin"), unit="pct"),
+        "net_profit_margin": _ratio_row("net_profit_margin", "Net Profit Margin", _lse_pct(flat, "net_margin", "net_profit_margin"), unit="pct"),
+        "revenue_growth_rate": _ratio_row("revenue_growth_rate", "Revenue Growth Rate", _lse_pct(flat, "revenue_growth", "revenue_growth_rate"), unit="pct"),
+        "roe": _ratio_row("roe", "Return on Equity", _lse_pct(flat, "roe", "return_on_equity"), unit="pct"),
+        "roa": _ratio_row("roa", "Return on Assets", _lse_pct(flat, "roa", "return_on_assets"), unit="pct"),
+        "pe_ratio": _ratio_row("pe_ratio", "Price-to-Earnings", _lse_pick(flat, "pe_ratio", "price_earnings", "trailing_pe")),
+    }
+
+
 def _compute_sec_ratios(metrics: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     revenue = _metric_value(metrics, "revenue")
     net_income = _metric_value(metrics, "net_income")
@@ -887,6 +935,15 @@ async def ticker_free_data(ticker: str, company_name: str | None = None) -> dict
         alpha_vantage_snapshot(t),
     ]
     sec_facts, trials, fda, alpha = await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        from . import london_strategic_edge as lse_svc
+        lse = await lse_svc.ticker_context(t) if lse_svc.configured() else {
+            "ok": False,
+            "quality": "optional",
+            "reason": "LSE_API_KEY not configured",
+        }
+    except Exception as exc:
+        lse = {"ok": False, "quality": "down", "source_key": "london_strategic_edge", "reason": str(exc)[:180]}
 
     def normalize(value: Any, source_key: str) -> dict[str, Any]:
         if isinstance(value, Exception):
@@ -907,16 +964,27 @@ async def ticker_free_data(ticker: str, company_name: str | None = None) -> dict
         "clinical_trials": normalize(trials, "clinicaltrials"),
         "openfda": normalize(fda, "openfda"),
         "alpha_vantage": normalize(alpha, "alpha_vantage"),
+        "london_strategic_edge": normalize(lse, "london_strategic_edge"),
     }
     payload["sources"] = [
+        {"key": "london_strategic_edge", "quality": "live" if payload["london_strategic_edge"].get("provider") else payload["london_strategic_edge"].get("quality"), "ok": bool(payload["london_strategic_edge"].get("provider"))},
         {"key": "sec_edgar", "quality": payload["sec"]["companyfacts"].get("quality"), "ok": payload["sec"]["companyfacts"].get("ok")},
         {"key": "clinicaltrials", "quality": payload["clinical_trials"].get("quality"), "ok": payload["clinical_trials"].get("ok")},
         {"key": "openfda", "quality": payload["openfda"].get("quality"), "ok": payload["openfda"].get("ok")},
         {"key": "alpha_vantage", "quality": payload["alpha_vantage"].get("quality"), "ok": payload["alpha_vantage"].get("ok")},
     ]
     ratios = dict((payload["sec"]["companyfacts"].get("ratios") or {}))
+    lse_ratios = {
+        key: value for key, value in _lse_ratio_rows(payload["london_strategic_edge"]).items()
+        if value.get("value") is not None
+    }
+    ratios.update(lse_ratios)
     pe_ratio = _to_float((payload["alpha_vantage"].get("overview") or {}).get("PERatio"))
-    ratios["pe_ratio"] = _ratio_row("pe_ratio", "Price-to-Earnings", pe_ratio)
+    if "pe_ratio" not in lse_ratios:
+        ratios["pe_ratio"] = _ratio_row("pe_ratio", "Price-to-Earnings", pe_ratio)
     payload["key_ratios"] = ratios
     payload["key_ratios_meta"] = _ratio_meta(payload["sec"]["companyfacts"], payload["alpha_vantage"])
+    if payload["london_strategic_edge"].get("provider"):
+        payload["key_ratios_meta"]["source"] = "London Strategic Edge + SEC EDGAR companyfacts"
+        payload["key_ratios_meta"]["market_source"] = "London Strategic Edge primary, Alpha Vantage fallback"
     return payload

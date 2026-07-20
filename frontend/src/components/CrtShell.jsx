@@ -3,6 +3,7 @@
 // status dots, micro-animations.
 import { Link, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
+import terminalLogo from "../assets/case-terminal-logo.png";
 
 const accent = "#c8a84b";
 const accent2 = "#5eead4";
@@ -37,6 +38,33 @@ const NAV = [
 if (!NAV.some(n => n.to === "/georisk")) {
   NAV.splice(8, 0, { to: "/georisk", label: "GEORISK", icon: "GR", group: "CORE" });
 }
+
+if (!NAV.some(n => n.to === "/macro")) {
+  NAV.splice(9, 0, { to: "/macro", label: "MACRO", icon: "MX", group: "CORE" });
+}
+
+const NAV_LOGOS = {
+  "/portfolio-manager": { logo: "PM", color: "#c8a84b" },
+  "/": { logo: "CC", color: "#ef4444" },
+  "/scanner": { logo: "SC", color: "#5eead4" },
+  "/intel": { logo: "IF", color: "#60a5fa" },
+  "/contracts": { logo: "CT", color: "#f59e0b" },
+  "/sec": { logo: "SEC", color: "#a78bfa" },
+  "/earnings": { logo: "ER", color: "#4ade80" },
+  "/lottery": { logo: "LT", color: "#facc15" },
+  "/pharma": { logo: "RX", color: "#f472b6" },
+  "/georisk": { logo: "GR", color: "#fb7185" },
+  "/macro": { logo: "MX", color: "#38bdf8" },
+  "/trade-floor": { logo: "TF", color: "#4ade80" },
+  "/options-desk": { logo: "OD", color: "#c8a84b" },
+  "/performance": { logo: "PX", color: "#22c55e" },
+  "/learning": { logo: "LN", color: "#5eead4" },
+  "/tf-engine": { logo: "TE", color: "#f97316" },
+  "/audit-logs": { logo: "AL", color: "#e879f9" },
+  "/settings": { logo: "ST", color: "#9ca3af" },
+};
+
+NAV.forEach(item => Object.assign(item, NAV_LOGOS[item.to] || { logo: item.icon, color: accent }));
 
 // US market hours: 9:30 - 16:00 ET (UTC-5 / UTC-4 DST)
 function getMarketStatus() {
@@ -261,8 +289,12 @@ export function CrtShell({ title, children, headerRight = null }) {
                   boxShadow: `0 0 14px rgba(200,168,75,0.3), inset 0 0 8px rgba(200,168,75,0.12)`,
                   position: "relative",
                 }}>
-                  <div style={{ width: 10, height: 10, background: accent,
-                                boxShadow: `0 0 6px ${accent}` }} />
+                  <img src={terminalLogo} alt="Case Capital Trading Terminal" style={{
+                    width: 28,
+                    height: 28,
+                    objectFit: "contain",
+                    filter: "drop-shadow(0 0 6px rgba(200,168,75,0.65))",
+                  }} />
                   {/* corner ticks on logo */}
                   <span style={{ position: "absolute", top: -3, left: -3, width: 4, height: 4, borderTop: `1px solid ${accent}`, borderLeft: `1px solid ${accent}` }} />
                   <span style={{ position: "absolute", bottom: -3, right: -3, width: 4, height: 4, borderBottom: `1px solid ${accent}`, borderRight: `1px solid ${accent}` }} />
@@ -273,7 +305,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                     lineHeight: 1,
                   }}>CASE CAP</div>
                   <div style={{ fontSize: 8, color: muted, letterSpacing: "0.16em", marginTop: 4 }}>
-                    TERMINAL · v3.2
+                    TRADING TERMINAL
                   </div>
                 </div>
               </div>
@@ -335,7 +367,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                   {groupItems.map((n, i) => {
                     const isActive = loc.pathname === n.to ||
                       (n.to !== "/" && loc.pathname.startsWith(n.to));
-                    const hue = accent;
+                    const hue = n.color || accent;
                     return (
                       <Link key={n.to} to={n.to}
                         data-testid={`nav-${n.label.toLowerCase().replace(' ', '-')}`}
@@ -370,6 +402,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                           fontSize: 10, width: 12,
                           textShadow: isActive ? `0 0 6px ${hue}` : "none",
                         }}>{isActive ? "▸" : n.icon}</span>
+                        <NavLogo item={n} active={isActive} />
                         <span style={{ flex: 1 }}>{n.label}</span>
                         {isActive && <span className="blink" style={{ color: hue, fontSize: 8 }}>●</span>}
                       </Link>
@@ -471,6 +504,40 @@ export function CrtShell({ title, children, headerRight = null }) {
         </main>
       </div>
     </>
+  );
+}
+
+function NavLogo({ item, active }) {
+  const color = item.color || accent;
+  const logo = item.logo || item.icon || "";
+  return (
+    <span style={{
+      width: 24,
+      height: 20,
+      minWidth: 24,
+      border: `0.5px solid ${active ? color : "rgba(255,255,255,0.12)"}`,
+      background: active ? `${color}18` : "rgba(255,255,255,0.025)",
+      color: active ? color : muted,
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: logo.length > 2 ? 6.5 : 8,
+      fontWeight: 900,
+      letterSpacing: logo.length > 2 ? "0.02em" : "0.06em",
+      boxShadow: active ? `0 0 10px ${color}33, inset 0 0 8px ${color}14` : "none",
+      position: "relative",
+    }}>
+      <span style={{
+        position: "absolute",
+        left: 2,
+        top: 2,
+        width: 3,
+        height: 3,
+        background: color,
+        opacity: active ? 1 : 0.45,
+      }} />
+      {logo}
+    </span>
   );
 }
 
