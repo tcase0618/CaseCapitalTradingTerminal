@@ -55,9 +55,22 @@ frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/CaseCapitalT
 frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/CaseCapitalTradingTerminal_0.1.0_x64-setup.exe
 ```
 
-## V1 Backend Behavior
+## Backend Boot Behavior
 
-The dev launcher starts the local FastAPI backend if port `8001` is not already
-listening. The packaged desktop shell still expects the backend to be available
-locally. A later version can bundle a backend sidecar or point to a private
-cloud backend.
+The dev launcher and packaged desktop app both check `127.0.0.1:8001`.
+
+If the backend is not already listening, the desktop app starts:
+
+```text
+backend/.venv/Scripts/python.exe -m uvicorn server:app --host 127.0.0.1 --port 8001
+```
+
+The app looks for the backend in this order:
+
+- `CASE_CAPITAL_BACKEND_DIR`, when set
+- common repo-relative paths
+- `C:\Case Capital\stock-intel\backend`
+
+For the current local desktop build, keep the repo folder and backend virtualenv
+on disk. A later public installer should bundle a backend sidecar or point to a
+private cloud backend.
