@@ -185,6 +185,12 @@ async def lse_macro(limit: int = 100):
     return await lse_svc.macro_context(limit)
 
 
+@api.get("/macro/overview")
+async def macro_overview():
+    from services import macro_intel
+    return await macro_intel.overview()
+
+
 @api.get("/data/free/catalog")
 async def free_data_catalog():
     from services import free_data
