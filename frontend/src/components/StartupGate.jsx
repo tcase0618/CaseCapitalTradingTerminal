@@ -42,10 +42,10 @@ export default function StartupGate({ children }) {
   }, []);
 
   useEffect(() => {
-    if (bootOpened || backend.state === "online") return;
+    if (backend.state === "online") return;
     const id = setInterval(() => checkBackend(setBackend), 2500);
     return () => clearInterval(id);
-  }, [backend.state, bootOpened]);
+  }, [backend.state]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -328,12 +328,27 @@ async function hashCode(code) {
 
 async function checkBackend(setBackend) {
   setBackend({ state: "checking", message: "Checking backend link" });
-  try {
-    await axios.get(`${API}/status`, { timeout: 3500 });
-    setBackend({ state: "online", message: "Backend online at 127.0.0.1:8001" });
-  } catch {
-    setBackend({ state: "offline", message: "Backend is not responding on 127.0.0.1:8001" });
+  const bases = [
+    (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, ""),
+    "http://127.0.0.1:8001",
+    "http://localhost:8001",
+  ].filter(Boolean);
+  const uniqueBases = [...new Set(bases)];
+  const errors = [];
+  for (const base of uniqueBases) {
+    try {
+      await axios.get(`${base}/api/status`, { timeout: 6000 });
+      setBackend({ state: "online", message: `Backend online at ${base}` });
+      return;
+    } catch (err) {
+      errors.push(`${base}: ${err?.message || "failed"}`);
+    }
   }
+  setBackend({
+    state: "offline",
+    message: `Backend is not responding. Tried ${uniqueBases.map(base => base.replace("http://", "")).join(" / ")}`,
+    detail: errors.join(" | "),
+  });
 }
 
 const startupAnimations = `
