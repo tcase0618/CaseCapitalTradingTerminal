@@ -94,6 +94,35 @@ async def system_health():
     return await svc.overview()
 
 
+@api.post("/admin/backend_refresh")
+async def admin_backend_refresh():
+    from services import integration_status as integration_svc, pricer
+    from services import system_health as health_svc
+
+    health = await health_svc.overview()
+    integrations = await integration_svc.integration_status()
+    status_payload = await status()
+    payload = {
+        "ok": True,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        "status": status_payload,
+        "health": health,
+        "integrations": integrations,
+        "jobs": integration_svc.scheduled_jobs(),
+        "commands": integration_svc.telegram_commands(),
+        "price_source": {
+            "source": pricer.source_label(),
+            "massive_available": pricer.has_massive(),
+            "finnhub_available": pricer.has_finnhub(),
+        },
+    }
+    try:
+        await log_activity("Backend link refresh completed from desktop UI", "info")
+    except Exception:
+        pass
+    return payload
+
+
 @api.get("/data/free/catalog")
 async def free_data_catalog():
     from services import free_data

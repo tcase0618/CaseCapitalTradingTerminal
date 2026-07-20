@@ -10,12 +10,72 @@ export default function SettingsPage() {
   const [status, setStatus] = useState(null);
   const [criteria, setCriteria] = useState(null);
   const [admin, setAdmin] = useState(null);
+  const [backendRefreshing, setBackendRefreshing] = useState(false);
+  const [backendBooting, setBackendBooting] = useState(false);
+  const [backendLink, setBackendLink] = useState(null);
 
   useEffect(() => {
     axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => setStatus({}));
     axios.get(`${API}/admin/pipeline_criteria`).then(r => setCriteria(r.data)).catch(() => {});
     axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {});
   }, []);
+
+  const refreshBackendLink = async () => {
+    if (backendRefreshing) return;
+    setBackendRefreshing(true);
+    toast("BACKEND LINK REFRESH INITIATED");
+    try {
+      const { data } = await axios.post(`${API}/admin/backend_refresh`);
+      setStatus(data.status || {});
+      setAdmin({
+        integrations: data.integrations || [],
+        jobs: data.jobs || [],
+        commands: data.commands || [],
+      });
+      setBackendLink({ ok: true, at: data.refreshed_at || new Date().toISOString() });
+      toast("BACKEND LINK REFRESHED");
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || "failed";
+      setBackendLink({ ok: false, at: new Date().toISOString(), detail });
+      toast(`BACKEND LINK REFRESH FAILED - ${detail}`);
+    } finally {
+      setBackendRefreshing(false);
+    }
+  };
+  const forceBootBackend = async () => {
+    if (backendBooting) return;
+    setBackendBooting(true);
+    toast("FORCE BACKEND BOOT INITIATED");
+    try {
+      if (!window.__TAURI_INTERNALS__) {
+        toast("FORCE BOOT IS AVAILABLE IN THE DESKTOP APP ONLY");
+        return;
+      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke("force_boot_backend");
+      setBackendLink({
+        ok: result.ok,
+        at: new Date().toISOString(),
+        detail: result.message,
+      });
+      toast(result.ok ? `BACKEND BOOT OK - ${result.message}` : `BACKEND BOOT FAILED - ${result.message}`);
+      try {
+        const { data } = await axios.post(`${API}/admin/backend_refresh`);
+        setStatus(data.status || {});
+        setAdmin({
+          integrations: data.integrations || [],
+          jobs: data.jobs || [],
+          commands: data.commands || [],
+        });
+      } catch {}
+    } catch (e) {
+      const detail = e?.message || "failed";
+      setBackendLink({ ok: false, at: new Date().toISOString(), detail });
+      toast(`BACKEND BOOT FAILED - ${detail}`);
+    } finally {
+      setBackendBooting(false);
+    }
+  };
 
   const runLearning = async () => {
     toast("LEARNING CYCLE INITIATED");
@@ -177,8 +237,18 @@ export default function SettingsPage() {
         </div>
 
         <div>
-          <Card title="SYSTEM STATUS">
+          <Card title="SYSTEM STATUS"
+            action={<div style={{ display: "flex", gap: 8 }}>
+              <button data-testid="settings-force-backend-boot" onClick={forceBootBackend} disabled={backendBooting} style={btnDanger}>
+                [ {backendBooting ? "BOOTING" : "FORCE BOOT BACKEND"} ]
+              </button>
+              <button data-testid="settings-backend-link-refresh" onClick={refreshBackendLink} disabled={backendRefreshing} style={btnTeal}>
+                [ {backendRefreshing ? "REFRESHING" : "BACKEND LINK REFRESH"} ]
+              </button>
+            </div>}>
             <Row k="BACKEND PORT" v="8001" />
+            <Row k="BACKEND LINK" v={backendLink ? (backendLink.ok ? `OK ${new Date(backendLink.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" })}` : "FAILED") : "AUTO"} c={backendLink?.ok === false ? "#f87171" : accent2} />
+            {backendLink?.detail && <Row k="BACKEND DETAIL" v={backendLink.detail} c={backendLink.ok ? accent2 : "#f87171"} />}
             <Row k="BOT BACKEND VERSION" v="3.0.0" c={accent} />
             <Row k="LAST SCAN" v={status?.last_scan_at || "UNKNOWN"} />
             <Row k="NEXT SCHEDULED SCAN" v="08:00 ET" />
@@ -252,4 +322,14 @@ const btnDim = {
   background: "transparent", border: `0.5px solid ${dim}`,
   color: muted, fontSize: 12, padding: "10px 14px", cursor: "pointer",
   letterSpacing: "0.1em", fontFamily: "Courier New",
+};
+const btnTeal = {
+  background: "transparent", border: `0.5px solid ${accent2}`,
+  color: accent2, fontSize: 10, padding: "7px 10px", cursor: "pointer",
+  letterSpacing: "0.1em", fontFamily: "Courier New", fontWeight: 700,
+};
+const btnDanger = {
+  background: "transparent", border: "0.5px solid #f87171",
+  color: "#f87171", fontSize: 10, padding: "7px 10px", cursor: "pointer",
+  letterSpacing: "0.1em", fontFamily: "Courier New", fontWeight: 700,
 };

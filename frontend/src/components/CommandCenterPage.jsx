@@ -69,6 +69,8 @@ export default function CommandCenterPage() {
   const [activity, setActivity] = useState([]);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [running, setRunning] = useState(null);
+  const [backendRefreshing, setBackendRefreshing] = useState(false);
+  const [backendRefresh, setBackendRefresh] = useState(null);
   const [completed, setCompleted] = useState([]);
 
   const refresh = useCallback(async () => {
@@ -137,6 +139,32 @@ export default function CommandCenterPage() {
     }
   };
 
+  const refreshBackend = async () => {
+    if (backendRefreshing) return;
+    setBackendRefreshing(true);
+    toast("BACKEND REFRESH INITIATED");
+    try {
+      const { data } = await axios.post(`${API}/admin/backend_refresh`);
+      setStatus(data.status || null);
+      setHealth(data.health || null);
+      setAdmin({
+        integrations: data.integrations || [],
+        jobs: data.jobs || [],
+        commands: data.commands || [],
+      });
+      setPriceSource(data.price_source || null);
+      setBackendRefresh({ ok: true, at: data.refreshed_at || new Date().toISOString() });
+      toast("BACKEND REFRESH COMPLETE");
+      await refresh();
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || "failed";
+      setBackendRefresh({ ok: false, at: new Date().toISOString(), detail });
+      toast(`BACKEND REFRESH FAILED - ${detail}`);
+    } finally {
+      setBackendRefreshing(false);
+    }
+  };
+
   return (
     <CrtShell title="COMMAND CENTER"
       headerRight={
@@ -153,7 +181,8 @@ export default function CommandCenterPage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 18 }}>
-        <Card title="MISSION STATE" accentColor={accent}>
+        <Card title="MISSION STATE" accentColor={accent}
+          action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={smallTeal}>{backendRefreshing ? "REFRESHING" : "BACKEND REFRESH"}</button>}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
             <MissionTile label="Scanner" value={health?.ready_for_scanning ? "READY" : "BLOCKED"} color={health?.ready_for_scanning ? "#4ade80" : "#f87171"} detail={`${scan?.pre_filter_passed || 0} passed filter`} />
             <MissionTile label="Portfolio Manager" value={health?.ready_for_pm ? "READY" : "WAITING"} color={health?.ready_for_pm ? accent2 : "#fbbf24"} detail={`${pmSummary.active_count || 0} active decisions`} />
@@ -169,11 +198,12 @@ export default function CommandCenterPage() {
             </div>
           )}
 
-          <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+          <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
             <MiniMetric k="MODE" v={pmSummary.mode || "--"} />
             <MiniMetric k="REGIME" v={(pmSummary.regime?.status || "--").toUpperCase()} />
             <MiniMetric k="BUYING POWER" v={fmtMoney(account.buying_power)} />
             <MiniMetric k="CLAUDE" v={health?.env?.claude_disabled ? "OFF" : "ON"} color={health?.env?.claude_disabled ? "#4ade80" : "#fbbf24"} />
+            <MiniMetric k="BACKEND REFRESH" v={backendRefresh ? fmtTime(backendRefresh.at) : "AUTO 20S"} color={backendRefresh?.ok === false ? "#f87171" : accent2} />
           </div>
         </Card>
 
@@ -368,6 +398,18 @@ const smallDanger = {
   background: "transparent",
   border: "0.5px solid #f87171",
   color: "#f87171",
+  fontSize: 9,
+  padding: "5px 10px",
+  cursor: "pointer",
+  letterSpacing: "0.12em",
+  fontFamily: "JetBrains Mono",
+  fontWeight: 700,
+};
+
+const smallTeal = {
+  background: "transparent",
+  border: `0.5px solid ${accent2}`,
+  color: accent2,
   fontSize: 9,
   padding: "5px 10px",
   cursor: "pointer",
