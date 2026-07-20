@@ -15,9 +15,14 @@ From the repo root:
 
 ```powershell
 .\start-desktop-dev.ps1
+.\build-desktop.ps1
 ```
 
-From `frontend/`:
+The root scripts load the Visual Studio Build Tools environment and force the
+matching x64 Rust toolchain/target. This matters on Windows ARM64 machines.
+
+Direct frontend commands are still available after the build environment is
+loaded:
 
 ```powershell
 npm run desktop:dev
@@ -34,6 +39,21 @@ Install:
 - Rust via `rustup`
 - Microsoft C++ Build Tools / Visual Studio Build Tools
 - WebView2 Runtime, normally already installed on modern Windows
+
+Verified on this machine:
+
+- Rust: `1.97.1`
+- Visual Studio Build Tools 2022: `17.14.36`
+- Tauri CLI: `2.11.4`
+
+## Build Output
+
+The verified x64 packages are generated at:
+
+```text
+frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/CaseCapitalTradingTerminal_0.1.0_x64_en-US.msi
+frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/CaseCapitalTradingTerminal_0.1.0_x64-setup.exe
+```
 
 ## V1 Backend Behavior
 
