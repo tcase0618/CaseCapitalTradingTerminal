@@ -4,7 +4,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import { CrtShell, SystemBar, tokens as crtTokens } from "./CrtShell";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const cls = (...x) => x.filter(Boolean).join(" ");
 
 const fmtPrice = (v) => (v == null ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
@@ -223,7 +223,7 @@ export default function Dashboard() {
   [results]);
 
   return (
-    <CrtShell title="DASHBOARD"
+    <CrtShell title="SCANNER"
       headerRight={
         <button data-testid="run-scan-button" onClick={runScan} disabled={scanning}
           style={{
@@ -403,7 +403,7 @@ export default function Dashboard() {
                     <span>ENTRY <span style={{ color: labelLight }}>{fmtPrice(r.entry_low)}–{fmtPrice(r.entry_high)}</span></span>
                     {tt.target_date && <span>HOLD <span style={{ color: labelLight }}>{tt.hold_period_low}–{tt.hold_period_high}d</span></span>}
                     {sq.score != null && <span>SQUEEZE <span style={{ color: labelLight }}>{sq.score}/100</span></span>}
-                    {r.learning_score != null && <span>AXIOM <span style={{ color: accent, fontWeight: 700 }}>{r.learning_score}</span></span>}
+                    {r.learning_score != null && <span>CASE SCORE <span style={{ color: accent, fontWeight: 700 }}>{r.learning_score}</span></span>}
                     {r.trade_score != null && (() => {
                       const ts = Number(r.trade_score), ls = r.learning_score != null ? Number(r.learning_score) : null;
                       // Compare at 1-decimal precision to match displayed values
@@ -602,7 +602,7 @@ export default function Dashboard() {
             <div style={{ display: "flex", gap: 20, fontSize: 8, color: dim, letterSpacing: "0.06em" }}>
               <span>SCANS {scan?.results?.length || 0}</span>
               <span>CACHE {cacheRate}%</span>
-              <span>MODEL CLAUDE-SONNET-4-5</span>
+              <span>MODEL CLAUDE-HAIKU-4-5</span>
               <span>VERSION 3.1.0</span>
             </div>
             <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.04)", margin: "0 20px" }} />

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
 FRED_BASE = "https://api.stlouisfed.org/fred"
 CACHE_TTL_HR = 4
+ET = ZoneInfo("America/New_York")
 
 # Release ID → display + sector impact.
 # Reference: https://api.stlouisfed.org/fred/releases (release_id is stable)
@@ -33,6 +35,28 @@ RELEASES = {
     53:  {"name": "GDP",  "tag": "GDP",  "warns_sectors": [], "boosts_sectors": ["FINANCIALS", "INDUSTRIALS"]},
     18:  {"name": "Retail Sales", "tag": "RETAIL", "warns_sectors": [], "boosts_sectors": ["CONSUMER_DISCRETIONARY"]},
 }
+
+EVENT_TIMES_ET = {
+    "FOMC": "14:00",
+    "CPI": "08:30",
+    "PPI": "08:30",
+    "JOBS": "08:30",
+    "GDP": "08:30",
+    "RETAIL": "08:30",
+}
+
+# FRED release_id=101 can surface non-decision placeholder rows. Use the
+# official Federal Reserve FOMC meeting decision dates for countdowns.
+FOMC_DECISION_DATES_2026 = [
+    "2026-01-28",
+    "2026-03-18",
+    "2026-04-29",
+    "2026-06-17",
+    "2026-07-29",
+    "2026-09-16",
+    "2026-10-28",
+    "2026-12-09",
+]
 
 # Industry → sector tag mapping (loose match — keys are lowercase substrings)
 INDUSTRY_TO_SECTOR = {
@@ -55,6 +79,37 @@ INDUSTRY_TO_SECTOR = {
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _event_datetime_et(date_str: str, tag: str) -> datetime:
+    hhmm = EVENT_TIMES_ET.get(tag, "09:30")
+    hour, minute = [int(x) for x in hhmm.split(":", 1)]
+    d = datetime.fromisoformat(date_str).date()
+    return datetime(d.year, d.month, d.day, hour, minute, tzinfo=ET)
+
+
+def _build_event(date_str: str, release_id: int, now_utc: datetime) -> dict[str, Any] | None:
+    meta = RELEASES[release_id]
+    tag = meta["tag"]
+    dt_et = _event_datetime_et(date_str, tag)
+    diff = dt_et.astimezone(timezone.utc) - now_utc
+    if diff.total_seconds() < 0:
+        return None
+    days_until = diff.days
+    hours_until = round(diff.total_seconds() / 3600, 2)
+    return {
+        "date": date_str,
+        "time_et": EVENT_TIMES_ET.get(tag, "09:30"),
+        "datetime_et": dt_et.isoformat(),
+        "days_until": days_until,
+        "hours_until": hours_until,
+        "tag": tag,
+        "name": meta["name"],
+        "warns_sectors": meta["warns_sectors"],
+        "boosts_sectors": meta["boosts_sectors"],
+        "is_imminent": hours_until <= 48,
+        "release_id": release_id,
+    }
 
 
 def has_fred() -> bool:
@@ -106,8 +161,21 @@ async def upcoming_events(days_ahead: int = 14, force: bool = False) -> list[dic
                 pass
 
     raw = await _fetch_release_dates(days_ahead=days_ahead)
-    today = _now().date()
+    now_utc = _now()
+    today = now_utc.date()
     events: list[dict[str, Any]] = []
+    end = today + timedelta(days=days_ahead)
+
+    for date_str in FOMC_DECISION_DATES_2026:
+        try:
+            d = datetime.fromisoformat(date_str).date()
+        except Exception:
+            continue
+        if today <= d <= end:
+            ev = _build_event(date_str, 101, now_utc)
+            if ev:
+                events.append(ev)
+
     # Dedup by (release_id, year-month). FRED returns daily release rows for
     # releases that update with each new data point — for our purposes we want
     # at most one event per release per calendar month (the actual print date).
@@ -116,6 +184,8 @@ async def upcoming_events(days_ahead: int = 14, force: bool = False) -> list[dic
         rid = r.get("release_id")
         date_str = r.get("date")
         if rid not in RELEASES or not date_str:
+            continue
+        if rid == 101:
             continue
         ym = date_str[:7]  # YYYY-MM
         key = (rid, ym)
@@ -126,21 +196,12 @@ async def upcoming_events(days_ahead: int = 14, force: bool = False) -> list[dic
             d = datetime.fromisoformat(date_str).date()
         except Exception:
             continue
-        days_until = (d - today).days
-        if days_until < 0:
+        if d < today:
             continue
-        meta = RELEASES[rid]
-        events.append({
-            "date": date_str,
-            "days_until": days_until,
-            "tag": meta["tag"],
-            "name": meta["name"],
-            "warns_sectors": meta["warns_sectors"],
-            "boosts_sectors": meta["boosts_sectors"],
-            "is_imminent": days_until <= 2,
-            "release_id": rid,
-        })
-    events.sort(key=lambda x: (x["days_until"], x["tag"]))
+        ev = _build_event(date_str, rid, now_utc)
+        if ev:
+            events.append(ev)
+    events.sort(key=lambda x: (x["hours_until"], x["tag"]))
 
     await db.macro_cache.update_one(
         {"_id": "events"},

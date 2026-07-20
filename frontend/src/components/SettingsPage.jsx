@@ -3,7 +3,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import { CrtShell, Card, tokens } from "./CrtShell";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 export default function SettingsPage() {
@@ -113,7 +113,7 @@ export default function SettingsPage() {
 
         <Card title="PIPELINE CRITERIA · FINAL SCREENER · LIVE WEIGHTS" accentColor={accent}>
           <div style={{ color: muted, fontSize: 11, marginBottom: 12, letterSpacing: "0.04em", lineHeight: 1.6 }}>
-            AXIOM score formula components — weights live from the learning engine.
+            Case Score formula components — weights live from the learning engine.
           </div>
           {!criteria ? (
             <div style={{ color: muted, padding: 10 }}>Loading...</div>
@@ -147,8 +147,8 @@ export default function SettingsPage() {
         <div>
           <Card title="INTEGRATIONS STATUS">
             <Row k="MONGODB" v="[CONNECTED]" c="#4ade80" />
-            <Row k="TELEGRAM BOT" v="[ACTIVE — @QuantNinjabot]" c="#4ade80" />
-            <Row k="CLAUDE LLM" v="[EMERGENT KEY — 24H CACHE]" c="#4ade80" />
+            <Row k="TELEGRAM BOT" v="[ACTIVE — @CaseCapitalTerminalQuant]" c="#4ade80" />
+            <Row k="CLAUDE LLM" v="[ANTHROPIC KEY - 24H CACHE]" c="#4ade80" />
             <Row k="USASPENDING API" v="[PUBLIC ENDPOINT]" c="#4ade80" />
             <Row k="OPENINSIDER" v="[HTML SCRAPE]" c="#4ade80" />
             <Row k="FINVIZ" v="[HTML SCRAPE]" c="#4ade80" />

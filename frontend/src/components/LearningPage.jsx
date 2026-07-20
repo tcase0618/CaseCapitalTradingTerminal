@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
 const STROKES = ["#c8a84b", "#5eead4", "#f87171", "#a78bfa", "#fb923c", "#4ade80",
@@ -19,15 +19,15 @@ export default function LearningPage() {
   const [running, setRunning] = useState(false);
   const [selectedSignal, setSelectedSignal] = useState(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     // Independent .catch so one failure doesn't kill the page
     axios.get(`${API}/learning/status`).then(r => setStatus(r.data)).catch(e => console.error("status:", e));
     axios.get(`${API}/learning/combos`).then(r => setCombos(r.data)).catch(e => console.error("combos:", e));
     axios.get(`${API}/learning/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
     axios.get(`${API}/learning/signal_stats`).then(r => setSignalStats(r.data)).catch(e => console.error("stats:", e));
     axios.get(`${API}/learning/weight_history?limit=2000`).then(r => setHistory(r.data)).catch(e => console.error("history:", e));
-  };
-  useEffect(() => { refresh(); }, []);
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
 
   const runCycle = async () => {
     setRunning(true);
@@ -49,7 +49,7 @@ export default function LearningPage() {
   };
 
   const lastRun = status?.last_run;
-  const weights = status?.weights || [];
+  const weights = useMemo(() => status?.weights || [], [status?.weights]);
 
   // Build history chart data: { ts: ..., [signal]: value } grouped by timestamp
   const historyChart = useMemo(() => {

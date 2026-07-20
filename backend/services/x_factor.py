@@ -156,13 +156,13 @@ async def fetch_news_velocity(ticker: str) -> int:
                                        follow_redirects=True) as c:
             r = await c.get(YAHOO_RSS.format(symbol=ticker.upper()))
             if r.status_code != 200:
-                return 0
+                return await _fetch_yfinance_news_velocity(ticker)
             text = r.text
     except Exception:
-        return 0
+        return await _fetch_yfinance_news_velocity(ticker)
     pub_dates = re.findall(r"<pubDate>([^<]+)</pubDate>", text)
     if not pub_dates:
-        return 0
+        return await _fetch_yfinance_news_velocity(ticker)
     cutoff = _now() - timedelta(hours=NEWS_WINDOW_HR)
     n = 0
     for pd in pub_dates:
@@ -176,6 +176,32 @@ async def fetch_news_velocity(ticker: str) -> int:
         except Exception:
             continue
     return n
+
+
+async def _fetch_yfinance_news_velocity(ticker: str) -> int:
+    """Fallback news count through yfinance's Yahoo-backed news adapter."""
+    def _sync() -> int:
+        try:
+            import yfinance as yf
+
+            rows = yf.Ticker(ticker.upper()).news or []
+            cutoff = _now() - timedelta(hours=NEWS_WINDOW_HR)
+            count = 0
+            for row in rows:
+                content = row.get("content") or {}
+                ts = content.get("pubDate") or content.get("displayTime")
+                if not ts:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if dt >= cutoff:
+                    count += 1
+            return count
+        except Exception:
+            return 0
+    return await asyncio.get_event_loop().run_in_executor(None, _sync)
 
 
 async def fetch_reddit_mentions(ticker: str) -> int:

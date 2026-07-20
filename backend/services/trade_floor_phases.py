@@ -192,7 +192,7 @@ async def process_phase_exits() -> dict[str, Any]:
             continue
 
         # ── Phase 1 ──
-        p1_target = float(t.get("phase1_target") or 0)
+        p1_target = float(t.get("pm_active_target") or t.get("phase1_target") or 0)
         if phase == 1 and p1_target and cur >= p1_target:
             qty_sell = round(qty_total * float(params["phase1_close_pct"]), 9)
             qty_sell = min(qty_sell, qty_rem)
@@ -232,7 +232,7 @@ async def process_phase_exits() -> dict[str, Any]:
                 phase = 2
 
         # ── Phase 2 ──
-        p2_target = float(t.get("phase2_target") or 0)
+        p2_target = float(t.get("pm_active_target") or t.get("phase2_target") or 0)
         if phase == 2 and p2_target and cur >= p2_target and qty_rem > 0:
             qty_sell = round(qty_total * float(params["phase2_close_pct"]), 9)
             qty_sell = min(qty_sell, qty_rem)

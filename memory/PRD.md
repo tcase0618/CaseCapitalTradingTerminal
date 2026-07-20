@@ -8,7 +8,7 @@ P&L tracking, backtesting, and a progressive learning engine.
 - DB: **MongoDB** — `MONGO_URL` in `/app/backend/.env`
 - Frontend: React (port 3000) — multi-page CRT Bloomberg-terminal aesthetic
   (Courier New, amber `#c8a84b`, scanlines, no rounded corners)
-- LLM: Claude Sonnet 4.5 via Emergent Universal Key, 24h cache
+- LLM: Claude Sonnet 4.5 via Anthropic API key, 24h cache
 - Bot: Telegram webhook `@Quantninjabot`, Chat ID `8073083936`
 - Scheduler: APScheduler — 3 scans/day (08:00/12:01/15:30 ET), 5m alerts,
   15m unusual-flow refresh, nightly P&L refresh, Sunday 02:00 learning cycle

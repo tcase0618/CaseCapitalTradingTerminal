@@ -40,6 +40,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+logs/
 dump.rdb
 
 # System files
@@ -84,6 +85,7 @@ android-sdk/-e
 .env
 .env.*
 *.env
+!.env.example
 credentials.json
 *.pem
 *.key
@@ -127,3 +129,8 @@ frontend/node_modules/.cache/default-development/20.pack
 frontend/node_modules/.cache/default-development/21.pack
 frontend/node_modules/.cache/default-development/22.pack
 frontend/node_modules/.cache/default-development/23.pack
+
+# Keep portable setup templates tracked while real secrets stay ignored.
+!.env.example
+!backend/.env.example
+!frontend/.env.example

@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -22,6 +23,18 @@ TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:[\.\-][A-Z]{1,2})?$")
 
 def _safe_text(el) -> str:
     return el.get_text(strip=True) if el else ""
+
+
+def _finviz_anchor_ticker(a) -> str | None:
+    href = a.get("href") or ""
+    parsed = urlparse(href)
+    if not parsed.path.endswith(("quote.ashx", "stock.ashx")) and parsed.path not in {"quote", "stock"}:
+        return None
+    ticker = (parse_qs(parsed.query).get("t") or [""])[0].upper().strip()
+    label = a.get_text(strip=True).upper()
+    if not ticker or ticker != label or not TICKER_RE.match(ticker):
+        return None
+    return ticker
 
 
 # ---------- OpenInsider: cluster buys ----------
@@ -133,10 +146,9 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                     break
                 soup = BeautifulSoup(resp_text, "lxml")
                 added = 0
-                # Finviz changed link pattern from `quote?t=...` to `stock?t=...` (2026).
-                for a in soup.find_all("a", href=re.compile(r"^(?:stock|quote)\?t=")):
-                    t = a.get_text(strip=True).upper()
-                    if not TICKER_RE.match(t) or t in seen:
+                for a in soup.find_all("a", href=True):
+                    t = _finviz_anchor_ticker(a)
+                    if not t or t in seen:
                         continue
                     short_pct = None
                     tr = a.find_parent("tr")
@@ -153,6 +165,7 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                     out.append({
                         "ticker": t,
                         "short_float_pct": short_pct if short_pct is not None else f">{min_pct:.0f}",
+                        "source": "FINVIZ_HIGH_SHORT",
                     })
                     added += 1
                     if len(out) >= limit:
@@ -189,12 +202,12 @@ async def fetch_finviz_upcoming_earnings(days: str = "nextweek", limit: int = 30
                     break
                 soup = BeautifulSoup(r.text, "lxml")
                 added = 0
-                for a in soup.find_all("a", href=re.compile(r"^(?:stock|quote)\?t=")):
-                    t = a.get_text(strip=True).upper()
-                    if not TICKER_RE.match(t) or t in seen:
+                for a in soup.find_all("a", href=True):
+                    t = _finviz_anchor_ticker(a)
+                    if not t or t in seen:
                         continue
                     seen.add(t)
-                    out.append({"ticker": t, "earnings_date": days})
+                    out.append({"ticker": t, "earnings_date": days, "source": "FINVIZ_EARNINGS"})
                     added += 1
                     if len(out) >= limit:
                         return out
@@ -274,6 +287,12 @@ async def fetch_quote(ticker: str) -> dict[str, Any] | None:
                 hist = t.history(period="5d")
                 if len(hist):
                     price = float(hist["Close"].iloc[-1])
+                    if prev_close is None and len(hist) >= 2:
+                        prev_close = float(hist["Close"].iloc[-2])
+            elif prev_close is None:
+                hist = t.history(period="5d")
+                if len(hist) >= 2:
+                    prev_close = float(hist["Close"].iloc[-2])
             try:
                 info = t.info
                 name = info.get("longName") or info.get("shortName")

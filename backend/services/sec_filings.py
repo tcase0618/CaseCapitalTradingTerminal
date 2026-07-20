@@ -93,8 +93,11 @@ def _parse_atom(xml_text: str, form_type: str) -> list[dict[str, Any]]:
                 "company": company,
                 "cik": cik,
                 "updated": updated,
+                "filing_date": updated[:10] if updated else None,
+                "accepted_at": updated or None,
                 "link": link,
                 "summary": summary.strip(),
+                "source": "SEC EDGAR Atom",
             })
     except Exception as e:
         logger.warning("EDGAR parse failed for %s: %s", form_type, e)
@@ -316,6 +319,11 @@ async def recent_filings(days: int = 7, form: str | None = None,
                 active_signals_by_t[t] = []
 
     for f in rows:
+        if not f.get("filing_date"):
+            f["filing_date"] = (f.get("updated") or f.get("created_at") or "")[:10] or None
+        if not f.get("accepted_at"):
+            f["accepted_at"] = f.get("updated") or f.get("created_at")
+        f.setdefault("source", "SEC EDGAR Atom")
         sigs = active_signals_by_t.get(f.get("ticker") or "", [])
         # Score: base + 12 per concurrent signal up to 100
         base = f.get("significance", 0)
@@ -325,3 +333,145 @@ async def recent_filings(days: int = 7, form: str | None = None,
         f["narrative_lock_badge"] = nls >= 70
     rows.sort(key=lambda r: -r.get("significance", 0))
     return rows
+
+
+RISK_LANGUAGE = [
+    "going concern", "material weakness", "substantial doubt", "liquidity",
+    "default", "restatement", "impairment", "bankruptcy", "delisting",
+    "cease operations", "covenant", "investigation", "subpoena",
+]
+
+
+def _filing_date(f: dict[str, Any]) -> str | None:
+    return (f.get("filing_date") or f.get("accepted_at") or f.get("updated") or f.get("created_at") or "")[:10] or None
+
+
+def _accession_from_link(link: str | None) -> str | None:
+    if not link:
+        return None
+    match = re.search(r"/(\d{10}-\d{2}-\d{6})-", link)
+    return match.group(1) if match else None
+
+
+async def _one_month_reaction(ticker: str, filing_date: str | None) -> dict[str, Any]:
+    if not ticker or not filing_date:
+        return {"status": "unavailable", "reaction_pct": None, "label": "NO DATE"}
+    try:
+        base_date = datetime.fromisoformat(filing_date).date()
+    except Exception:
+        return {"status": "unavailable", "reaction_pct": None, "label": "BAD DATE"}
+    target_date = base_date + timedelta(days=30)
+    if target_date > _now().date():
+        return {"status": "pending", "reaction_pct": None, "label": "PENDING 30D"}
+    try:
+        from . import pricer
+        base = await pricer.get_close_on_date(ticker, base_date.isoformat())
+        target = await pricer.get_close_on_date(ticker, target_date.isoformat())
+        if not base or not target:
+            return {"status": "unavailable", "reaction_pct": None, "label": "NO PRICE DATA"}
+        pct = round((target - base) / base * 100.0, 2)
+        return {
+            "status": "complete",
+            "reaction_pct": pct,
+            "label": "BULLISH" if pct >= 3 else "BEARISH" if pct <= -3 else "FLAT",
+            "base_close": round(float(base), 2),
+            "target_close": round(float(target), 2),
+            "base_date": base_date.isoformat(),
+            "target_date": target_date.isoformat(),
+            "source": "Massive/yfinance daily close",
+        }
+    except Exception as exc:
+        logger.debug("SEC 30d reaction %s %s: %s", ticker, filing_date, exc)
+        return {"status": "unavailable", "reaction_pct": None, "label": "NO PRICE DATA"}
+
+
+def _risk_hits(filings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    for f in filings:
+        text = f"{f.get('title', '')} {f.get('summary', '')}".lower()
+        found = [term for term in RISK_LANGUAGE if term in text]
+        if found:
+            hits.append({
+                "ticker": f.get("ticker"),
+                "form": f.get("form"),
+                "filing_date": _filing_date(f),
+                "terms": found[:6],
+                "title": f.get("title") or f.get("company"),
+                "link": f.get("link"),
+            })
+    return hits[:12]
+
+
+async def battle_card(ticker: str, limit: int = 25) -> dict[str, Any]:
+    """Ticker SEC battle card: filing history, 30d reaction, insider cluster,
+    and risk-language hits. Reaction values are computed only from daily closes;
+    newer filings remain pending instead of estimated."""
+    t = (ticker or "").upper().strip()
+    db = get_db()
+    rows = await db.sec_filings.find({"ticker": t}, {"_id": 0}).sort("accepted_at", -1).to_list(max(5, min(limit, 50)))
+    if not rows:
+        rows = await db.sec_filings.find({"ticker": t}, {"_id": 0}).sort("created_at", -1).to_list(max(5, min(limit, 50)))
+    unique_rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for f in rows:
+        key = f.get("link") or _accession_from_link(f.get("link")) or f"{f.get('form')}|{f.get('cik')}|{f.get('accepted_at') or f.get('updated')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(f)
+    rows = unique_rows
+
+    filing_dates = [_filing_date(f) for f in rows]
+    sem = asyncio.Semaphore(4)
+
+    async def _bounded_reaction(fd: str | None) -> dict[str, Any]:
+        async with sem:
+            return await _one_month_reaction(t, fd)
+
+    reactions = await asyncio.gather(*[_bounded_reaction(fd) for fd in filing_dates], return_exceptions=True)
+
+    history: list[dict[str, Any]] = []
+    for f, fd, reaction_raw in zip(rows, filing_dates, reactions):
+        reaction = reaction_raw if isinstance(reaction_raw, dict) else {"status": "unavailable", "reaction_pct": None, "label": "NO PRICE DATA"}
+        history.append({
+            "ticker": t,
+            "form": f.get("form"),
+            "company": f.get("company"),
+            "filing_date": fd,
+            "accepted_at": f.get("accepted_at") or f.get("updated") or f.get("created_at"),
+            "accession": _accession_from_link(f.get("link")),
+            "summary": f.get("summary") or f.get("title"),
+            "significance": f.get("significance"),
+            "bias": f.get("bias"),
+            "link": f.get("link"),
+            "reaction_30d": reaction,
+        })
+
+    now = _now()
+    form4_recent = [
+        f for f in rows
+        if f.get("form") == "Form 4"
+        and f.get("accepted_at")
+        and (now - datetime.fromisoformat(str(f["accepted_at"]).replace("Z", "+00:00"))).days <= 10
+    ]
+    reactions = [h["reaction_30d"]["reaction_pct"] for h in history if h.get("reaction_30d", {}).get("reaction_pct") is not None]
+    return {
+        "ticker": t,
+        "company": (rows[0].get("company") if rows else None),
+        "filing_count": len(rows),
+        "history": history,
+        "insider_cluster": {
+            "active": len(form4_recent) >= 2,
+            "recent_form4_count": len(form4_recent),
+            "window": "10D",
+            "read": "Cluster detected" if len(form4_recent) >= 2 else "No active Form 4 cluster in this feed window",
+        },
+        "risk_language": _risk_hits(rows),
+        "reaction_summary": {
+            "complete_count": len(reactions),
+            "avg_30d_pct": round(sum(reactions) / len(reactions), 2) if reactions else None,
+            "wins": sum(1 for r in reactions if r > 0),
+            "losses": sum(1 for r in reactions if r < 0),
+        },
+        "source": "SEC filings + Massive/yfinance daily closes",
+    }

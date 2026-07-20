@@ -21,10 +21,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger(__name__)
+
+ALPACA_DATA_BASE = "https://data.alpaca.markets"
+ALPACA_KEY = (os.environ.get("OPTIONS_APCA_API_KEY_ID") or os.environ.get("APCA_API_KEY_ID") or "").strip()
+ALPACA_SECRET = (os.environ.get("OPTIONS_APCA_API_SECRET_KEY") or os.environ.get("APCA_API_SECRET_KEY") or "").strip()
+ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+ALPACA_OPTIONS_FEED = os.environ.get("OPTIONS_APCA_DATA_FEED", "indicative").strip() or "indicative"
+OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
 
 
 def _is_nan(v) -> bool:
@@ -56,16 +67,196 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
+def _days_to_expiration(expiration: Any) -> int:
+    try:
+        return max(0, (datetime.fromisoformat(str(expiration)).date() - date.today()).days)
+    except Exception:
+        return 30
+
+
 # All yfinance access is sync → wrap each call in run_in_executor.
 async def _to_thread(fn, *a, **kw):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: fn(*a, **kw))
 
 
+def _option_expiration_target(catalyst_date: str | None = None) -> tuple[date, date]:
+    target_min, target_max = 14, 70
+    if catalyst_date:
+        try:
+            base = datetime.fromisoformat(catalyst_date).date()
+            target_min, target_max = 5, 45
+        except Exception:
+            base = date.today()
+    else:
+        base = date.today()
+    return base + timedelta(days=target_min), base + timedelta(days=target_max)
+
+
+def _parse_occ_symbol(symbol: str) -> dict[str, Any] | None:
+    m = OCC_SYMBOL_RE.match(str(symbol or "").upper())
+    if not m:
+        return None
+    root, yymmdd, cp, strike_raw = m.groups()
+    try:
+        exp = datetime.strptime(yymmdd, "%y%m%d").date()
+        strike = int(strike_raw) / 1000.0
+    except Exception:
+        return None
+    return {"root": root, "expiration": exp.isoformat(), "type": cp, "strike": strike}
+
+
+async def _alpaca_stock_price(ticker: str) -> float | None:
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=12.0, headers=ALPACA_HEADERS) as client:
+            r = await client.get(f"{ALPACA_DATA_BASE}/v2/stocks/{ticker}/trades/latest", params={"feed": "iex"})
+        if r.status_code == 200:
+            trade = (r.json() or {}).get("trade") or {}
+            price = _safe_float(trade.get("p"))
+            if price > 0:
+                return price
+    except Exception:
+        pass
+    return None
+
+
+async def _alpaca_chain_page(client: httpx.AsyncClient, ticker: str, params: dict[str, Any]) -> dict[str, Any]:
+    r = await client.get(f"{ALPACA_DATA_BASE}/v1beta1/options/snapshots/{ticker}", params=params)
+    if r.status_code != 200:
+        return {}
+    return r.json() or {}
+
+
+async def _fetch_alpaca_options_data(ticker: str, catalyst_date: str | None = None) -> dict[str, Any] | None:
+    """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return None
+    try:
+        import pandas as pd
+
+        ticker = ticker.upper()
+        spot = await _alpaca_stock_price(ticker)
+        if not spot or spot <= 0:
+            return None
+        target_lo, target_hi = _option_expiration_target(catalyst_date)
+        strike_lo = max(0.5, spot * 0.55)
+        strike_hi = spot * 1.75
+        params = {
+            "feed": ALPACA_OPTIONS_FEED,
+            "limit": 1000,
+            "root_symbol": ticker,
+            "expiration_date_gte": target_lo.isoformat(),
+            "expiration_date_lte": target_hi.isoformat(),
+            "strike_price_gte": round(strike_lo, 2),
+            "strike_price_lte": round(strike_hi, 2),
+        }
+        snapshots: dict[str, Any] = {}
+        async with httpx.AsyncClient(timeout=25.0, headers=ALPACA_HEADERS) as client:
+            for _ in range(8):
+                page = await _alpaca_chain_page(client, ticker, params)
+                snapshots.update(page.get("snapshots") or {})
+                token = page.get("next_page_token")
+                if not token:
+                    break
+                params["page_token"] = token
+        if not snapshots:
+            return None
+
+        rows = []
+        for symbol, snap in snapshots.items():
+            parsed = _parse_occ_symbol(symbol)
+            if not parsed:
+                continue
+            quote = snap.get("latestQuote") or {}
+            trade = snap.get("latestTrade") or {}
+            greeks = snap.get("greeks") or {}
+            daily = snap.get("dailyBar") or {}
+            bid = _safe_float(quote.get("bp"))
+            ask = _safe_float(quote.get("ap"))
+            last = _safe_float(trade.get("p")) or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
+            volume = _safe_int(daily.get("v") or trade.get("s") or 0)
+            rows.append({
+                "contractSymbol": symbol,
+                "strike": parsed["strike"],
+                "lastPrice": last,
+                "bid": bid,
+                "ask": ask,
+                "impliedVolatility": _safe_float(snap.get("impliedVolatility")),
+                "openInterest": _safe_int(snap.get("openInterest"), -1),
+                "volume": volume,
+                "delta": _safe_float(greeks.get("delta")),
+                "gamma": _safe_float(greeks.get("gamma")),
+                "theta": _safe_float(greeks.get("theta")),
+                "vega": _safe_float(greeks.get("vega")),
+                "expiration": parsed["expiration"],
+                "type": parsed["type"],
+                "quoteTime": quote.get("t"),
+                "dataProvider": "ALPACA_OPTIONS",
+                "dataFeed": ALPACA_OPTIONS_FEED,
+                "openInterestSource": "alpaca_snapshot" if snap.get("openInterest") is not None else "unavailable",
+            })
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+        expirations = sorted(df["expiration"].dropna().unique().tolist())
+        if not expirations:
+            return None
+        ideal = target_lo + ((target_hi - target_lo) / 2)
+        best = min(expirations, key=lambda exp: abs((datetime.fromisoformat(exp).date() - ideal).days))
+        calls = df[df["type"] == "C"].copy()
+        puts = df[df["type"] == "P"].copy()
+        if not len(calls) and not len(puts):
+            return None
+
+        atm_iv = None
+        valid_iv = calls[calls["impliedVolatility"] > 0] if len(calls) else df[df["impliedVolatility"] > 0]
+        if len(valid_iv):
+            idx = (valid_iv["strike"] - spot).abs().idxmin()
+            atm_iv = _safe_float(valid_iv.loc[idx, "impliedVolatility"])
+        iv_rank = 50
+        iv_label = "FAIR"
+        if atm_iv and atm_iv > 0:
+            # Free Alpaca indicative feed gives current IV, not a full IV history.
+            if atm_iv < 0.3:
+                iv_rank, iv_label = 25, "CHEAP"
+            elif atm_iv < 0.6:
+                iv_rank, iv_label = 50, "FAIR"
+            elif atm_iv < 0.9:
+                iv_rank, iv_label = 70, "ELEVATED"
+            else:
+                iv_rank, iv_label = 85, "EXPENSIVE"
+        return {
+            "ticker": ticker,
+            "calls": calls,
+            "puts": puts,
+            "price": spot,
+            "expirations": expirations,
+            "expiration": best,
+            "expiration_window": {"gte": target_lo.isoformat(), "lte": target_hi.isoformat()},
+            "strike_window": {"gte": round(strike_lo, 2), "lte": round(strike_hi, 2)},
+            "snapshot_count": len(rows),
+            "atm_iv": atm_iv,
+            "iv_rank": iv_rank,
+            "iv_label": iv_label,
+            "data_provider": "ALPACA_OPTIONS",
+            "data_feed": ALPACA_OPTIONS_FEED,
+            "data_quality": "INDICATIVE" if ALPACA_OPTIONS_FEED == "indicative" else "EXECUTION_GRADE",
+        }
+    except Exception as e:
+        logger.warning("Alpaca options data failed for %s: %s", ticker, e)
+        return None
+
+
 # ---------------- chain fetcher (Part 2) ----------------
 async def get_options_data(ticker: str, catalyst_date: str | None = None) -> dict[str, Any] | None:
     """Returns chain dataframes + ATM IV + iv_rank, or None if fetch fails."""
     ticker = ticker.upper()
+    alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date)
+    if alpaca_chain:
+        return alpaca_chain
     try:
         import yfinance as yf
 
@@ -186,6 +377,9 @@ async def get_options_data(ticker: str, catalyst_date: str | None = None) -> dic
                 "atm_iv": atm_iv,
                 "iv_rank": iv_rank,
                 "iv_label": iv_label,
+                "data_provider": "YFINANCE",
+                "data_feed": "fallback",
+                "data_quality": "FALLBACK_RESEARCH",
             }
 
         return await _to_thread(_sync)
@@ -204,9 +398,13 @@ def _approx_delta(strike: float, spot: float, is_call: bool) -> float:
     return float(delta) if is_call else float(-delta)
 
 
-def _liquidity_flag(oi: int, spread: float) -> str:
+def _liquidity_flag(oi: int, spread: float, premium: float = 0.0, volume: int = 0) -> str:
+    spread_pct = spread / premium if premium > 0 else 1.0
     bad_oi = oi < 100
-    bad_spread = spread > 0.50
+    bad_spread = spread > 0.75 and spread_pct > 0.35
+    thin = oi < 50 and volume < 10
+    if thin:
+        return "POOR"
     if bad_oi and bad_spread:
         return "POOR"
     if bad_oi or bad_spread:
@@ -214,7 +412,7 @@ def _liquidity_flag(oi: int, spread: float) -> str:
     return "GOOD"
 
 
-def find_best_contract(chain_data: dict, direction: str, budget: float = 100.0) -> dict | None:
+def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) -> dict | None:
     """Returns the recommended single-leg contract dict for BULL or BEAR.
     Never raises — returns None on any data issue."""
     try:
@@ -235,8 +433,53 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 100.0) 
             return None
 
         df = df.copy()
+        df["bid_safe"] = df["bid"].apply(_safe_float) if "bid" in df.columns else 0.0
+        df["ask_safe"] = df["ask"].apply(_safe_float) if "ask" in df.columns else 0.0
+        df["last_safe"] = df["lastPrice"].apply(_safe_float) if "lastPrice" in df.columns else 0.0
+        df["premium_safe"] = df.apply(
+            lambda r: r["last_safe"] or ((r["bid_safe"] + r["ask_safe"]) / 2 if r["bid_safe"] > 0 and r["ask_safe"] > 0 else 0.0),
+            axis=1,
+        )
+        df["premium_safe"] = df["premium_safe"].where(df["premium_safe"] > 0, (df["strike"] - spot).abs() * 0.05)
+        df["premium_safe"] = df["premium_safe"].clip(lower=0.05)
+        df["max_loss_safe"] = df["premium_safe"] * 100
+        df["spread_safe"] = (df["ask_safe"] - df["bid_safe"]).clip(lower=0.0)
+        df["oi_safe"] = df["openInterest"].apply(_safe_int) if "openInterest" in df.columns else 0
+        df["volume_safe"] = df["volume"].apply(_safe_int) if "volume" in df.columns else 0
         df["dist"] = (df["strike"] - target_strike).abs()
-        df = df.sort_values("dist").head(1)
+        if "expiration" in df.columns:
+            df["days_to_exp"] = df["expiration"].apply(_days_to_expiration)
+        else:
+            df["days_to_exp"] = 30
+        if "delta" in df.columns:
+            df["delta_safe"] = df["delta"].apply(_safe_float).abs()
+        else:
+            df["delta_safe"] = df["strike"].apply(lambda s: abs(_approx_delta(_safe_float(s), spot, is_call)))
+
+        affordable = df[df["max_loss_safe"] <= float(budget)]
+        pool = affordable if len(affordable) else df
+        pool = pool.copy()
+        pool["spread_pct"] = pool["spread_safe"] / pool["premium_safe"].replace(0, 0.01)
+        target_delta = 0.35 if is_call else 0.4
+        pool["delta_penalty"] = (pool["delta_safe"] - target_delta).abs()
+        pool["expiry_penalty"] = (pool["days_to_exp"] - 35).abs() / 35
+        pool["liquidity_penalty"] = (
+            (pool["oi_safe"] < 50).astype(int) * 4
+            + (pool["oi_safe"] < 100).astype(int) * 1
+            + (pool["volume_safe"] < 10).astype(int) * 2
+            + ((pool["spread_safe"] > 0.75) & (pool["spread_pct"] > 0.35)).astype(int) * 4
+            + (pool["ask_safe"] <= 0).astype(int) * 10
+            + (pool["bid_safe"] <= 0).astype(int) * 2
+        )
+        pool["budget_penalty"] = (pool["max_loss_safe"] > float(budget)).astype(int) * 8
+        pool["score"] = (
+            pool["budget_penalty"]
+            + pool["liquidity_penalty"]
+            + pool["expiry_penalty"]
+            + pool["delta_penalty"] * 2
+            + (pool["dist"] / max(spot, 1.0))
+        )
+        df = pool.sort_values(["score", "dist"]).head(1)
         if not len(df):
             return None
         row = df.iloc[0]
@@ -255,22 +498,30 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 100.0) 
         premium = last or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
         if premium <= 0:
             premium = max(0.05, abs(spot - strike) * 0.05)
-        delta = _approx_delta(strike, spot, is_call)
+        provider_delta = _safe_float(row.get("delta"))
+        delta = provider_delta or _approx_delta(strike, spot, is_call)
         affordable = max(0, int(budget // (premium * 100))) if premium > 0 else 0
         return {
+            "symbol": str(row.get("contractSymbol") or ""),
+            "contractSymbol": str(row.get("contractSymbol") or ""),
+            "data_provider": chain_data.get("data_provider") or row.get("dataProvider") or "YFINANCE",
+            "data_feed": chain_data.get("data_feed") or row.get("dataFeed"),
+            "data_quality": chain_data.get("data_quality") or "FALLBACK_RESEARCH",
+            "open_interest_source": row.get("openInterestSource") or ("reported" if oi >= 0 else "unavailable"),
             "strike": round(strike, 2),
-            "expiration": chain_data.get("expiration"),
+            "expiration": str(row.get("expiration") or chain_data.get("expiration") or ""),
+            "days_to_expiration": _safe_int(row.get("days_to_exp")),
             "premium": round(premium, 2),
             "bid": round(bid, 2),
             "ask": round(ask, 2),
             "iv": round(iv, 4),
             "delta": round(delta, 3),
-            "open_interest": oi,
+            "open_interest": max(0, oi),
             "volume": volume,
             "spread": round(spread, 2),
             "contracts_at_budget": affordable,
             "max_loss": round(premium * 100, 2),
-            "liquidity": _liquidity_flag(oi, spread),
+            "liquidity": _liquidity_flag(oi, spread, premium, volume),
             "type": "C" if is_call else "P",
         }
     except Exception as e:
@@ -380,9 +631,12 @@ def build_spread(chain_data: dict, direction: str, width: float = 5.0) -> dict |
     else:
         breakeven = round(primary["strike"] - net_debit, 2)
 
-    return {
-        "direction": direction,
-        "buy_strike": primary["strike"],
+        return {
+            "direction": direction,
+            "data_provider": chain_data.get("data_provider"),
+            "data_feed": chain_data.get("data_feed"),
+            "data_quality": chain_data.get("data_quality"),
+            "buy_strike": primary["strike"],
         "sell_strike": sell_strike,
         "buy_premium": round(buy_premium, 2),
         "sell_premium": round(sell_premium, 2),
@@ -397,15 +651,18 @@ def build_spread(chain_data: dict, direction: str, width: float = 5.0) -> dict |
 
 
 # ---------------- unusual flow (Part 7) ----------------
-async def detect_unusual_flow(ticker: str) -> dict[str, Any]:
-    """Detect unusual options activity vs open interest baseline."""
-    chain = await get_options_data(ticker)
+def _detect_unusual_flow_from_chain(ticker: str, chain: dict | None) -> dict[str, Any]:
+    """Detect unusual options activity vs open interest baseline from an existing chain."""
     if not chain:
         return {"unusual_calls": False, "unusual_puts": False, "call_sweep": False,
                 "total_call_volume": 0, "total_put_volume": 0,
                 "call_put_ratio": 0.0, "flow_bias": "NEUTRAL"}
     try:
         calls = chain["calls"]; puts = chain["puts"]
+        if calls is None or puts is None:
+            return {"unusual_calls": False, "unusual_puts": False, "call_sweep": False,
+                    "total_call_volume": 0, "total_put_volume": 0,
+                    "call_put_ratio": 0.0, "flow_bias": "NEUTRAL"}
         cv = _safe_int(calls["volume"].fillna(0).sum()) if "volume" in calls.columns else 0
         pv = _safe_int(puts["volume"].fillna(0).sum()) if "volume" in puts.columns else 0
         coi = _safe_int(calls["openInterest"].fillna(0).sum()) if "openInterest" in calls.columns else 0
@@ -440,6 +697,11 @@ async def detect_unusual_flow(ticker: str) -> dict[str, Any]:
         return {"unusual_calls": False, "unusual_puts": False, "call_sweep": False,
                 "total_call_volume": 0, "total_put_volume": 0,
                 "call_put_ratio": 0.0, "flow_bias": "NEUTRAL"}
+
+
+async def detect_unusual_flow(ticker: str) -> dict[str, Any]:
+    """Detect unusual options activity vs open interest baseline."""
+    return _detect_unusual_flow_from_chain(ticker, await get_options_data(ticker))
 
 
 # ---------------- crush risk (Part 8) ----------------
@@ -487,13 +749,16 @@ async def analyze_ticker(stock: dict) -> dict | None:
             spread = build_spread(chain, "BEAR")
 
         crush = assess_iv_crush_risk(stock, chain)
-        flow = await detect_unusual_flow(ticker)
+        flow = _detect_unusual_flow_from_chain(ticker, chain)
 
         # Don't carry dataframes downstream — they're huge and unnecessary
         return {
             "strategy": selected["strategy"],
             "direction": selected["direction"],
             "strategy_reason": selected["reason"],
+            "data_provider": chain.get("data_provider"),
+            "data_feed": chain.get("data_feed"),
+            "data_quality": chain.get("data_quality"),
             "iv_rank": chain.get("iv_rank"),
             "iv_label": chain.get("iv_label"),
             "atm_iv": chain.get("atm_iv"),

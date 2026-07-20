@@ -21,6 +21,8 @@ from services.scrapers import fetch_quote  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("server")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(title="Stock Intel Bot")
 api = APIRouter(prefix="/api")
@@ -44,20 +46,30 @@ async def root():
 
 @api.get("/status")
 async def status():
-    db = get_db()
-    state = await db.bot_state.find_one({"_id": "state"}, {"_id": 0}) or {}
-    today_iso_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cache_today = await db.claude_cache.count_documents({"date_key": today_iso_prefix})
-    last_scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
-    watchlist_count = await db.watchlist.count_documents({})
-    alerts_count = await db.alerts.count_documents({"triggered": False})
+    db_available = True
+    state = {}
+    cache_today = 0
+    last_scan = None
+    watchlist_count = 0
+    alerts_count = 0
+    try:
+        db = get_db()
+        today_iso_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        state = await db.bot_state.find_one({"_id": "state"}, {"_id": 0}) or {}
+        cache_today = await db.claude_cache.count_documents({"date_key": today_iso_prefix})
+        last_scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+        watchlist_count = await db.watchlist.count_documents({})
+        alerts_count = await db.alerts.count_documents({"triggered": False})
+    except Exception as e:
+        db_available = False
+        logger.warning("status degraded; MongoDB unavailable: %s", e)
 
     return {
         "bot": {
             "online": True,
+            "db_available": db_available,
             "telegram_configured": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
-            "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")
-                                       or os.environ.get("EMERGENT_LLM_KEY")),
+            "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
             "default_chat_id_set": bool(os.environ.get("TELEGRAM_CHAT_ID")),
         },
         "webhook_url": state.get("webhook_url"),
@@ -76,11 +88,49 @@ async def status():
     }
 
 
+@api.get("/system/health")
+async def system_health():
+    from services import system_health as svc
+    return await svc.overview()
+
+
+@api.get("/data/free/catalog")
+async def free_data_catalog():
+    from services import free_data
+    return {"sources": free_data.catalog()}
+
+
+@api.get("/data/free/sec/companyfacts/{cik}")
+async def free_data_sec_companyfacts(cik: str):
+    from services import free_data
+    return await free_data.sec_companyfacts(cik)
+
+
+@api.get("/data/free/ticker/{ticker}")
+async def free_data_ticker(ticker: str):
+    from services import free_data
+
+    t = ticker.upper()
+    company_name = None
+    try:
+        fund = await risk_target.fetch_fundamentals(t)
+        company_name = (fund or {}).get("name")
+    except Exception:
+        company_name = None
+    return await free_data.ticker_free_data(t, company_name=company_name)
+
+
+@api.get("/data/free/fred/latest/{series_id}")
+async def free_data_fred_latest(series_id: str):
+    from services import free_data
+    return await free_data.fred_latest(series_id)
+
+
 @api.post("/scan/run")
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        await telegram_service.dispatch_consolidated(scan)
+        await telegram_service.dispatch_consolidated(scan, title="CASE CAPITAL INTEL")
     return scan
 
 
@@ -89,7 +139,14 @@ async def scan_dispatch():
     scan = await scanner.latest_scan()
     if not scan:
         raise HTTPException(404, "no scan available")
-    return await telegram_service.dispatch_consolidated(scan)
+    result = await telegram_service.dispatch_consolidated(scan, title="CASE CAPITAL INTEL")
+    return {
+        **result,
+        "scan_finished_at": scan.get("finished_at"),
+        "scan_started_at": scan.get("started_at"),
+        "result_count": len(scan.get("results") or []),
+        "top_tickers": [r.get("ticker") for r in (scan.get("results") or [])[:5]],
+    }
 
 
 @api.get("/scan/preview")
@@ -97,9 +154,11 @@ async def scan_preview():
     scan = await scanner.latest_scan()
     if not scan:
         return {"messages": [], "char_counts": [], "total_chars": 0}
-    msgs = telegram_service.build_consolidated_messages(scan)
+    msgs = telegram_service.build_consolidated_messages(scan, title="CASE CAPITAL INTEL")
     return {"messages": msgs, "char_counts": [len(m) for m in msgs],
-             "total_chars": sum(len(m) for m in msgs)}
+             "total_chars": sum(len(m) for m in msgs),
+             "scan_finished_at": scan.get("finished_at"),
+             "result_count": len(scan.get("results") or [])}
 
 
 @api.post("/scan/gov")
@@ -445,13 +504,25 @@ async def learning_signal_stats():
 
 # ─────────── AXIOM v3.2 endpoints ───────────
 @api.get("/v32/earnings_week")
-async def v32_earnings_week():
+async def v32_earnings_week(week_offset: int = 0):
     from services import earnings_engine
     db = get_db()
     last_scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1},
                                                   sort=[("finished_at", -1)])
     scan_set = {r["ticker"] for r in (last_scan or {}).get("results", []) or []}
-    return await earnings_engine.current_week_with_probability(scan_tickers=scan_set)
+    return await earnings_engine.current_week_cached(scan_tickers=scan_set, week_offset=week_offset)
+
+
+@api.post("/v32/earnings_divergences/dispatch")
+async def v32_earnings_divergences_dispatch(week_offset: int = 0):
+    from services import earnings_engine
+    db = get_db()
+    last_scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1},
+                                                  sort=[("finished_at", -1)])
+    scan_set = {r["ticker"] for r in (last_scan or {}).get("results", []) or []}
+    snapshot = await earnings_engine.current_week_cached(scan_tickers=scan_set, week_offset=week_offset)
+    result = await telegram_service.dispatch_earnings_divergences(snapshot)
+    return {"ok": result.get("messages_sent", 0) > 0, **result}
 
 
 @api.get("/v32/lottery")
@@ -521,7 +592,9 @@ async def v32_macro(days_ahead: int = 14):
     events = await macro_pulse.upcoming_events(days_ahead=days_ahead)
     return {
         "events": events,
-        "imminent_warnings": [e for e in events if e.get("is_imminent")],
+        "imminent_warnings": [
+            e for e in events if e.get("is_imminent") and e.get("warns_sectors")
+        ],
         "fred_available": macro_pulse.has_fred(),
     }
 
@@ -544,6 +617,9 @@ async def ticker_detail(ticker: str):
     )
     pnl_record = await db.signal_performance.find_one(
         {"ticker": t}, {"_id": 0}, sort=[("ts", -1)],
+    )
+    first_seen = await db.signal_first_seen.find_one(
+        {"ticker": t}, {"_id": 0},
     )
     fund = await risk_target.fetch_fundamentals(t)
     q = await fetch_quote(t)
@@ -568,6 +644,23 @@ async def ticker_detail(ticker: str):
             )
         except Exception:
             pass
+    if first_seen:
+        first_price = first_seen.get("first_seen_price")
+        current_price = result.get("price")
+        result["first_alert"] = {
+            "date": first_seen.get("first_seen_date"),
+            "price": first_price,
+            "signals": first_seen.get("first_signals") or [],
+            "signal_score": first_seen.get("first_signal_score"),
+        }
+        result["change_since_first_alert_pct"] = None
+        if first_price and current_price and first_price > 0:
+            try:
+                result["change_since_first_alert_pct"] = round(
+                    (current_price - first_price) / first_price * 100.0, 2
+                )
+            except Exception:
+                pass
     return result
 
 
@@ -601,6 +694,12 @@ async def activity(limit: int = 50):
     db = get_db()
     items = await db.activity_log.find({}, {"_id": 0}).sort("ts", -1).to_list(limit)
     return items
+
+
+@api.get("/audit_logs")
+async def audit_logs(limit: int = 250, source: str | None = None, event_type: str | None = None, ticker: str | None = None):
+    from services import audit_logs as svc
+    return await svc.list_events(limit=limit, source=source, event_type=event_type, ticker=ticker)
 
 
 @api.get("/watchlist")
@@ -681,7 +780,7 @@ async def analyze(ticker: str):
     q = await fetch_quote(ticker)
     a = await claude_service.analyze_single(ticker, context={"quote": q})
     if not a:
-        raise HTTPException(500, "analysis failed (check EMERGENT_LLM_KEY)")
+        raise HTTPException(500, "analysis failed (check ANTHROPIC_API_KEY)")
     return {"analysis": a, "quote": q}
 
 
@@ -747,7 +846,7 @@ async def pipeline_criteria():
     return {
         "pre_filter": pre_filter,
         "final_screener": final_screener,
-        "axiom_score_formula": "Σ (signal × live_weight) + bonuses (UNUSUAL_FLOW +2, CALL_SWEEP +3, NARRATIVE_LOCK +20)",
+        "axiom_score_formula": "Case Score = Σ (signal × live_weight) + bonuses (UNUSUAL_FLOW +2, CALL_SWEEP +3, NARRATIVE_LOCK +20)",
     }
 
 
@@ -848,6 +947,18 @@ async def contracts_sub_awards(award_id: str):
     return {"sub_awards": rows, "cached": False}
 
 
+@api.get("/gov/intel")
+async def gov_intel_layer(ticker: str | None = None, recipient: str | None = None,
+                          agency: str | None = None, description: str | None = None):
+    from services import gov_intel
+    return await gov_intel.contract_layer(
+        ticker=ticker,
+        recipient=recipient,
+        agency=agency,
+        description=description,
+    )
+
+
 
 # ---------- App wiring ----------
 # (Router include moved to end of file so v5.0 endpoints register)
@@ -863,9 +974,15 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup():
     from services import learning_engine, pnl_tracker
-    await learning_engine.ensure_weights_exist()
+    db_ready = True
     try:
-        await pnl_tracker.ensure_first_seen_backfill()
+        await learning_engine.ensure_weights_exist()
+    except Exception as e:
+        db_ready = False
+        logger.warning("learning weights init skipped; MongoDB unavailable: %s", e)
+    try:
+        if db_ready:
+            await pnl_tracker.ensure_first_seen_backfill()
     except Exception as e:
         logger.warning("first_seen backfill failed: %s", e)
     scheduler.start_scheduler()
@@ -876,11 +993,16 @@ async def on_startup():
             logger.info("Telegram webhook setup: %s", res)
         except Exception as e:
             logger.warning("Webhook setup failed: %s", e)
-    await log_activity("Server started", "info")
+    try:
+        if db_ready:
+            await log_activity("Server started", "info")
+    except Exception as e:
+        logger.warning("startup activity log skipped: %s", e)
     # Trade Floor Engine — one-time fork from Signal Engine
     try:
-        from services import trade_floor_learning
-        await trade_floor_learning.initialize_from_signal_engine()
+        if db_ready:
+            from services import trade_floor_learning
+            await trade_floor_learning.initialize_from_signal_engine()
     except Exception as e:
         logger.warning("Trade Floor Engine init: %s", e)
 
@@ -897,6 +1019,12 @@ async def sec_filings_list(days: int = 7, form: str | None = None):
     from services import sec_filings
     rows = await sec_filings.recent_filings(days=days, form=form)
     return {"filings": rows, "count": len(rows)}
+
+
+@api.get("/sec/battle_card/{ticker}")
+async def sec_battle_card(ticker: str, limit: int = 25):
+    from services import sec_filings
+    return await sec_filings.battle_card(ticker=ticker, limit=limit)
 
 
 # ─────── TRADE FLOOR ───────
@@ -943,6 +1071,25 @@ async def tf_sync():
     return await trade_floor.sync_positions_and_close_settled()
 
 
+@api.post("/trade_floor/execute_pm_ticker")
+async def tf_execute_pm_ticker(ticker: str):
+    from services import trade_floor
+    from services.db import get_db
+    t = ticker.upper()
+    scan = await get_db().scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+    rows = [r for r in ((scan or {}).get("results") or []) if str(r.get("ticker") or "").upper() == t]
+    if not rows:
+        return {"ok": False, "reason": "ticker_not_in_latest_scan", "ticker": t}
+    result = await trade_floor.evaluate_and_execute(rows, only_tickers={t})
+    return {"ok": bool(result.get("executed")), "ticker": t, "scan_finished_at": (scan or {}).get("finished_at"), **result}
+
+
+@api.post("/trade_floor/execution_probe")
+async def tf_execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_order: bool = False):
+    from services import trade_floor
+    return await trade_floor.execution_probe(ticker=ticker, notional=notional, place_order=place_order)
+
+
 @api.get("/trade_floor/history")
 async def tf_history():
     from services import trade_floor
@@ -953,6 +1100,12 @@ async def tf_history():
 async def tf_journal(date: str | None = None):
     from services import trade_floor
     return {"journal": await trade_floor.daily_journal(date)}
+
+
+@api.get("/trade_journal/overview")
+async def trade_journal_overview(limit_scans: int = 120, limit_trades: int = 200):
+    from services import trade_journal
+    return await trade_journal.overview(limit_scans=limit_scans, limit_trades=limit_trades)
 
 
 @api.post("/trade_floor/manual_send")
@@ -1101,6 +1254,210 @@ async def tf_engine_recal():
     return await trade_floor_learning.recalibrate()
 
 
+@api.get("/portfolio_manager/latest")
+async def portfolio_manager_latest(equity: float | None = None, mode: str = "AUTO", ruleset_id: str | None = None):
+    from services import portfolio_manager
+    return await portfolio_manager.latest_portfolio_plan(equity=equity, mode=mode, ruleset_id=ruleset_id)
+
+
+@api.get("/portfolio_manager/learning/status")
+async def portfolio_manager_learning_status(limit_scans: int = 120):
+    from services import pm_learning
+    return await pm_learning.status(limit_scans=limit_scans)
+
+
+@api.get("/portfolio_manager/backtest")
+async def portfolio_manager_backtest(
+    limit_scans: int = 120,
+    equity: float = 1000.0,
+    mode: str = "BALANCED",
+    max_position_pct: float | None = None,
+    max_single_name_risk_pct: float | None = None,
+    max_gross_deployment_pct: float | None = None,
+    accumulate_score: float | None = None,
+    accumulate_rr: float | None = None,
+    starter_score: float | None = None,
+    starter_rr: float | None = None,
+    watch_score: float | None = None,
+    ruleset_id: str | None = None,
+):
+    from services import pm_backtest
+    overrides = {
+        "max_position_pct": max_position_pct,
+        "max_single_name_risk_pct": max_single_name_risk_pct,
+        "max_gross_deployment_pct": max_gross_deployment_pct,
+        "accumulate_score": accumulate_score,
+        "accumulate_rr": accumulate_rr,
+        "starter_score": starter_score,
+        "starter_rr": starter_rr,
+        "watch_score": watch_score,
+    }
+    return await pm_backtest.run(
+        limit_scans=limit_scans,
+        equity=equity,
+        mode=mode,
+        profile_override=overrides,
+        ruleset_id=ruleset_id,
+    )
+
+
+@api.get("/portfolio_manager/options/latest")
+async def portfolio_manager_options_latest():
+    from services import options_desk
+    return await options_desk.candidates()
+
+
+@api.get("/portfolio_manager/options/learning/status")
+async def portfolio_manager_options_learning_status(limit: int = 200):
+    from services import options_desk
+    return await options_desk.learning_status(limit=limit)
+
+
+@api.get("/portfolio_manager/options/backtest")
+async def portfolio_manager_options_backtest(limit_scans: int = 120):
+    from services import options_desk
+    return await options_desk.backtest(limit_scans=limit_scans)
+
+
+@api.get("/options_desk/account")
+async def options_desk_account():
+    from services import options_desk
+    return await options_desk.account()
+
+
+@api.get("/options_desk/positions")
+async def options_desk_positions():
+    from services import options_desk
+    return await options_desk.positions()
+
+
+@api.get("/options_desk/orders")
+async def options_desk_orders(status: str = "all", limit: int = 100):
+    from services import options_desk
+    return await options_desk.orders(status=status, limit=limit)
+
+
+@api.get("/options_desk/candidates")
+async def options_desk_candidates():
+    from services import options_desk
+    return await options_desk.candidates()
+
+
+@api.post("/options_desk/candidates/refresh")
+async def options_desk_refresh():
+    from services import options_desk
+    return await options_desk.build_candidates(persist=True)
+
+
+class OptionsDeskExecutePayload(BaseModel):
+    candidate_id: str
+    qty: int | None = None
+    limit_price: float | None = None
+
+
+@api.post("/options_desk/execute")
+async def options_desk_execute(payload: OptionsDeskExecutePayload):
+    from services import options_desk
+    return await options_desk.execute(
+        candidate_id=payload.candidate_id,
+        qty=payload.qty,
+        limit_price=payload.limit_price,
+    )
+
+
+@api.post("/options_desk/auto_execute_latest")
+async def options_desk_auto_execute_latest(limit: int | None = None):
+    from services import options_desk
+    return await options_desk.auto_execute_latest(limit=limit)
+
+
+class OptionsDeskClosePayload(BaseModel):
+    symbol: str
+    qty: int | None = None
+
+
+@api.post("/options_desk/close")
+async def options_desk_close(payload: OptionsDeskClosePayload):
+    from services import options_desk
+    return await options_desk.close(symbol=payload.symbol, qty=payload.qty)
+
+
+@api.post("/options_desk/sync")
+async def options_desk_sync():
+    from services import options_desk
+    return await options_desk.sync()
+
+
+@api.get("/options_desk/trades")
+async def options_desk_trades(limit: int = 100, sync_live: bool = True):
+    from services import options_desk
+    return await options_desk.trades(limit=limit, sync_live=sync_live)
+
+
+@api.post("/options_desk/fills/sync")
+async def options_desk_fills_sync():
+    from services import options_desk
+    return await options_desk.sync_fills()
+
+
+@api.post("/options_desk/reports/daily/dispatch")
+async def options_desk_daily_report_dispatch(force: bool = False):
+    from services import options_desk
+    return await options_desk.dispatch_options_daily_report(force=force)
+
+
+@api.post("/options_desk/reports/weekly/dispatch")
+async def options_desk_weekly_report_dispatch(force: bool = False):
+    from services import options_desk
+    return await options_desk.dispatch_options_weekly_report(force=force)
+
+
+@api.get("/options_desk/risk")
+async def options_desk_risk():
+    from services import options_desk
+    return await options_desk.latest_risk_check()
+
+
+@api.post("/options_desk/risk/check")
+async def options_desk_risk_check():
+    from services import options_desk
+    return await options_desk.monitor_open_positions(enforce_hard_stop=True)
+
+
+@api.get("/portfolio_manager/rulesets")
+async def portfolio_manager_rulesets():
+    from services import pm_rules
+    return await pm_rules.list_rulesets()
+
+
+@api.post("/portfolio_manager/rulesets")
+async def portfolio_manager_create_ruleset(payload: dict):
+    from services import pm_rules
+    return await pm_rules.create_ruleset(
+        name=payload.get("name") or "Custom PM Rules",
+        description=payload.get("description") or "",
+        mode_overrides=payload.get("mode_overrides") or {},
+        activate=bool(payload.get("activate")),
+    )
+
+
+@api.post("/portfolio_manager/rulesets/{ruleset_id}/activate")
+async def portfolio_manager_activate_ruleset(ruleset_id: str):
+    from services import pm_rules
+    return await pm_rules.activate_ruleset(ruleset_id)
+
+
+@api.post("/portfolio_manager/ratchet/process")
+async def portfolio_manager_ratchet_process():
+    from services import pm_ratchet
+    return await pm_ratchet.process_open_ratchets()
+
+
+@api.get("/portfolio_manager/ratchet/events")
+async def portfolio_manager_ratchet_events(limit: int = 50):
+    from services import pm_ratchet
+    return await pm_ratchet.recent_events(limit=limit)
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -1174,6 +1531,12 @@ async def admin_integration_status():
     return {"integrations": await svc.integration_status(),
              "jobs": svc.scheduled_jobs(),
              "commands": svc.telegram_commands()}
+
+
+@api.get("/georisk/live")
+async def georisk_live():
+    from services import georisk
+    return await georisk.live_georisk()
 
 
 app.include_router(api)

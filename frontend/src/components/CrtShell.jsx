@@ -16,19 +16,27 @@ const hairline = "0.5px solid rgba(255,255,255,0.06)";
 const hairlineAccent = "0.5px solid rgba(200,168,75,0.18)";
 
 const NAV = [
-  { to: "/",            label: "DASHBOARD",   icon: "▣", group: "CORE" },
+  { to: "/portfolio-manager", label: "PORTFOLIO MGR", icon: "PM", group: "TRADE FLOOR" },
+  { to: "/",            label: "COMMAND CENTER", icon: "CC", group: "CORE" },
+  { to: "/scanner",     label: "SCANNER",     icon: "SC", group: "CORE" },
   { to: "/intel",       label: "INTEL FEED",  icon: "◉", group: "CORE" },
   { to: "/contracts",   label: "CONTRACTS",   icon: "▦", group: "CORE" },
   { to: "/sec",         label: "SEC FILINGS", icon: "§", group: "CORE" },
-  { to: "/earnings",    label: "EARNINGS",    icon: "▤", group: "v3.2" },
-  { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "v3.2" },
-  { to: "/pharma",      label: "PHARMA",      icon: "🧬", group: "v3.2" },
+  { to: "/earnings",    label: "EARNINGS",    icon: "▤", group: "CORE" },
+  { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "CORE" },
+  { to: "/pharma",      label: "PHARMA",      icon: "🧬", group: "CORE" },
   { to: "/trade-floor", label: "TRADE FLOOR", icon: "⚡", group: "TRADE FLOOR" },
+  { to: "/options-desk", label: "OPTIONS DESK", icon: "OD", group: "TRADE FLOOR" },
   { to: "/performance", label: "PERFORMANCE", icon: "▶", group: "ANALYSIS" },
   { to: "/learning",    label: "LEARNING",    icon: "◆", group: "ANALYSIS" },
   { to: "/tf-engine",   label: "TRADE ENGINE", icon: "▼", group: "ANALYSIS" },
+  { to: "/audit-logs",  label: "AUDIT LOGS",  icon: "AL", group: "SYSTEM" },
   { to: "/settings",    label: "SETTINGS",    icon: "▥", group: "SYSTEM" },
 ];
+
+if (!NAV.some(n => n.to === "/georisk")) {
+  NAV.splice(8, 0, { to: "/georisk", label: "GEORISK", icon: "GR", group: "CORE" });
+}
 
 // US market hours: 9:30 - 16:00 ET (UTC-5 / UTC-4 DST)
 function getMarketStatus() {
@@ -46,10 +54,10 @@ function getMarketStatus() {
   return { state: "POST", color: "#fb923c" };
 }
 
-// Compute precise days/hours/minutes until a UTC midnight date string
-function timeUntilDate(targetDateStr) {
+// Compute precise days/hours/minutes until the event timestamp.
+function timeUntilEvent(event) {
   try {
-    const target = new Date(targetDateStr + "T13:30:00Z"); // 9:30 ET — market open
+    const target = event?.datetime_et ? new Date(event.datetime_et) : new Date(`${event?.date}T${event?.time_et || "09:30"}:00-04:00`);
     const diffMs = target - new Date();
     if (diffMs <= 0) return null;
     const days = Math.floor(diffMs / 86400000);
@@ -69,7 +77,7 @@ function useNextMacroEvent() {
     let cancelled = false;
     const load = async () => {
       try {
-        const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+        const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
         const r = await fetch(`${API}/v32/macro?days_ahead=14`);
         const d = await r.json();
         const ev = (d.events || []).find(e => e.days_until >= 0);
@@ -104,7 +112,7 @@ function SystemBar() {
     timeZone: "America/New_York",
     hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
   });
-  const countdown = nextMacro ? timeUntilDate(nextMacro.date) : null;
+  const countdown = nextMacro ? timeUntilEvent(nextMacro) : null;
   const macroColor = nextMacro
     ? (nextMacro.is_imminent ? "#fb923c" : (nextMacro.warns_sectors?.length ? "#fbbf24" : "#5eead4"))
     : muted;
@@ -156,7 +164,7 @@ function useLiveAlertCounts() {
   const [counts, setCounts] = useState({ dh: 0, xf: 0, locks: 0, lottery_hot: 0 });
   useEffect(() => {
     let cancelled = false;
-    const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+    const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
     const load = async () => {
       try {
         const [dh, xf, conv, lot] = await Promise.all([
@@ -263,9 +271,9 @@ export function CrtShell({ title, children, headerRight = null }) {
                   <div className="glow-amber" style={{
                     fontSize: 18, color: accent, letterSpacing: "0.24em", fontWeight: 800,
                     lineHeight: 1,
-                  }}>AXIOM</div>
+                  }}>CASE CAP</div>
                   <div style={{ fontSize: 8, color: muted, letterSpacing: "0.16em", marginTop: 4 }}>
-                    INTELLIGENCE · v3.2
+                    TERMINAL · v3.2
                   </div>
                 </div>
               </div>
@@ -281,7 +289,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                   </span>
                   <span className="num" style={{
                     color: nextMacro.is_imminent ? "#fb923c" : labelLight, fontWeight: 700,
-                  }}>{timeUntilDate(nextMacro.date) || "—"}</span>
+                  }}>{timeUntilEvent(nextMacro) || "—"}</span>
                 </div>
               )}
             </div>
@@ -310,7 +318,7 @@ export function CrtShell({ title, children, headerRight = null }) {
 
           {/* Navigation — grouped */}
           <nav style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-            {["CORE", "v3.2", "TRADE FLOOR", "ANALYSIS", "SYSTEM"].map((group, gi) => {
+            {["CORE", "TRADE FLOOR", "ANALYSIS", "SYSTEM"].map((group, gi) => {
               const groupItems = NAV.filter(n => n.group === group);
               if (groupItems.length === 0) return null;
               return (
@@ -322,19 +330,12 @@ export function CrtShell({ title, children, headerRight = null }) {
                     display: "flex", alignItems: "center", gap: 8,
                   }}>
                     <span>{"// "+group}</span>
-                    {group === "v3.2" && (
-                      <span style={{
-                        fontSize: 7, padding: "1px 5px",
-                        background: `${accent2}22`, color: accent2,
-                        letterSpacing: "0.1em", border: `0.5px solid ${accent2}66`,
-                      }}>NEW</span>
-                    )}
                     <span style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.04)" }} />
                   </div>
                   {groupItems.map((n, i) => {
                     const isActive = loc.pathname === n.to ||
                       (n.to !== "/" && loc.pathname.startsWith(n.to));
-                    const hue = group === "v3.2" ? accent2 : accent;
+                    const hue = accent;
                     return (
                       <Link key={n.to} to={n.to}
                         data-testid={`nav-${n.label.toLowerCase().replace(' ', '-')}`}
@@ -399,7 +400,7 @@ export function CrtShell({ title, children, headerRight = null }) {
             paddingTop: 10, borderTop: hairline,
           }}>
             <div>BUILD 3.2.0 · STABLE</div>
-            <div style={{ marginTop: 3, color: muted }}>@Quantninjabot</div>
+            <div style={{ marginTop: 3, color: muted }}>@CaseCapitalTerminalQuant</div>
             <div style={{ marginTop: 6, color: accent2, opacity: 0.6 }}>
               {"// THE MARKET NEVER SLEEPS"}
             </div>
@@ -444,7 +445,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                 <span style={{ color: accent }}>▣</span>
                 {!isMobile && (
                   <>
-                    AXIOM INTELLIGENCE PLATFORM
+                    CASE CAP TERMINAL
                     <span style={{ color: dim }}>│</span>
                   </>
                 )}

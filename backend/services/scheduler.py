@@ -144,6 +144,30 @@ def start_scheduler():
         id="pnl_refresh",
         replace_existing=True,
     )
+    async def _options_daily_report_job():
+        try:
+            from . import options_desk
+            await options_desk.dispatch_options_daily_report()
+        except Exception as e:
+            logger.warning("options daily report: %s", e)
+    _scheduler.add_job(
+        _options_daily_report_job,
+        CronTrigger(day_of_week="mon-thu", hour=17, minute=0, timezone=ET),
+        id="options_daily_report_5pm",
+        replace_existing=True,
+    )
+    async def _options_weekly_report_job():
+        try:
+            from . import options_desk
+            await options_desk.dispatch_options_weekly_report()
+        except Exception as e:
+            logger.warning("options weekly report: %s", e)
+    _scheduler.add_job(
+        _options_weekly_report_job,
+        CronTrigger(day_of_week="fri", hour=21, minute=0, timezone=ET),
+        id="options_weekly_report_friday_9pm",
+        replace_existing=True,
+    )
     # Mid-day scan — 12:01 ET Mon-Fri
     _scheduler.add_job(
         _daily_scan_job,
@@ -180,8 +204,10 @@ def start_scheduler():
     # v5.0 — position monitor every 15 min during market hours
     async def _position_monitor():
         try:
-            from . import trade_floor, trade_floor_phases
+            from . import options_desk, pm_ratchet, trade_floor, trade_floor_phases
             await trade_floor.sync_positions_and_close_settled()
+            await pm_ratchet.process_open_ratchets()
+            await options_desk.monitor_open_positions(enforce_hard_stop=True)
             # v5.3 — run the three-phase exit logic on every sync
             await trade_floor_phases.process_phase_exits()
         except Exception as e:

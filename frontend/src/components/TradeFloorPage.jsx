@@ -3,7 +3,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };
@@ -42,6 +42,7 @@ export default function TradeFloorPage() {
   const acctReady = account?.alpaca_configured;
   const deployed = liveAlpaca.reduce((a, p) => a + Number(p.market_value || 0), 0);
   const unrealized = liveAlpaca.reduce((a, p) => a + Number(p.unrealized_pl || 0), 0);
+  const pendingOrders = positions.filter(p => p.fill_status === "PENDING");
 
   return (
     <CrtShell title="TRADE FLOOR Â· ALPACA PAPER">
@@ -54,7 +55,8 @@ export default function TradeFloorPage() {
       )}
 
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="OPEN POS" value={positions.length} sub={`MAX 10`} color={accent} accentBar />
+        <Stat label="LIVE POS" value={liveAlpaca.length} sub={`MAX 10`} color={accent} accentBar />
+        <Stat label="PENDING" value={pendingOrders.length} sub="UNFILLED ORDERS" color={pendingOrders.length ? "#fbbf24" : muted} />
         <Stat label="DEPLOYED" value={`$${Math.round(deployed)}`} sub="MARKET VALUE" color={accent2} />
         <Stat label="UNREALIZED" value={`${unrealized >= 0 ? "+" : ""}$${Math.round(unrealized)}`}
               sub="P&L" color={unrealized >= 0 ? "#4ade80" : "#f87171"} />
@@ -86,6 +88,7 @@ export default function TradeFloorPage() {
 }
 
 function LivePositions({ positions, db, reload, scanLog }) {
+  const pending = db.filter(p => p.fill_status === "PENDING");
   const close = async (t) => {
     if (!confirm(`Close ${t}?`)) return;
     await axios.post(`${API}/trade_floor/close?ticker=${t}`).catch(() => {});
@@ -131,6 +134,33 @@ function LivePositions({ positions, db, reload, scanLog }) {
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+      <Card title={`PENDING ORDERS · ${pending.length}`}>
+        {!pending.length ? <div style={{ color: muted, padding: 20 }}>No pending buy orders.</div> : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={th}>TICKER</th><th style={th}>NOTIONAL</th>
+              <th style={th}>LIMIT</th><th style={th}>RAW ASK</th>
+              <th style={th}>GUARD</th><th style={th}>STOP AFTER FILL</th>
+              <th style={th}>SUBMITTED</th>
+            </tr></thead>
+            <tbody>
+              {pending.map((p, i) => (
+                <tr key={`${p.client_order_id || p.order_id || p.ticker}-${i}`} style={{ borderTop: hairline }}>
+                  <td style={{ ...td, color: accent, fontWeight: 700 }}>${p.ticker}</td>
+                  <td style={td}>${Number(p.notional || 0).toFixed(2)}</td>
+                  <td style={{ ...td, color: "#fbbf24", fontWeight: 700 }}>${Number(p.limit_price || 0).toFixed(2)}</td>
+                  <td style={td}>{p.raw_alpaca_ask ? `$${Number(p.raw_alpaca_ask).toFixed(2)}` : "—"}</td>
+                  <td style={{ ...td, color: p.limit_price_guard?.capped ? "#4ade80" : muted, fontWeight: 700 }}>
+                    {p.limit_price_guard?.capped ? "CAPPED" : "PASS"}
+                  </td>
+                  <td style={{ ...td, color: "#f87171", fontWeight: 700 }}>${Number(p.current_stop || p.stop_price || 0).toFixed(2)}</td>
+                  <td style={{ ...td, color: muted }}>{p.submitted_at?.slice(0, 19) || "—"}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}

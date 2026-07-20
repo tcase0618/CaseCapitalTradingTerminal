@@ -27,7 +27,7 @@
     "/app/backend/tests/test_v13_axiom_v52.py (created — 17 tests covering all 12 spec items)"
   ],
   "success_rate": {"backend": "100% (17/17 pytest assertions)", "frontend": "N/A (backend-only test per request)"},
-  "test_credentials": "N/A — uses Alpaca paper keys from /app/backend/.env (APCA_API_KEY_ID=PK4SRQHC63UV4ARABLJWTKBK4G, paper account)",
+  "test_credentials": "N/A — uses Alpaca paper keys from /app/backend/.env (APCA_API_KEY_ID=<redacted>, paper account)",
   "seed_data_creation": "During testing: (a) cancelled all pre-existing Alpaca orders + closed all positions at start. (b) Scan #1 placed 9 fractional LIMIT/DAY tf- orders ($10/$20/$30/$50 by tier, all <= cap). (c) Scan #2 placed zero (dedup correctly blocked). (d) LDOS + SPY manual_send tests opened & cancelled their own orders. (e) Final teardown cancelled all open orders and closed all positions — Alpaca paper account left clean.",
   "retest_needed": false,
   "main_agent_can_self_test": true,

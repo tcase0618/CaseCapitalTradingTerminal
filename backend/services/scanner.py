@@ -4,6 +4,7 @@ single batched Claude call (only thesis/conviction/horizon/stop_loss). 24h cache
 from __future__ import annotations
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -65,9 +66,18 @@ def _finalize_signals_and_filter(by_ticker: dict[str, dict[str, Any]],
     """Apply 2+ signal pre-filter + finalize CONCENTRATION_WIN with mkt-cap."""
     out: list[dict[str, Any]] = []
     for ticker, x in by_ticker.items():
+        fund = fundamentals.get(ticker) or {}
+        company_identity = (
+            x.get("company")
+            or fund.get("name")
+            or (x.get("gov_summary") or {}).get("prime")
+            or (x.get("insider_summary") or {}).get("company")
+        )
+        if len(str(ticker or "")) == 1 and not company_identity:
+            continue
         # Finalize CONCENTRATION_WIN: requires mkt cap < $2B
         if x.get("concentration_provisional"):
-            mc = (fundamentals.get(ticker) or {}).get("market_cap")
+            mc = fund.get("market_cap")
             if mc and mc < 2_000_000_000:
                 if "CONCENTRATION_WIN" not in x["signals"]:
                     x["signals"].append("CONCENTRATION_WIN")
@@ -241,7 +251,8 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     # Single batched Claude call (only thesis/conviction/horizon/stop_loss/entry/score)
     analyses = await claude_service.analyze_batch(enriched)
     cache_hits = sum(1 for a in analyses if a.get("cached"))
-    fresh_calls = (1 if (len(analyses) - cache_hits) > 0 else 0)  # 1 batched call total
+    claude_disabled = os.environ.get("DISABLE_CLAUDE_ANALYSIS", "").strip().lower() in {"1", "true", "yes", "on"}
+    fresh_calls = 0 if claude_disabled else (1 if (len(analyses) - cache_hits) > 0 else 0)  # 1 batched call total
 
     # Merge Claude output into enriched dicts (keyed by ticker)
     by_t = {a["ticker"]: a for a in analyses}
@@ -284,6 +295,7 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             opts["hold_stock_instead"] = bool(a.get("hold_stock_instead")) or opts.get("strategy") == "AVOID_OPTIONS"
         final.append({
             "ticker": c["ticker"],
+            "company_name": c.get("company") or c["fundamentals"].get("name"),
             "signals": c["signals"],
             "signal_score": score,
             "learning_score": round(learning_score, 1),
@@ -388,6 +400,11 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         asyncio.create_task(_tf.evaluate_and_execute(final))
     except Exception as e:
         logger.warning("Trade Floor dispatch failed: %s", e)
+    try:
+        from . import options_desk as _od
+        asyncio.create_task(_od.refresh_and_auto_execute_latest())
+    except Exception as e:
+        logger.warning("Options Desk auto-execute dispatch failed: %s", e)
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

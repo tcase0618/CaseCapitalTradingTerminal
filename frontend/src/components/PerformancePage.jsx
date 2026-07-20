@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
 export default function PerformancePage() {
@@ -18,7 +18,7 @@ export default function PerformancePage() {
   const [refreshingPrices, setRefreshingPrices] = useState(false);
   const [priceSource, setPriceSource] = useState(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     // Use independent .catch so one failure doesn't kill the others
     axios.get(`${API}/performance/summary`).then(r => setPerf(r.data)).catch(e => console.error("perf:", e));
     axios.get(`${API}/backtest/summary`).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
@@ -26,13 +26,13 @@ export default function PerformancePage() {
     axios.get(`${API}/signals/curve?days=${curveDays}`).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
     axios.get(`${API}/signals/options_curve?days=${curveDays}`).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
     axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
-  };
+  }, [curveDays]);
   useEffect(() => {
     refresh();
     // v5.1 — auto-refresh every 30s so charts update in real-time without manual reload
     const t = setInterval(() => refresh(), 30000);
     return () => clearInterval(t);
-  }, [curveDays]);
+  }, [refresh]);
 
   const seedBacktest = async () => {
     setSeeding(true);
@@ -236,9 +236,9 @@ export default function PerformancePage() {
         )}
       </Card>
 
-      {/* AXIOM Performance Curve — Robinhood-style */}
+      {/* Case Cap Performance Curve — Robinhood-style */}
       <PerfCurve
-        title={`AXIOM STOCK PERFORMANCE — ${curveDays}D · AVG % GAIN ACROSS ALL TRACKED SIGNALS`}
+        title={`CASE CAP STOCK PERFORMANCE — ${curveDays}D · AVG % GAIN ACROSS ALL TRACKED SIGNALS`}
         curve={curve}
         days={curveDays}
         setDays={setCurveDays}
@@ -248,9 +248,9 @@ export default function PerformancePage() {
         emptyMsg="Building performance curve... Need at least 1 day of signal history."
       />
 
-      {/* AXIOM Options Curve — same shape, different data */}
+      {/* Case Cap Options Curve — same shape, different data */}
       <PerfCurve
-        title={`AXIOM OPTIONS PERFORMANCE — ${curveDays}D · AVG PROXY % RETURN ACROSS ALL OPEN OPTIONS PLAYS`}
+        title={`CASE CAP OPTIONS PERFORMANCE — ${curveDays}D · AVG PROXY % RETURN ACROSS ALL OPEN OPTIONS PLAYS`}
         curve={optionsCurve}
         days={curveDays}
         setDays={setCurveDays}

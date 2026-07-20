@@ -171,7 +171,7 @@ def _seed_pdufa() -> list[dict[str, Any]]:
     """Curated seed list of known upcoming PDUFA dates. Updated quarterly.
     Used only when all live sources are blocked. Operator can override by
     inserting docs directly into pharma_pdufa_cache.entries in MongoDB."""
-    return [
+    rows = [
         {"ticker": "LLY",   "drug": "Donanemab",       "indication": "Early Alzheimer's disease", "pdufa_date": "2026-07-08", "type": "PDUFA"},
         {"ticker": "BMY",   "drug": "Iberdomide",      "indication": "Multiple myeloma",            "pdufa_date": "2026-08-15", "type": "PDUFA"},
         {"ticker": "MRK",   "drug": "Keytruda + Lenvima","indication": "Endometrial cancer",         "pdufa_date": "2026-09-22", "type": "sBLA"},
@@ -186,6 +186,10 @@ def _seed_pdufa() -> list[dict[str, Any]]:
         {"ticker": "SRPT",  "drug": "Elevidys",        "indication": "Duchenne muscular dystrophy",  "pdufa_date": "2026-06-21", "type": "sBLA"},
         {"ticker": "INCY",  "drug": "Ruxolitinib XR",  "indication": "Atopic dermatitis",            "pdufa_date": "2026-05-08", "type": "sNDA"},
     ]
+    for row in rows:
+        row["source"] = "curated_seed"
+        row["data_quality"] = "fallback_calendar"
+    return rows
 
 
 def _parse_pdufa_html(html_text: str, source: str) -> list[dict[str, Any]]:
@@ -639,7 +643,7 @@ def format_pharma_alert(r: dict[str, Any]) -> str:
     upside = 40.0
     return (
         f"1. <b>${ts._esc(r['ticker'])}</b> · <code>{score:.0f}/100</code> · 🔴H · "
-        f"AXIOM <b>{score:.0f}</b> {tier_emoji}\n"
+        f"CASE SCORE <b>{score:.0f}</b> {tier_emoji}\n"
         f"{' '.join(sigs) or '🧬 PHARMA'}\n"
         f"<i>Binary FDA catalyst — {ts._esc(r.get('drug', '?'))} · "
         f"{ts._esc(r.get('indication', ''))} · prevalence {prev_str}</i>\n"
@@ -661,6 +665,9 @@ async def get_pdufa_within_days(days: int = 90) -> list[dict[str, Any]]:
         {"pdufa_date": {"$gte": today, "$lte": horizon}},
         {"_id": 0},
     ).sort("binary_event_score", -1).to_list(500)
+    for row in rows:
+        row.setdefault("source", "curated_seed")
+        row.setdefault("data_quality", "fallback_calendar")
     return rows
 
 

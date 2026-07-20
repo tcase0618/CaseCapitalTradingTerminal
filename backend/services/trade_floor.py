@@ -44,6 +44,8 @@ ALPACA_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
 ALPACA_TRADE_BASE = os.environ.get(
     "APCA_API_BASE_URL", "https://paper-api.alpaca.markets",
 ).rstrip("/")
+if ALPACA_TRADE_BASE.endswith("/v2"):
+    ALPACA_TRADE_BASE = ALPACA_TRADE_BASE[:-3]
 ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
 
 MAX_OPEN_POSITIONS = 10
@@ -126,6 +128,78 @@ async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price:
     except Exception as e:
         logger.warning("alpaca limit buy exception %s: %s", ticker, e)
     return None
+
+
+async def execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_order: bool = False) -> dict[str, Any]:
+    """Account/quote/order smoke test for Alpaca.
+
+    The order path is paper-only and capped. It is intentionally separate from
+    PM/Trade Floor execution so diagnostics do not contaminate PM learning.
+    """
+    ticker = (ticker or "AAPL").upper()
+    notional = max(0.01, min(float(notional or 1.0), 5.0))
+    result: dict[str, Any] = {
+        "ok": False,
+        "ticker": ticker,
+        "notional": notional,
+        "place_order": place_order,
+        "base_url": ALPACA_TRADE_BASE,
+        "paper_only": "paper-api.alpaca.markets" in ALPACA_TRADE_BASE,
+        "account_ok": False,
+        "quote_ok": False,
+        "order_ok": False,
+        "reason": None,
+    }
+    if not _alpaca_ready():
+        result["reason"] = "missing_alpaca_key_or_secret"
+        return result
+    account = await get_account()
+    if not account:
+        result["reason"] = "alpaca_account_unauthorized_or_unreachable"
+        return result
+    result["account_ok"] = True
+    result["account"] = {
+        "status": account.get("status"),
+        "equity": account.get("equity"),
+        "cash": account.get("cash"),
+        "buying_power": account.get("buying_power"),
+        "trading_blocked": account.get("trading_blocked"),
+    }
+    ask = await get_latest_ask(ticker)
+    if not ask:
+        result["reason"] = "alpaca_quote_unavailable"
+        return result
+    result["quote_ok"] = True
+    result["ask"] = ask
+    if not place_order:
+        result["ok"] = True
+        result["reason"] = "dry_run_ok"
+        return result
+    if not result["paper_only"]:
+        result["reason"] = "refusing_test_order_on_non_paper_base_url"
+        return result
+    cli_id = f"tf-probe-{ticker}-{int(_now().timestamp())}"
+    order = await submit_fractional_limit_buy(ticker, notional, round(float(ask), 4), client_order_id=cli_id)
+    if not order:
+        result["reason"] = "alpaca_test_order_rejected"
+        return result
+    result["ok"] = True
+    result["order_ok"] = True
+    result["reason"] = "paper_test_order_submitted"
+    result["order"] = {
+        "id": order.get("id"),
+        "client_order_id": order.get("client_order_id"),
+        "symbol": order.get("symbol"),
+        "status": order.get("status"),
+        "submitted_at": order.get("submitted_at"),
+        "limit_price": order.get("limit_price"),
+        "notional": order.get("notional"),
+    }
+    try:
+        await get_db().tf_execution_tests.insert_one(stamped(result))
+    except Exception:
+        pass
+    return result
 
 
 # Backwards-compatible alias used by legacy code paths
@@ -319,24 +393,25 @@ async def _gate_check(scan_row: dict[str, Any], *,
                        held_tickers: set[str] | None = None,
                        pending_tickers: set[str] | None = None,
                        position_count: int | None = None,
-                       regime: dict[str, Any] | None = None) -> tuple[bool, str | None]:
+                       regime: dict[str, Any] | None = None,
+                       pm_managed: bool = False) -> tuple[bool, str | None]:
     """Returns (passed, rejection_reason). Optional kwargs let callers
     pass pre-fetched Alpaca state to avoid hitting the API per-row."""
     ticker = (scan_row.get("ticker") or "").upper()
     trade_score = scan_row.get("trade_score") or scan_row.get("score") or 0
-    if trade_score < TRADE_SCORE_MIN:
+    if not pm_managed and trade_score < TRADE_SCORE_MIN:
         return False, f"trade_score {trade_score:.1f} < {TRADE_SCORE_MIN}"
     signals = scan_row.get("signals") or {}
-    if len(signals) < 2:
+    if not pm_managed and len(signals) < 2:
         return False, f"only {len(signals)} signal type(s) firing"
     if regime is None:
         regime = await regime_status()
-    if regime.get("halt_new_entries"):
+    if not pm_managed and regime.get("halt_new_entries"):
         return False, f"regime halt (vix={regime.get('vix')}, spy_ema_break={regime.get('spy_last',0) < regime.get('spy_ema200',0)})"
     # Earnings within 10d gate
     earnings = scan_row.get("earnings") or {}
     days_to_er = earnings.get("days_until")
-    if days_to_er is not None and 0 <= days_to_er <= 10:
+    if not pm_managed and days_to_er is not None and 0 <= days_to_er <= 10:
         beat_prob = (earnings.get("beat_probability") or 0)
         if beat_prob < 0.65:
             return False, f"earnings in {days_to_er}d · beat_prob {beat_prob*100:.0f}% < 65%"
@@ -360,7 +435,7 @@ async def _gate_check(scan_row: dict[str, Any], *,
 
 
 # ─────── Main execution ───────
-async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, Any]:
+async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers: set[str] | None = None) -> dict[str, Any]:
     """Walk scan results, apply gates, execute limit DAY orders for any
     candidate that clears every gate.
 
@@ -368,7 +443,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
     orders happens immediately before EVERY single submit attempt. A
     ticker that already has a position or a queued/working order will
     never receive a duplicate order."""
-    from . import stop_engine, trade_floor_learning as tfle  # local to avoid cycle
+    from . import portfolio_manager, pm_rules, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -392,16 +467,34 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
     open_orders = await list_orders(status="open")
     pending_tickers = {o.get("symbol", "").upper() for o in open_orders}
     regime = await regime_status()
+    pm_mode = portfolio_manager._mode_from_regime(regime)
+    ruleset = await pm_rules.get_ruleset()
+    profile_override = await pm_rules.profile_override_for(pm_mode)
+    pm_rows = portfolio_manager.evaluate_rows(scan_results, equity=equity, mode=pm_mode, profile_override=profile_override)
+    pm_by_ticker = {r["ticker"]: r for r in pm_rows}
 
     for row in scan_results:
         ticker = (row.get("ticker") or "").upper()
         if not ticker:
             continue
+        if only_tickers and ticker not in only_tickers:
+            continue
+        pm_row = pm_by_ticker.get(ticker)
+        if not pm_row or pm_row.get("action") not in {"ACCUMULATE", "STARTER"} or float(pm_row.get("allocation_usd") or 0) <= 0:
+            rejected.append({
+                "ticker": ticker,
+                "score": row.get("score"),
+                "trade_score": row.get("trade_score"),
+                "reason": f"PM_NOT_APPROVED ({(pm_row or {}).get('action', 'NO_PM_ROW')})",
+                "pm_action": (pm_row or {}).get("action"),
+                "pm_score": (pm_row or {}).get("pm_score"),
+            })
+            continue
         _sig = row.get("signals") or {}
         _sig_list = list(_sig.keys()) if isinstance(_sig, dict) else list(_sig)
         passed, reason = await _gate_check(
             row, held_tickers=held_tickers, pending_tickers=pending_tickers,
-            position_count=len(positions), regime=regime,
+            position_count=len(positions), regime=regime, pm_managed=True,
         )
         if not passed:
             rejected.append({"ticker": ticker, "score": row.get("score"),
@@ -409,15 +502,13 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
                               "reason": reason, "signals": _sig_list})
             continue
 
-        score = float(row.get("trade_score") or row.get("score") or 0)
+        score = float(pm_row.get("pm_score") or row.get("trade_score") or row.get("score") or 0)
         instrument = "fractional"
         # NOTE: Alpaca options trading not yet enabled on this account; the
         # recommended_contract field on the scan row is logged but not used.
 
-        # Risk %  →  notional  →  HARD cap
-        risk_pct = await _risk_pct(score, instrument)
-        risk_budget_pct_notional = equity * risk_pct
-        hard_cap = hard_cap_for(score, instrument)
+        risk_pct = float(pm_row.get("risk_usd") or 0) / equity if equity > 0 else 0.0
+        hard_cap = float(pm_row.get("allocation_usd") or 0)
         # Determine entry price = current Alpaca ask (sole source).
         ask = await get_latest_ask(ticker)
         if not ask:
@@ -427,8 +518,16 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             rejected.append({"ticker": ticker, "score": score,
                               "reason": "no_ask_quote_from_alpaca"})
             continue
+        raw_ask = float(ask)
+        entry_high = float(pm_row.get("entry_high") or row.get("entry_high") or 0)
+        scanner_price = float(pm_row.get("price") or row.get("price") or 0)
+        if entry_high > 0 and raw_ask > entry_high:
+            ask = entry_high
+        elif scanner_price > 0 and raw_ask > scanner_price * 1.03:
+            ask = round(scanner_price * 1.01, 4)
 
-        # Compute analytical stop (NO ATR)
+        # Compute analytical stop (NO ATR). PM remains the sizing authority;
+        # this stop record gives Trade Floor a live operational stop object.
         hold_days = (row.get("targets") or {}).get("hold_period_high") \
                        or row.get("hold_period_high") \
                        or row.get("recommended_hold_days") or 30
@@ -438,7 +537,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             score=score, hold_window_days=int(hold_days or 30), sector=sector,
             instrument=instrument,
         )
-        stop_price = float(stop_calc["stop_price"])
+        stop_price = float(pm_row.get("stop") or stop_calc["stop_price"])
 
         # AXIOM target: prefer scan blended target; fall back to signal uplift.
         axiom_target = row.get("target_blended") or row.get("target_high")
@@ -453,10 +552,8 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
         # Phase 2 target = entry + 1.5 × (AXIOM target − entry)
         phase2_target = round(ask + 1.5 * (axiom_target - ask), 4)
 
-        # Sizing: min(percent-based, hard cap, $15% of equity safety floor)
-        notional = min(risk_budget_pct_notional, hard_cap, equity * 0.15)
-        # Apply hard cap absolutely — never exceed under any circumstance
-        notional = round(min(notional, hard_cap), 2)
+        # PM is the sizing authority. Trade Floor does not resize approved rows.
+        notional = round(float(pm_row.get("allocation_usd") or 0), 2)
         if notional < 1.0:
             rejected.append({"ticker": ticker, "score": score,
                               "reason": f"notional<${notional}_too_small"})
@@ -500,12 +597,26 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             "ticker": ticker,
             "entry_score": score,
             "trade_score": row.get("trade_score") or score,
+            "pm_score": pm_row.get("pm_score"),
+            "pm_action": pm_row.get("action"),
+            "pm_mode": pm_mode,
+            "pm_ruleset_id": ruleset.get("ruleset_id"),
+            "pm_ruleset_name": ruleset.get("name"),
+            "pm_ratchet_plan": pm_row.get("ratchet_plan") or {"enabled": False},
+            "pm_ratchet_level": 0,
             "signal_combo": sorted(_sig_list),
             "instrument": instrument,
             "notional": notional,
             "risk_pct_used": risk_pct,
             "hard_cap_applied": hard_cap,
+            "pm_plan": pm_row,
             "limit_price": limit_price,
+            "raw_alpaca_ask": raw_ask,
+            "limit_price_guard": {
+                "entry_high": entry_high,
+                "scanner_price": scanner_price,
+                "capped": limit_price != round(raw_ask, 4),
+            },
             "entry_price_ref": limit_price,        # initial entry = ask
             "stop_price": stop_price,
             "current_stop": stop_price,            # mutable — moves up on phase hits
@@ -519,8 +630,10 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
             "submitted_at": _now().isoformat(),
             # v5.3 — three-phase exit system
             "axiom_target": axiom_target,
-            "phase1_target": axiom_target,
+            "phase1_target": (pm_row.get("ratchet_plan") or {}).get("initial_target_price") or axiom_target,
             "phase2_target": phase2_target,
+            "pm_active_target": (pm_row.get("ratchet_plan") or {}).get("initial_target_price") or axiom_target,
+            "pm_active_stop": (pm_row.get("ratchet_plan") or {}).get("initial_stop_price") or stop_price,
             "phase": 1,                             # active phase: 1, 2, or 3
             "phases_hit": {},
             "qty_total": None,                      # set on fill
@@ -533,7 +646,9 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
         except Exception as e:
             logger.warning("tfle.log_trade_initiation: %s", e)
         executed.append({"ticker": ticker, "notional": notional,
-                          "score": score, "limit_price": limit_price,
+                          "score": score, "pm_score": pm_row.get("pm_score"),
+                          "pm_action": pm_row.get("action"),
+                          "limit_price": limit_price,
                           "stop_price": stop_price, "stop_pct": stop_calc["stop_pct"],
                           "order_id": order.get("id")})
 
@@ -545,6 +660,9 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]]) -> dict[str, 
         "rejected": len(rejected),
         "rejection_details": rejected,
         "execution_details": executed,
+        "pm_mode": pm_mode,
+        "pm_ruleset_id": ruleset.get("ruleset_id"),
+        "pm_approved": sum(1 for r in pm_rows if r.get("action") in {"ACCUMULATE", "STARTER"} and float(r.get("allocation_usd") or 0) > 0),
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "compression_ratio": round(compression, 3),
@@ -611,6 +729,8 @@ async def sync_positions_and_close_settled():
             t["filled_avg_price"] = avg_fill
             t["qty_total"] = qty_filled
             t["qty_remaining"] = qty_filled
+        if t.get("fill_status") in (None, "PENDING"):
+            continue
         if p:
             cur = float(p.get("current_price") or 0)
             new_low = cur

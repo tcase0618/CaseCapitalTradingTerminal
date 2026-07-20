@@ -11,7 +11,10 @@ FEATURE_VERSION = "3.0"
 def get_db():
     global _client
     if _client is None:
-        _client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+        _client = AsyncIOMotorClient(
+            os.environ["MONGO_URL"],
+            serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000")),
+        )
     return _client[os.environ["DB_NAME"]]
 
 

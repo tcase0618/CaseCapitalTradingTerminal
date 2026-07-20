@@ -343,7 +343,7 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
 
     lines = [
         f"<b>{rank}. ${_esc(r['ticker'])}</b> · <code>{r.get('signal_score',0)}/10</code> · "
-        f"{risk_emoji}{risk_letter} · AXIOM <b>{learning}</b> "
+        f"{risk_emoji}{risk_letter} · CASE SCORE <b>{learning}</b> "
         + ("🟢" if r.get("max_conviction") else ""),
         badges,
     ]
@@ -498,7 +498,7 @@ def build_consolidated_messages(scan: dict[str, Any], title: str = "AXIOM INTEL"
 
 
 async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None,
-                                 title: str = "AXIOM INTEL") -> dict[str, Any]:
+                                title: str = "AXIOM INTEL") -> dict[str, Any]:
     """Build + send consolidated msgs. Returns delivery summary."""
     msgs = build_consolidated_messages(scan, title=title)
     sent = 0
@@ -508,7 +508,49 @@ async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None
         if ok:
             sent += 1
     return {"messages_built": len(msgs), "messages_sent": sent,
-             "char_counts": [len(m) for m in msgs]}
+            "char_counts": [len(m) for m in msgs]}
+
+
+def build_earnings_divergence_message(snapshot: dict[str, Any]) -> str:
+    divergences = list(snapshot.get("earnings_divergences") or [])
+    week = snapshot.get("week_of") or "?"
+    week_end = snapshot.get("week_end") or "?"
+    lines = [
+        f"<b>CASE CAPITAL EARNINGS DIVERGENCES</b> - {_now_et()}",
+        f"<code>{_esc(week)}</code> to <code>{_esc(week_end)}</code>",
+        "--------------------",
+    ]
+    if not divergences:
+        lines.append("<i>No active call-tone / price-reaction divergences found for the selected week.</i>")
+        return "\n".join(lines)
+
+    for i, row in enumerate(divergences[:8], start=1):
+        div = row.get("earnings_divergence") or {}
+        tone = (row.get("earnings_call_tone") or {}).get("tone") or "?"
+        reaction = row.get("post_earnings_reaction") or {}
+        lines.extend([
+            f"<b>{i}. ${_esc(row.get('ticker'))}</b> - <b>{_esc(div.get('severity', ''))}</b>",
+            f"Tone: <b>{_esc(tone)}</b> - Reaction: <b>{_fmt_pct(reaction.get('reaction_pct'))}</b> - {_esc(reaction.get('reaction_label'))}",
+            f"{_esc(div.get('label'))}",
+            f"<i>{_esc(div.get('read'))}</i>",
+            f"Action: {_esc(div.get('action'))}",
+            "",
+        ])
+    lines.append("Source note: tone is inferred from free headline/news context and available growth fields until transcript data is connected.")
+    return "\n".join(lines).strip()
+
+
+async def dispatch_earnings_divergences(snapshot: dict[str, Any],
+                                        chat_id: str | None = None) -> dict[str, Any]:
+    msg = build_earnings_divergence_message(snapshot)
+    ok = await send_message(msg, chat_id=chat_id)
+    await log_activity(f"Earnings divergence Telegram dispatch: {len(msg)} chars", "info")
+    return {
+        "messages_built": 1,
+        "messages_sent": 1 if ok else 0,
+        "char_counts": [len(msg)],
+        "divergence_count": snapshot.get("earnings_divergence_count", 0),
+    }
 
 
 def format_contracts_condensed(rows: list[dict[str, Any]]) -> str:

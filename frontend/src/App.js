@@ -1,5 +1,6 @@
 import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import CommandCenterPage from "@/components/CommandCenterPage";
 import Dashboard from "@/components/Dashboard";
 import LearningPage from "@/components/LearningPage";
 import PerformancePage from "@/components/PerformancePage";
@@ -11,8 +12,12 @@ import IntelPage from "@/components/IntelPage";
 import PharmaPage from "@/components/PharmaPage";
 import ContractsPage from "@/components/ContractsPage";
 import SECPage from "@/components/SECPage";
+import GeoRiskPage from "@/components/GeoRiskPage";
 import TradeFloorPage from "@/components/TradeFloorPage";
+import OptionsDeskPage from "@/components/OptionsDeskPage";
 import TFEnginePage from "@/components/TFEnginePage";
+import PortfolioManagerPage from "@/components/PortfolioManagerPage";
+import AuditLogsPage from "@/components/AuditLogsPage";
 import { Toaster } from "sonner";
 
 function App() {
@@ -20,7 +25,9 @@ function App() {
     <div className="App min-h-screen bg-slate-950 text-slate-50">
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<CommandCenterPage />} />
+          <Route path="/command-center" element={<CommandCenterPage />} />
+          <Route path="/scanner" element={<Dashboard />} />
           <Route path="/learning" element={<LearningPage />} />
           <Route path="/tf-engine" element={<TFEnginePage />} />
           <Route path="/performance" element={<PerformancePage />} />
@@ -30,8 +37,12 @@ function App() {
           <Route path="/pharma" element={<PharmaPage />} />
           <Route path="/contracts" element={<ContractsPage />} />
           <Route path="/sec" element={<SECPage />} />
+          <Route path="/georisk" element={<GeoRiskPage />} />
           <Route path="/trade-floor" element={<TradeFloorPage />} />
+          <Route path="/options-desk" element={<OptionsDeskPage />} />
+          <Route path="/portfolio-manager" element={<PortfolioManagerPage />} />
           <Route path="/ticker/:ticker" element={<TickerPage />} />
+          <Route path="/audit-logs" element={<AuditLogsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </BrowserRouter>

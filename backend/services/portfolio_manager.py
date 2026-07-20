@@ -1,0 +1,541 @@
+"""Algorithmic portfolio manager.
+
+Turns scan rows into deterministic portfolio recommendations. This service
+does not call Claude and does not execute trades.
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+from .db import get_db
+
+DEFAULT_EQUITY = 1000.0
+MODE_PROFILES = {
+    "RISK_OFF": {
+        "max_position_pct": 0.025,
+        "max_single_name_risk_pct": 0.004,
+        "max_gross_deployment_pct": 0.10,
+        "accumulate_score": 82,
+        "accumulate_rr": 2.4,
+        "starter_score": 72,
+        "starter_rr": 1.9,
+        "watch_score": 55,
+    },
+    "CONSERVATIVE": {
+        "max_position_pct": 0.05,
+        "max_single_name_risk_pct": 0.008,
+        "max_gross_deployment_pct": 0.22,
+        "accumulate_score": 76,
+        "accumulate_rr": 2.1,
+        "starter_score": 64,
+        "starter_rr": 1.6,
+        "watch_score": 50,
+    },
+    "BALANCED": {
+        "max_position_pct": 0.08,
+        "max_single_name_risk_pct": 0.0125,
+        "max_gross_deployment_pct": 0.35,
+        "accumulate_score": 70,
+        "accumulate_rr": 1.8,
+        "starter_score": 58,
+        "starter_rr": 1.3,
+        "watch_score": 45,
+    },
+    "AGGRESSIVE": {
+        "max_position_pct": 0.12,
+        "max_single_name_risk_pct": 0.018,
+        "max_gross_deployment_pct": 0.55,
+        "accumulate_score": 64,
+        "accumulate_rr": 1.5,
+        "starter_score": 52,
+        "starter_rr": 1.1,
+        "watch_score": 40,
+    },
+}
+
+
+def _num(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _signals(row: dict[str, Any]) -> list[str]:
+    sigs = row.get("signals") or []
+    if isinstance(sigs, dict):
+        return sorted(str(k) for k, v in sigs.items() if v)
+    return sorted(str(s) for s in sigs)
+
+
+def _target(row: dict[str, Any]) -> float:
+    targets = row.get("targets") or {}
+    return _num(
+        row.get("target_blended")
+        or targets.get("target_blended")
+        or row.get("target_high")
+        or targets.get("target_high")
+    )
+
+
+def _stop(row: dict[str, Any], price: float) -> float:
+    stop = _num(row.get("stop_loss"))
+    if stop > 0:
+        return stop
+    risk = row.get("risk") or {}
+    risk_stop = _num(risk.get("stop_loss"))
+    if risk_stop > 0:
+        return risk_stop
+    return round(price * 0.88, 2) if price > 0 else 0.0
+
+
+def _upside_pct(price: float, target: float) -> float:
+    if price <= 0 or target <= 0:
+        return 0.0
+    return ((target - price) / price) * 100.0
+
+
+def _downside_pct(price: float, stop: float) -> float:
+    if price <= 0 or stop <= 0:
+        return 0.0
+    return max(0.0, ((price - stop) / price) * 100.0)
+
+
+def _rr(upside: float, downside: float) -> float:
+    if downside <= 0:
+        return 0.0
+    return max(0.0, upside / downside)
+
+
+def _pm_score(row: dict[str, Any], price: float, target: float, stop: float) -> tuple[float, dict[str, float]]:
+    sigs = _signals(row)
+    signal_score = _num(row.get("signal_score"))
+    trade_score = _num(row.get("trade_score"))
+    learning_score = _num(row.get("learning_score"))
+    squeeze_score = _num((row.get("squeeze") or {}).get("score"))
+    risk_score = _num((row.get("risk") or {}).get("score"))
+    upside = _upside_pct(price, target)
+    downside = _downside_pct(price, stop)
+    rr = _rr(upside, downside)
+
+    signal_component = min(30.0, len(set(sigs)) * 7.5)
+    trade_component = min(22.0, trade_score * 0.55)
+    analyst_component = min(14.0, signal_score * 1.4)
+    learning_component = min(10.0, max(0.0, learning_score))
+    squeeze_component = min(8.0, squeeze_score * 0.08)
+    rr_component = min(16.0, rr * 5.0)
+    penalty = min(25.0, risk_score * 0.12)
+    score = signal_component + trade_component + analyst_component + learning_component + squeeze_component + rr_component - penalty
+    score = max(0.0, min(100.0, score))
+    return round(score, 1), {
+        "signal_component": round(signal_component, 1),
+        "trade_component": round(trade_component, 1),
+        "analyst_component": round(analyst_component, 1),
+        "learning_component": round(learning_component, 1),
+        "squeeze_component": round(squeeze_component, 1),
+        "risk_reward_component": round(rr_component, 1),
+        "risk_penalty": round(penalty, 1),
+    }
+
+
+def _action(score: float, rr: float, signal_count: int, risk_score: float, profile: dict[str, Any]) -> str:
+    if (
+        score >= profile["accumulate_score"]
+        and rr >= profile["accumulate_rr"]
+        and signal_count >= 3
+        and risk_score < 75
+    ):
+        return "ACCUMULATE"
+    if score >= profile["starter_score"] and rr >= profile["starter_rr"] and signal_count >= 2:
+        return "STARTER"
+    if score >= profile["watch_score"]:
+        return "WATCH"
+    return "REJECT"
+
+
+def _sizing(action: str, score: float, price: float, stop: float, equity: float, profile: dict[str, Any]) -> dict[str, Any]:
+    if action in {"WATCH", "REJECT"} or price <= 0:
+        return {"allocation_usd": 0.0, "shares": 0.0, "risk_usd": 0.0, "position_pct": 0.0}
+    max_position = equity * profile["max_position_pct"]
+    risk_per_share = max(0.01, price - stop) if stop > 0 else price * 0.12
+    risk_budget = equity * profile["max_single_name_risk_pct"]
+    if action == "STARTER":
+        risk_budget *= 0.55
+        max_position *= 0.55
+    score_multiplier = 0.65 + min(0.35, max(0.0, score - 58.0) / 42.0)
+    risk_budget *= score_multiplier
+    shares_by_risk = risk_budget / risk_per_share
+    shares_by_position = max_position / price
+    shares = max(0.0, min(shares_by_risk, shares_by_position))
+    allocation = shares * price
+    return {
+        "allocation_usd": round(allocation, 2),
+        "shares": round(shares, 4),
+        "risk_usd": round(shares * risk_per_share, 2),
+        "position_pct": round((allocation / equity) * 100.0, 2) if equity > 0 else 0.0,
+    }
+
+
+def _option_view(row: dict[str, Any], rr: float) -> str:
+    opts = row.get("options") or {}
+    if opts.get("hold_stock_instead") or opts.get("strategy") == "AVOID_OPTIONS":
+        return "STOCK_ONLY"
+    iv_rank = _num(opts.get("iv_rank"), default=-1)
+    if iv_rank >= 65:
+        return "SPREAD_ONLY"
+    if rr >= 2.2 and iv_rank >= 0 and iv_rank < 45:
+        return "CALL_ALLOWED"
+    return "STOCK_PREFERRED"
+
+
+def _ratchet_profile(action: str, upside_pct: float, rr: float, signals: list[str]) -> dict[str, Any]:
+    high_vol = "high_short_interest" in signals or "UNUSUAL_FLOW" in signals
+    if upside_pct >= 60 or (high_vol and upside_pct >= 35):
+        profile = {
+            "name": "RUNNER",
+            "initial_tp_pct": 25.0,
+            "initial_sl_pct": 15.0,
+            "trigger_step_pct": 10.0,
+            "stop_raise_pct": 7.5,
+            "target_raise_pct": 18.0,
+            "max_ratchets": 8,
+        }
+    elif upside_pct >= 25 or rr >= 2.0:
+        profile = {
+            "name": "CORE",
+            "initial_tp_pct": 15.0,
+            "initial_sl_pct": 10.0,
+            "trigger_step_pct": 5.0,
+            "stop_raise_pct": 5.0,
+            "target_raise_pct": 10.0,
+            "max_ratchets": 6,
+        }
+    else:
+        profile = {
+            "name": "TACTICAL",
+            "initial_tp_pct": 10.0,
+            "initial_sl_pct": 7.0,
+            "trigger_step_pct": 3.0,
+            "stop_raise_pct": 3.0,
+            "target_raise_pct": 5.0,
+            "max_ratchets": 4,
+        }
+    if action == "STARTER":
+        profile = {**profile}
+        profile["initial_tp_pct"] = max(8.0, profile["initial_tp_pct"] - 3.0)
+        profile["initial_sl_pct"] = max(5.0, profile["initial_sl_pct"] - 2.0)
+        profile["max_ratchets"] = max(3, profile["max_ratchets"] - 1)
+        profile["name"] = f"{profile['name']}_STARTER"
+    return profile
+
+
+def _ratchet_plan(action: str, price: float, target: float, stop: float, upside_pct: float, rr: float, signals: list[str]) -> dict[str, Any]:
+    if action not in {"ACCUMULATE", "STARTER"} or price <= 0:
+        return {"enabled": False}
+    profile = _ratchet_profile(action, upside_pct, rr, signals)
+    initial_stop_pct = profile["initial_sl_pct"]
+    if stop > 0 and stop < price:
+        initial_stop_pct = round(((price - stop) / price) * 100.0, 1)
+        initial_stop_pct = min(profile["initial_sl_pct"], max(5.0, initial_stop_pct))
+    initial_tp_pct = min(max(profile["initial_tp_pct"], 6.0), max(6.0, upside_pct))
+    if target > price:
+        initial_tp_pct = min(initial_tp_pct, round(((target - price) / price) * 100.0, 1))
+    levels = []
+    for level in range(1, int(profile["max_ratchets"]) + 1):
+        trigger_pct = round(level * profile["trigger_step_pct"], 1)
+        stop_pct = round(-initial_stop_pct + level * profile["stop_raise_pct"], 1)
+        target_pct = round(initial_tp_pct + level * profile["target_raise_pct"], 1)
+        levels.append({
+            "level": level,
+            "trigger_gain_pct": trigger_pct,
+            "stop_gain_pct": stop_pct,
+            "target_gain_pct": target_pct,
+        })
+    return {
+        "enabled": True,
+        "profile": profile["name"],
+        "initial_target_pct": round(initial_tp_pct, 1),
+        "initial_stop_pct": round(initial_stop_pct, 1),
+        "initial_target_price": round(price * (1 + initial_tp_pct / 100.0), 2),
+        "initial_stop_price": round(price * (1 - initial_stop_pct / 100.0), 2),
+        "trigger_step_pct": profile["trigger_step_pct"],
+        "stop_raise_pct": profile["stop_raise_pct"],
+        "target_raise_pct": profile["target_raise_pct"],
+        "max_ratchets": profile["max_ratchets"],
+        "levels": levels,
+        "notes": "PM-owned dynamic exit ladder; stop only moves favorably.",
+    }
+
+
+def _reasons(row: dict[str, Any], action: str, rr: float, upside: float, risk_score: float) -> tuple[list[str], list[str]]:
+    sigs = _signals(row)
+    reasons = []
+    cautions = []
+    if sigs:
+        reasons.append(f"{len(set(sigs))} confirmed signal types: {', '.join(sigs[:4])}")
+    trade_score = _num(row.get("trade_score"))
+    if trade_score:
+        reasons.append(f"trade score {trade_score:.1f}")
+    if upside > 0:
+        reasons.append(f"{upside:.1f}% blended upside")
+    if rr > 0:
+        reasons.append(f"{rr:.2f} risk/reward")
+    if risk_score >= 70:
+        cautions.append(f"risk score elevated at {risk_score:.1f}")
+    if action == "WATCH":
+        cautions.append("score is not high enough for algorithmic sizing")
+    if action == "REJECT":
+        cautions.append("fails current portfolio-manager score threshold")
+    earnings = row.get("earnings_summary") or {}
+    if earnings.get("earnings_date"):
+        cautions.append(f"earnings date {earnings.get('earnings_date')}")
+    return reasons, cautions
+
+
+def _profile_for(mode: str, profile_override: dict[str, Any] | None = None) -> dict[str, Any]:
+    mode = (mode or "BALANCED").upper()
+    profile = MODE_PROFILES.get(mode, MODE_PROFILES["BALANCED"])
+    if not profile_override:
+        return profile
+    return {**profile, **{k: v for k, v in profile_override.items() if v is not None}}
+
+
+def evaluate_rows(
+    rows: list[dict[str, Any]],
+    equity: float = DEFAULT_EQUITY,
+    mode: str = "BALANCED",
+    profile_override: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    mode = (mode or "BALANCED").upper()
+    profile = _profile_for(mode, profile_override)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        price = _num(row.get("price"))
+        target = _target(row)
+        stop = _stop(row, price)
+        upside = _upside_pct(price, target)
+        downside = _downside_pct(price, stop)
+        rr = _rr(upside, downside)
+        score, breakdown = _pm_score(row, price, target, stop)
+        risk_score = _num((row.get("risk") or {}).get("score"))
+        action = _action(score, rr, len(set(_signals(row))), risk_score, profile)
+        reasons, cautions = _reasons(row, action, rr, upside, risk_score)
+        signals = _signals(row)
+        sizing = _sizing(action, score, price, stop, equity, profile)
+        ratchet = _ratchet_plan(action, price, target, stop, upside, rr, signals)
+        out.append({
+            "ticker": ticker,
+            "action": action,
+            "pm_score": score,
+            "score_breakdown": breakdown,
+            "price": price,
+            "entry_low": row.get("entry_low"),
+            "entry_high": row.get("entry_high"),
+            "target": target,
+            "stop": stop,
+            "upside_pct": round(upside, 1),
+            "downside_pct": round(downside, 1),
+            "risk_reward": round(rr, 2),
+            "allocation_usd": sizing["allocation_usd"],
+            "shares": sizing["shares"],
+            "risk_usd": sizing["risk_usd"],
+            "position_pct": sizing["position_pct"],
+            "option_view": _option_view(row, rr),
+            "signals": signals,
+            "ratchet_plan": ratchet,
+            "trade_score": row.get("trade_score"),
+            "signal_score": row.get("signal_score"),
+            "learning_score": row.get("learning_score"),
+            "sector": row.get("sector"),
+            "reasons": reasons,
+            "cautions": cautions,
+        })
+    out.sort(key=lambda r: (r["action"] == "ACCUMULATE", r["action"] == "STARTER", r["pm_score"]), reverse=True)
+    remaining_deploy = equity * profile["max_gross_deployment_pct"]
+    for row in out:
+        if row["action"] not in {"ACCUMULATE", "STARTER"}:
+            continue
+        desired = float(row["allocation_usd"] or 0)
+        if desired <= 0:
+            continue
+        approved = min(desired, max(0.0, remaining_deploy))
+        if approved <= 0:
+            row["allocation_usd"] = 0.0
+            row["shares"] = 0.0
+            row["risk_usd"] = 0.0
+            row["position_pct"] = 0.0
+            row["action"] = "WATCH"
+            row["ratchet_plan"] = {"enabled": False}
+            row["cautions"].append("portfolio gross deployment cap reached")
+            continue
+        if approved < desired:
+            scale = approved / desired
+            row["allocation_usd"] = round(approved, 2)
+            row["shares"] = round(float(row["shares"] or 0) * scale, 4)
+            row["risk_usd"] = round(float(row["risk_usd"] or 0) * scale, 2)
+            row["position_pct"] = round((approved / equity) * 100.0, 2) if equity > 0 else 0.0
+            row["cautions"].append("sized down by portfolio gross deployment cap")
+        remaining_deploy -= approved
+    return out
+
+
+def _summary(rows: list[dict[str, Any]], equity: float, mode: str, equity_source: str, regime: dict[str, Any]) -> dict[str, Any]:
+    deployable = [r for r in rows if r["action"] in {"ACCUMULATE", "STARTER"}]
+    planned_deployment = sum(r["allocation_usd"] for r in deployable)
+    planned_risk = sum(r["risk_usd"] for r in deployable)
+    target_upside = sum(max(0.0, (r["target"] - r["price"]) * r["shares"]) for r in deployable)
+    high_short_loss = sum(
+        min(float(r["allocation_usd"] or 0) * 0.12, float(r["risk_usd"] or 0) * 1.5)
+        for r in deployable
+        if "high_short_interest" in (r.get("signals") or [])
+    )
+    sector_allocations: dict[str, float] = {}
+    for r in deployable:
+        sector = (r.get("sector") or "Unknown").title()
+        sector_allocations[sector] = sector_allocations.get(sector, 0.0) + float(r["allocation_usd"] or 0)
+    largest_sector, largest_sector_allocation = ("None", 0.0)
+    if sector_allocations:
+        largest_sector, largest_sector_allocation = max(sector_allocations.items(), key=lambda kv: kv[1])
+    return {
+        "equity_basis": round(equity, 2),
+        "equity_source": equity_source,
+        "mode": mode,
+        "regime": regime,
+        "rows": len(rows),
+        "accumulate": sum(1 for r in rows if r["action"] == "ACCUMULATE"),
+        "starter": sum(1 for r in rows if r["action"] == "STARTER"),
+        "watch": sum(1 for r in rows if r["action"] == "WATCH"),
+        "reject": sum(1 for r in rows if r["action"] == "REJECT"),
+        "planned_deployment": round(planned_deployment, 2),
+        "planned_risk": round(planned_risk, 2),
+        "cash_reserved": round(max(0.0, equity - planned_deployment), 2),
+        "target_upside_usd": round(target_upside, 2),
+        "shock_tests": [
+            {
+                "name": "ALL STOPS HIT",
+                "loss_usd": round(planned_risk, 2),
+                "equity_pct": round((planned_risk / equity) * 100.0, 2) if equity > 0 else 0.0,
+                "detail": "Every active PM stop is hit.",
+            },
+            {
+                "name": "MARKET GAP -5%",
+                "loss_usd": round(planned_deployment * 0.05, 2),
+                "equity_pct": round(((planned_deployment * 0.05) / equity) * 100.0, 2) if equity > 0 else 0.0,
+                "detail": "Active basket gaps down 5% before exits.",
+            },
+            {
+                "name": "SHORT-SQUEEZE FAIL",
+                "loss_usd": round(high_short_loss, 2),
+                "equity_pct": round((high_short_loss / equity) * 100.0, 2) if equity > 0 else 0.0,
+                "detail": "High-short-interest names reverse hard.",
+            },
+            {
+                "name": f"{largest_sector.upper()} -7%",
+                "loss_usd": round(largest_sector_allocation * 0.07, 2),
+                "equity_pct": round(((largest_sector_allocation * 0.07) / equity) * 100.0, 2) if equity > 0 else 0.0,
+                "detail": "Largest sector sleeve pulls back 7%.",
+            },
+        ],
+    }
+
+
+def _mode_from_regime(regime: dict[str, Any]) -> str:
+    status = (regime or {}).get("status")
+    if status == "red" or (regime or {}).get("halt_new_entries"):
+        return "RISK_OFF"
+    if status == "yellow":
+        return "CONSERVATIVE"
+    return "BALANCED"
+
+
+def _exposure(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    active = [r for r in rows if r["allocation_usd"] > 0]
+    by_sector: dict[str, float] = {}
+    by_action: dict[str, float] = {}
+    by_option_view: dict[str, float] = {}
+    for r in active:
+        allocation = float(r["allocation_usd"] or 0)
+        sector = (r.get("sector") or "Unknown").title()
+        by_sector[sector] = by_sector.get(sector, 0.0) + allocation
+        by_action[r["action"]] = by_action.get(r["action"], 0.0) + allocation
+        by_option_view[r["option_view"]] = by_option_view.get(r["option_view"], 0.0) + allocation
+    def _rows(d: dict[str, float]) -> list[dict[str, Any]]:
+        total = sum(d.values()) or 1.0
+        return [
+            {"name": k, "value": round(v, 2), "pct": round((v / total) * 100, 1)}
+            for k, v in sorted(d.items(), key=lambda kv: kv[1], reverse=True)
+        ]
+    return {"by_sector": _rows(by_sector), "by_action": _rows(by_action), "by_option_view": _rows(by_option_view)}
+
+
+async def _account_equity() -> tuple[float | None, str]:
+    try:
+        from . import trade_floor
+        account = await asyncio.wait_for(trade_floor.get_account(), timeout=4.0)
+        if account and account.get("equity"):
+            return float(account["equity"]), "alpaca"
+    except Exception:
+        pass
+    return None, "fallback"
+
+
+async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO", ruleset_id: str | None = None) -> dict[str, Any]:
+    db = get_db()
+    scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+    rows = (scan or {}).get("results") or []
+    account_equity, equity_source = await _account_equity()
+    equity_basis = float(equity or account_equity or DEFAULT_EQUITY)
+    if equity:
+        equity_source = "manual"
+    try:
+        from . import trade_floor
+        regime = await asyncio.wait_for(trade_floor.regime_status(), timeout=8.0)
+    except Exception:
+        regime = {"status": "unknown", "halt_new_entries": False, "source": "timeout_fallback"}
+    requested_mode = (mode or "AUTO").upper()
+    active_mode = _mode_from_regime(regime) if requested_mode == "AUTO" else requested_mode
+    if active_mode not in MODE_PROFILES:
+        active_mode = "BALANCED"
+    try:
+        from . import pm_rules
+        ruleset = await pm_rules.get_ruleset(ruleset_id)
+        profile_override = await pm_rules.profile_override_for(active_mode, ruleset_id)
+    except Exception:
+        ruleset = {"ruleset_id": "pm-default-v1", "name": "PM Default v1", "active": True}
+        profile_override = {}
+    profile = _profile_for(active_mode, profile_override)
+    recommendations = evaluate_rows(rows, equity=equity_basis, mode=active_mode, profile_override=profile_override)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scan_finished_at": (scan or {}).get("finished_at"),
+        "mode": active_mode,
+        "requested_mode": requested_mode,
+        "ruleset": {
+            "ruleset_id": ruleset.get("ruleset_id"),
+            "name": ruleset.get("name"),
+            "active": ruleset.get("active"),
+        },
+        "claude_required": False,
+        "summary": _summary(recommendations, equity_basis, active_mode, equity_source, regime),
+        "exposure": _exposure(recommendations),
+        "recommendations": recommendations,
+        "rules": {
+            "max_position_pct": profile["max_position_pct"],
+            "max_single_name_risk_pct": profile["max_single_name_risk_pct"],
+            "max_gross_deployment_pct": profile["max_gross_deployment_pct"],
+            "mode_profiles": MODE_PROFILES,
+            "actions": {
+                "ACCUMULATE": f"pm_score >= {profile['accumulate_score']}, risk/reward >= {profile['accumulate_rr']}, at least 3 signals, risk_score < 75",
+                "STARTER": f"pm_score >= {profile['starter_score']}, risk/reward >= {profile['starter_rr']}, at least 2 signals",
+                "WATCH": f"pm_score >= {profile['watch_score']} but not sized",
+                "REJECT": "below watch threshold",
+            },
+        },
+    }
