@@ -667,7 +667,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                 ☰
               </button>
             )}
-            <div className="fade-in" style={{ flex: 1, minWidth: 0 }}>
+            <div className="terminal-page-title fade-in" style={{ flex: 1, minWidth: 0 }}>
               <div style={{
                 fontSize: 9, color: muted, letterSpacing: "0.22em",
                 display: "flex", alignItems: "center", gap: 8,
@@ -691,7 +691,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                 {title}
               </div>
             </div>
-            <div className="fade-in fade-in-1" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div className="terminal-page-actions fade-in fade-in-1" style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button
                 data-testid="global-refresh-tab"
                 title="Refresh this terminal page"

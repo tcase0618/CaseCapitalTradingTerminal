@@ -245,9 +245,9 @@ export default function StartupGate({ children }) {
       )}
 
       {launching && (
-        <div style={styles.launchOverlay}>
-          <img src={startupLogo} alt="" style={styles.launchLogo} />
-          <div style={styles.launchText}>INITIALIZING CASE CAPITAL TRADING TERMINAL</div>
+        <div className="startup-launch-overlay" style={styles.launchOverlay}>
+          <img className="startup-launch-logo" src={startupLogo} alt="" style={styles.launchLogo} />
+          <div className="startup-launch-text" style={styles.launchText}>INITIALIZING CASE CAPITAL TRADING TERMINAL</div>
         </div>
       )}
     </div>
@@ -257,13 +257,13 @@ export default function StartupGate({ children }) {
 function BootSplash({ backend, checks, isDesktop, usesLocalDesktopBackend, onRefresh, onForceBoot, onOpen }) {
   const online = backend.state === "online";
   return (
-    <section style={styles.splashStage}>
+    <section className="startup-splash-stage" style={styles.splashStage}>
       <div style={styles.heroLogoWrap}>
         <div style={styles.logoBackdrop} />
         <img src={startupLogo} alt="Case Capital Automated Management" style={styles.heroLogo} />
       </div>
 
-      <div style={styles.bootConsole}>
+      <div className="startup-boot-console" style={styles.bootConsole}>
         <div style={styles.bootHeader}>
           <span style={{ color: accent2 }}>SYSTEM BOOT</span>
           <span style={{ color: online ? "#4ade80" : accent }}>{online ? "READY" : "LOADING"}</span>
@@ -321,12 +321,12 @@ function LoginPanel({
   onPreview,
 }) {
   return (
-    <section style={styles.loginStage}>
+    <section className="startup-login-stage" style={styles.loginStage}>
       <div style={styles.loginMark}>
         <img src={startupLogo} alt="Case Capital Automated Management" style={styles.loginLogo} />
       </div>
 
-      <form onSubmit={onSubmit} style={styles.panel}>
+      <form className="startup-login-panel" onSubmit={onSubmit} style={styles.panel}>
         <div style={styles.panelTop}>
           <div>
             <div style={styles.kicker}>{mode === "setup" ? "LOCAL FIRST RUN SECURITY" : "SECURE TERMINAL LOGIN"}</div>
