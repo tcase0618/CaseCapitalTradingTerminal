@@ -377,9 +377,29 @@ function readAuth() {
 }
 
 async function hashCode(code) {
+  const input = `case-capital:${code}`;
+  if (!crypto?.subtle) {
+    return fallbackHash(input);
+  }
   const encoder = new TextEncoder();
-  const buffer = await crypto.subtle.digest("SHA-256", encoder.encode(`case-capital:${code}`));
+  const buffer = await crypto.subtle.digest("SHA-256", encoder.encode(input));
   return Array.from(new Uint8Array(buffer)).map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function fallbackHash(input) {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+
+  return `fallback-${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 async function checkBackend(setBackend, setBootChecks, isDesktop = false) {
