@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
 
 const SOURCE_WEIGHTS = {
@@ -340,6 +340,27 @@ export default function IntelPage() {
   const activePositions = asArray(payloads?.tradeFloor, "db_positions");
   const xFactorTape = asArray(payloads?.xFactor, "alerts");
   const xDiscoveries = asArray(payloads?.discoveries, "discoveries");
+  const darkPoolTape = asArray(payloads?.darkHorse, "alerts")
+    .map(item => ({
+      ...item,
+      ticker: cleanTicker(item.ticker),
+      notional_proxy: Number(item.block_volume || 0) * Number(item.close || item.price || 0),
+    }))
+    .filter(item => item.ticker)
+    .sort((a, b) =>
+      Number(b.block_pct_of_adv || 0) - Number(a.block_pct_of_adv || 0)
+      || Number(b.off_exchange_pct || 0) - Number(a.off_exchange_pct || 0)
+      || Number(b.notional_proxy || 0) - Number(a.notional_proxy || 0)
+    );
+  const darkPoolSummary = {
+    prints: darkPoolTape.length,
+    totalVolume: darkPoolTape.reduce((sum, item) => sum + Number(item.block_volume || 0), 0),
+    totalNotional: darkPoolTape.reduce((sum, item) => sum + Number(item.notional_proxy || 0), 0),
+    maxAdv: Math.max(0, ...darkPoolTape.map(item => Number(item.block_pct_of_adv || 0))),
+    avgOffExchange: darkPoolTape.length
+      ? darkPoolTape.reduce((sum, item) => sum + Number(item.off_exchange_pct || 0), 0) / darkPoolTape.length
+      : 0,
+  };
   const georiskEvents = asArray(payloads?.georisk, "events");
   const freeSources = asArray(payloads?.freeCatalog, "sources");
   const macroSeries = [
@@ -401,6 +422,7 @@ export default function IntelPage() {
         <Stat label="PM ALIGNED" value={intel.filter(row => row.sourceSet.has("PM")).length} sub={pmSummary.mode || "AUTO"} color={accent2} />
         <Stat label="TRADE FLOOR" value={activePositions.length} sub="ACTIVE POSITIONS" color="#a78bfa" />
         <Stat label="CATALYSTS" value={catalystTape.length} sub="SEC / CONTRACT / TAPE" color="#fb923c" />
+        <Stat label="DARK POOL" value={darkPoolSummary.prints} sub="FINRA PROXY PRINTS" color={darkPoolSummary.prints ? "#f59e0b" : muted} />
         <Stat label="MACRO WARNINGS" value={imminent.length} sub="<48H" color={imminent.length ? "#f87171" : muted} />
       </div>
 
@@ -566,6 +588,55 @@ export default function IntelPage() {
               ))}
               {!xDiscoveries.length && <span style={{ color: muted, fontSize: 11 }}>No new discovery tickers.</span>}
             </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card
+        title="DARK POOL TAPE - FINRA OFF-EXCHANGE PROXY"
+        accentColor="#f59e0b"
+        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{darkPoolSummary.prints} QUALIFIED PRINTS / 14D</span>}
+      >
+        <div style={darkPoolGrid}>
+          <div style={darkPoolCommand}>
+            <div style={eyebrow}>INSTITUTIONAL BLOCK WATCH</div>
+            <div style={{ color: darkPoolSummary.prints ? "#f59e0b" : muted, fontSize: 34, letterSpacing: "0.08em", fontWeight: 900 }}>
+              {darkPoolSummary.prints ? `${darkPoolSummary.prints} PRINTS` : "NO PRINTS"}
+            </div>
+            <p style={{ color: labelLight, lineHeight: 1.55, margin: "10px 0 0", fontSize: 12 }}>
+              Uses the terminal Dark Horse feed as a dark-pool proxy: FINRA off-exchange volume, block size versus ADV, and price-premium confirmation. This is institutional tape context, not an execution signal by itself.
+            </p>
+            <div style={darkPoolMetrics}>
+              <MiniMetric label="SHARES" value={num(darkPoolSummary.totalVolume)} color={accent} />
+              <MiniMetric label="NOTIONAL" value={money(darkPoolSummary.totalNotional)} color="#f59e0b" />
+              <MiniMetric label="MAX ADV" value={percent(darkPoolSummary.maxAdv)} color={darkPoolSummary.maxAdv >= 10 ? "#4ade80" : labelLight} />
+              <MiniMetric label="AVG OFF-EX" value={percent(darkPoolSummary.avgOffExchange)} color={darkPoolSummary.avgOffExchange >= 45 ? "#4ade80" : labelLight} />
+            </div>
+          </div>
+          <div style={darkPoolTableWrap}>
+            {darkPoolTape.length === 0 ? (
+              <EmptyState text="No qualified off-exchange block tape in the current window." />
+            ) : (
+              <table style={table}>
+                <thead>
+                  <tr>
+                    <Th>TICKER</Th><Th>OFF-EX</Th><Th>ADV BLOCK</Th><Th>SHARES</Th><Th>PREMIUM</Th><Th>STAMP</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {darkPoolTape.slice(0, 12).map(item => (
+                    <tr key={`${item.ticker}-${item.fired_at || item.created_at || item.block_volume}`} style={{ borderTop: hairline }}>
+                      <Td strong><Link to={`/ticker/${item.ticker}`} style={tickerLink(14)}>${item.ticker}</Link></Td>
+                      <Td color={Number(item.off_exchange_pct || 0) >= 45 ? "#4ade80" : labelLight}>{percent(item.off_exchange_pct)}</Td>
+                      <Td color={Number(item.block_pct_of_adv || 0) >= 10 ? "#f59e0b" : labelLight}>{percent(item.block_pct_of_adv)}</Td>
+                      <Td>{num(item.block_volume)}</Td>
+                      <Td color={Number(item.premium_pct || 0) > 0 ? "#4ade80" : "#f87171"}>{percent(item.premium_pct)}</Td>
+                      <Td muted>{shortDate(item.fired_at || item.created_at || item.trade_date)}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       </Card>
@@ -820,6 +891,18 @@ function EmptyState({ text }) {
   return <div style={{ color: muted, padding: "18px 6px", letterSpacing: "0.08em" }}>{text}</div>;
 }
 
+function Th({ children }) {
+  return <th style={th}>{children}</th>;
+}
+
+function Td({ children, color = labelLight, muted: isMuted = false, strong = false }) {
+  return (
+    <td style={{ ...td, color: isMuted ? muted : color, fontWeight: strong ? 800 : 500 }}>
+      {children}
+    </td>
+  );
+}
+
 const commandDeck = {
   display: "grid",
   gridTemplateColumns: "minmax(0, 1.35fr) minmax(310px, 0.65fr)",
@@ -891,6 +974,32 @@ function matrixCell(ok) {
   };
 }
 
+const darkPoolGrid = {
+  display: "grid",
+  gridTemplateColumns: "minmax(260px, 0.62fr) minmax(0, 1.38fr)",
+  gap: 14,
+};
+
+const darkPoolCommand = {
+  border: "0.5px solid rgba(245,158,11,0.28)",
+  background: "linear-gradient(180deg, rgba(245,158,11,0.095), rgba(255,255,255,0.014))",
+  padding: 16,
+  alignSelf: "start",
+};
+
+const darkPoolMetrics = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 8,
+  marginTop: 14,
+};
+
+const darkPoolTableWrap = {
+  border: hairline,
+  background: "rgba(255,255,255,0.012)",
+  overflowX: "auto",
+};
+
 const geoGrid = {
   display: "grid",
   gridTemplateColumns: "minmax(250px, 0.6fr) minmax(0, 1.4fr)",
@@ -911,6 +1020,31 @@ function geoRow(severity) {
     background: `${color}0c`,
     padding: "11px 12px",
   };
+};
+
+const table = {
+  width: "100%",
+  borderCollapse: "collapse",
+  minWidth: 680,
+};
+
+const th = {
+  color: dim,
+  fontSize: 9,
+  letterSpacing: "0.16em",
+  fontWeight: 800,
+  textAlign: "left",
+  padding: "10px 11px",
+  borderBottom: hairline,
+  whiteSpace: "nowrap",
+};
+
+const td = {
+  padding: "11px",
+  fontSize: 11,
+  letterSpacing: "0.08em",
+  verticalAlign: "middle",
+  whiteSpace: "nowrap",
 };
 
 const eyebrow = {
