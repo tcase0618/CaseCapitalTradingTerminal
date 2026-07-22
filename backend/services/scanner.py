@@ -17,6 +17,10 @@ from .scrapers import collect_all_signals
 logger = logging.getLogger(__name__)
 
 
+def _execution_enabled() -> bool:
+    return os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _aggregate_market_signals(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     by_ticker: dict[str, dict[str, Any]] = {}
 
@@ -395,16 +399,19 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         asyncio.create_task(_sec.poll_edgar_filings())
     except Exception as e:
         logger.warning("SEC poll dispatch failed: %s", e)
-    try:
-        from . import trade_floor as _tf
-        asyncio.create_task(_tf.evaluate_and_execute(final))
-    except Exception as e:
-        logger.warning("Trade Floor dispatch failed: %s", e)
-    try:
-        from . import options_desk as _od
-        asyncio.create_task(_od.refresh_and_auto_execute_latest())
-    except Exception as e:
-        logger.warning("Options Desk auto-execute dispatch failed: %s", e)
+    if _execution_enabled():
+        try:
+            from . import trade_floor as _tf
+            asyncio.create_task(_tf.evaluate_and_execute(final))
+        except Exception as e:
+            logger.warning("Trade Floor dispatch failed: %s", e)
+        try:
+            from . import options_desk as _od
+            asyncio.create_task(_od.refresh_and_auto_execute_latest())
+        except Exception as e:
+            logger.warning("Options Desk auto-execute dispatch failed: %s", e)
+    else:
+        await log_activity("Scan execution dispatch skipped; ENABLE_TRADE_EXECUTION is off", "info")
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

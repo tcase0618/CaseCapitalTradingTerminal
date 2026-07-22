@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+import platform
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +90,64 @@ async def status():
     }
 
 
+@api.get("/position_monitor/latest")
+async def position_monitor_latest():
+    db = get_db()
+    row = await db.bot_state.find_one({"_id": "live_position_snapshot_latest"}, {"_id": 0})
+    if row:
+        return {"ok": True, **row}
+    return {"ok": True, "snapshot_at": None, "totals": {"positions": 0, "open_orders": 0, "market_value": 0, "unrealized_pl": 0}, "equities": {}, "options": {}}
+
+
+@api.get("/position_monitor/history")
+async def position_monitor_history(limit: int = 96):
+    db = get_db()
+    limit = max(1, min(int(limit or 96), 500))
+    rows = await db.live_position_snapshots.find({}, {"_id": 0}).sort("snapshot_at", -1).to_list(limit)
+    return {"ok": True, "count": len(rows), "snapshots": rows}
+
+
+@api.post("/position_monitor/refresh")
+async def position_monitor_refresh():
+    return await scheduler.persist_live_position_snapshot(triggered_by="manual_refresh")
+
+
+@api.get("/data_quality/overview")
+async def data_quality_overview(force_refresh: bool = False):
+    from services import data_quality
+    return await data_quality.overview(force_refresh=force_refresh)
+
+
+@api.post("/data_quality/refresh")
+async def data_quality_refresh():
+    from services import data_quality
+    return await data_quality.overview(force_refresh=True)
+
+
+@api.post("/data_quality/remediate")
+async def data_quality_remediate(limit: int = 16):
+    from services import data_quality
+    return await data_quality.remediate(limit=limit)
+
+
+@api.get("/data_quality/events")
+async def data_quality_events(limit: int = 100):
+    from services import data_quality
+    return await data_quality.events(limit=limit)
+
+
+@api.post("/trading_halts/check")
+async def trading_halts_check(force_alert: bool = False):
+    from services import trading_halts
+    return await trading_halts.check_and_alert(force_alert=force_alert)
+
+
+@api.get("/trading_halts/latest")
+async def trading_halts_latest(limit: int = 25):
+    from services import trading_halts
+    return await trading_halts.latest(limit=limit)
+
+
 @api.get("/system/health")
 async def system_health():
     from services import system_health as svc
@@ -96,7 +156,7 @@ async def system_health():
 
 @api.post("/admin/backend_refresh")
 async def admin_backend_refresh():
-    from services import integration_status as integration_svc, pricer
+    from services import pricer
     from services import system_health as health_svc
 
     health = await health_svc.overview()
@@ -121,6 +181,139 @@ async def admin_backend_refresh():
     except Exception:
         pass
     return payload
+
+
+@api.get("/desktop/diagnostics")
+async def desktop_diagnostics():
+    """Single fast desktop readiness payload for startup + Settings diagnostics."""
+    from services import integration_status as integration_svc, pricer
+    from services import system_health as health_svc
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    async def _status_probe():
+        return await asyncio.wait_for(status(), timeout=3.0)
+
+    async def _health_probe():
+        return await asyncio.wait_for(health_svc.overview(), timeout=3.5)
+
+    status_result, health_result = await asyncio.gather(
+        _status_probe(),
+        _health_probe(),
+        return_exceptions=True,
+    )
+    if isinstance(status_result, Exception):
+        status_payload = {
+            "bot": {"online": True, "db_available": False, "telegram_configured": bool(os.environ.get("TELEGRAM_BOT_TOKEN"))},
+            "last_scan_at": None,
+            "last_scan_summary": {},
+            "stats": {},
+            "diagnostics_error": str(status_result)[:180],
+        }
+    else:
+        status_payload = status_result
+    if isinstance(health_result, Exception):
+        health = {
+            "generated_at": generated_at,
+            "ready_for_scanning": bool(status_payload.get("bot", {}).get("db_available")),
+            "ready_for_pm": bool(status_payload.get("last_scan_at")),
+            "ready_for_trade_floor": False,
+            "ready_for_journal_learning": False,
+            "blockers": [f"System health timed out: {str(health_result)[:120]}"],
+            "database": {"ok": bool(status_payload.get("bot", {}).get("db_available")), "latest_scan_at": status_payload.get("last_scan_at")},
+            "alpaca": {"ok": False, "reason": "health_probe_timeout"},
+            "env": {},
+        }
+    else:
+        health = health_result
+
+    db = get_db()
+    xfactor_count = 0
+    earnings_cache = None
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        xfactor_count = await db.x_factor_alerts.count_documents({"fired_at": {"$gte": cutoff}})
+    except Exception:
+        xfactor_count = 0
+    try:
+        earnings_cache = await db.earnings_snapshots.find_one(
+            {},
+            {"_id": 0, "week_of": 1, "created_at": 1, "feature_version": 1, "total": 1},
+            sort=[("created_at", -1)],
+        )
+    except Exception:
+        earnings_cache = None
+
+    installer = ROOT_DIR.parent / "frontend" / "src-tauri" / "target" / "x86_64-pc-windows-msvc" / "release" / "bundle" / "nsis" / "CaseCapitalTradingTerminal_0.1.1_x64-setup.exe"
+    source_state = {
+        "backend_root": str(ROOT_DIR),
+        "frontend_root": str(ROOT_DIR.parent / "frontend"),
+        "installer_path": str(installer),
+        "installer_exists": installer.exists(),
+    }
+
+    checklist = [
+        {"key": "backend", "label": "Backend API", "ok": True, "detail": "FastAPI responding on 127.0.0.1:8001"},
+        {"key": "mongo", "label": "MongoDB", "ok": bool(status_payload.get("bot", {}).get("db_available")), "detail": health.get("database", {}).get("reason") or "database reachable"},
+        {"key": "latest_scan", "label": "Latest Scan", "ok": bool(status_payload.get("last_scan_at") or health.get("database", {}).get("latest_scan_at")), "detail": status_payload.get("last_scan_at") or health.get("database", {}).get("latest_scan_at") or "no scan saved"},
+        {"key": "pm", "label": "Portfolio Manager", "ok": bool(health.get("ready_for_pm")), "detail": "latest scan available" if health.get("ready_for_pm") else "waiting for scan state"},
+        {"key": "trade_floor", "label": "Trade Floor", "ok": bool(health.get("ready_for_trade_floor")), "detail": health.get("alpaca", {}).get("reason") or "execution account reachable"},
+        {"key": "telegram", "label": "Telegram", "ok": bool(status_payload.get("bot", {}).get("telegram_configured")), "detail": "bot token configured" if status_payload.get("bot", {}).get("telegram_configured") else "bot token missing"},
+        {"key": "earnings_cache", "label": "Earnings Cache", "ok": bool(earnings_cache), "detail": (earnings_cache or {}).get("created_at") or "no earnings cache"},
+        {"key": "xfactor", "label": "X Factor Alerts", "ok": xfactor_count > 0, "detail": f"{xfactor_count} alerts in 2 days"},
+    ]
+
+    core_keys = {"backend", "mongo", "latest_scan", "pm"}
+    core_ready = all(item["ok"] for item in checklist if item["key"] in core_keys)
+
+    return {
+        "ok": core_ready,
+        "generated_at": generated_at,
+        "app": {
+            "name": "CaseCapitalTradingTerminal",
+            "version": "0.1.1",
+            "build_channel": "local-desktop",
+            "backend_pid": os.getpid(),
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+        },
+        "backend": {
+            "url": "http://127.0.0.1:8001",
+            "pid": os.getpid(),
+            "cwd": os.getcwd(),
+            "root": str(ROOT_DIR),
+            "price_source": pricer.source_label(),
+        },
+        "status": status_payload,
+        "health": health,
+        "signals": {
+            "xfactor_2d": xfactor_count,
+            "latest_scan_at": status_payload.get("last_scan_at"),
+            "latest_scan_results": (status_payload.get("last_scan_summary") or {}).get("results_count"),
+        },
+        "earnings_cache": earnings_cache,
+        "checklist": checklist,
+        "integrations_count": None,
+        "source_state": source_state,
+    }
+
+
+@api.get("/desktop/update_strategy")
+async def desktop_update_strategy():
+    installer = ROOT_DIR.parent / "frontend" / "src-tauri" / "target" / "x86_64-pc-windows-msvc" / "release" / "bundle" / "nsis" / "CaseCapitalTradingTerminal_0.1.1_x64-setup.exe"
+    return {
+        "current_version": "0.1.1",
+        "channel": "local",
+        "installer_path": str(installer),
+        "installer_exists": installer.exists(),
+        "recommended_strategy": "Local installer now; GitHub Releases updater once the repo/release flow is stable.",
+        "next_steps": [
+            "Keep every stable desktop build as a GitHub Release artifact.",
+            "Show current version and latest available version in Settings.",
+            "Download updates only from the configured repository release URL.",
+            "Never overwrite local .env secrets during app updates.",
+            "Keep backend migrations backwards compatible before enabling auto-update.",
+        ],
+    }
 
 
 @api.get("/data/lse/applicability")
@@ -396,6 +589,19 @@ async def admin_price_source():
         "massive_available": pricer.has_massive(),
         "finnhub_available": pricer.has_finnhub(),
     }
+
+
+@api.get("/price/history/{ticker}")
+async def price_history(ticker: str, days: int = 140, force: bool = False):
+    from services import pricer
+    symbol = ticker.upper().strip()
+    history = await pricer.get_history(symbol, days=max(5, min(int(days or 140), 900)), force=force)
+    rows = [
+        {"date": d, "close": v, "source": pricer.source_label()}
+        for d, v in sorted(history.items())
+        if v is not None
+    ]
+    return {"ok": bool(rows), "ticker": symbol, "days": days, "source": pricer.source_label(), "rows": rows}
 
 
 
@@ -784,6 +990,54 @@ async def scan_latest():
     return s or {"results": [], "pre_filter_passed": 0, "raw_counts": {}}
 
 
+@api.get("/kronos/forecast")
+async def kronos_forecast(persist: bool = True):
+    from services import kronos
+    return await kronos.forecast(persist=persist)
+
+
+@api.get("/kronos/market_forecast")
+async def kronos_market_forecast():
+    from services import kronos
+    return await kronos.market_forecast()
+
+
+@api.get("/kronos/disagreements")
+async def kronos_disagreements(limit: int = 200):
+    from services import kronos
+    return await kronos.disagreement_performance(limit=limit)
+
+
+@api.get("/kronos/calendar")
+async def kronos_calendar(year: int, month: int):
+    from services import kronos
+    return await kronos.calendar_month(year=year, month=month)
+
+
+@api.get("/kronos/battle_card/{ticker}")
+async def kronos_battle_card(ticker: str):
+    from services import kronos
+    return await kronos.battle_card(ticker)
+
+
+@api.post("/kronos/telegram/morning")
+async def kronos_telegram_morning(force: bool = False):
+    from services import kronos
+    return await kronos.dispatch_morning_forecast(force=force)
+
+
+@api.get("/research/dashboard")
+async def research_dashboard(limit_scans: int = 160):
+    from services import research_lab
+    return await research_lab.dashboard(limit_scans=limit_scans)
+
+
+@api.post("/research/refresh")
+async def research_refresh(limit_scans: int = 180):
+    from services import research_lab
+    return await research_lab.refresh_snapshot(limit_scans=limit_scans, triggered_by="manual")
+
+
 @api.get("/scan/history")
 async def scan_history(limit: int = 10):
     db = get_db()
@@ -1089,7 +1343,11 @@ async def on_startup():
             await pnl_tracker.ensure_first_seen_backfill()
     except Exception as e:
         logger.warning("first_seen backfill failed: %s", e)
-    scheduler.start_scheduler()
+    scheduler_enabled = os.environ.get("ENABLE_SCHEDULER", "true").strip().lower() not in {"0", "false", "no", "off"}
+    if scheduler_enabled:
+        scheduler.start_scheduler()
+    else:
+        logger.warning("Scheduler disabled by ENABLE_SCHEDULER")
     base = os.environ.get("PUBLIC_BASE_URL")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and base:
         try:
@@ -1129,6 +1387,12 @@ async def sec_filings_list(days: int = 7, form: str | None = None):
 async def sec_battle_card(ticker: str, limit: int = 25):
     from services import sec_filings
     return await sec_filings.battle_card(ticker=ticker, limit=limit)
+
+
+@api.get("/sec/edgartools/{ticker}")
+async def sec_edgartools_snapshot(ticker: str):
+    from services import edgartools_bridge
+    return await edgartools_bridge.company_snapshot(ticker=ticker)
 
 
 # ─────── TRADE FLOOR ───────

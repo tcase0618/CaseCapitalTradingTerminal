@@ -1,0 +1,19 @@
+[Unit]
+Description=Case Capital Trading Terminal Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=casecapital
+Group=casecapital
+WorkingDirectory=/opt/case-capital/stock-intel/backend
+EnvironmentFile=/opt/case-capital/stock-intel/backend/.env
+ExecStart=/opt/case-capital/stock-intel/backend/.venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
