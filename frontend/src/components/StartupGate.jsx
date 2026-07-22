@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
+import { API, BACKEND_BASE_URL } from "../config";
 import {
   CheckCircle2,
   LoaderCircle,
@@ -12,7 +13,6 @@ import {
 } from "lucide-react";
 import startupLogo from "../assets/case-capital-startup-logo.png";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const AUTH_KEY = "case_capital_terminal_auth_v1";
 const SESSION_KEY = "case_capital_terminal_session_v1";
 
@@ -33,19 +33,65 @@ export default function StartupGate({ children }) {
   const [confirmCode, setConfirmCode] = useState("");
   const [error, setError] = useState("");
   const [backend, setBackend] = useState({ state: "checking", message: "Checking backend link" });
+  const [bootChecks, setBootChecks] = useState([]);
   const [launching, setLaunching] = useState(false);
+  const autoBootAttempted = useRef(false);
 
-  const isDesktop = useMemo(() => Boolean(window.__TAURI_INTERNALS__), []);
+  const isDesktop = useMemo(() => Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__), []);
+  const usesLocalDesktopBackend = useMemo(() => {
+    if (!isDesktop || !BACKEND_BASE_URL) return isDesktop;
+    try {
+      const parsed = new URL(BACKEND_BASE_URL);
+      return ["127.0.0.1", "localhost"].includes(parsed.hostname);
+    } catch {
+      return isDesktop;
+    }
+  }, [isDesktop]);
+
+  const forceBoot = useCallback(async () => {
+    setBackend({ state: "checking", message: "Forcing desktop backend boot" });
+    try {
+      if (!usesLocalDesktopBackend) {
+        setBackend({ state: "offline", message: "Force boot is only for local desktop backend mode." });
+        return false;
+      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke("force_boot_backend");
+      if (result.ok) {
+        await checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend);
+        return true;
+      }
+      setBackend({
+        state: "offline",
+        message: result.message || "Backend boot failed",
+      });
+      return false;
+    } catch (err) {
+      setBackend({ state: "offline", message: err?.message || "Backend boot failed" });
+      return false;
+    }
+  }, [usesLocalDesktopBackend]);
 
   useEffect(() => {
-    checkBackend(setBackend);
-  }, []);
+    if (usesLocalDesktopBackend) {
+      autoBootAttempted.current = true;
+      forceBoot();
+      return;
+    }
+    checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend);
+  }, [forceBoot, usesLocalDesktopBackend]);
 
   useEffect(() => {
     if (backend.state === "online") return;
-    const id = setInterval(() => checkBackend(setBackend), 2500);
+    const id = setInterval(() => checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend), 2500);
     return () => clearInterval(id);
-  }, [backend.state]);
+  }, [backend.state, usesLocalDesktopBackend]);
+
+  useEffect(() => {
+    if (!usesLocalDesktopBackend || backend.state === "online" || autoBootAttempted.current) return;
+    autoBootAttempted.current = true;
+    forceBoot();
+  }, [backend.state, forceBoot, usesLocalDesktopBackend]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -54,7 +100,7 @@ export default function StartupGate({ children }) {
     return () => clearTimeout(id);
   }, [sessionReady]);
 
-  if (sessionReady && !launching) {
+  if (sessionReady && !launching && backend.state !== "offline") {
     return children;
   }
 
@@ -89,26 +135,11 @@ export default function StartupGate({ children }) {
       setError("Access denied. Check the local terminal code.");
       return;
     }
+    if (backend.state === "checking") {
+      setBackend({ state: "online", message: "Access verified. Backend sync continuing in terminal." });
+    }
     sessionStorage.setItem(SESSION_KEY, "open");
     setSessionReady(true);
-  };
-
-  const forceBoot = async () => {
-    setBackend({ state: "checking", message: "Sending desktop backend boot command" });
-    try {
-      if (!isDesktop) {
-        setBackend({ state: "offline", message: "Force boot is available inside the desktop app." });
-        return;
-      }
-      const { invoke } = await import("@tauri-apps/api/core");
-      const result = await invoke("force_boot_backend");
-      setBackend({
-        state: result.ok ? "online" : "offline",
-        message: result.message || (result.ok ? "Backend online" : "Backend boot failed"),
-      });
-    } catch (err) {
-      setBackend({ state: "offline", message: err?.message || "Backend boot failed" });
-    }
   };
 
   return (
@@ -122,8 +153,10 @@ export default function StartupGate({ children }) {
       {!bootOpened ? (
         <BootSplash
           backend={backend}
+          checks={bootChecks}
           isDesktop={isDesktop}
-          onRefresh={() => checkBackend(setBackend)}
+          usesLocalDesktopBackend={usesLocalDesktopBackend}
+          onRefresh={() => checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend)}
           onForceBoot={forceBoot}
           onOpen={() => setBootOpened(true)}
         />
@@ -136,11 +169,13 @@ export default function StartupGate({ children }) {
           confirmCode={confirmCode}
           error={error}
           backend={backend}
+          checks={bootChecks}
           isDesktop={isDesktop}
+          usesLocalDesktopBackend={usesLocalDesktopBackend}
           onName={setName}
           onCode={setCode}
           onConfirmCode={setConfirmCode}
-          onRefresh={() => checkBackend(setBackend)}
+          onRefresh={() => checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend)}
           onForceBoot={forceBoot}
           onSubmit={submit}
         />
@@ -156,7 +191,7 @@ export default function StartupGate({ children }) {
   );
 }
 
-function BootSplash({ backend, isDesktop, onRefresh, onForceBoot, onOpen }) {
+function BootSplash({ backend, checks, isDesktop, usesLocalDesktopBackend, onRefresh, onForceBoot, onOpen }) {
   const online = backend.state === "online";
   return (
     <section style={styles.splashStage}>
@@ -177,8 +212,9 @@ function BootSplash({ backend, isDesktop, onRefresh, onForceBoot, onOpen }) {
           <LoaderCircle className={online ? "" : "startup-spin"} size={15} />
           <span>{online ? "Backend is up and firing." : backend.message}</span>
         </div>
+        <BootChecklist checks={checks} />
         <div style={styles.bootMeta}>
-          <span>{isDesktop ? "DESKTOP SHELL DETECTED" : "BROWSER DEVELOPMENT MODE"}</span>
+          <span>{isDesktop ? (usesLocalDesktopBackend ? "DESKTOP LOCAL BACKEND" : "DESKTOP CLOUD BACKEND") : "BROWSER DEVELOPMENT MODE"}</span>
           <button type="button" onClick={onRefresh} style={styles.textButton}>REFRESH LINK</button>
         </div>
         <div style={styles.splashActions}>
@@ -190,7 +226,7 @@ function BootSplash({ backend, isDesktop, onRefresh, onForceBoot, onOpen }) {
           >
             OPEN TERMINAL
           </button>
-          {!online && (
+          {!online && usesLocalDesktopBackend && (
             <button type="button" onClick={onForceBoot} style={styles.secondaryButton}>
               FORCE BACKEND BOOT
             </button>
@@ -209,7 +245,9 @@ function LoginPanel({
   confirmCode,
   error,
   backend,
+  checks,
   isDesktop,
+  usesLocalDesktopBackend,
   onName,
   onCode,
   onConfirmCode,
@@ -237,7 +275,7 @@ function LoginPanel({
         <div style={styles.bootRail}>
           <StatusItem icon={<ShieldCheck size={14} />} label="AUTH" value={mode === "setup" ? "FIRST RUN" : "ARMED"} tone={accent} />
           <StatusItem icon={backend.state === "online" ? <Wifi size={14} /> : <WifiOff size={14} />} label="BACKEND" value={backend.state.toUpperCase()} tone={backend.state === "online" ? "#4ade80" : backend.state === "checking" ? accent : "#f87171"} />
-          <StatusItem icon={<Power size={14} />} label="SHELL" value={isDesktop ? "DESKTOP" : "BROWSER"} tone={accent2} />
+          <StatusItem icon={<Power size={14} />} label="SHELL" value={isDesktop ? (usesLocalDesktopBackend ? "DESKTOP" : "CLOUD") : "BROWSER"} tone={accent2} />
         </div>
 
         <div style={styles.backendStrip}>
@@ -247,6 +285,7 @@ function LoginPanel({
           <span>{backend.message}</span>
           <button type="button" onClick={onRefresh} style={styles.textButton}>REFRESH</button>
         </div>
+        <BootChecklist checks={checks} compact />
 
         {mode === "setup" && (
           <label style={styles.field}>
@@ -286,9 +325,11 @@ function LoginPanel({
           <button type="submit" style={styles.primaryButton}>
             {mode === "setup" ? "CREATE LOGIN" : "UNLOCK TERMINAL"}
           </button>
-          <button type="button" onClick={onForceBoot} style={styles.secondaryButton}>
-            FORCE BACKEND BOOT
-          </button>
+          {usesLocalDesktopBackend && (
+            <button type="button" onClick={onForceBoot} style={styles.secondaryButton}>
+              FORCE BACKEND BOOT
+            </button>
+          )}
         </div>
 
         {auth && mode === "login" && (
@@ -312,6 +353,21 @@ function StatusItem({ icon, label, value, tone }) {
   );
 }
 
+function BootChecklist({ checks = [], compact = false }) {
+  if (!checks.length) return null;
+  const visible = compact ? checks.slice(0, 4) : checks;
+  return (
+    <div style={{ ...styles.checkGrid, gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))" }}>
+      {visible.map(check => (
+        <div key={check.key || check.label} style={styles.checkItem}>
+          <span style={{ color: check.ok ? "#4ade80" : "#fbbf24", fontWeight: 900 }}>{check.ok ? "READY" : "SYNC"}</span>
+          <span style={styles.checkLabel}>{check.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function readAuth() {
   try {
     return JSON.parse(localStorage.getItem(AUTH_KEY) || "null");
@@ -326,19 +382,44 @@ async function hashCode(code) {
   return Array.from(new Uint8Array(buffer)).map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function checkBackend(setBackend) {
+async function checkBackend(setBackend, setBootChecks, isDesktop = false) {
   setBackend({ state: "checking", message: "Checking backend link" });
+  if (isDesktop) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke("backend_status");
+      if (result.ok) {
+        setBackend({ state: "online", message: "Backend is responding. Syncing terminal data." });
+        warmTerminalData(undefined, setBootChecks);
+        return;
+      }
+      if (result.listening) {
+        setBackend({ state: "checking", message: result.message || "Backend port is open. Verifying terminal data." });
+        const warm = await waitForTerminalData(undefined, setBootChecks, 8000);
+        if (warm.ok) {
+          setBackend({ state: "online", message: "Backend and terminal data are ready" });
+          return;
+        }
+      }
+    } catch {}
+  }
+
+  const browserBase = window.location?.origin || "";
+  const localBases = isDesktop
+    ? ["http://127.0.0.1:8001", "http://localhost:8001"]
+    : [];
   const bases = [
-    (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, ""),
-    "http://127.0.0.1:8001",
-    "http://localhost:8001",
+    BACKEND_BASE_URL,
+    browserBase,
+    ...localBases,
   ].filter(Boolean);
   const uniqueBases = [...new Set(bases)];
   const errors = [];
   for (const base of uniqueBases) {
     try {
       await axios.get(`${base}/api/status`, { timeout: 6000 });
-      setBackend({ state: "online", message: `Backend online at ${base}` });
+      setBackend({ state: "online", message: `Backend responding at ${base}` });
+      warmTerminalData(base, setBootChecks);
       return;
     } catch (err) {
       errors.push(`${base}: ${err?.message || "failed"}`);
@@ -346,9 +427,44 @@ async function checkBackend(setBackend) {
   }
   setBackend({
     state: "offline",
-    message: `Backend is not responding. Tried ${uniqueBases.map(base => base.replace("http://", "")).join(" / ")}`,
+    message: `Backend is not responding. Tried ${uniqueBases.map(formatBackendBase).join(" / ")}`,
     detail: errors.join(" | "),
   });
+}
+
+function warmTerminalData(base, setBootChecks) {
+  waitForTerminalData(base, setBootChecks).catch(() => {});
+}
+
+async function waitForTerminalData(base = API.replace(/\/api$/, ""), setBootChecks = () => {}, timeoutMs = 14000) {
+  const started = Date.now();
+  const root = (base || window.location?.origin || "http://127.0.0.1:8001").replace(/\/$/, "");
+  let lastError = "";
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const { data } = await axios.get(`${root}/api/desktop/diagnostics`, { timeout: 4500 });
+      setBootChecks(data.checklist || []);
+      if (data.ok) {
+        return { ok: true };
+      }
+      const waiting = (data.checklist || []).filter(item => !item.ok).map(item => item.label).slice(0, 2).join(", ");
+      lastError = waiting ? `Waiting for ${waiting}` : "Waiting for terminal readiness";
+    } catch (err) {
+      lastError = err?.message || "terminal data unavailable";
+    }
+    await sleep(700);
+  }
+
+  return { ok: false, message: `Backend online. Terminal data still warming: ${lastError}` };
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function formatBackendBase(base = "") {
+  return base.replace(/^https?:\/\//, "") || "/api";
 }
 
 const startupAnimations = `
@@ -367,12 +483,15 @@ const startupAnimations = `
 
 const styles = {
   root: {
+    height: "100vh",
     minHeight: "100vh",
     background: `radial-gradient(circle at 50% 18%, rgba(200,168,75,0.13), transparent 20%), radial-gradient(circle at 50% 70%, rgba(94,234,212,0.055), transparent 26%), linear-gradient(180deg, #06111f 0%, ${pageBg} 52%, #030306 100%)`,
     color: "#f8fafc",
     position: "relative",
     overflowX: "hidden",
     overflowY: "auto",
+    overscrollBehavior: "contain",
+    WebkitOverflowScrolling: "touch",
     fontFamily: "JetBrains Mono, Courier New, monospace",
   },
   grid: {
@@ -386,20 +505,23 @@ const styles = {
   splashStage: {
     position: "relative",
     zIndex: 3,
-    minHeight: "100vh",
+    minHeight: "100%",
     display: "flex",
     flexDirection: "column",
-    justifyContent: "center",
+    justifyContent: "flex-start",
     alignItems: "center",
     gap: 22,
-    padding: "32px 24px",
+    padding: "clamp(18px, 4vh, 32px) 24px 44px",
+    boxSizing: "border-box",
   },
   heroLogoWrap: {
     width: "min(940px, 88vw)",
+    maxHeight: "42vh",
     position: "relative",
     display: "flex",
     justifyContent: "center",
     alignItems: "center",
+    flexShrink: 0,
   },
   logoBackdrop: {
     position: "absolute",
@@ -409,6 +531,7 @@ const styles = {
   },
   heroLogo: {
     width: "100%",
+    maxHeight: "42vh",
     objectFit: "contain",
     position: "relative",
     opacity: 0.9,
@@ -454,6 +577,28 @@ const styles = {
     letterSpacing: "0.08em",
     minHeight: 22,
   },
+  checkGrid: {
+    marginTop: 12,
+    display: "grid",
+    gap: 8,
+  },
+  checkItem: {
+    border: "0.5px solid rgba(255,255,255,0.08)",
+    background: "rgba(255,255,255,0.018)",
+    padding: "8px 9px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    minHeight: 46,
+    fontSize: 9,
+    letterSpacing: "0.12em",
+  },
+  checkLabel: {
+    color: muted,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   bootMeta: {
     marginTop: 12,
     paddingTop: 12,
@@ -484,13 +629,13 @@ const styles = {
   loginStage: {
     position: "relative",
     zIndex: 3,
-    minHeight: "100dvh",
+    minHeight: "100%",
     display: "flex",
     flexDirection: "column",
-    justifyContent: "center",
+    justifyContent: "flex-start",
     alignItems: "center",
     gap: 14,
-    padding: "28px 24px 44px",
+    padding: "clamp(18px, 4vh, 28px) 24px 44px",
     boxSizing: "border-box",
   },
   loginMark: {
