@@ -26,6 +26,7 @@ HEADERS = {
 }
 TIMEOUT = httpx.Timeout(10.0, connect=4.0)
 CACHE_TTL_SECONDS = 300
+MAX_ARTICLE_AGE_MINUTES = 7 * 24 * 60
 
 MARKET_FEEDS = [
     {
@@ -50,7 +51,10 @@ MARKET_FEEDS = [
 
 URGENT_TERMS = {
     "halt": 18,
-    "sec": 10,
+    "sec filing": 10,
+    "8-k": 10,
+    "10-q": 10,
+    "10-k": 10,
     "probe": 12,
     "investigation": 14,
     "lawsuit": 10,
@@ -234,13 +238,23 @@ def _score_article(article: dict[str, Any], mapped: list[str]) -> dict[str, Any]
     if published:
         age_min = max(0.0, (_now() - published).total_seconds() / 60.0)
 
-    urgency = sum(points for term, points in URGENT_TERMS.items() if term in text)
-    recency = 22 if age_min is not None and age_min <= 60 else 14 if age_min is not None and age_min <= 240 else 6
+    urgency_terms = [term for term in URGENT_TERMS if _has_term(text, term)]
+    urgency = sum(URGENT_TERMS[term] for term in urgency_terms)
+    if age_min is None:
+        recency = 2
+    elif age_min <= 60:
+        recency = 22
+    elif age_min <= 240:
+        recency = 14
+    elif age_min <= 1440:
+        recency = 6
+    else:
+        recency = 0
     ticker_weight = 18 if mapped else 0
     score = max(0, min(100, 28 + urgency + recency + ticker_weight))
 
-    bull = sum(1 for term in BULLISH_TERMS if term in text)
-    bear = sum(1 for term in BEARISH_TERMS if term in text)
+    bull = sum(1 for term in BULLISH_TERMS if _has_term(text, term))
+    bear = sum(1 for term in BEARISH_TERMS if _has_term(text, term))
     if bull > bear:
         bias = "BULLISH"
     elif bear > bull:
@@ -252,10 +266,28 @@ def _score_article(article: dict[str, Any], mapped: list[str]) -> dict[str, Any]
     return {
         "score": score,
         "bias": bias,
-        "urgency_terms": [term for term in URGENT_TERMS if term in text][:6],
+        "urgency_terms": urgency_terms[:6],
         "age_minutes": round(age_min, 1) if age_min is not None else None,
         "intel_lane": lane,
     }
+
+
+def _has_term(text: str, term: str) -> bool:
+    if not term:
+        return False
+    if re.search(r"[^\w\s]", term):
+        return term in text
+    return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+
+
+def _is_fresh_article(article: dict[str, Any]) -> bool:
+    age_min = article.get("age_minutes")
+    if age_min is None:
+        return True
+    try:
+        return float(age_min) <= MAX_ARTICLE_AGE_MINUTES
+    except Exception:
+        return True
 
 
 def _dedupe(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -294,8 +326,10 @@ async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]
         article.update(scored)
         article["tickers"] = mapped
 
-    deduped.sort(key=lambda row: (row.get("score") or 0, -(row.get("age_minutes") or 999999)), reverse=True)
-    rows = deduped[: max(1, min(int(limit or 60), 120))]
+    stale_rows = [row for row in deduped if not _is_fresh_article(row)]
+    fresh_rows = [row for row in deduped if _is_fresh_article(row)]
+    fresh_rows.sort(key=lambda row: (row.get("score") or 0, -(row.get("age_minutes") or 999999)), reverse=True)
+    rows = fresh_rows[: max(1, min(int(limit or 60), 120))]
     live_sources = [r for r in feed_results if r.get("ok")]
     failed_sources = [{k: r.get(k) for k in ("key", "source", "reason")} for r in feed_results if not r.get("ok")]
 
@@ -310,6 +344,8 @@ async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]
         "live_source_count": len(live_sources),
         "failed_source_count": len(failed_sources),
         "failed_sources": failed_sources[:12],
+        "stale_filtered_count": len(stale_rows),
+        "max_article_age_minutes": MAX_ARTICLE_AGE_MINUTES,
         "summary": {
             "articles": len(rows),
             "urgent": sum(1 for row in rows if row.get("intel_lane") == "URGENT"),
@@ -323,4 +359,3 @@ async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]
     await db.bot_state.update_one({"_id": "news_intel_latest"}, {"$set": payload}, upsert=True)
     await db.news_intel_snapshots.insert_one(stamped(payload))
     return payload
-
