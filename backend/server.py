@@ -148,6 +148,26 @@ async def trading_halts_latest(limit: int = 25):
     return await trading_halts.latest(limit=limit)
 
 
+@api.get("/news_intel/latest")
+async def news_intel_latest(force_refresh: bool = False, limit: int = 60):
+    from services import news_intel
+    return await news_intel.latest(force_refresh=force_refresh, limit=limit)
+
+
+@api.post("/news_intel/refresh")
+async def news_intel_refresh(limit: int = 60):
+    from services import news_intel
+    return await news_intel.latest(force_refresh=True, limit=limit)
+
+
+@api.get("/news_intel/snapshots")
+async def news_intel_snapshots(limit: int = 25):
+    db = get_db()
+    limit = max(1, min(int(limit or 25), 100))
+    rows = await db.news_intel_snapshots.find({}, {"_id": 0}).sort("generated_at", -1).to_list(limit)
+    return {"ok": True, "count": len(rows), "snapshots": rows}
+
+
 @api.get("/system/health")
 async def system_health():
     from services import system_health as svc

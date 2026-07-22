@@ -169,6 +169,7 @@ export default function IntelPage() {
       pm: "/portfolio_manager/latest",
       tradeFloor: "/trade_floor/positions",
       georisk: "/georisk/live",
+      newsIntel: "/news_intel/latest?limit=80",
       freeCatalog: "/data/free/catalog",
       lseMacro: "/data/lse/macro?limit=100",
       fredVix: "/data/free/fred/latest/VIXCLS",
@@ -361,6 +362,8 @@ export default function IntelPage() {
       ? darkPoolTape.reduce((sum, item) => sum + Number(item.off_exchange_pct || 0), 0) / darkPoolTape.length
       : 0,
   };
+  const newsIntel = payloads?.newsIntel || {};
+  const newsTape = asArray(newsIntel, "articles").sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
   const georiskEvents = asArray(payloads?.georisk, "events");
   const freeSources = asArray(payloads?.freeCatalog, "sources");
   const macroSeries = [
@@ -376,6 +379,7 @@ export default function IntelPage() {
     { label: "Contracts", ok: Boolean(payloads?.contracts), count: payloads?.contracts?.contracts?.length || 0 },
     { label: "X Factor", ok: Boolean(payloads?.xFactor), count: xFactorTape.length },
     { label: "GeoRisk", ok: Boolean(payloads?.georisk), count: georiskEvents.length },
+    { label: "Newswire", ok: Boolean(newsIntel?.ok), count: newsTape.length },
     { label: "LSE", ok: Boolean(payloads?.lseMacro?.provider), count: (payloads?.lseMacro?.economic_calendar || []).length + (payloads?.lseMacro?.bond_yields || []).length },
     { label: "FRED", ok: macroSeries.some(item => item.source?.ok), count: macroSeries.filter(item => item.source?.ok).length },
   ];
@@ -560,12 +564,14 @@ export default function IntelPage() {
         )}
       </section>
 
+      <section style={intelMosaic}>
+        <div style={mosaicStack}>
       <Card
         title="X FACTOR RADAR - GOOGLE TRENDS / STOCKTWITS / RETAIL TAPE"
         accentColor="#22d3ee"
         action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{xFactorTape.length} ALERTS / {xDiscoveries.length} DISCOVERIES</span>}
       >
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(260px, 0.8fr)", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 14 }}>
           <div style={{ display: "grid", gap: 8 }}>
             {xFactorTape.length === 0 ? (
               <EmptyState text="No X Factor alerts in the current 14 day window." />
@@ -592,6 +598,44 @@ export default function IntelPage() {
         </div>
       </Card>
 
+      <Card
+        title="INSTITUTIONAL NEWSWIRE - FREE RSS EVENT TAPE"
+        accentColor="#93c5fd"
+        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{newsIntel?.live_source_count || 0}/{newsIntel?.source_count || 0} SOURCES / {newsIntel?.cache || "LIVE"}</span>}
+      >
+        <div style={newsWireGrid}>
+          <div style={newsWireCommand}>
+            <div style={eyebrow}>EVENT RADAR</div>
+            <div style={{ color: newsTape.length ? "#93c5fd" : muted, fontSize: 34, letterSpacing: "0.08em", fontWeight: 900 }}>
+              {newsTape.length ? `${newsTape.length} HEADLINES` : "NO TAPE"}
+            </div>
+            <p style={{ color: labelLight, lineHeight: 1.55, margin: "10px 0 0", fontSize: 12 }}>
+              Free RSS newswire fused against the current scan, PM, and trade-floor universe. It flags urgent language, maps tickers, and labels bullish/bearish tone without using Claude.
+            </p>
+            <div style={newsWireMetrics}>
+              <MiniMetric label="URGENT" value={newsIntel?.summary?.urgent ?? 0} color={(newsIntel?.summary?.urgent || 0) ? "#f87171" : "#4ade80"} />
+              <MiniMetric label="MAPPED" value={newsIntel?.summary?.ticker_mapped ?? 0} color={accent2} />
+              <MiniMetric label="BULL" value={newsIntel?.summary?.bullish ?? 0} color="#4ade80" />
+              <MiniMetric label="BEAR" value={newsIntel?.summary?.bearish ?? 0} color="#f87171" />
+            </div>
+            {!!newsIntel?.failed_source_count && (
+              <div style={{ ...pill("#fb923c"), marginTop: 12 }}>
+                {newsIntel.failed_source_count} DEGRADED SOURCE{newsIntel.failed_source_count === 1 ? "" : "S"}
+              </div>
+            )}
+          </div>
+          <div style={newsWireList}>
+            {newsTape.length === 0 ? (
+              <EmptyState text="No free RSS headlines are mapped to the current universe yet." />
+            ) : (
+              newsTape.slice(0, 10).map(item => <NewsWireRow key={item.id || `${item.title}-${item.url}`} item={item} />)
+            )}
+          </div>
+        </div>
+      </Card>
+        </div>
+
+        <div style={mosaicStack}>
       <Card
         title="DARK POOL TAPE - FINRA OFF-EXCHANGE PROXY"
         accentColor="#f59e0b"
@@ -680,6 +724,8 @@ export default function IntelPage() {
           </div>
         </div>
       </Card>
+        </div>
+      </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.1fr) minmax(300px, 0.9fr)", gap: 18 }}>
         <Card title="CATALYST TAPE" accentColor="#fb923c">
@@ -837,6 +883,33 @@ function SourceChip({ source, note }) {
   );
 }
 
+function NewsWireRow({ item }) {
+  const biasColor = item.bias === "BULLISH" ? "#4ade80" : item.bias === "BEARISH" ? "#f87171" : accent;
+  const laneColor = item.intel_lane === "URGENT" ? "#f87171" : item.intel_lane === "WATCH" ? "#93c5fd" : muted;
+  return (
+    <div style={newsRow}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={scoreBadge(item.score || 0)}>{item.score || 0}</span>
+        <span style={pill(laneColor)}>{item.intel_lane || "MARKET"}</span>
+        <span style={pill(biasColor)}>{item.bias || "NEUTRAL"}</span>
+        <span style={{ color: muted, fontSize: 10, letterSpacing: "0.1em" }}>{item.source || "RSS"} / {fmtNewsAge(item.age_minutes)}</span>
+      </div>
+      <a href={item.url || "#"} target="_blank" rel="noreferrer" style={newsTitle}>
+        {item.title}
+      </a>
+      {item.summary && <div style={newsSummary}>{item.summary}</div>}
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+        {(item.tickers || []).slice(0, 8).map(ticker => (
+          <Link key={ticker} to={`/ticker/${cleanTicker(ticker)}`} style={previewChip(item.score || 50)}>
+            ${cleanTicker(ticker)}
+          </Link>
+        ))}
+        {(item.urgency_terms || []).slice(0, 5).map(term => <span key={term} style={pill("#fb923c")}>{String(term).toUpperCase()}</span>)}
+      </div>
+    </div>
+  );
+}
+
 function MiniMetric({ label, value, color = labelLight }) {
   return (
     <div style={{ border: hairline, padding: "8px 7px", background: "rgba(255,255,255,0.015)", minWidth: 0 }}>
@@ -863,6 +936,14 @@ function StackList({ label, items, color = labelLight }) {
       </div>
     </div>
   );
+}
+
+function fmtNewsAge(minutes) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n)) return "NO TIME";
+  if (n < 60) return `${Math.round(n)}M AGO`;
+  if (n < 1440) return `${Math.round(n / 60)}H AGO`;
+  return `${Math.round(n / 1440)}D AGO`;
 }
 
 function BriefLine({ label, value, color = labelLight }) {
@@ -974,10 +1055,72 @@ function matrixCell(ok) {
   };
 }
 
+const intelMosaic = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 430px), 1fr))",
+  gap: 18,
+  alignItems: "start",
+};
+
+const mosaicStack = {
+  display: "grid",
+  gap: 18,
+  minWidth: 0,
+};
+
 const darkPoolGrid = {
   display: "grid",
-  gridTemplateColumns: "minmax(260px, 0.62fr) minmax(0, 1.38fr)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
   gap: 14,
+};
+
+const newsWireGrid = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+  gap: 14,
+};
+
+const newsWireCommand = {
+  border: "0.5px solid rgba(147,197,253,0.28)",
+  background: "linear-gradient(180deg, rgba(147,197,253,0.085), rgba(255,255,255,0.014))",
+  padding: 16,
+  alignSelf: "start",
+};
+
+const newsWireMetrics = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 8,
+  marginTop: 14,
+};
+
+const newsWireList = {
+  display: "grid",
+  gap: 9,
+  alignSelf: "start",
+};
+
+const newsRow = {
+  border: hairline,
+  background: "linear-gradient(90deg, rgba(147,197,253,0.045), rgba(255,255,255,0.012))",
+  padding: "11px 12px",
+  display: "grid",
+  gap: 8,
+};
+
+const newsTitle = {
+  color: labelLight,
+  fontSize: 13,
+  lineHeight: 1.42,
+  textDecoration: "none",
+  fontWeight: 800,
+  letterSpacing: "0.035em",
+};
+
+const newsSummary = {
+  color: muted,
+  fontSize: 11,
+  lineHeight: 1.45,
 };
 
 const darkPoolCommand = {

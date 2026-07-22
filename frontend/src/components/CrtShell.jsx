@@ -239,10 +239,134 @@ function useLiveAlertCounts() {
   return counts;
 }
 
+function useNewsStrip() {
+  const [state, setState] = useState({ items: [], loading: true, cache: "SYNC" });
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { data } = await axios.get(`${API}/news_intel/latest`, {
+          params: { limit: 18 },
+          timeout: 7000,
+        });
+        if (cancelled) return;
+        setState({
+          items: Array.isArray(data?.articles) ? data.articles.slice(0, 14) : [],
+          loading: false,
+          cache: data?.cache || "LIVE",
+        });
+      } catch {
+        if (!cancelled) setState(prev => ({ ...prev, loading: false, cache: "DOWN" }));
+      }
+    };
+    load();
+    const id = setInterval(load, 2 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return state;
+}
+
+function GlobalNewsStrip({ items, loading, cache }) {
+  const tape = Array.isArray(items) ? items : [];
+  return (
+    <div data-testid="global-news-strip" style={{
+      display: "grid",
+      gridTemplateColumns: "120px minmax(0, 1fr) 78px",
+      alignItems: "center",
+      gap: 12,
+      padding: "7px 18px",
+      borderBottom: hairline,
+      background: "rgba(5,5,10,0.92)",
+      backdropFilter: "blur(8px)",
+      fontFamily: "JetBrains Mono, Courier New",
+      minHeight: 34,
+      boxShadow: "0 8px 22px rgba(0,0,0,0.24)",
+    }}>
+      <div style={{
+        color: accent2,
+        fontSize: 9,
+        letterSpacing: "0.22em",
+        fontWeight: 900,
+        whiteSpace: "nowrap",
+      }}>
+        NEWSWIRE
+      </div>
+      <div style={{ overflow: "hidden" }}>
+        {tape.length ? (
+          <div style={{
+            display: "flex",
+            gap: 10,
+            overflowX: "auto",
+            scrollbarWidth: "none",
+            whiteSpace: "nowrap",
+          }}>
+            {tape.map(item => {
+              const ticker = cleanNewsTicker(item?.tickers?.[0]);
+              const tone = item?.tone || "neutral";
+              const color = tone === "bullish" ? "#4ade80" : tone === "bearish" ? "#f87171" : accent;
+              const content = (
+                <>
+                  {ticker && <span style={{ color, marginRight: 6 }}>${ticker}</span>}
+                  <span style={{ color: labelLight }}>{String(item?.title || "Untitled headline").slice(0, 92)}</span>
+                  <span style={{ color: dim, marginLeft: 7 }}>{item?.source || "RSS"}</span>
+                </>
+              );
+              return ticker ? (
+                <Link key={item?.id || item?.url || item?.title} to={`/ticker/${ticker}`} style={newsStripItem(color)}>
+                  {content}
+                </Link>
+              ) : (
+                <span key={item?.id || item?.url || item?.title} style={newsStripItem(color)}>
+                  {content}
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          <span style={{ color: loading ? accent : muted, fontSize: 10, letterSpacing: "0.12em" }}>
+            {loading ? "SYNCING FREE NEWSWIRE..." : "NO MAPPED HEADLINES ON THE TAPE"}
+          </span>
+        )}
+      </div>
+      <div style={{
+        justifySelf: "end",
+        color: cache === "DOWN" ? "#f87171" : cache === "CACHE" ? "#fb923c" : "#4ade80",
+        fontSize: 9,
+        letterSpacing: "0.16em",
+        fontWeight: 900,
+      }}>
+        {cache || "LIVE"}
+      </div>
+    </div>
+  );
+}
+
+function cleanNewsTicker(ticker) {
+  const value = String(ticker || "").replace(/^\$/, "").trim().toUpperCase();
+  return /^[A-Z][A-Z0-9.]{0,9}$/.test(value) ? value : "";
+}
+
+function newsStripItem(color) {
+  return {
+    border: `0.5px solid ${color}33`,
+    background: `${color}0d`,
+    color: labelLight,
+    textDecoration: "none",
+    padding: "4px 9px",
+    fontSize: 10,
+    letterSpacing: "0.06em",
+    flex: "0 0 auto",
+    maxWidth: 520,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  };
+}
+
 export function CrtShell({ title, children, headerRight = null }) {
   const loc = useLocation();
   const nextMacro = useNextMacroEvent();
   const alerts = useLiveAlertCounts();
+  const newsStrip = useNewsStrip();
   const [isMobile, setIsMobile] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   useEffect(() => {
@@ -468,8 +592,9 @@ export function CrtShell({ title, children, headerRight = null }) {
         {/* ── Main column ── */}
         <main style={{ overflowY: "auto", height: "100vh", display: "flex", flexDirection: "column" }}>
           {/* Sticky system bar */}
-          <div style={{ position: "sticky", top: 0, zIndex: 10 }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
             <SystemBar />
+            <GlobalNewsStrip items={newsStrip.items} loading={newsStrip.loading} cache={newsStrip.cache} />
           </div>
 
           {/* Page header */}
