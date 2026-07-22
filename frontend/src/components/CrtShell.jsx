@@ -268,6 +268,7 @@ function useNewsStrip() {
 
 function GlobalNewsStrip({ items, loading, cache }) {
   const tape = Array.isArray(items) ? items : [];
+  const loopTape = tape.length ? [...tape, ...tape] : [];
   return (
     <div data-testid="global-news-strip" style={{
       display: "grid",
@@ -291,18 +292,12 @@ function GlobalNewsStrip({ items, loading, cache }) {
       }}>
         NEWSWIRE
       </div>
-      <div style={{ overflow: "hidden" }}>
+      <div style={{ overflow: "hidden", position: "relative" }}>
         {tape.length ? (
-          <div style={{
-            display: "flex",
-            gap: 10,
-            overflowX: "auto",
-            scrollbarWidth: "none",
-            whiteSpace: "nowrap",
-          }}>
-            {tape.map(item => {
+          <div className="newswire-marquee">
+            {loopTape.map((item, idx) => {
               const ticker = cleanNewsTicker(item?.tickers?.[0]);
-              const tone = item?.tone || "neutral";
+              const tone = item?.bias === "BULLISH" ? "bullish" : item?.bias === "BEARISH" ? "bearish" : item?.tone || "neutral";
               const color = tone === "bullish" ? "#4ade80" : tone === "bearish" ? "#f87171" : accent;
               const content = (
                 <>
@@ -312,11 +307,11 @@ function GlobalNewsStrip({ items, loading, cache }) {
                 </>
               );
               return ticker ? (
-                <Link key={item?.id || item?.url || item?.title} to={`/ticker/${ticker}`} style={newsStripItem(color)}>
+                <Link key={`${item?.id || item?.url || item?.title}-${idx}`} to={`/ticker/${ticker}`} style={newsStripItem(color)}>
                   {content}
                 </Link>
               ) : (
-                <span key={item?.id || item?.url || item?.title} style={newsStripItem(color)}>
+                <span key={`${item?.id || item?.url || item?.title}-${idx}`} style={newsStripItem(color)}>
                   {content}
                 </span>
               );
@@ -337,6 +332,23 @@ function GlobalNewsStrip({ items, loading, cache }) {
       }}>
         {cache || "LIVE"}
       </div>
+      <style>{`
+        @keyframes case-newswire-scroll {
+          from { transform: translateX(0); }
+          to { transform: translateX(-50%); }
+        }
+        .newswire-marquee {
+          display: flex;
+          gap: 10px;
+          width: max-content;
+          white-space: nowrap;
+          animation: case-newswire-scroll 42s linear infinite;
+          will-change: transform;
+        }
+        .newswire-marquee:hover {
+          animation-play-state: paused;
+        }
+      `}</style>
     </div>
   );
 }
