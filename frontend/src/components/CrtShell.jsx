@@ -344,7 +344,7 @@ function GlobalNewsStrip({ label = "NEWSWIRE", items, loading, cache, accentColo
           </span>
         )}
       </div>
-      <div style={{
+      <div className="terminal-shell" style={{
         justifySelf: "end",
         color: cache === "DOWN" ? "#f87171" : cache === "CACHE" ? "#fb923c" : "#4ade80",
         fontSize: 9,
@@ -433,7 +433,7 @@ export function CrtShell({ title, children, headerRight = null }) {
             }} />
         )}
         {/* ── Sidebar ── */}
-        <aside style={{
+        <aside className="terminal-sidebar" style={{
           background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 100%)`,
           borderRight: hairline,
           padding: "16px 12px 16px 14px",
@@ -623,9 +623,9 @@ export function CrtShell({ title, children, headerRight = null }) {
         </aside>
 
         {/* ── Main column ── */}
-        <main style={{ overflowY: "auto", height: "100vh", display: "flex", flexDirection: "column" }}>
+        <main className="terminal-main" style={{ overflowY: "auto", height: "100vh", display: "flex", flexDirection: "column" }}>
           {/* Sticky system bar */}
-          <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+          <div className="terminal-sticky-bars" style={{ position: "sticky", top: 0, zIndex: 20 }}>
             <SystemBar />
             <GlobalNewsStrip
               label="ACTIVE"
@@ -646,7 +646,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           </div>
 
           {/* Page header */}
-          <div style={{
+          <div className="terminal-page-header" style={{
             padding: isMobile ? "14px 14px" : "22px 30px",
             borderBottom: hairline,
             display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -719,8 +719,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           </div>
 
           {/* Page body */}
-          <div style={{ padding: isMobile ? "14px 12px" : "22px 30px", flex: 1 }}
-                className="fade-in fade-in-2">
+          <div className="terminal-page-body fade-in fade-in-2" style={{ padding: isMobile ? "14px 12px" : "22px 30px", flex: 1 }}>
             {children}
           </div>
         </main>
@@ -865,7 +864,7 @@ export const tokens = {
  */
 export function Card({ title, children, action = null, accentColor = accent }) {
   return (
-    <div className="corner-brackets fade-in" style={{
+    <div className="corner-brackets fade-in terminal-card" style={{
       background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
       border: hairline,
       marginBottom: 22,
@@ -876,8 +875,8 @@ export function Card({ title, children, action = null, accentColor = accent }) {
         position: "absolute", top: 0, left: 0, right: 0,
         height: 1, background: `linear-gradient(90deg, ${accentColor} 0%, ${accentColor}33 30%, transparent 100%)`,
       }} />
-      <div style={{ padding: "16px 22px 18px" }}>
-        <div style={{
+      <div className="terminal-card-inner" style={{ padding: "16px 22px 18px" }}>
+        <div className="terminal-card-header" style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
           marginBottom: 14, paddingBottom: 10, borderBottom: hairline,
         }}>

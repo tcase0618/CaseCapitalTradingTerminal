@@ -3,6 +3,7 @@ import axios from "axios";
 import { API, BACKEND_BASE_URL } from "../config";
 import {
   CheckCircle2,
+  Eye,
   LoaderCircle,
   LockKeyhole,
   Power,
@@ -22,12 +23,15 @@ const pageBg = "#05070b";
 const hairline = "0.5px solid rgba(255,255,255,0.11)";
 const muted = "#7d8594";
 const label = "#c9d0dc";
+let previewInterceptorId = null;
 
 export default function StartupGate({ children }) {
   const [auth, setAuth] = useState(() => readAuth());
-  const [sessionReady, setSessionReady] = useState(() => sessionStorage.getItem(SESSION_KEY) === "open");
-  const [bootOpened, setBootOpened] = useState(() => sessionStorage.getItem(SESSION_KEY) === "open");
-  const [mode] = useState(() => (readAuth() ? "login" : "setup"));
+  const [session, setSession] = useState(() => readSession());
+  const sessionReady = Boolean(session?.mode);
+  const [bootOpened, setBootOpened] = useState(() => Boolean(readSession()?.mode));
+  const [mode, setMode] = useState("login");
+  const [authConfig, setAuthConfig] = useState({ cloud: false, operator_login_enabled: true, preview_enabled: true, setup_enabled: false });
   const [name, setName] = useState(() => readAuth()?.name || "CASE CAPITAL OPERATOR");
   const [code, setCode] = useState("");
   const [confirmCode, setConfirmCode] = useState("");
@@ -47,6 +51,25 @@ export default function StartupGate({ children }) {
       return isDesktop;
     }
   }, [isDesktop]);
+
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`${API}/auth/config`, { timeout: 6000 })
+      .then(({ data }) => {
+        if (cancelled) return;
+        setAuthConfig(data || {});
+        setMode(data?.setup_enabled && !readAuth() ? "setup" : "login");
+      })
+      .catch(() => {
+        if (!cancelled) setMode(readAuth() ? "login" : "setup");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    configureTerminalSession(session);
+    return () => {};
+  }, [session]);
 
   const forceBoot = useCallback(async () => {
     setBackend({ state: "checking", message: "Forcing desktop backend boot" });
@@ -114,6 +137,10 @@ export default function StartupGate({ children }) {
     }
 
     if (mode === "setup") {
+      if (!authConfig.setup_enabled) {
+        setError("Operator creation is disabled on this server. Use the server access code or preview mode.");
+        return;
+      }
       if (normalizedCode !== confirmCode.trim()) {
         setError("Access codes do not match.");
         return;
@@ -125,25 +152,59 @@ export default function StartupGate({ children }) {
       };
       localStorage.setItem(AUTH_KEY, JSON.stringify(nextAuth));
       setAuth(nextAuth);
-      sessionStorage.setItem(SESSION_KEY, "open");
-      setSessionReady(true);
+      const nextSession = { mode: "operator", name: nextAuth.name, local: true };
+      writeSession(nextSession);
+      setSession(nextSession);
       return;
     }
 
-    const attemptedHash = await hashCode(normalizedCode);
-    if (attemptedHash !== auth?.hash) {
-      setError("Access denied. Check the local terminal code.");
-      return;
+    if (authConfig.cloud || authConfig.operator_login_enabled) {
+      try {
+        const { data } = await axios.post(`${API}/auth/login`, { code: normalizedCode }, { timeout: 8000 });
+        const nextSession = { mode: "operator", token: data.token, name: data.name || "CASE CAPITAL OPERATOR" };
+        writeSession(nextSession);
+        setSession(nextSession);
+        if (backend.state === "checking") {
+          setBackend({ state: "online", message: "Access verified. Backend sync continuing in terminal." });
+        }
+        return;
+      } catch (err) {
+        setError(err?.response?.data?.detail || "Access denied. Check the server terminal code.");
+        return;
+      }
+    }
+
+    if (auth?.hash) {
+      const attemptedHash = await hashCode(normalizedCode);
+      if (attemptedHash !== auth?.hash) {
+        setError("Access denied. Check the local terminal code.");
+        return;
+      }
+      const nextSession = { mode: "operator", name: auth.name || "CASE CAPITAL OPERATOR", local: true };
+      writeSession(nextSession);
+      setSession(nextSession);
     }
     if (backend.state === "checking") {
       setBackend({ state: "online", message: "Access verified. Backend sync continuing in terminal." });
     }
-    sessionStorage.setItem(SESSION_KEY, "open");
-    setSessionReady(true);
+  };
+
+  const enterPreview = async () => {
+    setError("");
+    try {
+      await axios.post(`${API}/auth/preview`, null, { timeout: 6000 }).catch(() => null);
+    } finally {
+      const nextSession = { mode: "preview", name: "CASE CAPITAL PREVIEW" };
+      writeSession(nextSession);
+      setSession(nextSession);
+      if (backend.state === "checking") {
+        setBackend({ state: "online", message: "Preview mode. Backend sync continuing read-only." });
+      }
+    }
   };
 
   return (
-    <div style={styles.root}>
+    <div className="startup-gate" style={styles.root}>
       <style>{startupAnimations}</style>
       <div className="crt-vignette" />
       <div className="scanline-overlay" />
@@ -178,6 +239,8 @@ export default function StartupGate({ children }) {
           onRefresh={() => checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend)}
           onForceBoot={forceBoot}
           onSubmit={submit}
+          onPreview={enterPreview}
+          authConfig={authConfig}
         />
       )}
 
@@ -240,6 +303,7 @@ function BootSplash({ backend, checks, isDesktop, usesLocalDesktopBackend, onRef
 function LoginPanel({
   auth,
   mode,
+  authConfig,
   name,
   code,
   confirmCode,
@@ -254,6 +318,7 @@ function LoginPanel({
   onRefresh,
   onForceBoot,
   onSubmit,
+  onPreview,
 }) {
   return (
     <section style={styles.loginStage}>
@@ -264,8 +329,8 @@ function LoginPanel({
       <form onSubmit={onSubmit} style={styles.panel}>
         <div style={styles.panelTop}>
           <div>
-            <div style={styles.kicker}>{mode === "setup" ? "FIRST RUN SECURITY" : "SECURE TERMINAL LOGIN"}</div>
-            <h1 style={styles.title}>{mode === "setup" ? "Create Operator Access" : "Operator Verification"}</h1>
+            <div style={styles.kicker}>{mode === "setup" ? "LOCAL FIRST RUN SECURITY" : "SECURE TERMINAL LOGIN"}</div>
+            <h1 style={styles.title}>{mode === "setup" ? "Create Local Operator Access" : "Operator Verification"}</h1>
           </div>
           <div style={styles.lockBadge}>
             {mode === "setup" ? <UserPlus size={22} /> : <LockKeyhole size={22} />}
@@ -286,6 +351,12 @@ function LoginPanel({
           <button type="button" onClick={onRefresh} style={styles.textButton}>REFRESH</button>
         </div>
         <BootChecklist checks={checks} compact />
+
+        {authConfig?.cloud && !authConfig?.operator_login_enabled && (
+          <div style={styles.previewNotice}>
+            Operator login is not configured on this server. Preview mode is available, but changes are blocked.
+          </div>
+        )}
 
         {mode === "setup" && (
           <label style={styles.field}>
@@ -322,7 +393,7 @@ function LoginPanel({
         {error && <div style={styles.error}>{error}</div>}
 
         <div style={styles.actions}>
-          <button type="submit" style={styles.primaryButton}>
+          <button type="submit" style={styles.primaryButton} disabled={authConfig?.cloud && !authConfig?.operator_login_enabled}>
             {mode === "setup" ? "CREATE LOGIN" : "UNLOCK TERMINAL"}
           </button>
           {usesLocalDesktopBackend && (
@@ -331,6 +402,13 @@ function LoginPanel({
             </button>
           )}
         </div>
+
+        {authConfig?.preview_enabled !== false && (
+          <button type="button" onClick={onPreview} style={styles.previewButton}>
+            <Eye size={14} />
+            PREVIEW TERMINAL - READ ONLY
+          </button>
+        )}
 
         {auth && mode === "login" && (
           <div style={styles.identity}>
@@ -373,6 +451,45 @@ function readAuth() {
     return JSON.parse(localStorage.getItem(AUTH_KEY) || "null");
   } catch {
     return null;
+  }
+}
+
+function readSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    if (raw === "open") return { mode: "operator", legacy: true };
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeSession(session) {
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  configureTerminalSession(session);
+}
+
+function configureTerminalSession(session) {
+  const mode = session?.mode || "";
+  document.body.dataset.terminalMode = mode;
+  if (session?.token) {
+    axios.defaults.headers.common.Authorization = `Bearer ${session.token}`;
+  } else {
+    delete axios.defaults.headers.common.Authorization;
+  }
+  if (previewInterceptorId != null) {
+    axios.interceptors.request.eject(previewInterceptorId);
+    previewInterceptorId = null;
+  }
+  if (mode === "preview") {
+    previewInterceptorId = axios.interceptors.request.use(config => {
+      const method = String(config.method || "get").toLowerCase();
+      if (!["get", "head", "options"].includes(method) && !String(config.url || "").includes("/auth/")) {
+        return Promise.reject(new Error("Preview mode is read-only. Operator login required for changes."));
+      }
+      return config;
+    });
   }
 }
 
@@ -775,6 +892,15 @@ const styles = {
     fontSize: 11,
     marginBottom: 14,
   },
+  previewNotice: {
+    border: "1px solid rgba(200,168,75,0.22)",
+    background: "rgba(200,168,75,0.07)",
+    color: label,
+    padding: "10px 12px",
+    fontSize: 11,
+    lineHeight: 1.5,
+    marginBottom: 12,
+  },
   actions: {
     display: "grid",
     gridTemplateColumns: "1.1fr 1fr",
@@ -809,6 +935,22 @@ const styles = {
     fontSize: 10,
     cursor: "pointer",
     letterSpacing: "0.12em",
+  },
+  previewButton: {
+    width: "100%",
+    marginTop: 10,
+    background: "rgba(94,234,212,0.06)",
+    color: accent2,
+    border: `1px solid ${accent2}66`,
+    minHeight: 42,
+    fontFamily: "JetBrains Mono, Courier New, monospace",
+    fontWeight: 900,
+    letterSpacing: "0.1em",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
   identity: {
     marginTop: 16,

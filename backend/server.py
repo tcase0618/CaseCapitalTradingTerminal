@@ -1,9 +1,12 @@
 """FastAPI entrypoint: Stock Intelligence Telegram Bot backend."""
 from __future__ import annotations
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import platform
+import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +15,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
@@ -28,6 +32,55 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(title="Stock Intel Bot")
 api = APIRouter(prefix="/api")
+OPERATOR_SESSIONS: set[str] = set()
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+AUTH_EXEMPT_PATHS = {
+    "/api/auth/config",
+    "/api/auth/login",
+    "/api/auth/preview",
+    "/api/telegram/webhook",
+}
+
+
+def _cloud_mode() -> bool:
+    return os.environ.get("APP_ENV", "").strip().lower() == "cloud"
+
+
+def _operator_hash() -> str:
+    configured_hash = os.environ.get("TERMINAL_ACCESS_CODE_HASH", "").strip()
+    if configured_hash:
+        return configured_hash
+    configured_code = os.environ.get("TERMINAL_ACCESS_CODE", "").strip()
+    if configured_code:
+        return hashlib.sha256(f"case-capital:{configured_code}".encode("utf-8")).hexdigest()
+    return ""
+
+
+def _operator_configured() -> bool:
+    return bool(_operator_hash())
+
+
+def _authorized_request(request: Request) -> bool:
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        token = request.headers.get("x-terminal-session", "").strip()
+    return bool(token and token in OPERATOR_SESSIONS)
+
+
+@app.middleware("http")
+async def cloud_operator_write_gate(request: Request, call_next):
+    if (
+        _cloud_mode()
+        and request.method.upper() in MUTATING_METHODS
+        and request.url.path not in AUTH_EXEMPT_PATHS
+        and not _authorized_request(request)
+    ):
+        return JSONResponse(
+            {"ok": False, "detail": "Operator session required. Preview mode is read-only."},
+            status_code=403,
+        )
+    return await call_next(request)
 
 
 # ---------- Schemas ----------
@@ -40,10 +93,57 @@ class AlertItem(BaseModel):
     target_price: float
 
 
+class AuthLoginRequest(BaseModel):
+    code: str
+
+
 # ---------- Routes ----------
 @api.get("/")
 async def root():
     return {"name": "Stock Intel Bot API", "status": "ok"}
+
+
+@api.get("/auth/config")
+async def auth_config():
+    return {
+        "ok": True,
+        "cloud": _cloud_mode(),
+        "operator_login_enabled": _operator_configured() or not _cloud_mode(),
+        "preview_enabled": True,
+        "setup_enabled": not _cloud_mode(),
+    }
+
+
+@api.post("/auth/login")
+async def auth_login(payload: AuthLoginRequest):
+    code = (payload.code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Access code required.")
+    expected = _operator_hash()
+    if not expected and _cloud_mode():
+        raise HTTPException(status_code=403, detail="Operator access code is not configured on the server.")
+    attempted = hashlib.sha256(f"case-capital:{code}".encode("utf-8")).hexdigest()
+    if expected and not hmac.compare_digest(attempted, expected):
+        raise HTTPException(status_code=403, detail="Access denied.")
+    token = secrets.token_urlsafe(32)
+    OPERATOR_SESSIONS.add(token)
+    return {
+        "ok": True,
+        "mode": "operator",
+        "token": token,
+        "name": os.environ.get("TERMINAL_OPERATOR_NAME", "CASE CAPITAL OPERATOR"),
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@api.post("/auth/preview")
+async def auth_preview():
+    return {
+        "ok": True,
+        "mode": "preview",
+        "name": "CASE CAPITAL PREVIEW",
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @api.get("/status")
