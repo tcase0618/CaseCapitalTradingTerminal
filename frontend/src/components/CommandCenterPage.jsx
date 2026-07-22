@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
 
 const scanCommands = [
@@ -58,6 +58,11 @@ function qualityForIntegration(i) {
   return { label: "DOWN", color: "#f87171" };
 }
 
+function missionState(loading, ok, readyLabel, blockedLabel) {
+  if (loading || ok == null) return { value: "SYNCING", color: muted };
+  return ok ? { value: readyLabel, color: "#4ade80" } : { value: blockedLabel, color: "#f87171" };
+}
+
 export default function CommandCenterPage() {
   const [status, setStatus] = useState(null);
   const [scan, setScan] = useState(null);
@@ -72,6 +77,7 @@ export default function CommandCenterPage() {
   const [backendRefreshing, setBackendRefreshing] = useState(false);
   const [backendRefresh, setBackendRefresh] = useState(null);
   const [completed, setCompleted] = useState([]);
+  const [initialLoad, setInitialLoad] = useState(true);
 
   const refresh = useCallback(async () => {
     const calls = [
@@ -85,6 +91,7 @@ export default function CommandCenterPage() {
       axios.get(`${API}/activity?limit=12`).then(r => setActivity(r.data || [])).catch(() => {}),
     ];
     await Promise.allSettled(calls);
+    setInitialLoad(false);
   }, []);
 
   useEffect(() => {
@@ -110,6 +117,9 @@ export default function CommandCenterPage() {
 
   const pmSummary = pm?.summary || {};
   const account = health?.alpaca?.account || {};
+  const scannerState = missionState(initialLoad, health?.ready_for_scanning, "READY", "BLOCKED");
+  const pmState = missionState(initialLoad, health?.ready_for_pm, "READY", "WAITING");
+  const tradeFloorState = missionState(initialLoad, health?.ready_for_trade_floor, "ARMED", "OFFLINE");
   const topSignals = useMemo(() => {
     const rows = [...(scan?.results || [])];
     rows.sort((a, b) => (b.signal_score || 0) - (a.signal_score || 0));
@@ -184,9 +194,9 @@ export default function CommandCenterPage() {
         <Card title="MISSION STATE" accentColor={accent}
           action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={smallTeal}>{backendRefreshing ? "REFRESHING" : "BACKEND REFRESH"}</button>}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-            <MissionTile label="Scanner" value={health?.ready_for_scanning ? "READY" : "BLOCKED"} color={health?.ready_for_scanning ? "#4ade80" : "#f87171"} detail={`${scan?.pre_filter_passed || 0} passed filter`} />
-            <MissionTile label="Portfolio Manager" value={health?.ready_for_pm ? "READY" : "WAITING"} color={health?.ready_for_pm ? accent2 : "#fbbf24"} detail={`${pmSummary.active_count || 0} active decisions`} />
-            <MissionTile label="Trade Floor" value={health?.ready_for_trade_floor ? "ARMED" : "OFFLINE"} color={health?.ready_for_trade_floor ? "#4ade80" : "#f87171"} detail={health?.alpaca?.reason || "paper execution"} />
+            <MissionTile label="Scanner" value={scannerState.value} color={scannerState.color} detail={initialLoad ? "loading scan state" : `${scan?.pre_filter_passed || 0} passed filter`} />
+            <MissionTile label="Portfolio Manager" value={pmState.value} color={pmState.color} detail={initialLoad ? "loading PM state" : `${pmSummary.active_count || 0} active decisions`} />
+            <MissionTile label="Trade Floor" value={tradeFloorState.value} color={tradeFloorState.color} detail={initialLoad ? "loading execution state" : (health?.alpaca?.reason || "paper execution")} />
           </div>
 
           {(health?.blockers || []).length > 0 && (
@@ -208,7 +218,7 @@ export default function CommandCenterPage() {
         </Card>
 
         <Card title="DATA QUALITY" accentColor={accent2}
-          action={<Link to="/settings" style={smallLink}>DETAILS</Link>}>
+          action={<Link to="/quality" style={smallLink}>DETAILS</Link>}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8, marginBottom: 12 }}>
             <QualityBadge label="LIVE" value={integrations.filter(i => qualityForIntegration(i).label === "LIVE").length} color="#4ade80" />
             <QualityBadge label="FALLBACK" value={fallbackFeeds.length} color="#fbbf24" />

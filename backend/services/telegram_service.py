@@ -497,6 +497,68 @@ def build_consolidated_messages(scan: dict[str, Any], title: str = "AXIOM INTEL"
     return safe
 
 
+def build_quality_message(scan: dict[str, Any], quality: dict[str, Any]) -> str:
+    overview = quality.get("overview") or quality
+    summary = overview.get("summary") or {}
+    gate = overview.get("trading_gate") or {}
+    remediation = overview.get("remediation") or quality.get("remediation") or {}
+    attempts = remediation.get("attempts") or quality.get("attempts") or []
+    checks = overview.get("checks") or []
+    degraded = [
+        c for c in checks
+        if c.get("blocks_trading") or c.get("status") in {"WARN", "FALLBACK", "STALE", "MISSING", "DOWN"} or c.get("warnings")
+    ][:6]
+    lines = [
+        f"<b>CASE CAPITAL QUALITY</b> - {_now_et()}",
+        "--------------------",
+        f"Gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> / QC <b>{overview.get('score', '-')}</b> / Critical <b>{overview.get('critical_score', '-')}</b>",
+        f"Scan: <b>{len(scan.get('results') or [])}</b> rows / {scan.get('duration_sec', '-')}s / Claude {scan.get('claude_calls_made', 0)}",
+        f"Checks: {summary.get('live', 0)} live / {summary.get('warnings', 0)} warnings / {summary.get('fallbacks', 0)} fallbacks / {summary.get('blockers', 0)} blockers",
+    ]
+    if attempts:
+        fixed = sum(1 for a in attempts if a.get("outcome") in {"live", "refreshed", "repulled", "rechecked_clean"})
+        lines.append(f"Auto-fix: {fixed}/{len(attempts)} repaired or refreshed")
+    if degraded:
+        lines.append("")
+        lines.append("<b>Degraded sources:</b>")
+        for c in degraded:
+            warnings = "; ".join(c.get("warnings") or [])
+            detail = warnings or c.get("detail") or c.get("auto_fix") or ""
+            lines.append(f"- {_esc(c.get('label'))}: <b>{_esc(c.get('status'))}</b> / {_esc(detail)[:120]}")
+    blockers = gate.get("blockers") or []
+    if blockers:
+        lines.append("")
+        lines.append("<b>Trading blockers:</b>")
+        for b in blockers[:4]:
+            lines.append(f"- {_esc(b.get('label'))}: {_esc(b.get('detail') or b.get('status'))}")
+    lines.append("")
+    lines.append("<i>Order path uses fresh critical cache first; display-only fallbacks do not slow execution.</i>")
+    return "\n".join(lines)
+
+
+async def dispatch_quality_after_scan(scan: dict[str, Any], chat_id: str | None = None) -> bool:
+    try:
+        from . import data_quality
+
+        quality = await data_quality.remediate(limit=12)
+        message = build_quality_message(scan, quality)
+        ok = await send_message(message, chat_id=chat_id)
+        await log_activity("Telegram quality report dispatched" if ok else "Telegram quality report failed", meta={
+            "ok": ok,
+            "score": ((quality.get("overview") or {}).get("score")),
+            "summary": quality.get("summary"),
+        })
+        return ok
+    except Exception as exc:
+        logger.warning("quality telegram dispatch failed: %s", exc)
+        fallback = (
+            f"<b>CASE CAPITAL QUALITY</b> - {_now_et()}\n"
+            "--------------------\n"
+            f"Quality check failed: {_esc(str(exc)[:180])}"
+        )
+        return await send_message(fallback, chat_id=chat_id)
+
+
 async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None,
                                 title: str = "AXIOM INTEL") -> dict[str, Any]:
     """Build + send consolidated msgs. Returns delivery summary."""
@@ -507,8 +569,9 @@ async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None
         ok = await send_message(m, chat_id=chat_id)
         if ok:
             sent += 1
+    quality_sent = await dispatch_quality_after_scan(scan, chat_id=chat_id)
     return {"messages_built": len(msgs), "messages_sent": sent,
-            "char_counts": [len(m) for m in msgs]}
+            "quality_sent": quality_sent, "char_counts": [len(m) for m in msgs]}
 
 
 def build_earnings_divergence_message(snapshot: dict[str, Any]) -> str:

@@ -40,7 +40,7 @@ async def _alpaca_probe() -> dict[str, Any]:
         out["reason"] = "missing_key_or_secret"
         return out
     try:
-        async with httpx.AsyncClient(timeout=12.0, headers={
+        async with httpx.AsyncClient(timeout=float(os.environ.get("ALPACA_HEALTH_TIMEOUT_SEC", "3.0")), headers={
             "APCA-API-KEY-ID": key,
             "APCA-API-SECRET-KEY": secret,
         }) as client:

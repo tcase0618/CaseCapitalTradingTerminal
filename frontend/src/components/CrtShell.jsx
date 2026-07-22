@@ -3,6 +3,8 @@
 // status dots, micro-animations.
 import { Link, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
+import axios from "axios";
+import { API } from "../config";
 import {
   Activity,
   Archive,
@@ -46,10 +48,12 @@ const NAV = [
   { to: "/pharma",      label: "PHARMA",      icon: "🧬", group: "CORE" },
   { to: "/trade-floor", label: "TRADE FLOOR", icon: "⚡", group: "TRADE FLOOR" },
   { to: "/options-desk", label: "OPTIONS DESK", icon: "OD", group: "TRADE FLOOR" },
+  { to: "/kronos",      label: "KRONOS",      icon: "KR", group: "ANALYSIS" },
   { to: "/performance", label: "PERFORMANCE", icon: "▶", group: "ANALYSIS" },
   { to: "/learning",    label: "LEARNING",    icon: "◆", group: "ANALYSIS" },
   { to: "/tf-engine",   label: "TRADE ENGINE", icon: "▼", group: "ANALYSIS" },
   { to: "/audit-logs",  label: "AUDIT LOGS",  icon: "AL", group: "SYSTEM" },
+  { to: "/quality",     label: "QUALITY",     icon: "QC", group: "SYSTEM" },
   { to: "/settings",    label: "SETTINGS",    icon: "▥", group: "SYSTEM" },
 ];
 
@@ -75,10 +79,12 @@ const NAV_LOGOS = {
   "/macro": { logo: "MX", Icon: Globe2, color: "#38bdf8" },
   "/trade-floor": { logo: "TF", Icon: Phone, color: "#4ade80" },
   "/options-desk": { logo: "OD", Icon: LampDesk, color: "#c8a84b" },
+  "/kronos": { logo: "KR", Icon: MagicBallIcon, color: "#a78bfa" },
   "/performance": { logo: "PX", Icon: Activity, color: "#22c55e" },
   "/learning": { logo: "LN", Icon: GraduationCap, color: "#5eead4" },
   "/tf-engine": { logo: "TE", Icon: Cog, color: "#f97316" },
   "/audit-logs": { logo: "AL", Icon: Archive, color: "#e879f9" },
+  "/quality": { logo: "QC", Icon: SprayBottleIcon, color: "#5eead4" },
   "/settings": { logo: "ST", Icon: Cog, color: "#9ca3af" },
 };
 
@@ -123,9 +129,7 @@ function useNextMacroEvent() {
     let cancelled = false;
     const load = async () => {
       try {
-        const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
-        const r = await fetch(`${API}/v32/macro?days_ahead=14`);
-        const d = await r.json();
+                const { data: d } = await axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 } });
         const ev = (d.events || []).find(e => e.days_until >= 0);
         if (!cancelled) setNext(ev || null);
       } catch {}
@@ -210,14 +214,13 @@ function useLiveAlertCounts() {
   const [counts, setCounts] = useState({ dh: 0, xf: 0, locks: 0, lottery_hot: 0 });
   useEffect(() => {
     let cancelled = false;
-    const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
-    const load = async () => {
+        const load = async () => {
       try {
         const [dh, xf, conv, lot] = await Promise.all([
-          fetch(`${API}/v32/dark_horse?days=2`).then(r => r.json()).catch(() => []),
-          fetch(`${API}/v32/x_factor?days=2`).then(r => r.json()).catch(() => []),
-          fetch(`${API}/v32/conviction`).then(r => r.json()).catch(() => ({})),
-          fetch(`${API}/v32/lottery/current`).then(r => r.json()).catch(() => ({})),
+          axios.get(`${API}/v32/dark_horse`, { params: { days: 2 } }).then(r => r.data).catch(() => []),
+          axios.get(`${API}/v32/x_factor`, { params: { days: 2 } }).then(r => r.data).catch(() => []),
+          axios.get(`${API}/v32/conviction`).then(r => r.data).catch(() => ({})),
+          axios.get(`${API}/v32/lottery/current`).then(r => r.data).catch(() => ({})),
         ]);
         if (cancelled) return;
         const hot = (lot.picks || []).filter(p => p.tier === "JACKPOT" || p.tier === "HOT").length;
@@ -306,11 +309,14 @@ export function CrtShell({ title, children, headerRight = null }) {
                   display: "flex", alignItems: "center", justifyContent: "center",
                   boxShadow: `0 0 14px rgba(200,168,75,0.3), inset 0 0 8px rgba(200,168,75,0.12)`,
                   position: "relative",
+                  overflow: "hidden",
                 }}>
                   <img src={terminalLogo} alt="Case Capital Trading Terminal" style={{
-                    width: 28,
-                    height: 28,
+                    width: 30,
+                    height: 30,
+                    display: "block",
                     objectFit: "contain",
+                    objectPosition: "center center",
                     filter: "drop-shadow(0 0 6px rgba(200,168,75,0.65))",
                   }} />
                   {/* corner ticks on logo */}
@@ -607,6 +613,30 @@ function SlotMachineIcon({ size = 14, strokeWidth = 1.9 }) {
       <circle cx="8.4" cy="11" r=".65" fill="currentColor" />
       <circle cx="11" cy="11" r=".65" fill="currentColor" />
       <circle cx="13.6" cy="11" r=".65" fill="currentColor" />
+    </svg>
+  );
+}
+
+function MagicBallIcon({ size = 14, strokeWidth = 1.9 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="10" r="6.2" stroke="currentColor" strokeWidth={strokeWidth} />
+      <path d="M8.2 18.4h7.6l1.4 2.1H6.8l1.4-2.1Z" stroke="currentColor" strokeWidth={strokeWidth} strokeLinejoin="round" />
+      <path d="M9.3 8.1c1.4-1.5 3.8-1.9 5.7-.8" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" opacity=".75" />
+      <path d="M12 5.1v2.1M7.1 10h2.1M14.8 14.9l1.5 1.5" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" opacity=".85" />
+      <circle cx="14.8" cy="9.3" r=".75" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SprayBottleIcon({ size = 14, strokeWidth = 1.9 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M9 6h6l2 3v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V9l2-3Z" stroke="currentColor" strokeWidth={strokeWidth} strokeLinejoin="round" />
+      <path d="M10 3h5v3h-5V3Z" stroke="currentColor" strokeWidth={strokeWidth} strokeLinejoin="round" />
+      <path d="M15 5h4l2 2h-4" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 7H3M5 11H2M5 15H3" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <path d="M9 13h6" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
     </svg>
   );
 }

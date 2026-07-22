@@ -85,6 +85,140 @@ async def _pnl_refresh_job():
         logger.exception("P&L refresh job failed: %s", e)
 
 
+def _num(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _compact_position(row: dict) -> dict:
+    return {
+        "symbol": row.get("symbol"),
+        "asset_class": row.get("asset_class"),
+        "side": row.get("side"),
+        "qty": row.get("qty"),
+        "avg_entry_price": row.get("avg_entry_price"),
+        "current_price": row.get("current_price"),
+        "market_value": row.get("market_value"),
+        "cost_basis": row.get("cost_basis"),
+        "unrealized_pl": row.get("unrealized_pl"),
+        "unrealized_plpc": row.get("unrealized_plpc"),
+        "change_today": row.get("change_today"),
+    }
+
+
+async def persist_live_position_snapshot(triggered_by: str = "scheduler_15m", management: dict | None = None) -> dict:
+    """Persist the PM's live view across both funds.
+
+    This is intentionally separate from scan results. It records what Alpaca
+    says is currently held, what is working, and what the monitor did.
+    """
+    from . import options_desk, trade_floor
+
+    db = get_db()
+    equity_positions = await trade_floor.list_positions()
+    equity_orders = await trade_floor.list_orders(status="open", limit=100)
+    equity_account = await trade_floor.get_account()
+    options_positions_payload = await options_desk.positions()
+    options_orders_payload = await options_desk.orders(status="open", limit=100)
+    options_account_payload = await options_desk.account()
+
+    option_positions = options_positions_payload.get("positions") or []
+    option_orders = options_orders_payload.get("orders") or []
+    options_account = options_account_payload.get("account") if options_account_payload.get("ok") else {}
+
+    equity_unrealized = sum(_num(p.get("unrealized_pl")) for p in equity_positions)
+    options_unrealized = sum(_num(p.get("unrealized_pl")) for p in option_positions)
+    equity_market_value = sum(_num(p.get("market_value")) for p in equity_positions)
+    options_market_value = sum(_num(p.get("market_value")) for p in option_positions)
+
+    snapshot = stamped({
+        "snapshot_at": _now_iso(),
+        "triggered_by": triggered_by,
+        "cadence_minutes": 15,
+        "management": management or {},
+        "totals": {
+            "positions": len(equity_positions) + len(option_positions),
+            "open_orders": len(equity_orders) + len(option_orders),
+            "market_value": round(equity_market_value + options_market_value, 2),
+            "unrealized_pl": round(equity_unrealized + options_unrealized, 2),
+        },
+        "equities": {
+            "account": {
+                "status": (equity_account or {}).get("status"),
+                "equity": (equity_account or {}).get("equity"),
+                "cash": (equity_account or {}).get("cash"),
+                "buying_power": (equity_account or {}).get("buying_power"),
+                "trading_blocked": (equity_account or {}).get("trading_blocked"),
+            },
+            "position_count": len(equity_positions),
+            "open_order_count": len(equity_orders),
+            "market_value": round(equity_market_value, 2),
+            "unrealized_pl": round(equity_unrealized, 2),
+            "positions": [_compact_position(p) for p in equity_positions],
+            "open_orders": [
+                {
+                    "id": o.get("id"),
+                    "symbol": o.get("symbol"),
+                    "side": o.get("side"),
+                    "type": o.get("type"),
+                    "qty": o.get("qty"),
+                    "notional": o.get("notional"),
+                    "limit_price": o.get("limit_price"),
+                    "status": o.get("status"),
+                    "submitted_at": o.get("submitted_at"),
+                }
+                for o in equity_orders
+            ],
+        },
+        "options": {
+            "account": options_account,
+            "position_count": len(option_positions),
+            "open_order_count": len(option_orders),
+            "market_value": round(options_market_value, 2),
+            "unrealized_pl": round(options_unrealized, 2),
+            "positions": [_compact_position(p) for p in option_positions],
+            "open_orders": [
+                {
+                    "id": o.get("id"),
+                    "symbol": o.get("symbol"),
+                    "side": o.get("side"),
+                    "type": o.get("type"),
+                    "qty": o.get("qty"),
+                    "limit_price": o.get("limit_price"),
+                    "status": o.get("status"),
+                    "submitted_at": o.get("submitted_at"),
+                }
+                for o in option_orders
+            ],
+        },
+    })
+    await db.live_position_snapshots.insert_one(snapshot)
+    latest_snapshot = {k: v for k, v in snapshot.items() if k != "_id"}
+    await db.bot_state.update_one(
+        {"_id": "live_position_snapshot_latest"},
+        {"$set": latest_snapshot},
+        upsert=True,
+    )
+    return {
+        "ok": True,
+        "snapshot_at": snapshot["snapshot_at"],
+        "cadence_minutes": 15,
+        "totals": snapshot["totals"],
+        "equities": {
+            "position_count": snapshot["equities"]["position_count"],
+            "open_order_count": snapshot["equities"]["open_order_count"],
+            "unrealized_pl": snapshot["equities"]["unrealized_pl"],
+        },
+        "options": {
+            "position_count": snapshot["options"]["position_count"],
+            "open_order_count": snapshot["options"]["open_order_count"],
+            "unrealized_pl": snapshot["options"]["unrealized_pl"],
+        },
+    }
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler and _scheduler.running:
@@ -121,6 +255,18 @@ def start_scheduler():
         _alerts_job,
         IntervalTrigger(minutes=5),
         id="alerts_check",
+        replace_existing=True,
+    )
+    async def _kronos_morning_forecast_job():
+        try:
+            from . import kronos
+            await kronos.dispatch_morning_forecast()
+        except Exception as e:
+            logger.warning("kronos morning forecast: %s", e)
+    _scheduler.add_job(
+        _kronos_morning_forecast_job,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=ET),
+        id="kronos_morning_forecast_930",
         replace_existing=True,
     )
     # 15-min options flow refresh — Mon-Fri 9:30 to 16:00 ET
@@ -202,6 +348,20 @@ def start_scheduler():
     )
 
     # v5.0 — position monitor every 15 min during market hours
+    async def _trading_halt_job():
+        try:
+            from . import trading_halts
+
+            await trading_halts.check_and_alert()
+        except Exception as e:
+            logger.warning("trading halt monitor: %s", e)
+    _scheduler.add_job(
+        _trading_halt_job,
+        CronTrigger(day_of_week="mon-fri", hour="4-20", minute="*", timezone=ET),
+        id="trading_halt_monitor",
+        replace_existing=True,
+    )
+
     async def _position_monitor():
         try:
             from . import options_desk, pm_ratchet, trade_floor, trade_floor_phases
@@ -212,10 +372,64 @@ def start_scheduler():
             await trade_floor_phases.process_phase_exits()
         except Exception as e:
             logger.warning("position monitor: %s", e)
+    async def _position_monitor_with_snapshot():
+        management: dict[str, dict] = {}
+        try:
+            await _position_monitor()
+            management["legacy_position_monitor"] = {"ok": True}
+        except Exception as e:
+            logger.warning("position monitor wrapper: %s", e)
+            management["legacy_position_monitor"] = {"ok": False, "reason": e.__class__.__name__}
+        try:
+            snapshot = await persist_live_position_snapshot(
+                triggered_by="scheduler_position_monitor_15m",
+                management=management,
+            )
+            await log_activity(
+                f"Live position snapshot: {snapshot['totals']['positions']} positions, "
+                f"{snapshot['totals']['open_orders']} open orders, "
+                f"unrealized={snapshot['totals']['unrealized_pl']}",
+                "info",
+                snapshot,
+            )
+        except Exception as e:
+            logger.warning("position monitor snapshot: %s", e)
+
     _scheduler.add_job(
-        _position_monitor,
+        _position_monitor_with_snapshot,
         CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15", timezone=ET),
         id="position_monitor", replace_existing=True,
+    )
+
+    async def _live_position_snapshot_job():
+        try:
+            await persist_live_position_snapshot(triggered_by="scheduler_live_snapshot_15m")
+        except Exception as e:
+            logger.warning("live position snapshot: %s", e)
+    _scheduler.add_job(
+        _live_position_snapshot_job,
+        IntervalTrigger(minutes=15),
+        id="live_position_snapshot_15m",
+        replace_existing=True,
+    )
+
+    async def _research_lab_job():
+        try:
+            from . import research_lab
+            res = await research_lab.refresh_snapshot(triggered_by="scheduler")
+            stats = res.get("stats", {})
+            await log_activity(
+                f"R&D refresh: decisions={stats.get('reconstructed_decisions', 0)} "
+                f"matured={stats.get('matured_outcomes', 0)} experiments={stats.get('active_experiments', 0)}",
+                "info",
+            )
+        except Exception as e:
+            logger.warning("research lab refresh: %s", e)
+    _scheduler.add_job(
+        _research_lab_job,
+        IntervalTrigger(hours=1),
+        id="research_lab_hourly_refresh",
+        replace_existing=True,
     )
 
     # v5.2 — stale-order sweep every hour: cancel any TF buy still unfilled > 24h
