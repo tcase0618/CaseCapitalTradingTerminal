@@ -1,9 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { API } from "../config";
 import { Link } from "react-router-dom";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 const FORM_COLORS = {
@@ -315,6 +315,10 @@ function SECBattleCard({ data }) {
   const cluster = data.insider_cluster || {};
   const reaction = data.reaction_summary || {};
   const risks = data.risk_language || [];
+  const edgar = data.edgartools || {};
+  const entity = edgar.entity || {};
+  const fundamentals = edgar.fundamentals || {};
+  const edgarFilings = edgar.latest_filings || [];
   return (
     <div style={battleCard}>
       <div style={battleHeader}>
@@ -328,6 +332,7 @@ function SECBattleCard({ data }) {
           <MiniMetric label="AVG 1M" value={pct(reaction.avg_30d_pct)} color={reactionColor(reaction.avg_30d_pct)} />
           <MiniMetric label="W/L" value={`${reaction.wins || 0}/${reaction.losses || 0}`} color="#fbbf24" />
           <MiniMetric label="INSIDER CLUSTER" value={cluster.active ? "ACTIVE" : "QUIET"} color={cluster.active ? "#4ade80" : dim} />
+          <MiniMetric label="EDGARTOOLS" value={edgar.ok ? "LIVE" : "FALLBACK"} color={edgar.ok ? "#4ade80" : "#fbbf24"} />
         </div>
       </div>
 
@@ -359,6 +364,37 @@ function SECBattleCard({ data }) {
               )}
             </tbody>
           </table>
+        </div>
+
+        <div style={battlePanel}>
+          <div style={panelTitle}>// EDGARTOOLS COMPANY FILE</div>
+          <SmallLine k="Company" v={edgar.company || data.company || "-"} />
+          <SmallLine k="CIK" v={edgar.cik || "-"} />
+          <SmallLine k="Industry" v={entity.industry || "-"} />
+          <SmallLine k="SIC" v={entity.sic || "-"} />
+          <SmallLine k="Filer" v={entity.filer_category || "-"} />
+          <SmallLine k="Fiscal Year End" v={entity.fiscal_year_end || "-"} />
+          <SmallLine k="Public Float" v={compactMoney(fundamentals.public_float)} />
+          <SmallLine k="Shares Out" v={compactNumber(fundamentals.shares_outstanding)} />
+          <SmallLine k="TTM Revenue" v={compactMoney(fundamentals.ttm_revenue?.value)} />
+          <SmallLine k="TTM Net Income" v={compactMoney(fundamentals.ttm_net_income?.value)} />
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+            {(entity.flags || []).slice(0, 6).map(flag => <span key={flag} style={badge(labelLight)}>{flag.toUpperCase()}</span>)}
+            {!edgar.ok && <span style={badge("#fbbf24")}>{(edgar.reason || "EDGARTOOLS UNAVAILABLE").slice(0, 42).toUpperCase()}</span>}
+          </div>
+
+          <div style={{ ...panelTitle, marginTop: 18 }}>// LATEST EDGAR COMPANY FILINGS</div>
+          {edgarFilings.length ? edgarFilings.slice(0, 5).map((f, i) => (
+            <div key={`${f.form}-${f.accession || i}`} style={riskHit}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                <span style={badge(FORM_COLORS[f.form] || labelLight)}>{f.form || "FILING"}</span>
+                <span style={{ color: muted }}>{f.filing_date || "-"}</span>
+              </div>
+              <div style={{ color: labelLight, marginTop: 7 }}>{f.description || f.accession || "SEC filing"}</div>
+            </div>
+          )) : (
+            <div style={{ color: muted, fontSize: 12, lineHeight: 1.5 }}>No EdgarTools company filing snapshot loaded yet.</div>
+          )}
         </div>
 
         <div style={battlePanel}>
@@ -427,6 +463,26 @@ function pct(value) {
   return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 }
 
+function compactMoney(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const n = Number(value);
+  const abs = Math.abs(n);
+  if (abs >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
+  if (abs >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+function compactNumber(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const n = Number(value);
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
+  return n.toLocaleString();
+}
+
 function formatAccepted(value) {
   if (!value) return "-";
   const date = new Date(value);
@@ -467,7 +523,7 @@ const sourceLine = { marginTop: 14, borderTop: hairline, paddingTop: 12, display
 const urgentRow = { display: "grid", gridTemplateColumns: "70px 92px 54px minmax(0, 1fr) 42px", gap: 10, alignItems: "center", padding: "8px 0", borderTop: hairline, textDecoration: "none", fontSize: 11 };
 const battleCard = { marginTop: 18, border: `0.5px solid ${accent}55`, background: "rgba(0,0,0,0.28)", padding: 16 };
 const battleHeader = { display: "grid", gridTemplateColumns: "minmax(0, 0.9fr) minmax(360px, 1.1fr)", gap: 18, alignItems: "start", borderBottom: hairline, paddingBottom: 14, marginBottom: 14 };
-const battleStats = { display: "grid", gridTemplateColumns: "repeat(4, minmax(90px, 1fr))", gap: 8 };
+const battleStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))", gap: 8 };
 const battleGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(320px, 0.75fr)", gap: 16 };
 const battlePanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, minWidth: 0 };
 const miniMetric = { border: hairline, background: "#020407cc", padding: "10px 11px", display: "grid", gap: 6, color: dim, fontSize: 9, letterSpacing: "0.12em" };

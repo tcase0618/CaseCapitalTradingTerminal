@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 export default function SettingsPage() {
@@ -13,11 +13,25 @@ export default function SettingsPage() {
   const [backendRefreshing, setBackendRefreshing] = useState(false);
   const [backendBooting, setBackendBooting] = useState(false);
   const [backendLink, setBackendLink] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [updateStrategy, setUpdateStrategy] = useState(null);
+  const [research, setResearch] = useState(null);
+
+  const loadSystem = async () => {
+    await Promise.allSettled([
+      axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => setStatus({})),
+      axios.get(`${API}/admin/pipeline_criteria`).then(r => setCriteria(r.data)).catch(() => {}),
+      axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {}),
+      axios.get(`${API}/desktop/diagnostics`).then(r => setDiagnostics(r.data)).catch(() => {}),
+      axios.get(`${API}/desktop/update_strategy`).then(r => setUpdateStrategy(r.data)).catch(() => {}),
+      axios.get(`${API}/research/dashboard?limit_scans=180`).then(r => setResearch(r.data)).catch(() => setResearch({ ok: false })),
+    ]);
+  };
 
   useEffect(() => {
-    axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => setStatus({}));
-    axios.get(`${API}/admin/pipeline_criteria`).then(r => setCriteria(r.data)).catch(() => {});
-    axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {});
+    loadSystem();
+    const id = setInterval(loadSystem, 30000);
+    return () => clearInterval(id);
   }, []);
 
   const refreshBackendLink = async () => {
@@ -33,6 +47,7 @@ export default function SettingsPage() {
         commands: data.commands || [],
       });
       setBackendLink({ ok: true, at: data.refreshed_at || new Date().toISOString() });
+      await loadSystem();
       toast("BACKEND LINK REFRESHED");
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "failed";
@@ -67,6 +82,7 @@ export default function SettingsPage() {
           jobs: data.jobs || [],
           commands: data.commands || [],
         });
+        await loadSystem();
       } catch {}
     } catch (e) {
       const detail = e?.message || "failed";
@@ -104,9 +120,78 @@ export default function SettingsPage() {
     } catch { toast("BACKTEST SEED FAILED"); }
   };
 
+  const copyDiagnostics = async () => {
+    const payload = {
+      copied_at: new Date().toISOString(),
+      diagnostics,
+      updateStrategy,
+      status,
+    };
+    const text = JSON.stringify(payload, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("DESKTOP DIAGNOSTICS COPIED");
+    } catch {
+      window.prompt("Copy diagnostics", text);
+    }
+  };
+
   return (
     <CrtShell title="SETTINGS & SYSTEM">
+      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 14, marginBottom: 18 }}>
+        <Card title="DESKTOP DIAGNOSTICS" accentColor={diagnostics?.ok ? "#4ade80" : "#fbbf24"}
+          action={<button data-testid="copy-desktop-diagnostics" onClick={copyDiagnostics} style={btnTeal}>[ COPY DIAGNOSTICS ]</button>}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+            {(diagnostics?.checklist || []).slice(0, 8).map(item => (
+              <div key={item.key} style={{ border: hairline, background: item.ok ? "rgba(74,222,128,0.055)" : "rgba(250,204,21,0.055)", padding: 9 }}>
+                <div style={{ color: item.ok ? "#4ade80" : "#fbbf24", fontSize: 10, fontWeight: 900 }}>{item.ok ? "READY" : "SYNC"}</div>
+                <div style={{ color: labelLight, fontSize: 9, letterSpacing: "0.1em", marginTop: 5 }}>{item.label}</div>
+              </div>
+            ))}
+          </div>
+          <Row k="APP VERSION" v={diagnostics?.app?.version || "0.1.0"} c={accent} />
+          <Row k="BACKEND PID" v={diagnostics?.backend?.pid || "--"} c={accent2} />
+          <Row k="BACKEND URL" v={diagnostics?.backend?.url || "http://127.0.0.1:8001"} />
+          <Row k="LATEST SCAN" v={diagnostics?.signals?.latest_scan_at || status?.last_scan_at || "UNKNOWN"} />
+          <Row k="X FACTOR 2D" v={diagnostics?.signals?.xfactor_2d ?? "--"} c={accent2} />
+          <Row k="EARNINGS CACHE" v={diagnostics?.earnings_cache?.created_at || "--"} />
+          <Row k="PRICE SOURCE" v={diagnostics?.backend?.price_source || "--"} c={accent2} />
+        </Card>
+
+        <Card title="UPDATE STRATEGY" accentColor={accent}>
+          <Row k="CHANNEL" v={(updateStrategy?.channel || "LOCAL").toUpperCase()} c={accent} />
+          <Row k="CURRENT VERSION" v={updateStrategy?.current_version || "0.1.0"} />
+          <Row k="INSTALLER EXISTS" v={updateStrategy?.installer_exists ? "YES" : "NO"} c={updateStrategy?.installer_exists ? "#4ade80" : "#f87171"} />
+          <div style={{ color: muted, fontSize: 11, lineHeight: 1.6, margin: "10px 0 12px" }}>
+            {updateStrategy?.recommended_strategy || "Local installer now; GitHub Releases updater once release flow is stable."}
+          </div>
+          {(updateStrategy?.next_steps || []).map((step, i) => (
+            <div key={i} style={{ color: labelLight, fontSize: 10, padding: "5px 0", borderBottom: hairline }}>
+              <span style={{ color: accent }}>{String(i + 1).padStart(2, "0")}</span> {step}
+            </div>
+          ))}
+          <div style={{ color: dim, fontSize: 9, marginTop: 10, overflowWrap: "anywhere" }}>
+            {updateStrategy?.installer_path}
+          </div>
+        </Card>
+      </div>
       {/* v5.1 — Integration Status / Scheduled Jobs / Telegram Commands */}
+      <Card title="R&D ENGINE STATUS" accentColor={(research?.stats?.matured_outcomes || 0) > 0 ? accent2 : "#fbbf24"}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+          <MiniStatus label="MODE" value="HOURLY" color={accent2} />
+          <MiniStatus label="DECISIONS" value={research?.stats?.reconstructed_decisions ?? "--"} color={accent} />
+          <MiniStatus label="MATURED" value={research?.stats?.matured_outcomes ?? "--"} color={(research?.stats?.matured_outcomes || 0) > 0 ? "#4ade80" : "#fbbf24"} />
+          <MiniStatus label="PENDING" value={research?.stats?.pending_outcomes ?? "--"} color={labelLight} />
+          <MiniStatus label="EXPERIMENTS" value={research?.stats?.active_experiments ?? "--"} color="#a78bfa" />
+          <MiniStatus label="QLIB" value={research?.qlib?.installed ? "LIVE" : "OPTIONAL"} color={research?.qlib?.installed ? "#4ade80" : "#fbbf24"} />
+        </div>
+        <Row k="LATEST SCAN" v={research?.source_map?.latest_scan_at || "--"} c={accent2} />
+        <Row k="LSE MARKET DATA" v={research?.source_map?.lse?.ok ? "LIVE" : "DEGRADED"} c={research?.source_map?.lse?.ok ? "#4ade80" : "#fbbf24"} />
+        <Row k="PROMOTION GATE" v={(research?.promotion_gates || []).find(g => g.name === "Matured outcomes")?.detail || "waiting for outcomes"} c="#fbbf24" />
+        <div style={{ color: muted, fontSize: 11, lineHeight: 1.55, marginTop: 10 }}>
+          R&D stays in the background until enough 7D/30D/90D outcomes mature. It collects evidence and snapshots, but the full tab is hidden for now.
+        </div>
+      </Card>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 18 }}>
         <Card title={`INTEGRATION STATUS · ${(admin?.integrations || []).length}`} accentColor={accent}>
           {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
@@ -309,6 +394,15 @@ function Row({ k, v, c = "#e5e7eb" }) {
     }}>
       <span style={{ color: dim, fontSize: 11, letterSpacing: "0.12em" }}>{k}</span>
       <span style={{ color: c, fontWeight: c === "#e5e7eb" ? 400 : 700 }}>{v}</span>
+    </div>
+  );
+}
+
+function MiniStatus({ label, value, color }) {
+  return (
+    <div style={{ border: hairline, background: `${color}0d`, padding: 9, minWidth: 0 }}>
+      <div style={{ color, fontSize: 14, fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis" }}>{value}</div>
+      <div style={{ color: dim, fontSize: 9, letterSpacing: "0.12em", marginTop: 5 }}>{label}</div>
     </div>
   );
 }

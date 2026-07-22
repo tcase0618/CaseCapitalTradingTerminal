@@ -1,6 +1,6 @@
 [package]
 name = "case_capital_trading_terminal"
-version = "0.1.0"
+version = "0.1.3"
 description = "CaseCapitalTradingTerminal desktop shell"
 authors = ["Case Capital"]
 edition = "2021"

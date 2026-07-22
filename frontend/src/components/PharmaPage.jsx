@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { API } from "../config";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 const TIER_COLOR = {

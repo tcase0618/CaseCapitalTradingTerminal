@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
+import { API } from "../config";
+import { CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { TradeJournalView } from "./TradeJournalPage";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };
@@ -36,6 +36,12 @@ export default function PortfolioManagerPage() {
   const [optionsAccount, setOptionsAccount] = useState(null);
   const [optionsPositions, setOptionsPositions] = useState([]);
   const [optionsOrders, setOptionsOrders] = useState([]);
+  const [plCalendar, setPlCalendar] = useState(null);
+  const [plCalendarLoading, setPlCalendarLoading] = useState(false);
+  const today = useMemo(() => new Date(), []);
+  const [plMonth, setPlMonth] = useState(today.getMonth() + 1);
+  const [plYear, setPlYear] = useState(today.getFullYear());
+  const [selectedPlDay, setSelectedPlDay] = useState(null);
   const [rulesets, setRulesets] = useState(null);
   const [health, setHealth] = useState(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
@@ -129,6 +135,32 @@ export default function PortfolioManagerPage() {
       .catch(() => setHealth(null));
   }, []);
 
+  const loadPlCalendar = useCallback(async () => {
+    setPlCalendarLoading(true);
+    try {
+      const r = await axios.get(`${API}/signals/benchmark_curve`, { params: { days: 900 }, timeout: 20000 });
+      setPlCalendar(r.data);
+      const rows = r.data?.curve || [];
+      setSelectedPlDay(rows.slice().reverse().find(row => dateParts(row.date).month === plMonth && dateParts(row.date).year === plYear) || null);
+    } catch (e) {
+      setPlCalendar({ curve: [], error: e.message });
+      setSelectedPlDay(null);
+    } finally {
+      setPlCalendarLoading(false);
+    }
+  }, [plMonth, plYear]);
+
+  useEffect(() => {
+    if (subtab !== "P/L CALENDAR" || plCalendar || plCalendarLoading) return;
+    loadPlCalendar();
+  }, [subtab, plCalendar, plCalendarLoading, loadPlCalendar]);
+
+  useEffect(() => {
+    if (subtab !== "P/L CALENDAR" || !plCalendar?.curve?.length) return;
+    const rows = plCalendar.curve || [];
+    setSelectedPlDay(rows.slice().reverse().find(row => dateParts(row.date).month === plMonth && dateParts(row.date).year === plYear) || null);
+  }, [subtab, plCalendar, plMonth, plYear]);
+
   useEffect(() => {
     let cancelled = false;
     Promise.all([
@@ -203,7 +235,7 @@ export default function PortfolioManagerPage() {
       </div>
 
       <div style={{ display: "flex", borderBottom: hairline, marginBottom: 16, flexWrap: "wrap" }}>
-        {["FUND", "LEARNING", "BACKTEST", "TRADE JOURNAL"].map(k => (
+        {["FUND", "P/L CALENDAR", "LEARNING", "BACKTEST", "TRADE JOURNAL"].map(k => (
           <button key={k} onClick={() => setSubtab(k)}
             style={{
               background: "transparent", border: "none", padding: "10px 22px",
@@ -252,6 +284,18 @@ export default function PortfolioManagerPage() {
             setOptionsOrders(ordersRes.data.orders || []);
           });
         }}
+      />}
+
+      {subtab === "P/L CALENDAR" && <PMCalendarView
+        data={plCalendar}
+        loading={plCalendarLoading}
+        month={plMonth}
+        year={plYear}
+        selected={selectedPlDay}
+        setSelected={setSelectedPlDay}
+        setMonth={setPlMonth}
+        setYear={setPlYear}
+        refresh={loadPlCalendar}
       />}
 
       {subtab === "LEARNING" && <LearningHubView
@@ -380,6 +424,100 @@ function FundHubView({
         />
       )}
     </>
+  );
+}
+
+function PMCalendarView({ data, loading, month, year, selected, setSelected, setMonth, setYear, refresh }) {
+  const rows = data?.curve || [];
+  const years = calendarYears(rows, year);
+  const cells = buildPmCalendarCells(year, month, rows);
+  const monthRows = rows.filter(r => dateParts(r.date).year === year && dateParts(r.date).month === month);
+  const summary = pmCalendarSummary(monthRows);
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title="PM P/L CALENDAR" accentColor={accent}>
+        <div style={calendarToolbar}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <select value={month} onChange={e => setMonth(Number(e.target.value))} style={selectStyle}>
+              {Array.from({ length: 12 }).map((_, i) => <option key={i + 1} value={i + 1}>{pmMonthName(i + 1)}</option>)}
+            </select>
+            <select value={year} onChange={e => setYear(Number(e.target.value))} style={selectStyle}>
+              {years.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+            <button onClick={refresh} disabled={loading} style={outlineButton(accent)}>{loading ? "LOADING" : "REFRESH P/L"}</button>
+          </div>
+          <div style={calendarLegend}>
+            <span><i style={legendDot("#4ade80")} /> GREEN DAY</span>
+            <span><i style={legendDot("#f87171")} /> RED DAY</span>
+            <span><i style={legendDot("#fbbf24")} /> FLAT / NO DATA</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 16, flexWrap: "wrap" }}>
+          <Stat label="MONTH AVG" value={fmtPct(summary.avg)} sub={`${monthRows.length} trading days`} color={pctColor(summary.avg)} accentBar />
+          <Stat label="GREEN DAYS" value={summary.green} sub="positive terminal total" color="#4ade80" />
+          <Stat label="RED DAYS" value={summary.red} sub="negative terminal total" color="#f87171" />
+          <Stat label="DAYS WON VS SPY" value={`${summary.spyWins}/${summary.spyLosses}`} sub={`${summary.spyWinRate}% win rate`} color={summary.spyWins >= summary.spyLosses ? "#4ade80" : "#f87171"} />
+          <Stat label="RETURN DIFF" value={fmtPct(summary.relativeAvg)} sub="avg fund minus SPY" color={pctColor(summary.relativeAvg)} />
+          <Stat label="BEST DAY" value={fmtPct(summary.best)} sub="terminal total" color="#4ade80" />
+          <Stat label="WORST DAY" value={fmtPct(summary.worst)} sub="terminal total" color="#f87171" />
+        </div>
+        <div style={calendarWeekHeader}>
+          {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map(d => <span key={d}>{d}</span>)}
+        </div>
+        <div style={calendarGrid}>
+          {cells.map((cell, i) => (
+            <button
+              key={cell.date || `blank-${i}`}
+              disabled={!cell.date}
+              onClick={() => cell.row && setSelected(cell.row)}
+              title={pmCalendarTitle(cell.row)}
+              style={pmCalendarCell(cell, selected?.date === cell.date)}
+            >
+              <span>{cell.dayNumber || ""}</span>
+              {cell.row && (
+                <span style={{ display: "grid", gap: 3 }}>
+                  <strong>{fmtPct(cell.row.terminal_total_pct)}</strong>
+                  <small style={{ color: muted, fontSize: 9, letterSpacing: "0.08em" }}>SPY {fmtPct(cell.row.spy_return_pct)}</small>
+                  <small style={{ color: pctColor(cell.row.relative_pct), fontSize: 9, letterSpacing: "0.08em" }}>DIFF {fmtPct(cell.row.relative_pct)}</small>
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      <Card title={selected ? `PM DAY DETAIL / ${selected.date}` : "PM DAY DETAIL"} accentColor={pctColor(selected?.terminal_total_pct)}>
+        {selected ? (
+          <div style={pmDetailGrid}>
+            <div>
+              <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 12, flexWrap: "wrap" }}>
+                <Stat label="TOTAL FUND" value={fmtPct(selected.terminal_total_pct)} sub="equities + options" color={pctColor(selected.terminal_total_pct)} accentBar />
+                <Stat label="EQUITIES" value={fmtPct(selected.stock_gain_pct)} sub={`${selected.stock_positions || 0} tracked`} color={pctColor(selected.stock_gain_pct)} />
+                <Stat label="OPTIONS" value={fmtPct(selected.options_gain_pct)} sub={`${selected.options_positions || 0} tracked`} color={pctColor(selected.options_gain_pct)} />
+                <Stat label="VS SPY" value={fmtPct(selected.relative_pct)} sub={`SPY ${fmtPct(selected.spy_return_pct)}`} color={pctColor(selected.relative_pct)} />
+              </div>
+              <PlanRow k="SOURCE" v={data?.source || "performance curve"} color={accent2} />
+              <PlanRow k="BENCHMARK" v={data?.benchmark || "SPY"} />
+            </div>
+            <div style={{ height: 300, border: hairline, background: "rgba(255,255,255,0.018)", padding: 10 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={pmDetailChartRows(rows, selected.date)} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.055)" vertical={false} />
+                  <XAxis dataKey="label" stroke={dim} tick={{ fill: muted, fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <YAxis stroke={dim} tick={{ fill: muted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `${v}%`} />
+                  <Tooltip contentStyle={{ background: "#050509", border: hairline, color: labelLight, fontSize: 11 }} formatter={(v, name) => [`${Number(v).toFixed(2)}%`, name]} />
+                  <ReferenceLine y={0} stroke={dim} strokeDasharray="3 3" />
+                  <Line type="monotone" dataKey="terminal" name="total fund" stroke={accent} strokeWidth={3} dot />
+                  <Line type="monotone" dataKey="spy" name="SPY" stroke={accent2} strokeWidth={2} strokeDasharray="5 5" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: muted, padding: 20 }}>Select a calendar day to inspect fund P/L.</div>
+        )}
+      </Card>
+    </div>
   );
 }
 
@@ -1631,6 +1769,153 @@ function LearningTable({ rows, label }) {
     </table>
   );
 }
+
+function buildPmCalendarCells(year, month, rows) {
+  const byDate = new Map(rows.map(r => [r.date, r]));
+  const first = new Date(year, month - 1, 1);
+  const totalDays = new Date(year, month, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < first.getDay(); i += 1) cells.push({ date: null });
+  for (let d = 1; d <= totalDays; d += 1) {
+    const date = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    cells.push({ date, dayNumber: d, row: byDate.get(date) || null });
+  }
+  while (cells.length % 7 !== 0) cells.push({ date: null });
+  return cells;
+}
+
+function pmCalendarSummary(rows) {
+  const vals = rows.map(r => Number(r.terminal_total_pct)).filter(Number.isFinite);
+  const relativeVals = rows.map(r => Number(r.relative_pct)).filter(Number.isFinite);
+  const spyWins = relativeVals.filter(v => v > 0).length;
+  const spyLosses = relativeVals.filter(v => v < 0).length;
+  const green = vals.filter(v => v > 0).length;
+  const red = vals.filter(v => v < 0).length;
+  return {
+    green,
+    red,
+    spyWins,
+    spyLosses,
+    spyWinRate: spyWins + spyLosses ? Math.round((spyWins / (spyWins + spyLosses)) * 100) : 0,
+    relativeAvg: relativeVals.length ? relativeVals.reduce((a, b) => a + b, 0) / relativeVals.length : null,
+    avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null,
+    best: vals.length ? Math.max(...vals) : null,
+    worst: vals.length ? Math.min(...vals) : null,
+  };
+}
+
+function pmDetailChartRows(rows, selectedDate) {
+  const idx = rows.findIndex(r => r.date === selectedDate);
+  const start = Math.max(0, idx - 8);
+  const end = idx >= 0 ? idx + 1 : rows.length;
+  return rows.slice(start, end).map(r => ({
+    label: String(r.date || "").slice(5),
+    terminal: r.terminal_total_pct,
+    spy: r.spy_return_pct,
+  }));
+}
+
+function calendarYears(rows, fallbackYear) {
+  const years = [...new Set(rows.map(r => dateParts(r.date).year).filter(Boolean))].sort((a, b) => b - a);
+  return years.length ? years : [fallbackYear, fallbackYear - 1, fallbackYear - 2];
+}
+
+function dateParts(date) {
+  const [y, m] = String(date || "").split("-").map(Number);
+  return { year: y || null, month: m || null };
+}
+
+function pmMonthName(month) {
+  return new Date(2026, Number(month) - 1, 1).toLocaleString("en-US", { month: "long" });
+}
+
+function fmtPct(v) {
+  if (v == null || v === "" || !Number.isFinite(Number(v))) return "-";
+  const n = Number(v);
+  return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function pctColor(v) {
+  if (v == null || v === "" || !Number.isFinite(Number(v))) return muted;
+  const n = Number(v);
+  if (n > 0) return "#4ade80";
+  if (n < 0) return "#f87171";
+  return "#fbbf24";
+}
+
+function pmCalendarTitle(row) {
+  if (!row) return "No P/L row for this date.";
+  return [
+    row.date,
+    `Total fund: ${fmtPct(row.terminal_total_pct)}`,
+    `Equities: ${fmtPct(row.stock_gain_pct)}`,
+    `Options: ${fmtPct(row.options_gain_pct)}`,
+    `SPY: ${fmtPct(row.spy_return_pct)}`,
+  ].join("\n");
+}
+
+function legendDot(color) {
+  return {
+    display: "inline-block",
+    width: 9,
+    height: 9,
+    borderRadius: 999,
+    background: color,
+    marginRight: 6,
+    boxShadow: `0 0 10px ${color}66`,
+  };
+}
+
+function outlineButton(color) {
+  return {
+    background: "transparent",
+    border: `0.5px solid ${color}`,
+    color,
+    fontSize: 11,
+    padding: "9px 14px",
+    cursor: "pointer",
+    letterSpacing: "0.14em",
+    fontFamily: "JetBrains Mono",
+    fontWeight: 800,
+  };
+}
+
+function pmCalendarCell(cell, active) {
+  const value = cell.row?.terminal_total_pct;
+  const color = pctColor(value);
+  return {
+    aspectRatio: "1 / 0.74",
+    minHeight: 68,
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    background: !cell.date ? "transparent" : cell.row ? `${color}18` : "rgba(255,255,255,0.014)",
+    border: !cell.date ? "0.5px solid transparent" : `0.5px solid ${active ? accent : cell.row ? `${color}88` : "rgba(255,255,255,0.08)"}`,
+    color: !cell.date ? "transparent" : labelLight,
+    cursor: cell.date && cell.row ? "pointer" : "default",
+    padding: 10,
+    fontFamily: "JetBrains Mono",
+    fontWeight: 900,
+    boxShadow: active ? `0 0 18px ${accent}24` : cell.row ? `inset 0 -3px 0 ${color}` : "none",
+  };
+}
+
+const calendarToolbar = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
+const calendarLegend = { display: "flex", gap: 14, flexWrap: "wrap", color: muted, fontSize: 10, letterSpacing: "0.12em" };
+const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8, color: dim, fontSize: 10, letterSpacing: "0.14em", margin: "12px 0 8px" };
+const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8 };
+const pmDetailGrid = { display: "grid", gridTemplateColumns: "minmax(330px, 0.9fr) minmax(0, 1.1fr)", gap: 18, alignItems: "start" };
+const selectStyle = {
+  background: "#050509",
+  border: hairline,
+  color: accent2,
+  padding: "10px 12px",
+  fontSize: 11,
+  letterSpacing: "0.1em",
+  fontFamily: "JetBrains Mono",
+  fontWeight: 800,
+};
 
 function PlanRow({ k, v, color = labelLight }) {
   return (

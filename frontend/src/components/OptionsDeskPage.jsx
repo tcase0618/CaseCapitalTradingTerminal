@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };

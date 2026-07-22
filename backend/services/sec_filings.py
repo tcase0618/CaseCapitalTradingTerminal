@@ -455,9 +455,20 @@ async def battle_card(ticker: str, limit: int = 25) -> dict[str, Any]:
         and (now - datetime.fromisoformat(str(f["accepted_at"]).replace("Z", "+00:00"))).days <= 10
     ]
     reactions = [h["reaction_30d"]["reaction_pct"] for h in history if h.get("reaction_30d", {}).get("reaction_pct") is not None]
+    try:
+        from . import edgartools_bridge
+        edgartools_snapshot = await edgartools_bridge.company_snapshot(t)
+    except Exception as exc:
+        logger.debug("EdgarTools battle-card enrichment skipped for %s: %s", t, exc)
+        edgartools_snapshot = {"ok": False, "provider": "edgartools", "reason": str(exc), "ticker": t}
+
+    source = "SEC filings + Massive/yfinance daily closes"
+    if edgartools_snapshot.get("ok"):
+        source = "SEC filings + EdgarTools + Massive/yfinance daily closes"
+
     return {
         "ticker": t,
-        "company": (rows[0].get("company") if rows else None),
+        "company": (rows[0].get("company") if rows else None) or edgartools_snapshot.get("company"),
         "filing_count": len(rows),
         "history": history,
         "insider_cluster": {
@@ -473,5 +484,6 @@ async def battle_card(ticker: str, limit: int = 25) -> dict[str, Any]:
             "wins": sum(1 for r in reactions if r > 0),
             "losses": sum(1 for r in reactions if r < 0),
         },
-        "source": "SEC filings + Massive/yfinance daily closes",
+        "edgartools": edgartools_snapshot,
+        "source": source,
     }

@@ -149,15 +149,15 @@ async def trading_halts_latest(limit: int = 25):
 
 
 @api.get("/news_intel/latest")
-async def news_intel_latest(force_refresh: bool = False, limit: int = 60):
+async def news_intel_latest(force_refresh: bool = False, limit: int = 60, lane: str = "active"):
     from services import news_intel
-    return await news_intel.latest(force_refresh=force_refresh, limit=limit)
+    return await news_intel.latest(force_refresh=force_refresh, limit=limit, lane=lane)
 
 
 @api.post("/news_intel/refresh")
-async def news_intel_refresh(limit: int = 60):
+async def news_intel_refresh(limit: int = 60, lane: str = "active"):
     from services import news_intel
-    return await news_intel.latest(force_refresh=True, limit=limit)
+    return await news_intel.latest(force_refresh=True, limit=limit, lane=lane)
 
 
 @api.get("/news_intel/snapshots")

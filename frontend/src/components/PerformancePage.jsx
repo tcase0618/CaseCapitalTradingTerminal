@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
+import { API } from "../config";
 import { toast } from "sonner";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, LineChart, Line, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
 export default function PerformancePage() {

@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import axios from "axios";
+import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
 export default function TickerPage() {
@@ -13,6 +13,7 @@ export default function TickerPage() {
   const [opts, setOpts] = useState(null);
   const [flow, setFlow] = useState(null);
   const [freeData, setFreeData] = useState(null);
+  const [kronos, setKronos] = useState(null);
 
   useEffect(() => {
     if (!ticker) return;
@@ -20,6 +21,7 @@ export default function TickerPage() {
     axios.get(`${API}/options/${ticker}`).then(r => setOpts(r.data.options)).catch(() => {});
     axios.get(`${API}/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
     axios.get(`${API}/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => setFreeData(null));
+    axios.get(`${API}/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(e => setKronos({ error: e.message }));
   }, [ticker]);
 
   if (!data) return (
@@ -100,6 +102,8 @@ export default function TickerPage() {
             {tt.target_date && <Row k="TARGET DATE" v={tt.target_date} c={accent}
                  sub={`HOLD ${tt.hold_period_low}–${tt.hold_period_high}d`} />}
           </Card>
+
+          <KronosTickerForecastBox data={data} kronos={kronos} />
 
           <Card title="THESIS">
             <div style={{ fontSize: 13, color: "#e5e7eb", lineHeight: 1.7, letterSpacing: "0.02em" }}>
@@ -316,6 +320,135 @@ function KeyRatiosCard({ freeData }) {
   );
 }
 
+function KronosTickerForecastBox({ data, kronos }) {
+  const card = kronos?.battle_card || {};
+  const tt = data?.time_target || {};
+  const holdLow = Number(tt.hold_period_low || tt.low || 0);
+  const holdHigh = Number(tt.hold_period_high || tt.high || 0);
+  const holdMid = holdLow && holdHigh ? Math.round((holdLow + holdHigh) / 2) : Number(data?.hold_window_days || 0);
+  const holdLabel = holdLow && holdHigh
+    ? `${holdLow}-${holdHigh} DAY SCANNER HOLD CONE`
+    : holdMid
+      ? `${holdMid} DAY SCANNER HOLD CONE`
+      : "SCANNER HOLD CONE";
+  const oneDay = card.horizons?.["1D"] || coneFromBase(card.forecast_pct, 1, card.instrument);
+  const holdCone = holdMid
+    ? coneFromBase(card.forecast_pct, Math.max(1, holdMid), card.instrument)
+    : card.horizons?.["10D"] || coneFromBase(card.forecast_pct, 10, card.instrument);
+  const probs = card.probabilities || {};
+  const attribution = card.attribution || [];
+
+  return (
+    <Card title="KRONOS FORECAST">
+      {!kronos ? (
+        <div style={{ color: muted, fontSize: 13 }}>Kronos forecast loading...</div>
+      ) : kronos.error ? (
+        <div style={{ color: "#f87171", fontSize: 13 }}>Kronos degraded: {kronos.error}</div>
+      ) : (
+        <div style={{ display: "grid", gap: 14 }}>
+          <div style={kronosMiniGrid}>
+            <KronosMini label="BIAS" value={card.forecast_bias || "UNKNOWN"} color={forecastColor(card.forecast_bias)} />
+            <KronosMini label="KRONOS SCORE" value={card.kronos_score ?? "-"} color={accent} />
+            <KronosMini label="CONFIDENCE" value={card.confidence == null ? "-" : `${card.confidence}%`} color="#5eead4" />
+            <KronosMini label="PM ALIGNMENT" value={card.aligned_with_pm ? "ALIGNED" : "WATCH"} color={card.aligned_with_pm ? "#4ade80" : "#fbbf24"} />
+          </div>
+
+          <ForecastCone title="1 DAY FORECAST CONE" cone={oneDay} price={data?.price} />
+          <ForecastCone
+            title={holdLabel}
+            cone={holdCone}
+            price={data?.price}
+            sub={holdLow && holdHigh ? `Midpoint estimate uses day ${holdMid}` : "Uses nearest available Kronos horizon"}
+          />
+
+          <div style={kronosTwoCol}>
+            <div style={kronosPanel}>
+              <div style={kronosSectionLabel}>PATH PROBABILITIES</div>
+              {[
+                ["+5%", probs.plus_5],
+                ["+10%", probs.plus_10],
+                ["-5%", probs.minus_5],
+                ["-10%", probs.minus_10],
+                ["STOP", probs.stop_hit],
+                ["RATCHET", probs.ratchet_hit],
+              ].map(([k, v]) => (
+                <div key={k} style={kronosLine}>
+                  <span>{k}</span>
+                  <strong style={{ color: Number(v || 0) >= 50 ? "#4ade80" : Number(v || 0) >= 30 ? "#fbbf24" : muted }}>
+                    {v == null ? "-" : `${v}%`}
+                  </strong>
+                </div>
+              ))}
+            </div>
+            <div style={kronosPanel}>
+              <div style={kronosSectionLabel}>ATTRIBUTION</div>
+              {attribution.length ? attribution.map(a => (
+                <div key={a.factor} style={kronosAttribution}>
+                  <span>{a.factor}</span>
+                  <div style={kronosTrack}><div style={{ ...kronosFill, width: `${Math.max(4, Number(a.weight || 0))}%` }} /></div>
+                  <strong>{a.state}</strong>
+                </div>
+              )) : <div style={{ color: muted, fontSize: 12 }}>No attribution available.</div>}
+            </div>
+          </div>
+
+          <div style={{ color: muted, fontSize: 11, lineHeight: 1.55 }}>
+            Advisory only. Kronos does not execute, size, or override PM.
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ForecastCone({ title, cone, price, sub }) {
+  const low = Number(cone?.low_pct ?? 0);
+  const base = Number(cone?.base_pct ?? 0);
+  const high = Number(cone?.high_pct ?? 0);
+  const maxAbs = Math.max(1, Math.abs(low), Math.abs(high), Math.abs(base));
+  const lowPx = price ? price * (1 + low / 100) : null;
+  const basePx = price ? price * (1 + base / 100) : null;
+  const highPx = price ? price * (1 + high / 100) : null;
+  return (
+    <div style={coneBox}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 9 }}>
+        <div>
+          <div style={kronosSectionLabel}>{title}</div>
+          {sub && <div style={{ color: muted, fontSize: 10, marginTop: 3 }}>{sub}</div>}
+        </div>
+        <strong style={{ color: forecastColor(base >= 0 ? "BULLISH" : "BEARISH"), fontSize: 13 }}>{signedPct(base)}</strong>
+      </div>
+      <div style={coneTrack}>
+        <div style={{ ...coneZero, left: "50%" }} />
+        <div style={{
+          ...coneRange,
+          left: `${50 + (low / maxAbs) * 45}%`,
+          width: `${Math.max(2, ((high - low) / (maxAbs * 2)) * 90)}%`,
+        }} />
+        <div style={{
+          ...coneBase,
+          left: `${50 + (base / maxAbs) * 45}%`,
+          background: base >= 0 ? "#4ade80" : "#f87171",
+        }} />
+      </div>
+      <div style={coneLabels}>
+        <span>{signedPct(low)} {lowPx ? `($${lowPx.toFixed(2)})` : ""}</span>
+        <span>{signedPct(base)} {basePx ? `($${basePx.toFixed(2)})` : ""}</span>
+        <span>{signedPct(high)} {highPx ? `($${highPx.toFixed(2)})` : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+function KronosMini({ label, value, color }) {
+  return (
+    <div style={{ border: hairline, background: "rgba(255,255,255,0.018)", padding: 10 }}>
+      <div style={{ color: dim, fontSize: 9, letterSpacing: "0.12em" }}>{label}</div>
+      <div style={{ color, fontSize: 16, fontWeight: 900, marginTop: 5, overflowWrap: "anywhere" }}>{value}</div>
+    </div>
+  );
+}
+
 function FreeDataCard({ freeData }) {
   const secFacts = freeData?.sec?.companyfacts || {};
   const secLookup = freeData?.sec?.lookup || {};
@@ -464,6 +597,30 @@ function ratioColor(status) {
   return muted;
 }
 
+function coneFromBase(basePct, days, instrument) {
+  const base = Number(basePct || 0);
+  const root = Math.sqrt(Math.max(1, days));
+  const vol = instrument === "OPTION" ? 4.8 : 1.15;
+  const scaled = base * Math.min(6, root / Math.sqrt(5));
+  return {
+    low_pct: Number((scaled - vol * root).toFixed(2)),
+    base_pct: Number(scaled.toFixed(2)),
+    high_pct: Number((scaled + vol * root).toFixed(2)),
+  };
+}
+
+function signedPct(v) {
+  const n = Number(v || 0);
+  return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function forecastColor(v) {
+  if (v === "BULLISH") return "#4ade80";
+  if (v === "BEARISH") return "#f87171";
+  if (v === "HEDGE") return "#a78bfa";
+  return "#fbbf24";
+}
+
 function SourcePill({ label, quality, ok }) {
   const q = (quality || (ok ? "live" : "down")).toUpperCase();
   const color = q === "LIVE" ? "#4ade80" : q === "OPTIONAL" || q === "NO_MATCH" ? muted : q === "FALLBACK" ? accent : "#f87171";
@@ -526,3 +683,109 @@ function Row({ k, v, c = "#e5e7eb", sub = "" }) {
 }
 
 const pctColor = (v) => v == null ? muted : v > 0 ? "#4ade80" : v < 0 ? "#f87171" : labelLight;
+
+const kronosMiniGrid = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(90px, 1fr))",
+  gap: 8,
+};
+
+const kronosTwoCol = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 10,
+};
+
+const kronosPanel = {
+  border: hairline,
+  background: "rgba(255,255,255,0.018)",
+  padding: 11,
+  minWidth: 0,
+};
+
+const kronosSectionLabel = {
+  color: "#5eead4",
+  fontSize: 9,
+  letterSpacing: "0.14em",
+  fontWeight: 900,
+};
+
+const kronosLine = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 10,
+  borderTop: hairline,
+  padding: "7px 0",
+  color: muted,
+  fontSize: 11,
+};
+
+const kronosAttribution = {
+  display: "grid",
+  gridTemplateColumns: "88px minmax(0, 1fr) 58px",
+  gap: 8,
+  alignItems: "center",
+  borderTop: hairline,
+  padding: "7px 0",
+  color: muted,
+  fontSize: 10,
+};
+
+const kronosTrack = {
+  height: 5,
+  background: "rgba(255,255,255,0.06)",
+  overflow: "hidden",
+};
+
+const kronosFill = {
+  height: "100%",
+  background: "#5eead4",
+  boxShadow: "0 0 8px rgba(94,234,212,0.35)",
+};
+
+const coneBox = {
+  border: hairline,
+  background: "rgba(255,255,255,0.018)",
+  padding: 12,
+};
+
+const coneTrack = {
+  height: 18,
+  position: "relative",
+  background: "rgba(255,255,255,0.045)",
+  overflow: "hidden",
+  marginTop: 8,
+};
+
+const coneZero = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  width: 1,
+  background: "rgba(255,255,255,0.22)",
+};
+
+const coneRange = {
+  position: "absolute",
+  top: 4,
+  bottom: 4,
+  background: "linear-gradient(90deg, rgba(248,113,113,0.5), rgba(250,204,21,0.35), rgba(74,222,128,0.5))",
+  border: "0.5px solid rgba(255,255,255,0.14)",
+};
+
+const coneBase = {
+  position: "absolute",
+  top: 1,
+  bottom: 1,
+  width: 3,
+  boxShadow: "0 0 10px currentColor",
+};
+
+const coneLabels = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 8,
+  color: muted,
+  fontSize: 10,
+  marginTop: 8,
+};

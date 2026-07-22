@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { API } from "../config";
 import { toast } from "sonner";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
 const STROKES = ["#c8a84b", "#5eead4", "#f87171", "#a78bfa", "#fb923c", "#4ade80",

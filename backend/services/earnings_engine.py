@@ -34,6 +34,7 @@ from . import options_engine, scrapers
 
 logger = logging.getLogger(__name__)
 EARNINGS_FEATURE_VERSION = "3.2"
+_BACKGROUND_REFRESH_KEYS: set[str] = set()
 
 
 def _now() -> datetime:
@@ -1048,11 +1049,25 @@ async def current_week_with_probability(scan_tickers: set[str] | None = None,
 # ─────────────────────────── Persistence ───────────────────────────
 async def store_week_snapshot(snapshot: dict[str, Any]) -> None:
     db = get_db()
+    doc = stamped(snapshot)
+    doc["feature_version"] = EARNINGS_FEATURE_VERSION
     await db.earnings_snapshots.update_one(
         {"week_of": snapshot["week_of"]},
-        {"$set": stamped(snapshot)},
+        {"$set": doc},
         upsert=True,
     )
+
+
+async def _refresh_week_snapshot_background(scan_tickers: set[str] | None,
+                                            week_offset: int,
+                                            refresh_key: str) -> None:
+    try:
+        snapshot = await current_week_with_probability(scan_tickers=scan_tickers, week_offset=week_offset)
+        await store_week_snapshot(snapshot)
+    except Exception as e:
+        logger.warning("earnings background refresh failed: %s", e)
+    finally:
+        _BACKGROUND_REFRESH_KEYS.discard(refresh_key)
 
 
 async def current_week_cached(scan_tickers: set[str] | None = None,
@@ -1062,23 +1077,67 @@ async def current_week_cached(scan_tickers: set[str] | None = None,
     db = get_db()
     target_monday, _target_friday = _target_week_window()
     target_week = (target_monday + timedelta(days=7 * int(week_offset or 0))).isoformat()
+    latest = None
     try:
         latest = await db.earnings_snapshots.find_one(
             {"week_of": target_week},
             {"_id": 0},
             sort=[("created_at", -1)],
         )
-        if (latest and latest.get("created_at") and latest.get("week_of") == target_week
-                and latest.get("feature_version") == EARNINGS_FEATURE_VERSION):
+        if latest and latest.get("created_at") and latest.get("week_of") == target_week:
             created = datetime.fromisoformat(str(latest["created_at"]).replace("Z", "+00:00"))
             age = (_now() - created).total_seconds() / 60.0
             if age <= max_age_minutes:
                 latest["cache_status"] = "HIT"
                 latest["cache_age_minutes"] = round(age, 1)
                 return _json_safe(latest)
+            latest["cache_status"] = "STALE_REFRESHING"
+            latest["cache_age_minutes"] = round(age, 1)
+            refresh_key = f"{target_week}:{int(week_offset or 0)}"
+            if refresh_key not in _BACKGROUND_REFRESH_KEYS:
+                _BACKGROUND_REFRESH_KEYS.add(refresh_key)
+                asyncio.create_task(_refresh_week_snapshot_background(scan_tickers, week_offset, refresh_key))
+            return _json_safe(latest)
     except Exception:
         pass
-    snapshot = await current_week_with_probability(scan_tickers=scan_tickers, week_offset=week_offset)
+
+    try:
+        snapshot = await asyncio.wait_for(
+            current_week_with_probability(scan_tickers=scan_tickers, week_offset=week_offset),
+            timeout=float(os.getenv("EARNINGS_UI_REFRESH_TIMEOUT_SEC", "8")),
+        )
+    except Exception as e:
+        if latest:
+            try:
+                created = datetime.fromisoformat(str(latest.get("created_at", "")).replace("Z", "+00:00"))
+                latest["cache_age_minutes"] = round((_now() - created).total_seconds() / 60.0, 1)
+            except Exception:
+                latest["cache_age_minutes"] = None
+            latest["cache_status"] = "STALE"
+            latest["refresh_error"] = f"Live earnings refresh timed out or failed: {type(e).__name__}"
+            return _json_safe(latest)
+
+        monday = target_monday + timedelta(days=7 * int(week_offset or 0))
+        empty = {
+            "week_of": monday.isoformat(),
+            "week_end": (monday + timedelta(days=4)).isoformat(),
+            "week_offset": int(week_offset or 0),
+            "by_day": {},
+            "total": 0,
+            "raw_calendar_total": 0,
+            "enriched_total": 0,
+            "calendar_limited": False,
+            "calendar_source_counts": {},
+            "calendar_sources": [],
+            "earnings_divergences": [],
+            "earnings_divergence_count": 0,
+            "feature_version": EARNINGS_FEATURE_VERSION,
+            "cache_status": "EMPTY_TIMEOUT",
+            "cache_age_minutes": None,
+            "refresh_error": f"Live earnings refresh timed out or failed: {type(e).__name__}",
+        }
+        return _json_safe(empty)
+
     try:
         await store_week_snapshot(snapshot)
     except Exception as e:

@@ -164,8 +164,8 @@ async def _send_ratchet_message(symbol: str, ticker: str, entry: float, current:
 
 
 async def _send_exit_message(symbol: str, ticker: str, reason: str, entry: float, exit_price: float, qty: int) -> bool:
-    pnl = (exit_price - entry) * qty * 100 if entry > 0 and exit_price > 0 else None
-    pct = ((exit_price - entry) / entry * 100.0) if entry > 0 and exit_price > 0 else None
+    pnl = (exit_price - entry) * qty * 100 if entry > 0 and exit_price >= 0 else None
+    pct = ((exit_price - entry) / entry * 100.0) if entry > 0 and exit_price >= 0 else None
     title = "OPTIONS HARD STOP" if reason == "hard_stop" else "OPTIONS EXIT"
     reason_label = "Premium hard stop" if reason == "hard_stop" else "Ratchet floor hit"
     msg = "\n".join([
@@ -286,7 +286,7 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
         ask = _safe_float(quote.get("ap"))
         last = _safe_float(trade.get("p"))
         mid = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else 0.0
-        mark = bid or mid or last
+        mark = bid or mid
         return {
             "ok": True,
             "symbol": symbol,
@@ -322,7 +322,7 @@ def options_ratchet_state(entry_premium: float, current_bid: float | None = None
     gain_pct = ((peak - entry) / entry * 100.0) if entry > 0 else 0.0
     floor_pct = _options_ratchet_floor_pct(gain_pct)
     floor_premium = entry * (1 + floor_pct / 100.0) if entry > 0 else 0.0
-    exit_triggered = bool(current > 0 and floor_premium > 0 and current <= floor_premium)
+    exit_triggered = bool(floor_premium > 0 and current <= floor_premium)
     return {
         "policy": "premium_ratchet_no_take_profit",
         "take_profit": None,
@@ -336,6 +336,82 @@ def options_ratchet_state(entry_premium: float, current_bid: float | None = None
         "exit_basis": "live bid <= ratchet floor",
         "tiers": [{"trigger_gain_pct": t, "locked_gain_pct": l} for t, l in OPTIONS_RATCHET_TIERS],
         "initial_stop_pct": OPTIONS_INITIAL_STOP_PCT,
+    }
+
+
+def _position_raw_present(v: Any) -> bool:
+    return v is not None and str(v).strip() != ""
+
+
+def _option_position_context(position: dict[str, Any], snap: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve open option risk from Alpaca's live position first.
+
+    Alpaca option snapshots can carry stale last trades on illiquid contracts.
+    For open-position risk, the position endpoint is the authority because it is
+    the same source Alpaca uses for market value and unrealized P/L.
+    """
+    snap = snap or {}
+    qty = _safe_int(position.get("qty"))
+    entry = _safe_float(position.get("avg_entry_price"))
+    if entry <= 0:
+        entry = _safe_float(position.get("cost_basis")) / max(1, qty * 100)
+
+    current = 0.0
+    price_source = "unavailable"
+    if _position_raw_present(position.get("current_price")):
+        current = max(0.0, _safe_float(position.get("current_price")))
+        price_source = "alpaca_position_current_price"
+    elif _position_raw_present(position.get("market_value")) and qty > 0:
+        current = max(0.0, _safe_float(position.get("market_value")) / max(1, qty * 100))
+        price_source = "alpaca_position_market_value"
+    elif snap.get("ok"):
+        bid = _safe_float(snap.get("bid"))
+        mid = _safe_float(snap.get("mid"))
+        if bid > 0:
+            current = bid
+            price_source = "alpaca_snapshot_bid"
+        elif mid > 0:
+            current = mid
+            price_source = "alpaca_snapshot_mid"
+
+    pnl_pct: float | None
+    if _position_raw_present(position.get("unrealized_plpc")):
+        pnl_pct = _safe_float(position.get("unrealized_plpc")) * 100.0
+    elif entry > 0:
+        pnl_pct = (current - entry) / entry * 100.0
+    else:
+        pnl_pct = None
+
+    if _position_raw_present(position.get("unrealized_pl")):
+        unrealized: float | None = _safe_float(position.get("unrealized_pl"))
+    elif entry > 0:
+        unrealized = (current - entry) * qty * 100
+    else:
+        unrealized = None
+
+    snap_last = _safe_float(snap.get("last")) if snap.get("ok") else 0.0
+    snap_bid = _safe_float(snap.get("bid")) if snap.get("ok") else 0.0
+    data_conflict = bool(
+        snap.get("ok")
+        and snap_last > 0
+        and price_source.startswith("alpaca_position")
+        and abs(snap_last - current) >= max(0.02, entry * 0.5)
+    )
+
+    return {
+        "qty": qty,
+        "entry": entry,
+        "current": current,
+        "pnl_pct": pnl_pct,
+        "unrealized": unrealized,
+        "price_source": price_source,
+        "position_unrealized_plpc": _safe_float(position.get("unrealized_plpc")) if _position_raw_present(position.get("unrealized_plpc")) else None,
+        "position_unrealized_pl": _safe_float(position.get("unrealized_pl")) if _position_raw_present(position.get("unrealized_pl")) else None,
+        "snapshot_bid": snap_bid,
+        "snapshot_mid": _safe_float(snap.get("mid")) if snap.get("ok") else 0.0,
+        "snapshot_last": snap_last,
+        "snapshot_mark": _safe_float(snap.get("mark")) if snap.get("ok") else 0.0,
+        "data_conflict": data_conflict,
     }
 
 
@@ -803,10 +879,14 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
     db = get_db()
     live_orders = await orders(status="all", limit=limit)
     live_positions = await positions()
-    position_symbols = {
-        str(p.get("symbol") or "").upper()
+    position_by_symbol = {
+        str(p.get("symbol") or "").upper(): p
         for p in live_positions.get("positions") or []
         if _parse_occ_symbol(str(p.get("symbol") or "").upper()) and _safe_int(p.get("qty")) > 0
+    }
+    position_symbols = {
+        symbol
+        for symbol in position_by_symbol.keys()
     }
     upserted = 0
     closed = 0
@@ -832,12 +912,28 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
             prior_peak = _safe_float(((existing or {}).get("exit_policy") or {}).get("peak_premium")) or fill_price
             current = 0.0
             snap = await _option_snapshot(symbol) if symbol in position_symbols else {"ok": False}
-            if snap.get("ok"):
-                current = _safe_float(snap.get("bid")) or _safe_float(snap.get("mark")) or _safe_float(snap.get("last"))
+            price_context = {}
+            if symbol in position_by_symbol:
+                price_context = _option_position_context(position_by_symbol[symbol], snap)
+                current = _safe_float(price_context.get("current"))
+            elif snap.get("ok"):
+                current = _safe_float(snap.get("bid")) or _safe_float(snap.get("mid"))
+                price_context = {
+                    "price_source": "alpaca_snapshot_bid" if _safe_float(snap.get("bid")) > 0 else "alpaca_snapshot_mid",
+                    "snapshot_bid": _safe_float(snap.get("bid")),
+                    "snapshot_mid": _safe_float(snap.get("mid")),
+                    "snapshot_last": _safe_float(snap.get("last")),
+                    "snapshot_mark": _safe_float(snap.get("mark")),
+                    "data_conflict": False,
+                }
+            pnl_pct = price_context.get("pnl_pct") if price_context else None
+            peak_basis = max(fill_price, current)
+            if pnl_pct is None or _safe_float(pnl_pct) > 0:
+                peak_basis = max(prior_peak, current, fill_price)
             exit_policy = options_ratchet_state(
                 entry_premium=fill_price,
                 current_bid=current,
-                peak_premium=max(prior_peak, current, fill_price),
+                peak_premium=peak_basis,
             )
             trade = {
                 "trade_id": f"opt-trade-{order.get('id')}",
@@ -861,6 +957,11 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
                 },
                 "status": "active" if symbol in position_symbols else "flat_no_position",
                 "exit_policy": exit_policy,
+                "current_premium": round(current, 2),
+                "unrealized_pnl": round(_safe_float(price_context.get("unrealized")), 2) if price_context and price_context.get("unrealized") is not None else None,
+                "unrealized_pct": round(_safe_float(pnl_pct), 2) if pnl_pct is not None else None,
+                "price_source": price_context.get("price_source") if price_context else None,
+                "price_context": price_context,
                 "last_synced_at": _now(),
             }
             await db.options_desk_trades.update_one(
@@ -1133,16 +1234,11 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         qty = _safe_int(p.get("qty"))
         if qty <= 0:
             continue
-        entry = _safe_float(p.get("avg_entry_price"))
-        if entry <= 0:
-            entry = _safe_float(p.get("cost_basis")) / max(1, qty * 100)
         snap = await _option_snapshot(symbol)
-        current = _safe_float(snap.get("bid") if snap.get("ok") else None)
-        if current <= 0:
-            current = _safe_float(snap.get("mark") if snap.get("ok") else None)
-        if current <= 0:
-            current = _safe_float(p.get("current_price"))
-        pnl_pct = ((current - entry) / entry * 100.0) if entry > 0 and current > 0 else None
+        price_context = _option_position_context(p, snap)
+        entry = _safe_float(price_context.get("entry"))
+        current = _safe_float(price_context.get("current"))
+        pnl_pct = price_context.get("pnl_pct")
         existing = await db.options_desk_orders.find_one(
             {"$or": [{"order.symbol": symbol}, {"candidate.instrument.symbol": symbol}, {"candidate.instrument.contractSymbol": symbol}]},
             {"_id": 0, "exit_policy": 1},
@@ -1157,10 +1253,13 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         if trade_doc and trade_doc.get("exit_policy"):
             prior_exit = trade_doc.get("exit_policy") or prior_exit
         prior_peak = _safe_float(prior_exit.get("peak_premium")) or entry
-        ratchet = options_ratchet_state(entry_premium=entry, current_bid=current, peak_premium=max(prior_peak, current))
+        peak_basis = max(entry, current)
+        if pnl_pct is None or _safe_float(pnl_pct) > 0:
+            peak_basis = max(prior_peak, current, entry)
+        ratchet = options_ratchet_state(entry_premium=entry, current_bid=current, peak_premium=peak_basis)
         theta = snap.get("theta") if snap.get("ok") else None
         theta_pct = (float(theta) / current * 100.0) if theta is not None and current > 0 else None
-        hard_stop = bool(pnl_pct is not None and pnl_pct <= OPTIONS_HARD_STOP_PCT)
+        hard_stop = bool(pnl_pct is not None and _safe_float(pnl_pct) <= OPTIONS_HARD_STOP_PCT)
         check = {
             "symbol": symbol,
             "qty": qty,
@@ -1174,14 +1273,24 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
             "hard_stop_triggered": hard_stop,
             "ratchet": ratchet,
             "snapshot": snap,
+            "price_source": price_context.get("price_source"),
+            "position_unrealized_plpc": price_context.get("position_unrealized_plpc"),
+            "position_unrealized_pl": price_context.get("position_unrealized_pl"),
+            "snapshot_bid": price_context.get("snapshot_bid"),
+            "snapshot_mid": price_context.get("snapshot_mid"),
+            "snapshot_last": price_context.get("snapshot_last"),
+            "snapshot_mark": price_context.get("snapshot_mark"),
+            "data_conflict": price_context.get("data_conflict"),
             "checked_at": _now(),
         }
-        unrealized = round((current - entry) * qty * 100, 2) if entry > 0 and current > 0 else None
+        unrealized = round(_safe_float(price_context.get("unrealized")), 2) if price_context.get("unrealized") is not None else None
         ticker = (trade_doc or {}).get("ticker") or (_parse_occ_symbol(symbol) or {}).get("root") or symbol
         previous_notified_floor = _safe_float((((trade_doc or {}).get("telegram") or {}).get("last_ratchet_floor_pct")), OPTIONS_INITIAL_STOP_PCT)
         current_floor = _safe_float(ratchet.get("locked_floor_pct"), OPTIONS_INITIAL_STOP_PCT)
+        ratchet_notification_allowed = bool(pnl_pct is not None and _safe_float(pnl_pct) > 0 and current > entry)
         if (
             trade_doc
+            and ratchet_notification_allowed
             and current_floor > previous_notified_floor
             and current_floor > OPTIONS_INITIAL_STOP_PCT
             and not (((trade_doc.get("telegram") or {}).get(f"ratchet_{current_floor:g}_sent")))
@@ -1208,6 +1317,8 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
                 "current_premium": round(current, 2),
                 "unrealized_pnl": unrealized,
                 "unrealized_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+                "price_source": price_context.get("price_source"),
+                "price_context": price_context,
                 "theta": check["theta"],
                 "theta_pct_of_premium": check["theta_pct_of_premium"],
                 "theta_status": check["theta_status"],

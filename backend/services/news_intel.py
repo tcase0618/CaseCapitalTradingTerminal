@@ -49,6 +49,45 @@ MARKET_FEEDS = [
     },
 ]
 
+DISCOVERY_FEEDS = [
+    {
+        "key": "google_market_movers",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=stock%20surges%20OR%20stock%20jumps%20OR%20shares%20rise%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
+        "key": "google_earnings_breakout",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=earnings%20beat%20raises%20guidance%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
+        "key": "google_fda_catalyst",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=FDA%20approval%20biotech%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
+        "key": "google_contract_awards",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=defense%20contract%20award%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
+        "key": "google_sec_catalysts",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=8-K%20offering%20acquisition%20NASDAQ%20NYSE%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+]
+
+TICKER_STOPLIST = {
+    "A", "AI", "CEO", "CFO", "COO", "CTO", "USA", "US", "UK", "EU", "SEC",
+    "FDA", "GDP", "CPI", "PPI", "IPO", "ETF", "EPS", "Q1", "Q2", "Q3", "Q4",
+    "THE", "AND", "FOR", "INC", "LLC", "CORP", "NYSE", "NASDAQ", "AMEX",
+}
+
 URGENT_TERMS = {
     "halt": 18,
     "sec filing": 10,
@@ -216,6 +255,10 @@ def _build_feeds(universe: list[dict[str, str]]) -> list[dict[str, Any]]:
     return feeds
 
 
+def _build_discovery_feeds() -> list[dict[str, Any]]:
+    return [*MARKET_FEEDS, *DISCOVERY_FEEDS]
+
+
 def _map_tickers(article: dict[str, Any], universe: list[dict[str, str]]) -> list[str]:
     haystack = f"{article.get('title', '')} {article.get('summary', '')}".upper()
     mapped: set[str] = set()
@@ -229,6 +272,22 @@ def _map_tickers(article: dict[str, Any], universe: list[dict[str, str]]) -> lis
         elif company and len(company) > 4 and company in haystack:
             mapped.add(ticker)
     return sorted(mapped)
+
+
+def _extract_discovery_tickers(article: dict[str, Any], active_tickers: set[str]) -> list[str]:
+    haystack = f"{article.get('title', '')} {article.get('summary', '')}"
+    candidates: set[str] = set()
+    patterns = [
+        r"\b(?:NYSE|NASDAQ|AMEX|NYSEAMERICAN|OTC)\s*:\s*([A-Z][A-Z0-9.]{0,5})\b",
+        r"\$([A-Z][A-Z0-9.]{0,5})\b",
+        r"\(([A-Z][A-Z0-9.]{0,5})\)",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, haystack):
+            ticker = str(match).upper().strip(".")
+            if ticker and ticker not in TICKER_STOPLIST and ticker not in active_tickers:
+                candidates.add(ticker)
+    return sorted(candidates)[:6]
 
 
 def _score_article(article: dict[str, Any], mapped: list[str]) -> dict[str, Any]:
@@ -302,16 +361,19 @@ def _dedupe(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]:
+async def latest(force_refresh: bool = False, limit: int = 60, lane: str = "active") -> dict[str, Any]:
+    lane = "discovery" if str(lane or "").lower() == "discovery" else "active"
     db = get_db()
-    cached = await db.bot_state.find_one({"_id": "news_intel_latest"}, {"_id": 0})
+    cache_key = f"news_intel_latest_{lane}"
+    cached = await db.bot_state.find_one({"_id": cache_key}, {"_id": 0})
     if cached and not force_refresh:
         generated = _parse_dt(cached.get("generated_at"))
         if generated and (_now() - generated).total_seconds() < CACHE_TTL_SECONDS:
             return {**cached, "cache": "hit"}
 
     universe = await _active_universe()
-    feeds = _build_feeds(universe)
+    active_tickers = {row["ticker"] for row in universe}
+    feeds = _build_discovery_feeds() if lane == "discovery" else _build_feeds(universe)
     async with httpx.AsyncClient(timeout=TIMEOUT, headers=HEADERS, follow_redirects=True) as client:
         feed_results = await asyncio.gather(*[_fetch_feed(client, feed) for feed in feeds])
 
@@ -321,13 +383,16 @@ async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]
 
     deduped = _dedupe(articles)
     for article in deduped:
-        mapped = _map_tickers(article, universe)
+        mapped = _extract_discovery_tickers(article, active_tickers) if lane == "discovery" else _map_tickers(article, universe)
         scored = _score_article(article, mapped)
         article.update(scored)
         article["tickers"] = mapped
+        article["newswire_lane"] = lane
 
     stale_rows = [row for row in deduped if not _is_fresh_article(row)]
     fresh_rows = [row for row in deduped if _is_fresh_article(row)]
+    if lane == "discovery":
+        fresh_rows = [row for row in fresh_rows if row.get("tickers") or row.get("score", 0) >= 70]
     fresh_rows.sort(key=lambda row: (row.get("score") or 0, -(row.get("age_minutes") or 999999)), reverse=True)
     rows = fresh_rows[: max(1, min(int(limit or 60), 120))]
     live_sources = [r for r in feed_results if r.get("ok")]
@@ -338,6 +403,7 @@ async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]
         "generated_at": _now().isoformat(),
         "cache": "refresh",
         "provider": "free_rss",
+        "lane": lane,
         "source_note": "Free RSS only: Yahoo Finance ticker feeds, Google News ticker searches, CNBC, MarketWatch.",
         "universe": universe,
         "source_count": len(feeds),
@@ -356,6 +422,6 @@ async def latest(force_refresh: bool = False, limit: int = 60) -> dict[str, Any]
         "articles": rows,
     }
 
-    await db.bot_state.update_one({"_id": "news_intel_latest"}, {"$set": payload}, upsert=True)
+    await db.bot_state.update_one({"_id": cache_key}, {"$set": payload}, upsert=True)
     await db.news_intel_snapshots.insert_one(stamped(payload))
     return payload

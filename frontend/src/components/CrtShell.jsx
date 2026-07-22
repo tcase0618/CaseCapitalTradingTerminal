@@ -240,23 +240,44 @@ function useLiveAlertCounts() {
 }
 
 function useNewsStrip() {
-  const [state, setState] = useState({ items: [], loading: true, cache: "SYNC" });
+  const [state, setState] = useState({
+    active: { items: [], loading: true, cache: "SYNC" },
+    discovery: { items: [], loading: true, cache: "SYNC" },
+  });
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const { data } = await axios.get(`${API}/news_intel/latest`, {
-          params: { limit: 18 },
-          timeout: 7000,
-        });
+        const [active, discovery] = await Promise.all([
+          axios.get(`${API}/news_intel/latest`, {
+            params: { limit: 18, lane: "active" },
+            timeout: 7000,
+          }).then(res => res.data).catch(() => null),
+          axios.get(`${API}/news_intel/latest`, {
+            params: { limit: 18, lane: "discovery" },
+            timeout: 7000,
+          }).then(res => res.data).catch(() => null),
+        ]);
         if (cancelled) return;
         setState({
-          items: Array.isArray(data?.articles) ? data.articles.slice(0, 14) : [],
-          loading: false,
-          cache: data?.cache || "LIVE",
+          active: {
+            items: Array.isArray(active?.articles) ? active.articles.slice(0, 14) : [],
+            loading: false,
+            cache: active?.cache || (active ? "LIVE" : "DOWN"),
+          },
+          discovery: {
+            items: Array.isArray(discovery?.articles) ? discovery.articles.slice(0, 14) : [],
+            loading: false,
+            cache: discovery?.cache || (discovery ? "LIVE" : "DOWN"),
+          },
         });
       } catch {
-        if (!cancelled) setState(prev => ({ ...prev, loading: false, cache: "DOWN" }));
+        if (!cancelled) {
+          setState({
+            active: { items: [], loading: false, cache: "DOWN" },
+            discovery: { items: [], loading: false, cache: "DOWN" },
+          });
+        }
       }
     };
     load();
@@ -266,7 +287,7 @@ function useNewsStrip() {
   return state;
 }
 
-function GlobalNewsStrip({ items, loading, cache }) {
+function GlobalNewsStrip({ label = "NEWSWIRE", items, loading, cache, accentColor = accent2, speed = 42 }) {
   const tape = Array.isArray(items) ? items : [];
   const loopTape = tape.length ? [...tape, ...tape] : [];
   return (
@@ -284,17 +305,17 @@ function GlobalNewsStrip({ items, loading, cache }) {
       boxShadow: "0 8px 22px rgba(0,0,0,0.24)",
     }}>
       <div style={{
-        color: accent2,
+        color: accentColor,
         fontSize: 9,
         letterSpacing: "0.22em",
         fontWeight: 900,
         whiteSpace: "nowrap",
       }}>
-        NEWSWIRE
+        {label}
       </div>
       <div style={{ overflow: "hidden", position: "relative" }}>
         {tape.length ? (
-          <div className="newswire-marquee">
+          <div className="newswire-marquee" style={{ animationDuration: `${speed}s` }}>
             {loopTape.map((item, idx) => {
               const ticker = cleanNewsTicker(item?.tickers?.[0]);
               const tone = item?.bias === "BULLISH" ? "bullish" : item?.bias === "BEARISH" ? "bearish" : item?.tone || "neutral";
@@ -319,7 +340,7 @@ function GlobalNewsStrip({ items, loading, cache }) {
           </div>
         ) : (
           <span style={{ color: loading ? accent : muted, fontSize: 10, letterSpacing: "0.12em" }}>
-            {loading ? "SYNCING FREE NEWSWIRE..." : "NO MAPPED HEADLINES ON THE TAPE"}
+            {loading ? `SYNCING ${label}...` : "NO MAPPED HEADLINES ON THE TAPE"}
           </span>
         )}
       </div>
@@ -606,7 +627,22 @@ export function CrtShell({ title, children, headerRight = null }) {
           {/* Sticky system bar */}
           <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
             <SystemBar />
-            <GlobalNewsStrip items={newsStrip.items} loading={newsStrip.loading} cache={newsStrip.cache} />
+            <GlobalNewsStrip
+              label="ACTIVE"
+              items={newsStrip.active.items}
+              loading={newsStrip.active.loading}
+              cache={newsStrip.active.cache}
+              accentColor={accent2}
+              speed={42}
+            />
+            <GlobalNewsStrip
+              label="DISCOVERY"
+              items={newsStrip.discovery.items}
+              loading={newsStrip.discovery.loading}
+              cache={newsStrip.discovery.cache}
+              accentColor={accent}
+              speed={54}
+            />
           </div>
 
           {/* Page header */}

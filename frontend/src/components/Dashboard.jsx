@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, SystemBar, tokens as crtTokens } from "./CrtShell";
 
-const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const cls = (...x) => x.filter(Boolean).join(" ");
 
 const fmtPrice = (v) => (v == null ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
@@ -123,6 +123,8 @@ export default function Dashboard() {
   const [squeezeLb, setSqueezeLb] = useState([]);
   const [fyStatus, setFyStatus] = useState({ fy_multiplier_active: false, days_to_fy_end: 0 });
   const [preview, setPreview] = useState(null);
+  const [kronosCard, setKronosCard] = useState(null);
+  const [kronosLoading, setKronosLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [dispatching, setDispatching] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -153,6 +155,20 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
+
+  useEffect(() => {
+    if (!selected) {
+      setKronosCard(null);
+      return;
+    }
+    let cancelled = false;
+    setKronosLoading(true);
+    axios.get(`${API}/kronos/battle_card/${selected}`)
+      .then(r => { if (!cancelled) setKronosCard(r.data); })
+      .catch(e => { if (!cancelled) setKronosCard({ error: e.message }); })
+      .finally(() => { if (!cancelled) setKronosLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected]);
 
   const runScan = async () => {
     setScanning(true);
@@ -478,6 +494,11 @@ export default function Dashboard() {
                   }}>{risk.level || "?"}</div>
                   {sq.score != null && <div style={{ fontSize: 10, color: labelLight, letterSpacing: "0.06em" }}>SQZ {sq.score}/100</div>}
                 </div>
+                {isSel && (
+                  <div style={{ gridColumn: "1 / -1", borderTop: hairlineLight, background: "#08080d", padding: "14px 18px 18px" }}>
+                    <ScannerKronosBattleCard loading={kronosLoading} payload={kronosCard} fallbackRow={r} />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -626,6 +647,171 @@ export default function Dashboard() {
   );
 }
 
+function ScannerKronosBattleCard({ loading, payload, fallbackRow }) {
+  const card = payload?.battle_card || {};
+  const probs = card.probabilities || {};
+  const horizons = card.horizons || {};
+  const exit = card.exit_forecast || {};
+  const tt = fallbackRow?.time_target || {};
+  const holdLow = Number(tt.hold_period_low || 0);
+  const holdHigh = Number(tt.hold_period_high || 0);
+  const holdMid = holdLow && holdHigh ? Math.round((holdLow + holdHigh) / 2) : Number(fallbackRow?.hold_window_days || 0);
+  const holdLabel = holdLow && holdHigh
+    ? `${holdLow}-${holdHigh} DAY SCANNER HOLD CONE`
+    : holdMid
+      ? `${holdMid} DAY SCANNER HOLD CONE`
+      : "SCANNER HOLD CONE";
+  const oneDay = horizons["1D"] || scannerConeFromBase(card.forecast_pct, 1, card.instrument);
+  const holdCone = holdMid
+    ? scannerConeFromBase(card.forecast_pct, Math.max(1, holdMid), card.instrument)
+    : horizons["10D"] || scannerConeFromBase(card.forecast_pct, 10, card.instrument);
+  if (loading) return <div style={scannerBattleEmpty}>LOADING KRONOS FORECAST...</div>;
+  if (payload?.error) return <div style={scannerBattleEmpty}>KRONOS DEGRADED: {payload.error}</div>;
+  return (
+    <div style={scannerKronosBox}>
+      <div style={scannerKronosHeader}>
+        <div>
+          <div style={scannerBattleLabel}>KRONOS FORECAST BOX</div>
+          <div style={{ color: accent, fontSize: 18, fontWeight: 900, letterSpacing: "0.08em" }}>
+            ${card.ticker || fallbackRow?.ticker} / {card.forecast_bias || "UNKNOWN"}
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(82px, 1fr))", gap: 8, minWidth: 280 }}>
+          <ScannerMini label="SCORE" value={card.kronos_score ?? "-"} color={accent} />
+          <ScannerMini label="CONF" value={card.confidence == null ? "-" : `${card.confidence}%`} color="#5eead4" />
+          <ScannerMini label="PM" value={card.pm_action || "UNMAPPED"} color={card.aligned_with_pm ? "#4ade80" : "#fbbf24"} />
+        </div>
+      </div>
+
+      <div style={scannerConeGrid}>
+        <ScannerForecastCone title="1 DAY FORECAST CONE" cone={oneDay} price={fallbackRow?.price} />
+        <ScannerForecastCone
+          title={holdLabel}
+          cone={holdCone}
+          price={fallbackRow?.price}
+          sub={holdLow && holdHigh ? `Midpoint estimate uses day ${holdMid}` : "Nearest Kronos horizon"}
+        />
+      </div>
+
+      <div style={scannerBattleGrid}>
+      <div style={scannerBattlePanel}>
+        <div style={scannerBattleLabel}>ATTRIBUTION</div>
+        {(card.attribution || []).map(a => (
+          <div key={a.factor} style={scannerAttributionRow}>
+            <span>{a.factor}</span>
+            <div style={scannerTrack}><div style={{ ...scannerFill, width: `${Math.max(4, Number(a.weight || 0))}%` }} /></div>
+            <strong>{a.state}</strong>
+          </div>
+        ))}
+      </div>
+      <div style={scannerBattlePanel}>
+        <div style={scannerBattleLabel}>PROBABILITY GRID</div>
+        {[
+          ["+5%", probs.plus_5],
+          ["+10%", probs.plus_10],
+          ["-5%", probs.minus_5],
+          ["-10%", probs.minus_10],
+          ["STOP", probs.stop_hit],
+          ["RATCHET", probs.ratchet_hit],
+        ].map(([k, v]) => (
+          <div key={k} style={scannerProbRow}>
+            <span>{k}</span>
+            <strong style={{ color: Number(v || 0) >= 50 ? "#4ade80" : Number(v || 0) >= 30 ? "#fbbf24" : muted }}>{v == null ? "-" : `${v}%`}</strong>
+          </div>
+        ))}
+      </div>
+      <div style={scannerBattlePanel}>
+        <div style={scannerBattleLabel}>HORIZONS / EXIT</div>
+        {Object.entries(horizons).slice(0, 5).map(([k, h]) => (
+          <div key={k} style={scannerProbRow}>
+            <span>{k}</span>
+            <strong>{signedDash(h.low_pct)} / {signedDash(h.base_pct)} / {signedDash(h.high_pct)}</strong>
+          </div>
+        ))}
+        <div style={{ ...scannerProbRow, marginTop: 8 }}>
+          <span>EXIT</span>
+          <strong style={{ color: "#5eead4" }}>{exit.style || "ADVISORY"}</strong>
+        </div>
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function ScannerForecastCone({ title, cone, price, sub }) {
+  const low = Number(cone?.low_pct ?? 0);
+  const base = Number(cone?.base_pct ?? 0);
+  const high = Number(cone?.high_pct ?? 0);
+  const maxAbs = Math.max(1, Math.abs(low), Math.abs(base), Math.abs(high));
+  const lowPx = price ? price * (1 + low / 100) : null;
+  const basePx = price ? price * (1 + base / 100) : null;
+  const highPx = price ? price * (1 + high / 100) : null;
+  return (
+    <div style={scannerConeBox}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+        <div>
+          <div style={scannerBattleLabel}>{title}</div>
+          {sub && <div style={{ color: muted, fontSize: 9, marginTop: 3 }}>{sub}</div>}
+        </div>
+        <strong style={{ color: base >= 0 ? "#4ade80" : "#f87171", fontSize: 14 }}>{signedDash(base)}</strong>
+      </div>
+      <div style={scannerConeTrack}>
+        <div style={{ ...scannerConeZero, left: "50%" }} />
+        <div style={{
+          ...scannerConeRange,
+          left: `${50 + (low / maxAbs) * 45}%`,
+          width: `${Math.max(2, ((high - low) / (maxAbs * 2)) * 90)}%`,
+        }} />
+        <div style={{
+          ...scannerConeBase,
+          left: `${50 + (base / maxAbs) * 45}%`,
+          background: base >= 0 ? "#4ade80" : "#f87171",
+        }} />
+      </div>
+      <div style={scannerConeLabels}>
+        <span>{signedDash(low)} {lowPx ? `$${lowPx.toFixed(2)}` : ""}</span>
+        <span>{signedDash(base)} {basePx ? `$${basePx.toFixed(2)}` : ""}</span>
+        <span>{signedDash(high)} {highPx ? `$${highPx.toFixed(2)}` : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+function ScannerMini({ label, value, color }) {
+  return (
+    <div style={{ border: hairlineLight, background: "rgba(255,255,255,0.018)", padding: 10, minWidth: 0 }}>
+      <div style={{ color: dim, fontSize: 8, letterSpacing: "0.12em" }}>{label}</div>
+      <div style={{ color, fontSize: 15, fontWeight: 900, marginTop: 5, overflowWrap: "anywhere" }}>{value}</div>
+    </div>
+  );
+}
+
+function signedDash(v) {
+  if (v == null) return "-";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function forecastColor(v) {
+  if (v === "BULLISH") return "#4ade80";
+  if (v === "BEARISH") return "#f87171";
+  if (v === "HEDGE") return "#a78bfa";
+  return "#fbbf24";
+}
+
+function scannerConeFromBase(basePct, days, instrument) {
+  const base = Number(basePct || 0);
+  const root = Math.sqrt(Math.max(1, days));
+  const vol = instrument === "OPTION" ? 4.8 : 1.15;
+  const scaled = base * Math.min(6, root / Math.sqrt(5));
+  return {
+    low_pct: Number((scaled - vol * root).toFixed(2)),
+    base_pct: Number(scaled.toFixed(2)),
+    high_pct: Number((scaled + vol * root).toFixed(2)),
+  };
+}
+
 function CollapsiblePanel({ title, children, isOpen, onToggle, testid, action = null }) {
   return (
     <div data-testid={testid} style={{ borderBottom: hairlineLight }}>
@@ -646,3 +832,148 @@ function CollapsiblePanel({ title, children, isOpen, onToggle, testid, action = 
     </div>
   );
 }
+
+const scannerBattleTabs = {
+  display: "flex",
+  gap: 8,
+  marginBottom: 12,
+};
+
+const scannerBattleTab = {
+  border: hairlineLight,
+  background: "rgba(255,255,255,0.018)",
+  padding: "7px 10px",
+  fontSize: 9,
+  letterSpacing: "0.13em",
+  fontWeight: 900,
+};
+
+const scannerBattleGrid = {
+  display: "grid",
+  gridTemplateColumns: "minmax(230px, 1fr) minmax(190px, 0.75fr) minmax(230px, 1fr)",
+  gap: 12,
+};
+
+const scannerKronosBox = {
+  border: "0.5px solid rgba(94,234,212,0.35)",
+  background: "linear-gradient(180deg, rgba(94,234,212,0.045), rgba(255,255,255,0.012))",
+  padding: 14,
+};
+
+const scannerKronosHeader = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "start",
+  gap: 14,
+  marginBottom: 12,
+};
+
+const scannerConeGrid = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 12,
+  marginBottom: 12,
+};
+
+const scannerConeBox = {
+  border: hairlineLight,
+  background: "rgba(0,0,0,0.22)",
+  padding: 12,
+  minWidth: 0,
+};
+
+const scannerConeTrack = {
+  height: 18,
+  position: "relative",
+  background: "rgba(255,255,255,0.045)",
+  overflow: "hidden",
+  marginTop: 8,
+};
+
+const scannerConeZero = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  width: 1,
+  background: "rgba(255,255,255,0.22)",
+};
+
+const scannerConeRange = {
+  position: "absolute",
+  top: 4,
+  bottom: 4,
+  background: "linear-gradient(90deg, rgba(248,113,113,0.5), rgba(250,204,21,0.35), rgba(74,222,128,0.5))",
+  border: "0.5px solid rgba(255,255,255,0.14)",
+};
+
+const scannerConeBase = {
+  position: "absolute",
+  top: 1,
+  bottom: 1,
+  width: 3,
+};
+
+const scannerConeLabels = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 8,
+  color: muted,
+  fontSize: 9,
+  marginTop: 8,
+};
+
+const scannerBattlePanel = {
+  border: hairlineLight,
+  background: "rgba(255,255,255,0.018)",
+  padding: 12,
+  minWidth: 0,
+};
+
+const scannerBattleLabel = {
+  color: "#5eead4",
+  fontSize: 8,
+  letterSpacing: "0.16em",
+  fontWeight: 900,
+  marginBottom: 10,
+};
+
+const scannerBattleEmpty = {
+  color: muted,
+  fontSize: 11,
+  padding: 14,
+  border: hairlineLight,
+  background: "rgba(255,255,255,0.018)",
+};
+
+const scannerAttributionRow = {
+  display: "grid",
+  gridTemplateColumns: "92px minmax(0, 1fr) 60px",
+  gap: 8,
+  alignItems: "center",
+  color: muted,
+  fontSize: 10,
+  padding: "6px 0",
+  borderTop: hairlineLight,
+};
+
+const scannerTrack = {
+  height: 5,
+  background: "rgba(255,255,255,0.06)",
+  overflow: "hidden",
+};
+
+const scannerFill = {
+  height: "100%",
+  background: "#5eead4",
+  boxShadow: "0 0 8px rgba(94,234,212,0.35)",
+};
+
+const scannerProbRow = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 10,
+  borderTop: hairlineLight,
+  padding: "7px 0",
+  color: muted,
+  fontSize: 10,
+};
