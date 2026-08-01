@@ -5,6 +5,7 @@ import logging
 import os
 from datetime import datetime
 
+import httpx
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -23,22 +24,43 @@ _scheduler: AsyncIOScheduler | None = None
 ET = pytz.timezone("America/New_York")
 
 
-def _regular_market_hours_now() -> tuple[bool, str]:
+async def _scan_market_day_now() -> tuple[bool, str]:
     now_et = datetime.now(ET)
     if now_et.weekday() >= 5:
         return False, f"weekend ({now_et.strftime('%A')})"
-    minutes = now_et.hour * 60 + now_et.minute
-    market_open = 9 * 60 + 30
-    market_close = 16 * 60
-    if minutes < market_open or minutes >= market_close:
-        return False, f"outside regular market hours ({now_et.strftime('%H:%M %Z')})"
-    return True, "regular market hours"
+
+    key = os.environ.get("APCA_API_KEY_ID", "").strip()
+    secret = os.environ.get("APCA_API_SECRET_KEY", "").strip()
+    base = os.environ.get("APCA_API_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
+    if base.endswith("/v2"):
+        base = base[:-3]
+    if not key or not secret:
+        return True, "weekday fallback; Alpaca calendar unavailable"
+
+    date_str = now_et.date().isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=4.0, headers={
+            "APCA-API-KEY-ID": key,
+            "APCA-API-SECRET-KEY": secret,
+        }) as client:
+            resp = await client.get(
+                f"{base}/v2/calendar",
+                params={"start": date_str, "end": date_str},
+            )
+            resp.raise_for_status()
+            sessions = resp.json() or []
+        if sessions:
+            return True, f"market session day ({date_str})"
+        return False, f"market closed ({date_str})"
+    except Exception as exc:
+        logger.warning("Alpaca market calendar check failed; weekday fallback: %s", exc)
+        return True, f"weekday fallback after calendar check failed ({date_str})"
 
 
 async def _daily_scan_job():
     try:
-        market_open, reason = _regular_market_hours_now()
-        if not market_open:
+        market_day, reason = await _scan_market_day_now()
+        if not market_day:
             await log_activity(f"Scheduled full scan skipped: {reason}", "info")
             return
         scan = await scanner.run_scan(triggered_by="scheduler")
@@ -240,16 +262,13 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return
     _scheduler = AsyncIOScheduler(timezone=ET)
-    # Full scanner runs only during regular US market hours. Other data jobs
-    # remain independent and can continue outside scan windows.
-    for tag, hr, minute in [
-        ("market_open_scan", 9, 35),
-        ("midday_scan", 13, 0),
-        ("preclose_scan_main", 15, 30),
-    ]:
+    # Original fixed scan cadence, restricted to market-session days by the
+    # runtime guard in _daily_scan_job.
+    for tag, hr in [("midnight_scan", 0), ("morning_scan", 8),
+                      ("midday_scan", 13), ("evening_scan", 18)]:
         _scheduler.add_job(
             _daily_scan_job,
-            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
+            CronTrigger(day_of_week="mon-fri", hour=hr, minute=0, timezone=ET),
             id=tag, replace_existing=True,
         )
     # v5.1 — auto-digest goes out 5 min after each scheduled scan
@@ -264,15 +283,11 @@ def start_scheduler():
                 await _ts.send_message(_ts.format_scan_summary(scan), chat_id=chat_id)
         except Exception as e:
             logger.warning("digest job: %s", e)
-    for tag, hr, minute in [
-        ("digest_market_open", 9, 40),
-        ("digest_midday_legacy", 12, 6),
-        ("digest_midday", 13, 5),
-        ("digest_preclose", 15, 35),
-    ]:
+    for tag, hr in [("digest_midnight", 0), ("digest_morning", 8),
+                      ("digest_midday", 13), ("digest_evening", 18)]:
         _scheduler.add_job(
             _telegram_digest_job,
-            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
+            CronTrigger(day_of_week="mon-fri", hour=hr, minute=5, timezone=ET),
             id=tag, replace_existing=True,
         )
     _scheduler.add_job(
@@ -343,6 +358,13 @@ def start_scheduler():
         _daily_scan_job,
         CronTrigger(day_of_week="mon-fri", hour=12, minute=1, timezone=ET),
         id="midday_scan_legacy",
+        replace_existing=True,
+    )
+    # Pre-close scan — 15:30 ET Mon-Fri
+    _scheduler.add_job(
+        _daily_scan_job,
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=ET),
+        id="preclose_scan",
         replace_existing=True,
     )
     # v5.0 — regime gate every 30 min during market hours
