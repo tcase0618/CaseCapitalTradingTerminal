@@ -33,6 +33,22 @@ def _now_iso() -> str:
     return _now().isoformat()
 
 
+def _market_day_now_et() -> bool:
+    """Fast local market-day guard for QC.
+
+    Scheduler still uses Alpaca calendar for the actual scan decision. QC should
+    not hard-block the terminal on weekends because the stock scan is correctly
+    skipped then, while positions/options/news can continue refreshing.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        return now_et.weekday() < 5
+    except Exception:
+        return True
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
@@ -87,6 +103,7 @@ def _qc_row(
     refresh: str | None = None,
     blocks_trading: bool | None = None,
     auto_fix: str | None = None,
+    execution_scopes: list[str] | None = None,
 ) -> dict[str, Any]:
     warnings = warnings or []
     blocks = bool(blocks_trading) if blocks_trading is not None else bool(critical and status in {"STALE", "MISSING", "DOWN"})
@@ -97,6 +114,7 @@ def _qc_row(
         "score": _score_row(status, critical, len(warnings)),
         "critical": critical,
         "blocks_trading": blocks,
+        "execution_scopes": execution_scopes or (["system"] if blocks else []),
         "source": source,
         "fetched_at": fetched_at,
         "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
@@ -131,6 +149,14 @@ async def _latest_scan_row() -> dict[str, Any]:
     age = _age_minutes(finished)
     status, _ = _status_from_age(age, CRITICAL_MAX_AGE_MINUTES["latest_scan"])
     count = len((scan or {}).get("results") or [])
+    market_day = _market_day_now_et()
+    blocks = status in {"MISSING", "DOWN"} or (market_day and status == "STALE")
+    warnings = []
+    detail = f"{count} latest rows"
+    if not market_day and status in {"STALE", "DOWN"}:
+        status = "WARN"
+        warnings.append("stock scan stale while market is closed; scheduler should refresh on next market day")
+        detail = f"{count} latest rows; market closed so stale stock scan is not execution-critical"
     return _qc_row(
         "latest_scan",
         "Latest Scanner Evidence",
@@ -139,8 +165,11 @@ async def _latest_scan_row() -> dict[str, Any]:
         source="scan_results",
         fetched_at=finished,
         age_minutes=age,
-        detail=f"{count} latest rows",
+        detail=detail,
+        warnings=warnings,
         refresh="/api/scan/run",
+        blocks_trading=blocks,
+        execution_scopes=["equity", "options"] if blocks else [],
     )
 
 
@@ -162,6 +191,7 @@ async def _live_positions_row() -> tuple[dict[str, Any], dict[str, Any]]:
         age_minutes=age,
         detail=detail,
         refresh="/api/position_monitor/refresh",
+        execution_scopes=["equity", "options"] if status in {"STALE", "MISSING", "DOWN"} else [],
     )
     return row, latest
 
@@ -194,6 +224,7 @@ async def _options_risk_row() -> dict[str, Any]:
         warnings=warnings,
         refresh="/api/options_desk/risk/check",
         blocks_trading=status in {"STALE", "MISSING", "DOWN"},
+        execution_scopes=["options"] if status in {"STALE", "MISSING", "DOWN"} else [],
     )
 
 
@@ -239,7 +270,13 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
             status = "WARN"
         else:
             status = "DOWN"
-        critical = item.get("key") in {"alpaca", "price_path", "london_strategic_edge", "edgar"}
+        critical = item.get("key") in {"alpaca", "price_path", "edgar"}
+        blocks = critical and status == "DOWN"
+        scopes = []
+        if blocks and item.get("key") in {"alpaca", "price_path"}:
+            scopes = ["equity"]
+        elif blocks:
+            scopes = ["equity", "options"]
         rows.append(_qc_row(
             f"integration:{item.get('key')}",
             item.get("name") or item.get("key"),
@@ -250,7 +287,8 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
             age_minutes=_age_minutes(item.get("last")),
             detail=str(item.get("detail") or item.get("reason") or "")[:180],
             warnings=[item.get("reason")] if item.get("reason") else [],
-            blocks_trading=critical and status == "DOWN",
+            blocks_trading=blocks,
+            execution_scopes=scopes,
         ))
     await db.bot_state.update_one(
         {"_id": "data_quality_integrations_cache"},
@@ -536,16 +574,35 @@ async def overview(force_refresh: bool = False, record_event: bool = True) -> di
 
     critical = [r for r in rows if r.get("critical")]
     blockers = [r for r in critical if r.get("blocks_trading")]
+    scoped_blockers = {
+        "system": [],
+        "equity": [],
+        "options": [],
+    }
+    for row in blockers:
+        scopes = row.get("execution_scopes") or ["system"]
+        if "all" in scopes:
+            scopes = ["system", "equity", "options"]
+        for scope in scopes:
+            if scope in scoped_blockers:
+                scoped_blockers[scope].append(row)
     fallback = [r for r in rows if r.get("status") == "FALLBACK"]
     warnings = [r for r in rows if r.get("status") == "WARN" or r.get("warnings")]
     avg_score = round(sum(r.get("score", 0) for r in rows) / max(1, len(rows)), 1)
     critical_score = round(sum(r.get("score", 0) for r in critical) / max(1, len(critical)), 1)
+    if scoped_blockers["system"]:
+        gate_decision = "BLOCK"
+    elif blockers:
+        gate_decision = "SCOPED_BLOCK"
+    else:
+        gate_decision = "ALLOW"
     trading_gate = {
-        "decision": "BLOCK" if blockers else "ALLOW",
+        "decision": gate_decision,
         "can_repull_fast": True,
         "max_gate_delay_ms": 1500,
         "policy": "Use fresh cached authority first; repull only stale critical sources; never wait on display-only feeds.",
         "blockers": blockers,
+        "scoped_blockers": {k: v[:12] for k, v in scoped_blockers.items()},
     }
     payload = {
         "ok": not blockers,

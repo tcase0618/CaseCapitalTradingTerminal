@@ -37,6 +37,24 @@ def _grade(score: float, blockers: int, warnings: int) -> str:
     return "F"
 
 
+def _scoped_qc_blockers(checks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    scoped: dict[str, list[dict[str, Any]]] = {
+        "system": [],
+        "equity": [],
+        "options": [],
+    }
+    for row in checks:
+        if not row.get("blocks_trading"):
+            continue
+        scopes = row.get("execution_scopes") or ["system"]
+        if "all" in scopes:
+            scopes = ["system", "equity", "options"]
+        for scope in scopes:
+            if scope in scoped:
+                scoped[scope].append(row)
+    return scoped
+
+
 def _execution_flags() -> dict[str, Any]:
     equity_enabled = os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
     options_enabled = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -74,32 +92,39 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
     flags = _execution_flags()
 
     qc_summary = qc.get("summary") or {}
+    qc_checks = qc.get("checks", []) or []
+    scoped_blockers = _scoped_qc_blockers(qc_checks)
     qc_score = _num(qc.get("critical_score") or qc.get("score"))
     blockers = int(qc_summary.get("blockers") or 0)
+    system_blockers = len(scoped_blockers.get("system") or [])
     warnings = int(qc_summary.get("warnings") or 0) + int(qc_summary.get("fallbacks") or 0) + (1 if single_letter else 0)
-    truth_grade = _grade(qc_score, blockers, warnings)
+    truth_grade = _grade(qc_score, system_blockers, warnings)
     pm_rows = pm.get("decisions") or pm.get("rows") or []
     opt_rows = options.get("candidates") or []
     court_rows = court.get("trials") or []
     option_ready = [r for r in opt_rows if r.get("manual_fire_ready")]
     option_research = [r for r in opt_rows if r.get("route") in {"OPTION", "BOTH"} and not r.get("manual_fire_ready")]
-    court_ready = [r for r in court_rows if r.get("live_run_ready")]
-    data_blocked = truth_grade in {"D", "F"} or (qc.get("trading_gate") or {}).get("decision") == "BLOCK"
+    court_ready = [r for r in court_rows if (r.get("judge") or {}).get("live_run_ready")]
+    qc_decision = (qc.get("trading_gate") or {}).get("decision")
+    data_blocked = qc_decision == "BLOCK" and bool(scoped_blockers.get("system"))
+    truth_decision = "BLOCK" if data_blocked else "WATCH" if truth_grade in {"C", "D", "F"} else "PASS"
 
     payload = {
         "ok": True,
         "generated_at": _now_iso(),
         "truth_grade": truth_grade,
         "tradable": not data_blocked,
-        "decision": "BLOCK" if data_blocked else "WATCH" if truth_grade == "C" else "PASS",
+        "decision": truth_decision,
         "execution": flags,
         "qc": {
             "score": qc.get("score"),
             "critical_score": qc.get("critical_score"),
             "gate": qc.get("trading_gate") or {},
             "summary": qc_summary,
-            "blockers": [r for r in qc.get("checks", []) if r.get("blocks_trading")][:12],
-            "warnings": [r for r in qc.get("checks", []) if r.get("warnings") or r.get("status") in {"WARN", "FALLBACK", "STALE"}][:12],
+            "blockers": [r for r in qc_checks if r.get("blocks_trading")][:12],
+            "scoped_blockers": {k: v[:12] for k, v in scoped_blockers.items()},
+            "scoped_blocker_counts": {k: len(v) for k, v in scoped_blockers.items()},
+            "warnings": [r for r in qc_checks if r.get("warnings") or r.get("status") in {"WARN", "FALLBACK", "STALE"}][:12],
         },
         "scan": {
             "finished_at": (latest_scan or {}).get("finished_at"),
@@ -126,7 +151,7 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
         "case_court": {
             "trials": len(court_rows),
             "live_ready": len(court_ready),
-            "needs_data": sum(1 for r in court_rows if str(r.get("posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
+            "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
         },
     }
     if persist:

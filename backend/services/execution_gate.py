@@ -94,11 +94,22 @@ async def check(
     truth = truth if truth is not None else await _truth_snapshot(force_refresh=force_refresh)
     truth_decision = str(truth.get("decision") or "UNKNOWN").upper()
     truth_grade = str(truth.get("truth_grade") or "UNKNOWN").upper()
-    if truth_decision == "BLOCK" or truth_grade in {"D", "F"}:
+    scoped_qc = ((truth.get("qc") or {}).get("scoped_blockers") or {})
+    if scope in {"equity", "options"}:
+        scoped_blockers = scoped_qc.get(scope, [])
+    else:
+        scoped_blockers = scoped_qc.get("system", [])
+    for row in scoped_blockers:
+        key = row.get("key") or row.get("label") or "quality"
+        blockers.append(f"qc:{key}")
+
+    if truth_decision == "BLOCK" and scope == "system":
         blockers.append(f"data_truth_block:{truth_grade or truth_decision}")
+    elif _env_bool("BLOCK_ON_LOW_TRUTH_GRADE") and truth_grade in {"D", "F"}:
+        blockers.append(f"low_truth_grade_strict_block:{truth_grade}")
     elif kills["qc_strict"] and truth_decision != "PASS":
         blockers.append(f"qc_strict_requires_pass:{truth_decision}")
-    elif truth_decision == "WATCH":
+    elif truth_decision == "WATCH" or truth_grade in {"C", "D", "F"}:
         warnings.append("data_truth_watch")
 
     execution = truth.get("execution") or {}
