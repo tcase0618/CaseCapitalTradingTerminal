@@ -86,7 +86,7 @@ export default function CaseCourtPage() {
         </div>
         <div style={commandMeta}>
           <Mini label="Authority" value="READ ONLY" color={accent2} />
-          <Mini label="Rubric" value={summary.rubric_version ? "V2 SCOPED" : "SYNCING"} color={accent} />
+          <Mini label="Rubric" value={summary.rubric_version ? "V2.1 UI" : "SYNCING"} color={accent} />
           <Mini label="Evidence Rule" value="N/A IS NEUTRAL" color="#a78bfa" />
         </div>
       </div>
@@ -137,13 +137,15 @@ export default function CaseCourtPage() {
           </div>
         </Card>
 
-        <div>
-          <Card title={selected ? `JUDGE RULING / ${selected.ticker}` : "JUDGE RULING"} accentColor={postureColors[selected?.judge?.advisory_posture] || accent2}>
-            {selected ? <Ruling trial={selected} /> : <Empty loading={loading} />}
-          </Card>
-
-          {tab === "DOCKET" ? (
+        <div className="case-court-main-panel">
+          {tab === "COURT DOCS" ? (
+            <CourtDocs trial={selected} loading={loading} />
+          ) : (
             <>
+              <Card title={selected ? `JUDGE RULING / ${selected.ticker}` : "JUDGE RULING"} accentColor={postureColors[selected?.judge?.advisory_posture] || accent2}>
+                {selected ? <Ruling trial={selected} /> : <Empty loading={loading} />}
+              </Card>
+
               <div style={lawyerGrid}>
                 <LawyerCard title="DEFENSE" side={selected?.defense} color="#4ade80" />
                 <LawyerCard title="PROSECUTOR" side={selected?.prosecution} color="#fb7185" />
@@ -161,8 +163,6 @@ export default function CaseCourtPage() {
                 ) : <Empty loading={loading} />}
               </Card>
             </>
-          ) : (
-            <CourtDocs trial={selected} loading={loading} />
           )}
         </div>
       </div>}
@@ -173,6 +173,7 @@ export default function CaseCourtPage() {
 function Ruling({ trial }) {
   const posture = trial.judge?.advisory_posture || "UNKNOWN";
   const color = postureColors[posture] || muted;
+  const expression = trial.judge?.expression_hint || "-";
   return (
     <div style={rulingGrid}>
       <div style={rulingMain}>
@@ -180,14 +181,15 @@ function Ruling({ trial }) {
         <div style={{ minWidth: 0 }}>
           <div style={smallLabel}>ADVISORY POSTURE</div>
           <div className="case-court-posture" style={{ color, fontSize: 26, fontWeight: 900, letterSpacing: "0.10em", lineHeight: 1.12, overflowWrap: "anywhere" }}>{labelPosture(posture)}</div>
+          <div style={expressionBadge}>EXPRESSION: {labelPosture(expression)}</div>
           <div style={{ color: labelLight, marginTop: 8, lineHeight: 1.5 }}>{trial.judge?.detail}</div>
         </div>
       </div>
       <div className="case-court-ruling-metrics" style={rulingMetrics}>
-        <Mini label="Expression Hint" value={trial.judge?.expression_hint || "-"} color={accent2} />
         <Mini label="Defense" value={trial.defense?.score ?? "-"} color="#4ade80" />
         <Mini label="Prosecutor" value={trial.prosecution?.score ?? "-"} color="#fb7185" />
         <Mini label="Scan Age" value={trial.scan_age_hours == null ? "-" : `${trial.scan_age_hours}H`} color={trial.scan_age_hours > 26 ? "#f87171" : accent} />
+        <Mini label="Decision Grade" value={trial.evidence_coverage?.decision_grade ? "YES" : "NO"} color={trial.evidence_coverage?.decision_grade ? "#4ade80" : "#fb7185"} />
       </div>
     </div>
   );
@@ -436,6 +438,20 @@ const evidenceRow = {
 const rulingGrid = { display: "grid", gridTemplateColumns: "1fr", gap: 10, alignItems: "stretch" };
 const rulingMain = { border: hairline, background: cardBgHi, padding: 16, display: "flex", gap: 14, alignItems: "flex-start", minWidth: 0 };
 const rulingMetrics = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 };
+const expressionBadge = {
+  display: "inline-flex",
+  maxWidth: "100%",
+  marginTop: 9,
+  padding: "5px 8px",
+  border: `0.5px solid ${accent2}55`,
+  background: "rgba(94,234,212,0.055)",
+  color: accent2,
+  fontSize: 11,
+  fontWeight: 900,
+  letterSpacing: "0.12em",
+  lineHeight: 1.25,
+  overflowWrap: "anywhere",
+};
 const miniBox = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12 };
 const witnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
 const witnessCard = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12, minHeight: 116 };
