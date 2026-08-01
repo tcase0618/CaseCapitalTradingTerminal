@@ -24,7 +24,7 @@ _scheduler: AsyncIOScheduler | None = None
 ET = pytz.timezone("America/New_York")
 
 
-async def _scan_market_day_now() -> tuple[bool, str]:
+async def _stock_scan_market_day_now() -> tuple[bool, str]:
     now_et = datetime.now(ET)
     if now_et.weekday() >= 5:
         return False, f"weekend ({now_et.strftime('%A')})"
@@ -59,9 +59,9 @@ async def _scan_market_day_now() -> tuple[bool, str]:
 
 async def _daily_scan_job():
     try:
-        market_day, reason = await _scan_market_day_now()
+        market_day, reason = await _stock_scan_market_day_now()
         if not market_day:
-            await log_activity(f"Scheduled full scan skipped: {reason}", "info")
+            await log_activity(f"Scheduled stock scan skipped: {reason}", "info")
             return
         scan = await scanner.run_scan(triggered_by="scheduler")
         await telegram_service.dispatch_consolidated(scan)
@@ -262,8 +262,9 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return
     _scheduler = AsyncIOScheduler(timezone=ET)
-    # Original fixed scan cadence, restricted to market-session days by the
-    # runtime guard in _daily_scan_job.
+    # Original fixed stock-scan cadence, restricted to market-session days by
+    # the runtime guard in _daily_scan_job. Other scheduled data pulls keep
+    # their own cadence and are not blocked by this stock-scan guard.
     for tag, hr in [("midnight_scan", 0), ("morning_scan", 8),
                       ("midday_scan", 13), ("evening_scan", 18)]:
         _scheduler.add_job(
