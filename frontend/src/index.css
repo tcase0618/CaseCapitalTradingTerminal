@@ -522,6 +522,13 @@ body {
   .case-court-tabs button {
     width: 100% !important;
   }
+  .case-court-ruling-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  .case-court-posture {
+    font-size: 21px !important;
+    line-height: 1.14 !important;
+  }
   .case-court-layout {
     grid-template-columns: 1fr !important;
     gap: 10px !important;
@@ -618,6 +625,12 @@ body {
   }
   .case-court-command-title {
     font-size: 17px !important;
+  }
+  .case-court-ruling-metrics {
+    grid-template-columns: 1fr !important;
+  }
+  .case-court-posture {
+    font-size: 18px !important;
   }
 }
 

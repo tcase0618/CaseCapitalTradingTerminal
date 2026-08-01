@@ -177,16 +177,18 @@ function Ruling({ trial }) {
     <div style={rulingGrid}>
       <div style={rulingMain}>
         <Gavel size={32} color={color} />
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div style={smallLabel}>ADVISORY POSTURE</div>
-          <div style={{ color, fontSize: 24, fontWeight: 900, letterSpacing: "0.14em" }}>{labelPosture(posture)}</div>
+          <div className="case-court-posture" style={{ color, fontSize: 26, fontWeight: 900, letterSpacing: "0.10em", lineHeight: 1.12, overflowWrap: "anywhere" }}>{labelPosture(posture)}</div>
           <div style={{ color: labelLight, marginTop: 8, lineHeight: 1.5 }}>{trial.judge?.detail}</div>
         </div>
       </div>
-      <Mini label="Expression Hint" value={trial.judge?.expression_hint || "-"} color={accent2} />
-      <Mini label="Defense" value={trial.defense?.score ?? "-"} color="#4ade80" />
-      <Mini label="Prosecutor" value={trial.prosecution?.score ?? "-"} color="#fb7185" />
-      <Mini label="Scan Age" value={trial.scan_age_hours == null ? "-" : `${trial.scan_age_hours}H`} color={trial.scan_age_hours > 26 ? "#f87171" : accent} />
+      <div className="case-court-ruling-metrics" style={rulingMetrics}>
+        <Mini label="Expression Hint" value={trial.judge?.expression_hint || "-"} color={accent2} />
+        <Mini label="Defense" value={trial.defense?.score ?? "-"} color="#4ade80" />
+        <Mini label="Prosecutor" value={trial.prosecution?.score ?? "-"} color="#fb7185" />
+        <Mini label="Scan Age" value={trial.scan_age_hours == null ? "-" : `${trial.scan_age_hours}H`} color={trial.scan_age_hours > 26 ? "#f87171" : accent} />
+      </div>
     </div>
   );
 }
@@ -431,8 +433,9 @@ const evidenceRow = {
   gap: 10,
   alignItems: "center",
 };
-const rulingGrid = { display: "grid", gridTemplateColumns: "minmax(260px, 1.4fr) repeat(4, minmax(105px, 1fr))", gap: 10, alignItems: "stretch" };
-const rulingMain = { border: hairline, background: cardBgHi, padding: 16, display: "flex", gap: 14, alignItems: "center" };
+const rulingGrid = { display: "grid", gridTemplateColumns: "1fr", gap: 10, alignItems: "stretch" };
+const rulingMain = { border: hairline, background: cardBgHi, padding: 16, display: "flex", gap: 14, alignItems: "flex-start", minWidth: 0 };
+const rulingMetrics = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 };
 const miniBox = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12 };
 const witnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
 const witnessCard = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12, minHeight: 116 };
