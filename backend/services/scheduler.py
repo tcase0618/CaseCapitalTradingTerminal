@@ -1,4 +1,4 @@
-"""APScheduler: 8AM ET daily scan + every-5min alert check + 15-min market-hours
+"""APScheduler: market-hours scans + every-5min alert check + 15-min
 options-flow refresh + nightly P&L returns refresh."""
 from __future__ import annotations
 import logging
@@ -23,8 +23,24 @@ _scheduler: AsyncIOScheduler | None = None
 ET = pytz.timezone("America/New_York")
 
 
+def _regular_market_hours_now() -> tuple[bool, str]:
+    now_et = datetime.now(ET)
+    if now_et.weekday() >= 5:
+        return False, f"weekend ({now_et.strftime('%A')})"
+    minutes = now_et.hour * 60 + now_et.minute
+    market_open = 9 * 60 + 30
+    market_close = 16 * 60
+    if minutes < market_open or minutes >= market_close:
+        return False, f"outside regular market hours ({now_et.strftime('%H:%M %Z')})"
+    return True, "regular market hours"
+
+
 async def _daily_scan_job():
     try:
+        market_open, reason = _regular_market_hours_now()
+        if not market_open:
+            await log_activity(f"Scheduled full scan skipped: {reason}", "info")
+            return
         scan = await scanner.run_scan(triggered_by="scheduler")
         await telegram_service.dispatch_consolidated(scan)
     except Exception as e:
@@ -224,12 +240,16 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return
     _scheduler = AsyncIOScheduler(timezone=ET)
-    # v5.0 — four fixed daily scans: midnight, 8am, 1pm, 6pm ET
-    for tag, hr in [("midnight_scan", 0), ("morning_scan", 8),
-                      ("midday_scan", 13), ("evening_scan", 18)]:
+    # Full scanner runs only during regular US market hours. Other data jobs
+    # remain independent and can continue outside scan windows.
+    for tag, hr, minute in [
+        ("market_open_scan", 9, 35),
+        ("midday_scan", 13, 0),
+        ("preclose_scan_main", 15, 30),
+    ]:
         _scheduler.add_job(
             _daily_scan_job,
-            CronTrigger(hour=hr, minute=0, timezone=ET),
+            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
             id=tag, replace_existing=True,
         )
     # v5.1 — auto-digest goes out 5 min after each scheduled scan
@@ -244,11 +264,15 @@ def start_scheduler():
                 await _ts.send_message(_ts.format_scan_summary(scan), chat_id=chat_id)
         except Exception as e:
             logger.warning("digest job: %s", e)
-    for tag, hr in [("digest_midnight", 0), ("digest_morning", 8),
-                      ("digest_midday", 13), ("digest_evening", 18)]:
+    for tag, hr, minute in [
+        ("digest_market_open", 9, 40),
+        ("digest_midday_legacy", 12, 6),
+        ("digest_midday", 13, 5),
+        ("digest_preclose", 15, 35),
+    ]:
         _scheduler.add_job(
             _telegram_digest_job,
-            CronTrigger(hour=hr, minute=5, timezone=ET),
+            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
             id=tag, replace_existing=True,
         )
     _scheduler.add_job(
@@ -321,14 +345,6 @@ def start_scheduler():
         id="midday_scan_legacy",
         replace_existing=True,
     )
-    # Pre-close scan — 15:30 ET Mon-Fri
-    _scheduler.add_job(
-        _daily_scan_job,
-        CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=ET),
-        id="preclose_scan",
-        replace_existing=True,
-    )
-
     # v5.0 — regime gate every 30 min during market hours
     async def _regime_job():
         try:

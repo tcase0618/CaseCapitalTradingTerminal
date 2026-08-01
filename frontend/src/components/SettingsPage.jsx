@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
-import { API } from "../config";
+import { API, BACKEND_BASE_URL } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, tokens } from "./CrtShell";
 
@@ -151,7 +151,7 @@ export default function SettingsPage() {
           </div>
           <Row k="APP VERSION" v={diagnostics?.app?.version || "0.1.0"} c={accent} />
           <Row k="BACKEND PID" v={diagnostics?.backend?.pid || "--"} c={accent2} />
-          <Row k="BACKEND URL" v={diagnostics?.backend?.url || "http://127.0.0.1:8001"} />
+          <Row k="BACKEND URL" v={diagnostics?.backend?.url || BACKEND_BASE_URL || "--"} />
           <Row k="LATEST SCAN" v={diagnostics?.signals?.latest_scan_at || status?.last_scan_at || "UNKNOWN"} />
           <Row k="X FACTOR 2D" v={diagnostics?.signals?.xfactor_2d ?? "--"} c={accent2} />
           <Row k="EARNINGS CACHE" v={diagnostics?.earnings_cache?.created_at || "--"} />

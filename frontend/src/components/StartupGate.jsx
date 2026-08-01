@@ -277,7 +277,7 @@ function BootSplash({ backend, checks, isDesktop, usesLocalDesktopBackend, onRef
         </div>
         <BootChecklist checks={checks} />
         <div style={styles.bootMeta}>
-          <span>{isDesktop ? (usesLocalDesktopBackend ? "DESKTOP LOCAL BACKEND" : "DESKTOP CLOUD BACKEND") : "BROWSER DEVELOPMENT MODE"}</span>
+          <span>{usesLocalDesktopBackend ? "DESKTOP LOCAL BACKEND" : "VPS CLOUD BACKEND"}</span>
           <button type="button" onClick={onRefresh} style={styles.textButton}>REFRESH LINK</button>
         </div>
         <div style={styles.splashActions}>
@@ -521,7 +521,8 @@ function fallbackHash(input) {
 
 async function checkBackend(setBackend, setBootChecks, isDesktop = false) {
   setBackend({ state: "checking", message: "Checking backend link" });
-  if (isDesktop) {
+  const configuredBackendIsLocal = isLocalBackendBase(BACKEND_BASE_URL);
+  if (isDesktop && configuredBackendIsLocal) {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke("backend_status");
@@ -542,12 +543,12 @@ async function checkBackend(setBackend, setBootChecks, isDesktop = false) {
   }
 
   const browserBase = window.location?.origin || "";
-  const localBases = isDesktop
+  const localBases = isDesktop && configuredBackendIsLocal
     ? ["http://127.0.0.1:8001", "http://localhost:8001"]
     : [];
   const bases = [
     BACKEND_BASE_URL,
-    browserBase,
+    isLocalBackendBase(BACKEND_BASE_URL) ? browserBase : "",
     ...localBases,
   ].filter(Boolean);
   const uniqueBases = [...new Set(bases)];
@@ -569,13 +570,23 @@ async function checkBackend(setBackend, setBootChecks, isDesktop = false) {
   });
 }
 
+function isLocalBackendBase(base = "") {
+  if (!base) return false;
+  try {
+    const parsed = new URL(base);
+    return ["127.0.0.1", "localhost"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function warmTerminalData(base, setBootChecks) {
   waitForTerminalData(base, setBootChecks).catch(() => {});
 }
 
 async function waitForTerminalData(base = API.replace(/\/api$/, ""), setBootChecks = () => {}, timeoutMs = 14000) {
   const started = Date.now();
-  const root = (base || window.location?.origin || "http://127.0.0.1:8001").replace(/\/$/, "");
+  const root = (base || BACKEND_BASE_URL || window.location?.origin || "").replace(/\/$/, "");
   let lastError = "";
 
   while (Date.now() - started < timeoutMs) {
