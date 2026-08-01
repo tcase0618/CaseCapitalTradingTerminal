@@ -155,6 +155,7 @@ async def _latest_scan_row() -> dict[str, Any]:
     detail = f"{count} latest rows"
     if not market_day and status in {"STALE", "DOWN"}:
         status = "WARN"
+        blocks = False
         warnings.append("stock scan stale while market is closed; scheduler should refresh on next market day")
         detail = f"{count} latest rows; market closed so stale stock scan is not execution-critical"
     return _qc_row(
