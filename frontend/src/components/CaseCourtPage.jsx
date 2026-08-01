@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Gavel, RefreshCw, ShieldAlert, ShieldCheck, Scale } from "lucide-react";
+import { FileText, Gavel, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
@@ -12,11 +12,14 @@ const postureColors = {
   EVIDENCE_CONFLICT: "#a78bfa",
   COURT_OBJECTS: "#fb7185",
   REQUIRES_CLEANER_DATA: "#ef4444",
+  EQUITY_ONLY_UNTIL_OPTIONS_CLEAN: "#38bdf8",
+  NOT_APPLICABLE: "#8b949e",
 };
 
 export default function CaseCourtPage() {
   const [data, setData] = useState(null);
   const [selectedTicker, setSelectedTicker] = useState(null);
+  const [tab, setTab] = useState("DOCKET");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
@@ -64,8 +67,6 @@ export default function CaseCourtPage() {
     () => trials.find(t => t.ticker === selectedTicker) || trials[0] || null,
     [trials, selectedTicker]
   );
-  const readiness = summary.requires_cleaner_data ? "HOLD AUTHORITY" : "ADVISORY READY";
-
   return (
     <CrtShell
       title="CASE COURT"
@@ -76,36 +77,30 @@ export default function CaseCourtPage() {
         </button>
       }
     >
-      <div style={hero}>
-        <div>
-          <div style={eyebrow}>READ-ONLY ADVERSARIAL REVIEW</div>
-          <h1 style={h1}>Defense argues upside. Prosecutor attacks risk. PM remains judge.</h1>
-          <p style={sub}>
-            Case Court reviews scanner candidates with existing terminal evidence only. It does not execute, size, route, or override PM authority.
-          </p>
-        </div>
-        <div style={authorityBox}>
-          <Scale size={30} color={accent} />
-          <div>
-            <div style={smallLabel}>AUTHORITY</div>
-            <div style={{ color: accent2, fontWeight: 900, letterSpacing: "0.16em" }}>READ ONLY</div>
-            <div style={{ color: muted, fontSize: 12, marginTop: 6 }}>{readiness}</div>
-          </div>
-        </div>
-      </div>
-
       {error && <div style={errorBox}><ShieldAlert size={16} /> {error}</div>}
 
       <div style={statRow}>
         <Stat label="TRIALS" value={loading ? "--" : summary.trials ?? trials.length} sub="LATEST SCAN DOCKET" color={accent} accentBar />
         <Stat label="SUPPORTS PM" value={summary.supports_pm ?? 0} sub="ADVISORY ONLY" color="#4ade80" />
         <Stat label="BULL WATCH" value={summary.bullish_watch ?? 0} sub="APPEAL ELIGIBLE" color="#fbbf24" />
+        <Stat label="READY" value={summary.live_run_ready ?? 0} sub="READ-ONLY PASS" color="#38bdf8" />
         <Stat label="OBJECTS" value={summary.objects ?? 0} sub="PROSECUTOR LEADS" color="#fb7185" />
-        <Stat label="CONFLICTS" value={summary.conflicts ?? 0} sub="MIXED RECORD" color="#a78bfa" />
         <Stat label="QC HOLDS" value={summary.requires_cleaner_data ?? 0} sub="CLEAN DATA FIRST" color={summary.requires_cleaner_data ? "#ef4444" : "#4ade80"} />
       </div>
 
-      <div style={layout}>
+      <div style={tabBar}>
+        {["DOCKET", "COURT DOCS", "LIVE READINESS"].map(x => (
+          <button key={x} onClick={() => setTab(x)} style={tabButton(tab === x)}>{x}</button>
+        ))}
+      </div>
+
+      {tab === "LIVE READINESS" && (
+        <Card title="LIVE RUN READINESS" accentColor={accent2}>
+          <ReadinessBoard summary={summary} trials={trials} />
+        </Card>
+      )}
+
+      {tab !== "LIVE READINESS" && <div style={layout}>
         <Card title="COURT DOCKET" accentColor={accent}>
           <div style={docket}>
             {trials.map(t => (
@@ -135,24 +130,30 @@ export default function CaseCourtPage() {
             {selected ? <Ruling trial={selected} /> : <Empty loading={loading} />}
           </Card>
 
-          <div style={lawyerGrid}>
-            <LawyerCard title="DEFENSE" side={selected?.defense} color="#4ade80" />
-            <LawyerCard title="PROSECUTOR" side={selected?.prosecution} color="#fb7185" />
-          </div>
-
-          <Card title="EXPERT WITNESSES" accentColor={accent2}>
-            {selected ? <WitnessGrid rows={selected.witnesses || []} /> : <Empty loading={loading} />}
-          </Card>
-
-          <Card title="APPEAL TRIGGERS / FUTURE REVIEW" accentColor="#a78bfa">
-            {selected ? (
-              <div style={appealGrid}>
-                {(selected.appeal_triggers || []).map((x, i) => <div key={`${x}-${i}`} style={appealItem}>{x}</div>)}
+          {tab === "DOCKET" ? (
+            <>
+              <div style={lawyerGrid}>
+                <LawyerCard title="DEFENSE" side={selected?.defense} color="#4ade80" />
+                <LawyerCard title="PROSECUTOR" side={selected?.prosecution} color="#fb7185" />
               </div>
-            ) : <Empty loading={loading} />}
-          </Card>
+
+              <Card title="EXPERT WITNESSES" accentColor={accent2}>
+                {selected ? <WitnessGrid rows={selected.witnesses || []} /> : <Empty loading={loading} />}
+              </Card>
+
+              <Card title="APPEAL TRIGGERS / FUTURE REVIEW" accentColor="#a78bfa">
+                {selected ? (
+                  <div style={appealGrid}>
+                    {(selected.appeal_triggers || []).map((x, i) => <div key={`${x}-${i}`} style={appealItem}>{x}</div>)}
+                  </div>
+                ) : <Empty loading={loading} />}
+              </Card>
+            </>
+          ) : (
+            <CourtDocs trial={selected} loading={loading} />
+          )}
         </div>
-      </div>
+      </div>}
     </CrtShell>
   );
 }
@@ -225,6 +226,101 @@ function WitnessGrid({ rows }) {
   );
 }
 
+function CourtDocs({ trial, loading }) {
+  if (!trial) return <Empty loading={loading} />;
+  const docs = trial.court_docs || {};
+  const exhibits = trial.exhibits || [];
+  const coverage = trial.evidence_coverage || {};
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title="COURT DOCS" accentColor={accent}>
+        <div style={docHeader}>
+          <FileText size={22} color={accent} />
+          <div>
+            <div style={{ color: accent, fontSize: 20, fontWeight: 900, letterSpacing: "0.12em" }}>
+              {docs.caption || `${trial.ticker} Allocation Case`}
+            </div>
+            <div style={{ color: muted, marginTop: 8, lineHeight: 1.45 }}>{docs.docket_entry}</div>
+          </div>
+        </div>
+        <div style={noteBox}>{docs.clerk_notes}</div>
+        <div style={coverageGrid}>
+          <Mini label="Applicable" value={`${coverage.scored_exhibits ?? 0}/${coverage.applicable_exhibits ?? 0}`} color={accent2} />
+          <Mini label="Required Missing" value={coverage.missing_required ?? 0} color={coverage.missing_required ? "#fb7185" : "#4ade80"} />
+          <Mini label="Decision Grade" value={coverage.decision_grade ? "YES" : "NO"} color={coverage.decision_grade ? "#4ade80" : "#fb7185"} />
+          <Mini label="Coverage" value={coverage.coverage_label || "-"} color={accent} />
+        </div>
+      </Card>
+
+      <Card title="MINI TRIALS" accentColor={accent2}>
+        <div style={miniTrialGrid}>
+          {(trial.mini_trials || []).map(mt => (
+            <div key={mt.name} style={miniTrialCard(postureColors[mt.verdict] || verdictColor(mt.verdict))}>
+              <div style={smallLabel}>{labelPosture(mt.name)}</div>
+              <div style={{ color: verdictColor(mt.verdict), fontWeight: 900, letterSpacing: "0.12em" }}>{labelPosture(mt.verdict)}</div>
+              <div style={metaLine}>D {mt.defense_score} / P {mt.prosecution_score} / spread {signed(mt.spread)}</div>
+              {!!(mt.missing_required || []).length && <div style={missingLine}>Missing: {mt.missing_required.join(", ")}</div>}
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card title="EVIDENCE EXHIBITS" accentColor="#a78bfa">
+        <div style={exhibitGrid}>
+          {exhibits.map(ex => {
+            const color = ex.side === "DEFENSE" ? "#4ade80" : ex.side === "PROSECUTOR" ? "#fb7185" : muted;
+            return (
+              <div key={ex.key} style={exhibitCard(color)}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <div style={{ color: labelLight, fontWeight: 900, letterSpacing: "0.08em" }}>{ex.label}</div>
+                  <div style={{ color, fontWeight: 900 }}>{ex.side === "NEUTRAL" ? "0" : `+${ex.score}`}</div>
+                </div>
+                <div style={{ color, marginTop: 8, fontSize: 12, letterSpacing: "0.12em", fontWeight: 900 }}>{ex.status}</div>
+                <div style={{ color: muted, lineHeight: 1.45, marginTop: 8, fontSize: 12 }}>{ex.detail}</div>
+                <div style={metaLine}>{ex.source || "terminal"} {ex.freshness ? `/ ${ex.freshness}` : ""}</div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ReadinessBoard({ summary, trials }) {
+  const ready = trials.filter(t => t.judge?.live_run_ready);
+  const holds = trials.filter(t => !t.judge?.live_run_ready);
+  return (
+    <div style={readinessGrid}>
+      <div>
+        <div style={eyebrow}>READ-ONLY LIVE RUN</div>
+        <h2 style={sectionH}>Case Court is prepared as an advisory layer only.</h2>
+        <div style={noteBox}>
+          It can run against the newest scan, preserve court docs, neutralize non-applicable evidence, and flag which records are clean enough for review. It still has no execution authority and does not override PM.
+        </div>
+      </div>
+      <div style={coverageGrid}>
+        <Mini label="Live Ready" value={summary.live_run_ready ?? ready.length} color="#38bdf8" />
+        <Mini label="Decision Grade" value={summary.decision_grade ?? 0} color="#4ade80" />
+        <Mini label="Cleaner Data" value={summary.requires_cleaner_data ?? 0} color="#fb7185" />
+        <Mini label="Neutralized" value={summary.neutralized_exhibits ?? 0} color={muted} />
+      </div>
+      <div style={splitList}>
+        <div>
+          <div style={smallLabel}>READY DOCKET</div>
+          {ready.slice(0, 12).map(t => <div key={t.ticker} style={compactRow}>${t.ticker}<span>{labelPosture(t.judge?.advisory_posture)}</span></div>)}
+          {!ready.length && <div style={metaLine}>No decision-grade cases yet.</div>}
+        </div>
+        <div>
+          <div style={smallLabel}>HELD DOCKET</div>
+          {holds.slice(0, 12).map(t => <div key={t.ticker} style={compactRow}>${t.ticker}<span>{labelPosture(t.judge?.advisory_posture)}</span></div>)}
+          {!holds.length && <div style={metaLine}>No held cases.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Mini({ label, value, color }) {
   return (
     <div style={miniBox}>
@@ -240,6 +336,15 @@ function Empty({ loading }) {
 
 function labelPosture(v) {
   return String(v || "UNKNOWN").replaceAll("_", " ");
+}
+
+function verdictColor(v) {
+  const s = String(v || "");
+  if (s.includes("SUPPORTS")) return "#4ade80";
+  if (s.includes("OBJECTS") || s.includes("NOT_DECISION")) return "#fb7185";
+  if (s.includes("WATCH")) return "#fbbf24";
+  if (s.includes("CONFLICT")) return "#a78bfa";
+  return muted;
 }
 
 function signed(v) {
@@ -263,24 +368,7 @@ function buttonStyle(color) {
   };
 }
 
-const hero = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) 260px",
-  gap: 18,
-  alignItems: "stretch",
-  marginBottom: 22,
-};
 const eyebrow = { color: accent2, fontSize: 11, letterSpacing: "0.18em", fontWeight: 900, marginBottom: 10 };
-const h1 = { color: accent, fontSize: 30, lineHeight: 1.05, letterSpacing: "0.08em", fontWeight: 900, margin: 0 };
-const sub = { color: muted, maxWidth: 760, marginTop: 12, fontSize: 13, lineHeight: 1.55 };
-const authorityBox = {
-  background: cardBg,
-  border: hairline,
-  padding: 18,
-  display: "flex",
-  gap: 14,
-  alignItems: "center",
-};
 const smallLabel = { color: muted, fontSize: 10, letterSpacing: "0.16em", fontWeight: 800, textTransform: "uppercase", marginBottom: 6 };
 const errorBox = {
   border: "1px solid rgba(248,113,113,0.45)",
@@ -293,6 +381,7 @@ const errorBox = {
   gap: 8,
 };
 const statRow = { display: "flex", background: cardBg, border: hairline, marginBottom: 22, overflowX: "auto" };
+const tabBar = { display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 22 };
 const layout = { display: "grid", gridTemplateColumns: "360px minmax(0, 1fr)", gap: 22, alignItems: "start" };
 const docket = { display: "grid", gap: 8, maxHeight: 960, overflowY: "auto" };
 const tickerStyle = { color: accent, fontWeight: 900, fontSize: 20, letterSpacing: "0.10em" };
@@ -315,6 +404,16 @@ const witnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, mi
 const witnessCard = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12, minHeight: 116 };
 const appealGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 };
 const appealItem = { border: hairline, padding: 12, color: labelLight, background: "rgba(167,139,250,0.06)", lineHeight: 1.45 };
+const docHeader = { display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 14 };
+const noteBox = { border: hairline, background: "rgba(255,255,255,0.02)", color: labelLight, padding: 13, lineHeight: 1.5 };
+const coverageGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginTop: 14 };
+const miniTrialGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
+const exhibitGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 };
+const missingLine = { color: "#fb7185", fontSize: 11, lineHeight: 1.4, marginTop: 8 };
+const readinessGrid = { display: "grid", gap: 18 };
+const sectionH = { color: accent, fontSize: 24, letterSpacing: "0.08em", lineHeight: 1.15, margin: 0 };
+const splitList = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 };
+const compactRow = { borderBottom: hairline, color: accent, padding: "9px 0", display: "flex", justifyContent: "space-between", gap: 12, fontWeight: 900 };
 
 function docketRow(active, color) {
   return {
@@ -328,5 +427,35 @@ function docketRow(active, color) {
     border: `1px solid ${active ? color : "rgba(255,255,255,0.08)"}`,
     background: active ? `${color}12` : "rgba(255,255,255,0.015)",
     cursor: "pointer",
+  };
+}
+
+function tabButton(active) {
+  return {
+    border: `1px solid ${active ? accent2 : "rgba(255,255,255,0.12)"}`,
+    background: active ? "rgba(157,255,229,0.10)" : "rgba(255,255,255,0.02)",
+    color: active ? accent2 : labelLight,
+    padding: "10px 14px",
+    fontSize: 12,
+    fontWeight: 900,
+    letterSpacing: "0.14em",
+    cursor: "pointer",
+  };
+}
+
+function miniTrialCard(color) {
+  return {
+    border: `1px solid ${color}55`,
+    background: `${color}0d`,
+    padding: 12,
+  };
+}
+
+function exhibitCard(color) {
+  return {
+    border: `1px solid ${color}44`,
+    background: "rgba(255,255,255,0.02)",
+    padding: 12,
+    minHeight: 138,
   };
 }
