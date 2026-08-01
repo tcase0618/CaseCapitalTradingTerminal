@@ -236,7 +236,7 @@ function CompanyProfileCard({ profile }) {
           </div>
         </div>
         <div style={{ display: "grid", gap: 9 }}>
-          <div style={{ color: accent2, fontSize: 11, fontWeight: 900, letterSpacing: "0.12em" }}>
+          <div style={{ color: accent, fontSize: 11, fontWeight: 900, letterSpacing: "0.12em" }}>
             SECTOR / {profile.sector || "UNKNOWN"}
           </div>
           <div style={{ color: labelLight, fontSize: 13, lineHeight: 1.7, letterSpacing: "0.025em" }}>
