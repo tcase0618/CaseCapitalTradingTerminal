@@ -19,6 +19,29 @@ import pytest
 import requests
 from pymongo import MongoClient
 
+pytestmark = pytest.mark.live_destructive
+
+REQUIRED_ENV = [
+    "REACT_APP_BACKEND_URL",
+    "APCA_API_KEY_ID",
+    "APCA_API_SECRET_KEY",
+    "MONGO_URL",
+    "DB_NAME",
+]
+
+if os.environ.get("RUN_LIVE_TRADING_TESTS", "").strip().lower() not in {"1", "true", "yes"}:
+    pytest.skip(
+        "live/destructive Alpaca regression disabled; set RUN_LIVE_TRADING_TESTS=true to run",
+        allow_module_level=True,
+    )
+
+missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
+if missing:
+    pytest.skip(
+        f"live/destructive Alpaca regression missing env: {', '.join(missing)}",
+        allow_module_level=True,
+    )
+
 BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
 APCA_KEY = os.environ["APCA_API_KEY_ID"]
 APCA_SEC = os.environ["APCA_API_SECRET_KEY"]

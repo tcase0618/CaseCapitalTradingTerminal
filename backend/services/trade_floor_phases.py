@@ -181,7 +181,8 @@ async def process_phase_exits() -> dict[str, Any]:
         # ── Hard stop check (any phase) ──
         cur_stop = float(t.get("current_stop") or t.get("stop_price") or 0)
         if cur_stop and cur <= cur_stop and qty_rem > 0:
-            actions.append(await _close_remaining(t, cur, reason="hard_stop"))
+            stop_reason = "phase3_trailing_stop" if phase >= 3 else "hard_stop"
+            actions.append(await _close_remaining(t, cur, reason=stop_reason))
             continue
 
         # ── Hold window expiry check ──
@@ -229,7 +230,10 @@ async def process_phase_exits() -> dict[str, Any]:
                     f"  Remaining: {qty_rem:.6f} · stop → ${new_stop:.2f} (breakeven)"
                 )
                 actions.append({"ticker": ticker, "phase": 1, "exit": sold_at})
-                phase = 2
+                # One monitor tick should advance only one exit phase. If price
+                # gaps through multiple targets, the next scheduled pass will
+                # process the next phase using the freshly persisted state.
+                continue
 
         # ── Phase 2 ──
         p2_target = float(t.get("pm_active_target") or t.get("phase2_target") or 0)
@@ -270,7 +274,9 @@ async def process_phase_exits() -> dict[str, Any]:
                     f"  Remaining: {qty_rem:.6f} · stop → ${new_stop:.2f} (locked profit)"
                 )
                 actions.append({"ticker": ticker, "phase": 2, "exit": sold_at})
-                phase = 3
+                # Keep phase transitions discrete for cleaner risk accounting
+                # and audit history.
+                continue
 
         # ── Phase 3 (trailing stop) ──
         if phase == 3 and qty_rem > 0:

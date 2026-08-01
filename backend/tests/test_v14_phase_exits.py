@@ -12,11 +12,16 @@ import asyncio
 import os
 import sys
 import pytest
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.db import get_db, stamped  # noqa: E402
 from services import trade_floor_phases as phases  # noqa: E402
+
+
+def _recent_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 
 @pytest.mark.asyncio
@@ -37,8 +42,8 @@ async def test_phase1_trigger_moves_stop_to_breakeven(monkeypatch):
         "peak_price_since_entry": 100.0,
         "hold_window_days": 30, "sector": "industrials",
         "status": "OPEN", "fill_status": "FILLED",
-        "submitted_at": "2026-06-08T01:00:00+00:00",
-        "filled_at": "2026-06-08T01:00:00+00:00",
+        "submitted_at": _recent_iso(),
+        "filled_at": _recent_iso(),
     }))
     # Stub Alpaca sell + price
     monkeypatch.setattr(phases, "_alpaca_market_sell",
@@ -73,14 +78,14 @@ async def test_phase2_moves_stop_to_phase1_exit_price(monkeypatch):
         "stop_pct": 0.12,
         "axiom_target": 120.0, "phase1_target": 120.0, "phase2_target": 130.0,
         "phase": 2,
-        "phases_hit": {"1": {"hit_at": "2026-06-08T02:00:00+00:00",
+        "phases_hit": {"1": {"hit_at": _recent_iso(),
                                   "exit_price": 121.0, "qty_sold": 0.12}},
         "qty_total": 0.3, "qty_remaining": 0.18,
         "peak_price_since_entry": 121.0,
         "hold_window_days": 30, "sector": "industrials",
         "status": "OPEN", "fill_status": "FILLED",
-        "submitted_at": "2026-06-08T01:00:00+00:00",
-        "filled_at": "2026-06-08T01:00:00+00:00",
+        "submitted_at": _recent_iso(),
+        "filled_at": _recent_iso(),
     }))
     monkeypatch.setattr(phases, "_alpaca_market_sell",
                           lambda t, q, client_order_id: _fake_order(t, q))
@@ -121,8 +126,8 @@ async def test_phase3_trailing_stop_closes_position(monkeypatch):
         "peak_price_since_entry": 140.0,
         "hold_window_days": 30, "sector": "technology",
         "status": "OPEN", "fill_status": "FILLED",
-        "submitted_at": "2026-06-08T01:00:00+00:00",
-        "filled_at": "2026-06-08T01:00:00+00:00",
+        "submitted_at": _recent_iso(),
+        "filled_at": _recent_iso(),
     }))
     monkeypatch.setattr(phases, "_alpaca_market_sell",
                           lambda t, q, client_order_id: _fake_order(t, q))
@@ -158,8 +163,8 @@ async def test_hard_stop_hit_closes_at_market(monkeypatch):
         "qty_total": 0.3, "qty_remaining": 0.3, "peak_price_since_entry": 100.0,
         "hold_window_days": 30, "sector": "biotechnology",
         "status": "OPEN", "fill_status": "FILLED",
-        "submitted_at": "2026-06-08T01:00:00+00:00",
-        "filled_at": "2026-06-08T01:00:00+00:00",
+        "submitted_at": _recent_iso(),
+        "filled_at": _recent_iso(),
     }))
     monkeypatch.setattr(phases, "_alpaca_market_sell",
                           lambda t, q, client_order_id: _fake_order(t, q))
