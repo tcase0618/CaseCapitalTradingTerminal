@@ -469,7 +469,10 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
     option_trial = next((t for t in mini_trials if t["name"] == "options_contract"), None)
     equity_ok = all(t.get("decision_grade") for t in mini_trials if t["name"] in {"ticker_quality", "trade_quality"})
 
-    if not_grade and not equity_ok:
+    if pm_action == "REJECT" or expression == "PASS":
+        posture = "PM_REJECTED"
+        detail = "PM rejected or passed on the setup; Case Court cannot elevate scanner evidence into authority."
+    elif not_grade and not equity_ok:
         posture = "REQUIRES_CLEANER_DATA"
         detail = "Required evidence is missing for the ticker or equity trade trial."
     elif expression in {"OPTION", "BOTH", "OPTION_OR_BOTH_ADVISORY"} and option_trial and not option_trial.get("decision_grade"):
@@ -480,7 +483,7 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
         detail = "Defense materially outweighs prosecution and PM is already constructive."
     elif spread >= 10:
         posture = "BULLISH_WATCH"
-        detail = "Defense leads, but PM has not approved full capital or evidence is still partial."
+        detail = "Defense leads, but PM has not approved capital; this stays watch-only."
     elif spread <= -12:
         posture = "COURT_OBJECTS"
         detail = "Prosecution has enough applicable evidence to challenge capital allocation."
@@ -490,8 +493,10 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
 
     if posture == "COURT_SUPPORTS_PM" and expression in {"OPTION", "BOTH", "OPTION_OR_BOTH_ADVISORY"}:
         expression_hint = "OPTION_OR_BOTH_ADVISORY"
-    elif posture in {"COURT_SUPPORTS_PM", "BULLISH_WATCH", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and pm_action in {"ACCUMULATE", "STARTER", "WATCH"}:
+    elif posture in {"COURT_SUPPORTS_PM", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and pm_action in {"ACCUMULATE", "STARTER"}:
         expression_hint = "EQUITY_ADVISORY"
+    elif posture == "BULLISH_WATCH":
+        expression_hint = "WATCHLIST_ONLY"
     else:
         expression_hint = "NO_AUTHORITY"
     return {
@@ -500,7 +505,7 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
         "defense_minus_prosecutor": spread,
         "detail": detail,
         "authority": "READ_ONLY_NO_EXECUTION_NO_PM_OVERRIDE",
-        "live_run_ready": posture in {"COURT_SUPPORTS_PM", "BULLISH_WATCH", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and equity_ok,
+        "live_run_ready": posture in {"COURT_SUPPORTS_PM", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and pm_action in {"ACCUMULATE", "STARTER"} and equity_ok,
     }
 
 
@@ -658,6 +663,7 @@ def _summary(trials: list[dict[str, Any]], context: dict[str, Any]) -> dict[str,
         "supports_pm": postures.count("COURT_SUPPORTS_PM"),
         "bullish_watch": postures.count("BULLISH_WATCH"),
         "objects": postures.count("COURT_OBJECTS"),
+        "pm_rejected": postures.count("PM_REJECTED"),
         "conflicts": postures.count("EVIDENCE_CONFLICT"),
         "requires_cleaner_data": postures.count("REQUIRES_CLEANER_DATA"),
         "equity_only_until_options_clean": postures.count("EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"),

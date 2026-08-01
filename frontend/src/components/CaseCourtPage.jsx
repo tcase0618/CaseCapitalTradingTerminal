@@ -11,6 +11,7 @@ const postureColors = {
   BULLISH_WATCH: "#fbbf24",
   EVIDENCE_CONFLICT: "#a78bfa",
   COURT_OBJECTS: "#fb7185",
+  PM_REJECTED: "#fb7185",
   REQUIRES_CLEANER_DATA: "#ef4444",
   EQUITY_ONLY_UNTIL_OPTIONS_CLEAN: "#38bdf8",
   NOT_APPLICABLE: "#8b949e",
@@ -94,10 +95,10 @@ export default function CaseCourtPage() {
       <div className="case-court-stats" style={statRow}>
         <Stat label="TRIALS" value={loading ? "--" : summary.trials ?? trials.length} sub="LATEST SCAN DOCKET" color={accent} accentBar />
         <Stat label="SUPPORTS PM" value={summary.supports_pm ?? 0} sub="ADVISORY ONLY" color="#4ade80" />
-        <Stat label="BULL WATCH" value={summary.bullish_watch ?? 0} sub="APPEAL ELIGIBLE" color="#fbbf24" />
-        <Stat label="READY" value={summary.live_run_ready ?? 0} sub="READ-ONLY PASS" color="#38bdf8" />
-        <Stat label="OBJECTS" value={summary.objects ?? 0} sub="PROSECUTOR LEADS" color="#fb7185" />
-        <Stat label="QC HOLDS" value={summary.requires_cleaner_data ?? 0} sub="CLEAN DATA FIRST" color={summary.requires_cleaner_data ? "#ef4444" : "#4ade80"} />
+        <Stat label="WATCH ONLY" value={summary.bullish_watch ?? 0} sub="NO PM AUTHORITY" color="#fbbf24" />
+        <Stat label="READY" value={summary.live_run_ready ?? 0} sub="PM APPROVED ONLY" color="#38bdf8" />
+        <Stat label="PM REJECT" value={summary.pm_rejected ?? 0} sub="NO AUTHORITY" color="#fb7185" />
+        <Stat label="DATA HOLDS" value={summary.requires_cleaner_data ?? 0} sub="CLEAN DATA FIRST" color={summary.requires_cleaner_data ? "#ef4444" : "#4ade80"} />
       </div>
 
       <div className="case-court-tabs" style={tabBar}>
