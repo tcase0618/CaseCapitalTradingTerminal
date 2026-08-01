@@ -79,7 +79,19 @@ export default function CaseCourtPage() {
     >
       {error && <div style={errorBox}><ShieldAlert size={16} /> {error}</div>}
 
-      <div style={statRow}>
+      <div className="case-court-command" style={commandStrip}>
+        <div>
+          <div style={eyebrow}>ADVERSARIAL ALLOCATION REVIEW</div>
+          <div className="case-court-command-title" style={commandTitle}>Defense. Prosecutor. Judge.</div>
+        </div>
+        <div style={commandMeta}>
+          <Mini label="Authority" value="READ ONLY" color={accent2} />
+          <Mini label="Rubric" value={summary.rubric_version ? "V2 SCOPED" : "SYNCING"} color={accent} />
+          <Mini label="Evidence Rule" value="N/A IS NEUTRAL" color="#a78bfa" />
+        </div>
+      </div>
+
+      <div className="case-court-stats" style={statRow}>
         <Stat label="TRIALS" value={loading ? "--" : summary.trials ?? trials.length} sub="LATEST SCAN DOCKET" color={accent} accentBar />
         <Stat label="SUPPORTS PM" value={summary.supports_pm ?? 0} sub="ADVISORY ONLY" color="#4ade80" />
         <Stat label="BULL WATCH" value={summary.bullish_watch ?? 0} sub="APPEAL ELIGIBLE" color="#fbbf24" />
@@ -88,7 +100,7 @@ export default function CaseCourtPage() {
         <Stat label="QC HOLDS" value={summary.requires_cleaner_data ?? 0} sub="CLEAN DATA FIRST" color={summary.requires_cleaner_data ? "#ef4444" : "#4ade80"} />
       </div>
 
-      <div style={tabBar}>
+      <div className="case-court-tabs" style={tabBar}>
         {["DOCKET", "COURT DOCS", "LIVE READINESS"].map(x => (
           <button key={x} onClick={() => setTab(x)} style={tabButton(tab === x)}>{x}</button>
         ))}
@@ -100,7 +112,7 @@ export default function CaseCourtPage() {
         </Card>
       )}
 
-      {tab !== "LIVE READINESS" && <div style={layout}>
+      {tab !== "LIVE READINESS" && <div className="case-court-layout" style={layout}>
         <Card title="COURT DOCKET" accentColor={accent}>
           <div style={docket}>
             {trials.map(t => (
@@ -237,7 +249,7 @@ function CourtDocs({ trial, loading }) {
         <div style={docHeader}>
           <FileText size={22} color={accent} />
           <div>
-            <div style={{ color: accent, fontSize: 20, fontWeight: 900, letterSpacing: "0.12em" }}>
+            <div className="case-court-doc-title" style={{ color: accent, fontSize: 20, fontWeight: 900, letterSpacing: "0.12em" }}>
               {docs.caption || `${trial.ticker} Allocation Case`}
             </div>
             <div style={{ color: muted, marginTop: 8, lineHeight: 1.45 }}>{docs.docket_entry}</div>
@@ -245,7 +257,7 @@ function CourtDocs({ trial, loading }) {
         </div>
         <div style={noteBox}>{docs.clerk_notes}</div>
         <div style={coverageGrid}>
-          <Mini label="Applicable" value={`${coverage.scored_exhibits ?? 0}/${coverage.applicable_exhibits ?? 0}`} color={accent2} />
+          <Mini label="Applicable" value={`${coverage.scored ?? coverage.scored_exhibits ?? 0}/${coverage.applicable ?? coverage.applicable_exhibits ?? 0}`} color={accent2} />
           <Mini label="Required Missing" value={coverage.missing_required ?? 0} color={coverage.missing_required ? "#fb7185" : "#4ade80"} />
           <Mini label="Decision Grade" value={coverage.decision_grade ? "YES" : "NO"} color={coverage.decision_grade ? "#4ade80" : "#fb7185"} />
           <Mini label="Coverage" value={coverage.coverage_label || "-"} color={accent} />
@@ -299,13 +311,13 @@ function ReadinessBoard({ summary, trials }) {
           It can run against the newest scan, preserve court docs, neutralize non-applicable evidence, and flag which records are clean enough for review. It still has no execution authority and does not override PM.
         </div>
       </div>
-      <div style={coverageGrid}>
+      <div className="case-court-coverage-grid" style={coverageGrid}>
         <Mini label="Live Ready" value={summary.live_run_ready ?? ready.length} color="#38bdf8" />
         <Mini label="Decision Grade" value={summary.decision_grade ?? 0} color="#4ade80" />
         <Mini label="Cleaner Data" value={summary.requires_cleaner_data ?? 0} color="#fb7185" />
         <Mini label="Neutralized" value={summary.neutralized_exhibits ?? 0} color={muted} />
       </div>
-      <div style={splitList}>
+      <div className="case-court-split-list" style={splitList}>
         <div>
           <div style={smallLabel}>READY DOCKET</div>
           {ready.slice(0, 12).map(t => <div key={t.ticker} style={compactRow}>${t.ticker}<span>{labelPosture(t.judge?.advisory_posture)}</span></div>)}
@@ -369,6 +381,28 @@ function buttonStyle(color) {
 }
 
 const eyebrow = { color: accent2, fontSize: 11, letterSpacing: "0.18em", fontWeight: 900, marginBottom: 10 };
+const commandStrip = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) minmax(420px, 0.95fr)",
+  gap: 14,
+  alignItems: "stretch",
+  marginBottom: 16,
+  border: hairline,
+  background: "linear-gradient(90deg, rgba(200,168,75,0.065), rgba(94,234,212,0.025), rgba(255,255,255,0.012))",
+  padding: 14,
+};
+const commandTitle = {
+  color: accent,
+  fontSize: 24,
+  lineHeight: 1.08,
+  letterSpacing: "0.08em",
+  fontWeight: 900,
+};
+const commandMeta = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 10,
+};
 const smallLabel = { color: muted, fontSize: 10, letterSpacing: "0.16em", fontWeight: 800, textTransform: "uppercase", marginBottom: 6 };
 const errorBox = {
   border: "1px solid rgba(248,113,113,0.45)",
@@ -380,14 +414,14 @@ const errorBox = {
   alignItems: "center",
   gap: 8,
 };
-const statRow = { display: "flex", background: cardBg, border: hairline, marginBottom: 22, overflowX: "auto" };
-const tabBar = { display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 22 };
-const layout = { display: "grid", gridTemplateColumns: "360px minmax(0, 1fr)", gap: 22, alignItems: "start" };
-const docket = { display: "grid", gap: 8, maxHeight: 960, overflowY: "auto" };
+const statRow = { display: "grid", gridTemplateColumns: "repeat(6, minmax(118px, 1fr))", background: cardBg, border: hairline, marginBottom: 16, overflow: "hidden" };
+const tabBar = { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 };
+const layout = { display: "grid", gridTemplateColumns: "330px minmax(0, 1fr)", gap: 18, alignItems: "start", maxWidth: "100%" };
+const docket = { display: "grid", gap: 7, maxHeight: "calc(100vh - 310px)", minHeight: 380, overflowY: "auto", paddingRight: 2 };
 const tickerStyle = { color: accent, fontWeight: 900, fontSize: 20, letterSpacing: "0.10em" };
 const metaLine = { color: muted, fontSize: 11, letterSpacing: "0.06em", marginTop: 4 };
 const postureText = { fontSize: 10, letterSpacing: "0.12em", fontWeight: 900, maxWidth: 140 };
-const lawyerGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 22 };
+const lawyerGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
 const evidenceRow = {
   border: hairline,
   background: "rgba(255,255,255,0.02)",
@@ -397,7 +431,7 @@ const evidenceRow = {
   gap: 10,
   alignItems: "center",
 };
-const rulingGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.5fr) repeat(4, minmax(110px, 1fr))", gap: 10, alignItems: "stretch" };
+const rulingGrid = { display: "grid", gridTemplateColumns: "minmax(260px, 1.4fr) repeat(4, minmax(105px, 1fr))", gap: 10, alignItems: "stretch" };
 const rulingMain = { border: hairline, background: cardBgHi, padding: 16, display: "flex", gap: 14, alignItems: "center" };
 const miniBox = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12 };
 const witnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
@@ -406,7 +440,7 @@ const appealGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, min
 const appealItem = { border: hairline, padding: 12, color: labelLight, background: "rgba(167,139,250,0.06)", lineHeight: 1.45 };
 const docHeader = { display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 14 };
 const noteBox = { border: hairline, background: "rgba(255,255,255,0.02)", color: labelLight, padding: 13, lineHeight: 1.5 };
-const coverageGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginTop: 14 };
+const coverageGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginTop: 14 };
 const miniTrialGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
 const exhibitGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 };
 const missingLine = { color: "#fb7185", fontSize: 11, lineHeight: 1.4, marginTop: 8 };
