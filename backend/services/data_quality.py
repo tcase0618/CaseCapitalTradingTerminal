@@ -669,6 +669,11 @@ async def remediate(limit: int = 16) -> dict[str, Any]:
     db = get_db()
     await db.data_quality_events.insert_one(event)
     await log_activity("Quality remediation completed", meta=summary)
+    try:
+        from . import telegram_events
+        await telegram_events.dispatch_qc_report(force_refresh=False, send_if_clean=False)
+    except Exception:
+        pass
     fresh = await overview(force_refresh=False, record_event=False)
     fresh["remediation"] = {
         "last_run_at": event.get("created_at") or event.get("generated_at"),

@@ -18,6 +18,7 @@ export default function PerformancePage() {
   const [seeding, setSeeding] = useState(false);
   const [refreshingPrices, setRefreshingPrices] = useState(false);
   const [priceSource, setPriceSource] = useState(null);
+  const [edge, setEdge] = useState(null);
 
   const refresh = useCallback(async () => {
     // Use independent .catch so one failure doesn't kill the others
@@ -28,6 +29,7 @@ export default function PerformancePage() {
     axios.get(`${API}/signals/options_curve?days=${curveDays}`).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
     axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
     axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
+    axios.get(`${API}/edge/overview`).then(r => setEdge(r.data)).catch(e => console.error("edge:", e));
   }, [curveDays]);
   useEffect(() => {
     refresh();
@@ -96,6 +98,8 @@ export default function PerformancePage() {
       </div>
 
       {/* ACTIVE vs CLOSED — v5.0 split */}
+      <EdgeProofCard edge={edge} />
+
       {(() => {
         const rows = tracker?.rows || [];
         const today = new Date();
@@ -415,10 +419,74 @@ export default function PerformancePage() {
   );
 }
 
+function EdgeProofCard({ edge }) {
+  const e = edge?.edge || {};
+  const truth = edge?.truth || {};
+  const holes = edge?.holes || [];
+  const gradeColor = truth.truth_grade === "A" || truth.truth_grade === "B" ? "#4ade80"
+    : truth.truth_grade === "C" ? "#fbbf24" : "#f87171";
+  return (
+    <Card title="EDGE PROOF COMMAND CENTER" accentColor={gradeColor}>
+      {!edge ? (
+        <div style={{ color: muted, fontSize: 12, padding: 10 }}>Loading edge proof...</div>
+      ) : (
+        <div style={{ display: "grid", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
+            <MiniEdge label="TRUTH" value={truth.truth_grade || "--"} color={gradeColor} />
+            <MiniEdge label="GATE" value={truth.decision || "--"} color={truth.decision === "BLOCK" ? "#f87171" : accent} />
+            <MiniEdge label="SAMPLE" value={e.sample ?? "--"} color={e.sample >= 100 ? "#4ade80" : "#fbbf24"} />
+            <MiniEdge label="WIN RATE" value={`${Number(e.win_rate || 0).toFixed(1)}%`} color={pctColor((e.win_rate || 0) - 50)} />
+            <MiniEdge label="EXPECTANCY" value={`${fmt(e.expectancy_pct)}%`} color={pctColor(e.expectancy_pct)} />
+            <MiniEdge label="ALPHA" value={e.alpha_grade || "UNPROVEN"} color={e.alpha_grade === "POSITIVE" ? "#4ade80" : "#fbbf24"} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            <div style={edgePanel}>
+              <div style={edgeLabel}>OPTIONS</div>
+              <div style={edgeText}>{edge.options?.ready || 0} ready / {edge.options?.total || 0} total</div>
+              <div style={edgeSub}>{edge.options?.research_only || 0} research-only tickets</div>
+            </div>
+            <div style={edgePanel}>
+              <div style={edgeLabel}>CASE COURT</div>
+              <div style={edgeText}>{edge.case_court?.live_ready || 0} live-ready / {edge.case_court?.trials || 0} trials</div>
+              <div style={edgeSub}>{edge.case_court?.needs_data || 0} need cleaner data</div>
+            </div>
+            <div style={edgePanel}>
+              <div style={edgeLabel}>SAMPLE GRADE</div>
+              <div style={edgeText}>{e.sample_grade || "--"}</div>
+              <div style={edgeSub}>proof before scale</div>
+            </div>
+          </div>
+          {holes.length > 0 && (
+            <div style={{ borderTop: hairline, paddingTop: 10 }}>
+              <div style={{ color: "#fbbf24", fontSize: 10, letterSpacing: "0.14em", marginBottom: 8 }}>OPEN HOLES</div>
+              {holes.slice(0, 5).map((h, i) => (
+                <div key={i} style={{ color: labelLight, fontSize: 11, padding: "4px 0" }}>{h}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function MiniEdge({ label, value, color }) {
+  return (
+    <div style={{ border: hairline, background: "rgba(255,255,255,0.025)", padding: 10, minHeight: 70 }}>
+      <div style={{ color: dim, fontSize: 9, letterSpacing: "0.13em" }}>{label}</div>
+      <div style={{ color, fontSize: 19, fontWeight: 900, marginTop: 8, overflowWrap: "anywhere" }}>{value}</div>
+    </div>
+  );
+}
+
 const fmt = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}`;
 const pctColor = (v) => v == null ? muted : v > 0 ? "#4ade80" : v < 0 ? "#f87171" : labelLight;
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400 };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em" };
+const edgePanel = { border: hairline, padding: 12, background: "rgba(255,255,255,0.018)" };
+const edgeLabel = { color: dim, fontSize: 9, letterSpacing: "0.14em", marginBottom: 8 };
+const edgeText = { color: labelLight, fontSize: 15, fontWeight: 900, letterSpacing: "0.04em" };
+const edgeSub = { color: muted, fontSize: 10, marginTop: 6, lineHeight: 1.45 };
 const btnPrimary = (loading) => ({
   background: loading ? "rgba(200,168,75,0.15)" : "transparent",
   border: `0.5px solid ${accent}`, color: accent, fontSize: 12,

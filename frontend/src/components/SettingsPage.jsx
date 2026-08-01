@@ -16,6 +16,8 @@ export default function SettingsPage() {
   const [diagnostics, setDiagnostics] = useState(null);
   const [updateStrategy, setUpdateStrategy] = useState(null);
   const [research, setResearch] = useState(null);
+  const [telegramOps, setTelegramOps] = useState(null);
+  const [truth, setTruth] = useState(null);
 
   const loadSystem = async () => {
     await Promise.allSettled([
@@ -25,6 +27,8 @@ export default function SettingsPage() {
       axios.get(`${API}/desktop/diagnostics`).then(r => setDiagnostics(r.data)).catch(() => {}),
       axios.get(`${API}/desktop/update_strategy`).then(r => setUpdateStrategy(r.data)).catch(() => {}),
       axios.get(`${API}/research/dashboard?limit_scans=180`).then(r => setResearch(r.data)).catch(() => setResearch({ ok: false })),
+      axios.get(`${API}/telegram/events?limit=20`).then(r => setTelegramOps(r.data)).catch(() => setTelegramOps({ ok: false })),
+      axios.get(`${API}/data_truth/overview`).then(r => setTruth(r.data)).catch(() => setTruth({ ok: false })),
     ]);
   };
 
@@ -136,6 +140,23 @@ export default function SettingsPage() {
     }
   };
 
+  const sendTelegramOps = async (kind) => {
+    const paths = {
+      scan: "/telegram/events/flush_scan",
+      qc: "/telegram/events/qc?send_if_clean=true",
+      daily: "/telegram/events/daily_report",
+      weekly: "/telegram/events/weekly_report",
+    };
+    toast(`TELEGRAM ${kind.toUpperCase()} DISPATCH`);
+    try {
+      const { data } = await axios.post(`${API}${paths[kind]}`);
+      toast(data.sent ? "TELEGRAM SENT" : `TELEGRAM NOT SENT - ${data.deduped ? "DEDUPED" : data.reason || "NO CHANGE"}`);
+      await loadSystem();
+    } catch (e) {
+      toast(`TELEGRAM DISPATCH FAILED - ${e?.message || "ERROR"}`);
+    }
+  };
+
   return (
     <CrtShell title="SETTINGS & SYSTEM">
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 14, marginBottom: 18 }}>
@@ -190,6 +211,31 @@ export default function SettingsPage() {
         <Row k="PROMOTION GATE" v={(research?.promotion_gates || []).find(g => g.name === "Matured outcomes")?.detail || "waiting for outcomes"} c="#fbbf24" />
         <div style={{ color: muted, fontSize: 11, lineHeight: 1.55, marginTop: 10 }}>
           R&D stays in the background until enough 7D/30D/90D outcomes mature. It collects evidence and snapshots, but the full tab is hidden for now.
+        </div>
+      </Card>
+      <Card title="TELEGRAM OPS LAYER" accentColor={truth?.decision === "BLOCK" ? "#f87171" : accent2}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+          <MiniStatus label="TRUTH" value={truth?.truth_grade || "--"} color={truth?.truth_grade === "A" || truth?.truth_grade === "B" ? "#4ade80" : truth?.truth_grade === "C" ? "#fbbf24" : "#f87171"} />
+          <MiniStatus label="GATE" value={truth?.decision || "--"} color={truth?.decision === "BLOCK" ? "#f87171" : accent2} />
+          <MiniStatus label="EVENTS" value={(telegramOps?.events || []).length} color={accent} />
+          <MiniStatus label="DELIVERIES" value={(telegramOps?.deliveries || []).length} color={labelLight} />
+          <MiniStatus label="MODE" value="GROUPED" color={accent2} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+          <button onClick={() => sendTelegramOps("scan")} style={btnTeal}>[ SEND SCAN REPORT ]</button>
+          <button onClick={() => sendTelegramOps("qc")} style={btnGold}>[ SEND QC REPORT ]</button>
+          <button onClick={() => sendTelegramOps("daily")} style={btnGold}>[ SEND DAILY ]</button>
+          <button onClick={() => sendTelegramOps("weekly")} style={btnDim}>[ SEND WEEKLY ]</button>
+        </div>
+        {(telegramOps?.deliveries || []).slice(0, 5).map((d, i) => (
+          <div key={`${d.created_at}-${i}`} style={{ display: "grid", gridTemplateColumns: "140px 1fr 70px", gap: 8, borderTop: hairline, padding: "7px 0", fontSize: 10 }}>
+            <span style={{ color: accent }}>{d.batch_type || "batch"}</span>
+            <span style={{ color: labelLight }}>{d.title || d.message_preview || "--"}</span>
+            <span style={{ color: d.sent ? "#4ade80" : "#fbbf24", textAlign: "right" }}>{d.sent ? "SENT" : "HELD"}</span>
+          </div>
+        ))}
+        <div style={{ color: muted, fontSize: 10, lineHeight: 1.55, marginTop: 10 }}>
+          Telegram is grouped by scan, execution, QC, and scheduled reports. Routine refreshes stay silent unless status changes or severity rises.
         </div>
       </Card>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 18 }}>

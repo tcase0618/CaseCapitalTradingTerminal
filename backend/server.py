@@ -236,6 +236,57 @@ async def data_quality_events(limit: int = 100):
     return await data_quality.events(limit=limit)
 
 
+@api.get("/data_truth/overview")
+async def data_truth_overview(force_refresh: bool = False):
+    from services import data_truth
+    return await data_truth.overview(force_refresh=force_refresh)
+
+
+@api.get("/edge/overview")
+async def edge_overview():
+    from services import edge_dashboard
+    return await edge_dashboard.overview()
+
+
+@api.get("/telegram/events")
+async def telegram_events_recent(limit: int = 80):
+    from services import telegram_events
+    return await telegram_events.recent_events(limit=limit)
+
+
+@api.get("/telegram/events/preview")
+async def telegram_events_preview(batch_type: str = "scan_report"):
+    from services import telegram_events
+    return await telegram_events.preview_latest(batch_type=batch_type)
+
+
+@api.post("/telegram/events/flush_scan")
+async def telegram_events_flush_scan():
+    from services import scanner, telegram_events
+    scan = await scanner.latest_scan()
+    if not scan:
+        return {"ok": False, "reason": "no_latest_scan"}
+    return await telegram_events.dispatch_scan_report(scan)
+
+
+@api.post("/telegram/events/qc")
+async def telegram_events_qc(force_refresh: bool = False, send_if_clean: bool = True):
+    from services import telegram_events
+    return await telegram_events.dispatch_qc_report(force_refresh=force_refresh, send_if_clean=send_if_clean)
+
+
+@api.post("/telegram/events/daily_report")
+async def telegram_events_daily_report():
+    from services import telegram_events
+    return await telegram_events.dispatch_daily_report()
+
+
+@api.post("/telegram/events/weekly_report")
+async def telegram_events_weekly_report():
+    from services import telegram_events
+    return await telegram_events.dispatch_weekly_report()
+
+
 @api.post("/trading_halts/check")
 async def trading_halts_check(force_alert: bool = False):
     from services import trading_halts
@@ -540,7 +591,8 @@ async def free_data_fred_latest(series_id: str):
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        await telegram_service.dispatch_consolidated(scan, title="CASE CAPITAL INTEL")
+        from services import telegram_events
+        await telegram_events.dispatch_scan_report(scan)
     return scan
 
 
@@ -549,7 +601,8 @@ async def scan_dispatch():
     scan = await scanner.latest_scan()
     if not scan:
         raise HTTPException(404, "no scan available")
-    result = await telegram_service.dispatch_consolidated(scan, title="CASE CAPITAL INTEL")
+    from services import telegram_events
+    result = await telegram_events.dispatch_scan_report(scan)
     return {
         **result,
         "scan_finished_at": scan.get("finished_at"),

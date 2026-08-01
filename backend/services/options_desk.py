@@ -1018,7 +1018,7 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
         "success" if submitted else "info",
         {"submitted": submitted, "skipped": skipped[:10]},
     )
-    return {
+    payload = {
         "ok": True,
         "auto": True,
         "ready": len(ready),
@@ -1026,6 +1026,12 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
         "skipped": skipped,
         "summary": candidate_set.get("summary", {}),
     }
+    try:
+        from . import telegram_events
+        await telegram_events.dispatch_options_execution_report(payload)
+    except Exception:
+        pass
+    return payload
 
 
 async def refresh_and_auto_execute_latest(limit: int | None = None) -> dict[str, Any]:

@@ -62,9 +62,23 @@ async def _daily_scan_job():
         market_day, reason = await _stock_scan_market_day_now()
         if not market_day:
             await log_activity(f"Scheduled stock scan skipped: {reason}", "info")
+            try:
+                from . import telegram_events
+                await telegram_events.emit_event(
+                    "scan_skipped_market_closed",
+                    severity="info",
+                    scope="scanner",
+                    title="Scheduled scan skipped",
+                    summary=reason,
+                    details={"reason": reason, "trading_impact": "no stock scan"},
+                    priority="summary",
+                )
+            except Exception:
+                pass
             return
         scan = await scanner.run_scan(triggered_by="scheduler")
-        await telegram_service.dispatch_consolidated(scan)
+        from . import telegram_events
+        await telegram_events.dispatch_scan_report(scan)
     except Exception as e:
         logger.exception("daily scan job failed: %s", e)
 
@@ -273,24 +287,8 @@ def start_scheduler():
             id=tag, replace_existing=True,
         )
     # v5.1 — auto-digest goes out 5 min after each scheduled scan
-    async def _telegram_digest_job():
-        try:
-            from . import telegram_service as _ts
-            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-            if not chat_id:
-                return
-            scan = await scanner.get_latest_scan() if hasattr(scanner, 'get_latest_scan') else None
-            if scan:
-                await _ts.send_message(_ts.format_scan_summary(scan), chat_id=chat_id)
-        except Exception as e:
-            logger.warning("digest job: %s", e)
-    for tag, hr in [("digest_midnight", 0), ("digest_morning", 8),
-                      ("digest_midday", 13), ("digest_evening", 18)]:
-        _scheduler.add_job(
-            _telegram_digest_job,
-            CronTrigger(day_of_week="mon-fri", hour=hr, minute=5, timezone=ET),
-            id=tag, replace_existing=True,
-        )
+    # Grouped Telegram scan reports are dispatched by _daily_scan_job. There
+    # is intentionally no separate 5-minute digest job so scans do not double-text.
     _scheduler.add_job(
         _alerts_job,
         IntervalTrigger(minutes=5),
@@ -342,6 +340,18 @@ def start_scheduler():
         id="options_daily_report_5pm",
         replace_existing=True,
     )
+    async def _terminal_daily_report_job():
+        try:
+            from . import telegram_events
+            await telegram_events.dispatch_daily_report()
+        except Exception as e:
+            logger.warning("terminal daily report: %s", e)
+    _scheduler.add_job(
+        _terminal_daily_report_job,
+        CronTrigger(day_of_week="mon-thu", hour=17, minute=2, timezone=ET),
+        id="terminal_daily_report_502pm",
+        replace_existing=True,
+    )
     async def _options_weekly_report_job():
         try:
             from . import options_desk
@@ -352,6 +362,18 @@ def start_scheduler():
         _options_weekly_report_job,
         CronTrigger(day_of_week="fri", hour=21, minute=0, timezone=ET),
         id="options_weekly_report_friday_9pm",
+        replace_existing=True,
+    )
+    async def _terminal_weekly_report_job():
+        try:
+            from . import telegram_events
+            await telegram_events.dispatch_weekly_report()
+        except Exception as e:
+            logger.warning("terminal weekly report: %s", e)
+    _scheduler.add_job(
+        _terminal_weekly_report_job,
+        CronTrigger(day_of_week="fri", hour=21, minute=2, timezone=ET),
+        id="terminal_weekly_report_friday_902pm",
         replace_existing=True,
     )
     # Mid-day scan — 12:01 ET Mon-Fri
