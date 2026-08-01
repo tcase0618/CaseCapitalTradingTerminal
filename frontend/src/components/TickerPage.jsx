@@ -235,8 +235,13 @@ function CompanyProfileCard({ profile }) {
             {profile.source || "SCAN PROFILE"}
           </div>
         </div>
-        <div style={{ color: labelLight, fontSize: 13, lineHeight: 1.7, letterSpacing: "0.025em" }}>
-          {profile.description}
+        <div style={{ display: "grid", gap: 9 }}>
+          <div style={{ color: accent2, fontSize: 11, fontWeight: 900, letterSpacing: "0.12em" }}>
+            SECTOR / {profile.sector || "UNKNOWN"}
+          </div>
+          <div style={{ color: labelLight, fontSize: 13, lineHeight: 1.7, letterSpacing: "0.025em" }}>
+            {profile.description}
+          </div>
         </div>
       </div>
     </Card>
