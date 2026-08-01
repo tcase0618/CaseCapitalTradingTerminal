@@ -224,6 +224,7 @@ async def fetch_recipient_history(recipient_name: str, lookback_days: int = 365,
                                    min_amount: float = 0, limit: int = 200) -> list[dict[str, Any]]:
     end = date.today()
     start = end - timedelta(days=lookback_days)
+    safe_limit = max(1, min(int(limit or 100), 100))
     payload = {
         "filters": {
             "award_type_codes": ["A", "B", "C", "D"],
@@ -233,7 +234,7 @@ async def fetch_recipient_history(recipient_name: str, lookback_days: int = 365,
         },
         "fields": ["Award ID", "Recipient Name", "Awarding Agency", "Award Amount",
                    "Period of Performance Start Date"],
-        "page": 1, "limit": limit, "sort": "Award Amount", "order": "desc",
+        "page": 1, "limit": safe_limit, "sort": "Award Amount", "order": "desc",
     }
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         data = await _post(client, "/search/spending_by_award/", payload)
@@ -253,7 +254,6 @@ async def fetch_agency_obligations_by_month(months_back: int = 4) -> dict[str, l
                 month_end = month_end.replace(day=1) - timedelta(days=1)
             month_start = month_end.replace(day=1)
             payload = {
-                "category": "awarding_agency",
                 "filters": {
                     "award_type_codes": ["A", "B", "C", "D"],
                     "time_period": [{"start_date": month_start.isoformat(),
@@ -261,7 +261,7 @@ async def fetch_agency_obligations_by_month(months_back: int = 4) -> dict[str, l
                 },
                 "limit": 30, "page": 1,
             }
-            data = await _post(client, "/search/spending_by_category/", payload)
+            data = await _post(client, "/search/spending_by_category/awarding_agency/", payload)
             for r in (data or {}).get("results", []):
                 out[r.get("name", "?")].append({
                     "month": month_start.isoformat()[:7],
