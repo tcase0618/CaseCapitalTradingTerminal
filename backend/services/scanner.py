@@ -10,7 +10,7 @@ from typing import Any
 
 from . import claude_service, congress, conviction, dark_horse, earnings_engine, \
     learning_engine, lottery, macro_pulse, options_engine, pnl_tracker, pricer, \
-    risk_target, squeeze as squeeze_mod, time_target, usaspending, x_factor
+    risk_target, squeeze as squeeze_mod, ticker_hygiene, time_target, usaspending, x_factor
 from .db import get_db, log_activity, stamped
 from .scrapers import collect_all_signals
 
@@ -327,6 +327,9 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "earnings_summary": c.get("earnings_summary"),
             "options": opts,
         })
+    hygiene = ticker_hygiene.filter_rows(final)
+    final = hygiene["rows"]
+    await ticker_hygiene.record_rejections("scanner_final", hygiene["rejected"])
     final.sort(key=lambda x: (x.get("signal_score", 0), x.get("targets", {}).get("upside_blended") or 0), reverse=True)
 
     finished = datetime.now(timezone.utc)
@@ -344,6 +347,10 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         },
         "universe_size": universe_size,
         "pre_filter_passed": pre_filter_count,
+        "ticker_hygiene": {
+            "rejected_count": hygiene["rejected_count"],
+            "rejected": hygiene["rejected"][:50],
+        },
         "claude_calls_made": fresh_calls,
         "claude_cache_hits": cache_hits,
         "results": final,

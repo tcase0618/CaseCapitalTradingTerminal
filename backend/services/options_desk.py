@@ -870,10 +870,15 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
 
 
 async def execute(candidate_id: str, qty: int | None = None, limit_price: float | None = None) -> dict[str, Any]:
+    from . import execution_gate
+
     db = get_db()
     ticket = await db.options_desk_candidates.find_one({"candidate_id": candidate_id}, {"_id": 0})
     if not ticket:
         return {"ok": False, "reason": "candidate_not_found"}
+    gate = await execution_gate.check(scope="options", ticker=ticket.get("ticker"), record=True)
+    if not gate.get("ok"):
+        return {"ok": False, "reason": "execution_gate_blocked", "gate": gate, "candidate": ticket}
     if not configured():
         return {"ok": False, "reason": "missing_options_alpaca_keys", "candidate": ticket}
     if not OPTIONS_EXECUTION_ENABLED:
@@ -947,11 +952,24 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     and enforces only mechanical paper execution constraints already present in
     execute(): risk budget, valid order fields, and Alpaca acceptance.
     """
+    from . import execution_gate
+
     if not OPTIONS_EXECUTION_ENABLED:
         return {
             "ok": False,
             "auto": True,
             "reason": "options_execution_disabled",
+            "submitted": [],
+            "skipped": [],
+            "summary": {},
+        }
+    gate_root = await execution_gate.check(scope="options", record=True)
+    if not gate_root.get("ok"):
+        return {
+            "ok": False,
+            "auto": True,
+            "reason": "execution_gate_blocked",
+            "execution_gate": gate_root,
             "submitted": [],
             "skipped": [],
             "summary": {},

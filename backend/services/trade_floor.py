@@ -443,7 +443,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     orders happens immediately before EVERY single submit attempt. A
     ticker that already has a position or a queued/working order will
     never receive a duplicate order."""
-    from . import portfolio_manager, pm_rules, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
+    from . import execution_gate, portfolio_manager, pm_rules, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -452,6 +452,22 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
         await log_activity("Trade Floor: ALPACA NOT CONFIGURED — no executions", "warn")
         return {"executed": [], "rejected": [], "compression_ratio": None,
                  "alpaca_ready": False, "started_at": started.isoformat()}
+
+    gate_root = await execution_gate.check(scope="equity", record=True)
+    if not gate_root.get("ok"):
+        await log_activity(
+            "Trade Floor: execution gate blocked equity orders",
+            "warn",
+            {"blockers": gate_root.get("blockers"), "truth_grade": gate_root.get("truth_grade")},
+        )
+        return {
+            "executed": [],
+            "rejected": [],
+            "compression_ratio": None,
+            "alpaca_ready": True,
+            "started_at": started.isoformat(),
+            "execution_gate": gate_root,
+        }
 
     account = await get_account()
     if not account:
@@ -478,6 +494,26 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
         if not ticker:
             continue
         if only_tickers and ticker not in only_tickers:
+            continue
+        row_gate = await execution_gate.check(
+            scope="equity",
+            ticker=ticker,
+            sector=row.get("sector"),
+            truth=gate_root.get("truth"),
+            record=True,
+        )
+        if not row_gate.get("ok"):
+            rejected.append({
+                "ticker": ticker,
+                "score": row.get("score"),
+                "trade_score": row.get("trade_score"),
+                "reason": "execution_gate_blocked",
+                "gate": {
+                    "decision": row_gate.get("decision"),
+                    "blockers": row_gate.get("blockers"),
+                    "warnings": row_gate.get("warnings"),
+                },
+            })
             continue
         pm_row = pm_by_ticker.get(ticker)
         if not pm_row or pm_row.get("action") not in {"ACCUMULATE", "STARTER"} or float(pm_row.get("allocation_usd") or 0) <= 0:

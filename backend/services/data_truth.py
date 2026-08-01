@@ -59,8 +59,13 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
     options = await options_desk.candidates()
     court = await case_court.latest()
     db = get_db()
-    latest_scan = await db.scan_results.find_one({}, {"_id": 0, "finished_at": 1, "results": 1, "duration_sec": 1}, sort=[("finished_at", -1)])
+    latest_scan = await db.scan_results.find_one(
+        {},
+        {"_id": 0, "finished_at": 1, "results": 1, "duration_sec": 1, "ticker_hygiene": 1},
+        sort=[("finished_at", -1)],
+    )
     scan_results = (latest_scan or {}).get("results") or []
+    hygiene = (latest_scan or {}).get("ticker_hygiene") or {}
     single_letter = sorted({
         str(r.get("ticker") or "").upper()
         for r in scan_results
@@ -101,7 +106,9 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
             "results": len(scan_results),
             "duration_sec": (latest_scan or {}).get("duration_sec"),
             "single_letter_tickers": single_letter,
-            "ticker_hygiene": "WATCH" if single_letter else "PASS",
+            "ticker_hygiene": "WATCH" if single_letter or hygiene.get("rejected_count") else "PASS",
+            "ticker_hygiene_rejected_count": hygiene.get("rejected_count") or 0,
+            "ticker_hygiene_rejected": (hygiene.get("rejected") or [])[:20],
         },
         "pm": {
             "decisions": len(pm_rows),

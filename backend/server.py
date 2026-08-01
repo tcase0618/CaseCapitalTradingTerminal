@@ -242,6 +242,18 @@ async def data_truth_overview(force_refresh: bool = False):
     return await data_truth.overview(force_refresh=force_refresh)
 
 
+@api.get("/execution_gate/overview")
+async def execution_gate_overview(force_refresh: bool = False):
+    from services import execution_gate
+    return await execution_gate.overview(force_refresh=force_refresh)
+
+
+@api.get("/execution_gate/check")
+async def execution_gate_check(scope: str = "system", ticker: str | None = None, sector: str | None = None):
+    from services import execution_gate
+    return await execution_gate.check(scope=scope, ticker=ticker, sector=sector)
+
+
 @api.get("/edge/overview")
 async def edge_overview():
     from services import edge_dashboard

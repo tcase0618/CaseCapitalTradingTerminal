@@ -68,6 +68,7 @@ export default function CommandCenterPage() {
   const [scan, setScan] = useState(null);
   const [admin, setAdmin] = useState(null);
   const [health, setHealth] = useState(null);
+  const [executionGate, setExecutionGate] = useState(null);
   const [tradeFloor, setTradeFloor] = useState(null);
   const [pm, setPm] = useState(null);
   const [priceSource, setPriceSource] = useState(null);
@@ -85,6 +86,7 @@ export default function CommandCenterPage() {
       axios.get(`${API}/scan/latest`).then(r => setScan(r.data)).catch(() => {}),
       axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {}),
       axios.get(`${API}/system/health`).then(r => setHealth(r.data)).catch(() => {}),
+      axios.get(`${API}/execution_gate/overview`).then(r => setExecutionGate(r.data)).catch(() => setExecutionGate({ ok: false, decision: "UNKNOWN" })),
       axios.get(`${API}/trade_floor/positions`).then(r => setTradeFloor(r.data)).catch(() => {}),
       axios.get(`${API}/portfolio_manager/latest`).then(r => setPm(r.data)).catch(() => {}),
       axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {}),
@@ -120,6 +122,8 @@ export default function CommandCenterPage() {
   const scannerState = missionState(initialLoad, health?.ready_for_scanning, "READY", "BLOCKED");
   const pmState = missionState(initialLoad, health?.ready_for_pm, "READY", "WAITING");
   const tradeFloorState = missionState(initialLoad, health?.ready_for_trade_floor, "ARMED", "OFFLINE");
+  const gateDecision = String(executionGate?.decision || "--").toUpperCase();
+  const gateColor = gateDecision === "PASS" ? "#4ade80" : gateDecision === "WATCH" ? "#fbbf24" : "#f87171";
   const topSignals = useMemo(() => {
     const rows = [...(scan?.results || [])];
     rows.sort((a, b) => (b.signal_score || 0) - (a.signal_score || 0));
@@ -252,6 +256,49 @@ export default function CommandCenterPage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18 }}>
+        <Card title="EXECUTION GATE" accentColor={gateColor}
+          action={<Link to="/quality" style={smallLink}>QUALITY</Link>}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            <MiniMetric k="GATE" v={gateDecision} color={gateColor} />
+            <MiniMetric k="TRUTH" v={executionGate?.truth_grade || "--"} color={gateColor} />
+            <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
+            <MiniMetric k="OPTIONS" v={executionGate?.truth?.execution?.options_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.options_execution_enabled ? "#4ade80" : muted} />
+          </div>
+          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <GateList title="BLOCKERS" rows={executionGate?.blockers || []} color="#f87171" empty="No active blockers." />
+            <GateList title="WARNINGS" rows={executionGate?.warnings || []} color="#fbbf24" empty="No active warnings." />
+          </div>
+        </Card>
+        <Card title="KILL SWITCHES" accentColor="#f87171">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            <MiniMetric k="GLOBAL" v={executionGate?.kill_switches?.global ? "KILLED" : "CLEAR"} color={executionGate?.kill_switches?.global ? "#f87171" : "#4ade80"} />
+            <MiniMetric k="EQUITY" v={executionGate?.kill_switches?.equity ? "KILLED" : "CLEAR"} color={executionGate?.kill_switches?.equity ? "#f87171" : "#4ade80"} />
+            <MiniMetric k="OPTIONS" v={executionGate?.kill_switches?.options ? "KILLED" : "CLEAR"} color={executionGate?.kill_switches?.options ? "#f87171" : "#4ade80"} />
+            <MiniMetric k="QC STRICT" v={executionGate?.kill_switches?.qc_strict ? "ON" : "OFF"} color={executionGate?.kill_switches?.qc_strict ? "#fbbf24" : muted} />
+          </div>
+          <div style={{ marginTop: 12, color: muted, fontSize: 10, lineHeight: 1.55 }}>
+            TICKER KILL LIST: {(executionGate?.kill_switches?.ticker_kill_list || []).join(", ") || "--"}<br />
+            SECTOR KILL LIST: {(executionGate?.kill_switches?.sector_kill_list || []).join(", ") || "--"}
+          </div>
+        </Card>
+        <Card title="SCAN HYGIENE" accentColor={accent}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <MiniMetric k="BAD TICKERS" v={scan?.ticker_hygiene?.rejected_count || 0} color={(scan?.ticker_hygiene?.rejected_count || 0) ? "#fbbf24" : "#4ade80"} />
+            <MiniMetric k="LAST SCAN" v={fmtTime(scan?.finished_at || status?.last_scan_at)} />
+          </div>
+          <div style={{ marginTop: 12, maxHeight: 74, overflowY: "auto", borderTop: hairline }}>
+            {(scan?.ticker_hygiene?.rejected || []).slice(0, 6).map((r, i) => (
+              <div key={`${r.ticker}-${i}`} style={{ display: "grid", gridTemplateColumns: "50px 1fr", gap: 8, borderBottom: hairline, padding: "6px 0", fontSize: 10 }}>
+                <span style={{ color: "#fbbf24", fontWeight: 800 }}>${r.ticker || "--"}</span>
+                <span style={{ color: muted }}>{r.reason}</span>
+              </div>
+            ))}
+            {!(scan?.ticker_hygiene?.rejected || []).length && <Empty text="No ticker hygiene rejects in latest scan." />}
+          </div>
+        </Card>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18 }}>
         <Card title="SCAN COMMANDS" accentColor="#f87171"
           action={<button data-testid="launch-control-inline" onClick={() => setLauncherOpen(true)} style={smallDanger}>OPEN LAUNCHER</button>}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -356,6 +403,21 @@ function QualityBadge({ label, value, color }) {
     <div style={{ border: `0.5px solid ${color}44`, background: `${color}10`, padding: "9px 10px" }}>
       <div style={{ color, fontSize: 18, fontWeight: 800 }}>{value}</div>
       <div style={{ color: muted, fontSize: 8, letterSpacing: "0.14em", marginTop: 3 }}>{label}</div>
+    </div>
+  );
+}
+
+function GateList({ title, rows, color, empty }) {
+  return (
+    <div style={{ border: hairline, background: pageBg, padding: "9px 10px", minHeight: 82 }}>
+      <div style={{ color, fontSize: 8, letterSpacing: "0.14em", fontWeight: 800 }}>{title}</div>
+      {!rows.length ? (
+        <div style={{ color: muted, fontSize: 10, marginTop: 10 }}>{empty}</div>
+      ) : rows.slice(0, 5).map((row, i) => (
+        <div key={`${row}-${i}`} style={{ color: labelLight, fontSize: 10, marginTop: 7, lineHeight: 1.35 }}>
+          {row}
+        </div>
+      ))}
     </div>
   );
 }
