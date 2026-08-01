@@ -38,6 +38,7 @@ export default function TickerPage() {
   const pnl = data.pnl_record || {};
   const fund = data.fundamentals || {};
   const companyName = fund.longName || fund.shortName || fund.name || data.name || "";
+  const companyProfile = buildCompanyProfile({ data, freeData, companyName, ticker: t });
   const changeColor = (data.change_pct || 0) >= 0 ? "#4ade80" : "#f87171";
   const changeArrow = data.change_pct == null ? "" : data.change_pct >= 0 ? "▲" : "▼";
 
@@ -61,6 +62,8 @@ export default function TickerPage() {
         </div>
       }>
       <TradingViewMiniChart ticker={t} companyName={companyName} />
+
+      <CompanyProfileCard profile={companyProfile} />
 
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
         <Stat label="SIGNAL SCORE" value={`${data.signal_score || 0}/10`} color={accent} />
@@ -217,6 +220,29 @@ export default function TickerPage() {
   );
 }
 
+function CompanyProfileCard({ profile }) {
+  return (
+    <Card title="COMPANY PROFILE">
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(150px, 0.28fr) minmax(0, 1fr)", gap: 18, alignItems: "start" }}>
+        <div style={{ borderRight: hairline, paddingRight: 16 }}>
+          <div style={{ color: accent, fontSize: 26, fontWeight: 900, letterSpacing: "0.08em", lineHeight: 1.1 }}>
+            {profile.name || `$${profile.ticker}`}
+          </div>
+          <div style={{ color: muted, fontSize: 10, letterSpacing: "0.14em", marginTop: 8 }}>
+            {profile.sector || "SECTOR UNKNOWN"}
+          </div>
+          <div style={{ color: dim, fontSize: 10, letterSpacing: "0.12em", marginTop: 7 }}>
+            {profile.source || "SCAN PROFILE"}
+          </div>
+        </div>
+        <div style={{ color: labelLight, fontSize: 13, lineHeight: 1.7, letterSpacing: "0.025em" }}>
+          {profile.description}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function KeyRatiosCard({ freeData }) {
   const ratios = freeData?.key_ratios || {};
   const meta = freeData?.key_ratios_meta || {};
@@ -318,6 +344,44 @@ function KeyRatiosCard({ freeData }) {
       )}
     </Card>
   );
+}
+
+function buildCompanyProfile({ data, freeData, companyName, ticker }) {
+  const alphaOverview = freeData?.alpha_vantage?.overview || {};
+  const lseProfiles = freeData?.london_strategic_edge?.company_profiles || [];
+  const lseProfile = Array.isArray(lseProfiles) ? lseProfiles[0] || {} : {};
+  const lseDescription = fieldValue(lseProfile, [
+    "description",
+    "long_description",
+    "business_description",
+    "company_description",
+    "profile",
+    "summary",
+  ]);
+  const fallbackDescription = data?.company_description || data?.business_summary || data?.summary;
+  const rawDescription = lseDescription || alphaOverview.Description || fallbackDescription || "";
+  const description = shortCompanyDescription(rawDescription)
+    || `${companyName || ticker} is being tracked by Case Capital Terminal from the latest scanner and market data. A verified business description was not available from the configured free-data sources. Review SEC filings, company releases, and live market context before using this profile in a trade decision.`;
+  return {
+    ticker,
+    name: companyName || alphaOverview.Name || fieldValue(lseProfile, ["name", "company_name"]) || ticker,
+    sector: alphaOverview.Sector || fieldValue(lseProfile, ["sector"]) || data?.sector || "",
+    source: lseDescription ? "LONDON STRATEGIC EDGE" : alphaOverview.Description ? "ALPHA VANTAGE OVERVIEW" : "FALLBACK PROFILE",
+    description,
+  };
+}
+
+function shortCompanyDescription(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const sentences = clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [clean];
+  return sentences.slice(0, 4).join(" ").trim();
+}
+
+function fieldValue(row, keys) {
+  const found = Object.keys(row || {}).find(k => keys.some(key => k.toLowerCase() === key || k.toLowerCase().includes(key)));
+  const value = found ? row[found] : null;
+  return value == null || value === "" ? null : value;
 }
 
 function KronosTickerForecastBox({ data, kronos }) {

@@ -17,6 +17,8 @@ export default function OptionsDeskPage() {
   const [orders, setOrders] = useState(null);
   const [risk, setRisk] = useState(null);
   const [trades, setTrades] = useState(null);
+  const [leaps, setLeaps] = useState(null);
+  const [activeView, setActiveView] = useState("DESK");
   const [selected, setSelected] = useState(null);
   const [selectedPosition, setSelectedPosition] = useState(null);
   const [lseContext, setLseContext] = useState(null);
@@ -24,13 +26,14 @@ export default function OptionsDeskPage() {
   const [message, setMessage] = useState("");
 
   const load = useCallback(async () => {
-    const [acct, cand, pos, ord, riskCheck, tradeSet] = await Promise.all([
+    const [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet] = await Promise.all([
       axios.get(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
       axios.get(`${API}/options_desk/candidates`).catch(() => ({ data: null })),
       axios.get(`${API}/options_desk/positions`).catch(() => ({ data: { positions: [] } })),
       axios.get(`${API}/options_desk/orders`).catch(() => ({ data: { orders: [] } })),
       axios.get(`${API}/options_desk/risk`).catch(() => ({ data: null })),
       axios.get(`${API}/options_desk/trades?sync_live=false`).catch(() => ({ data: { trades: [] } })),
+      axios.get(`${API}/options_desk/leaps`).catch(() => ({ data: null })),
     ]);
     setAccount(acct.data);
     setCandidates(cand.data);
@@ -38,6 +41,7 @@ export default function OptionsDeskPage() {
     setOrders(ord.data);
     setRisk(riskCheck.data);
     setTrades(tradeSet.data);
+    setLeaps(leapsSet.data);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -157,6 +161,14 @@ export default function OptionsDeskPage() {
         SEPARATE PAPER OPTIONS ACCOUNT. PM ROUTES THE EXPRESSION. EQUITY TRADE FLOOR IS NOT CONNECTED TO THIS DESK.
       </div>
 
+      <div style={tabStrip}>
+        {["DESK", "LEAPS"].map(view => (
+          <button key={view} onClick={() => setActiveView(view)} style={tabButton(activeView === view)}>
+            {view === "DESK" ? "OPTIONS DESK" : "LEAPS SLEEVE"}
+          </button>
+        ))}
+      </div>
+
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="DESK STATUS" value={account?.ok ? "ARMED" : "DISABLED"} sub={account?.reason || "OPTIONS PAPER"} color={account?.ok ? "#4ade80" : "#f87171"} accentBar />
         <Stat label="EQUITY BASIS" value={`$${Number(candidates?.options_equity_basis || 20000).toLocaleString()}`} sub="OPTIONS PM" color={accent} />
@@ -174,6 +186,21 @@ export default function OptionsDeskPage() {
       </div>
 
       {message && <div style={messageBox}>{message}</div>}
+
+      {activeView === "LEAPS" ? (
+        <LeapsSleeve data={leaps} onRefresh={async () => {
+          setBusy(true);
+          setMessage("");
+          try {
+            const r = await axios.post(`${API}/options_desk/leaps/refresh`);
+            setLeaps(r.data);
+            setMessage("LEAPS SLEEVE REFRESHED");
+          } finally {
+            setBusy(false);
+          }
+        }} busy={busy} />
+      ) : (
+      <>
 
       <div style={deskGrid}>
         <Card title="PM ROUTING BOARD" accentColor={accent}>
@@ -247,7 +274,92 @@ export default function OptionsDeskPage() {
           ])}
         />
       </Card>
+      </>
+      )}
     </CrtShell>
+  );
+}
+
+function LeapsSleeve({ data, onRefresh, busy }) {
+  const holdings = data?.holdings || [];
+  const candidates = data?.candidates || [];
+  const summary = data?.summary || {};
+  return (
+    <div>
+      <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 18, flexWrap: "wrap" }}>
+        <Stat label="OPEN LEAPS" value={summary.open_leaps || 0} sub="BOUGHT CONTRACTS" color={accent} accentBar />
+        <Stat label="DIAGONALS" value={summary.diagonal_overlays || 0} sub="SHORT CALL OVERLAYS" color="#4ade80" />
+        <Stat label="CANDIDATES" value={summary.candidate_count || 0} sub="PM LONG-TERM WATCH" color="#fbbf24" />
+        <Stat label="MODE" value="READ ONLY" sub="NO LEAPS EXECUTION YET" color={accent2} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <button onClick={onRefresh} disabled={busy} style={buttonStyle(accent2)}>{busy ? "REFRESHING" : "REFRESH LEAPS"}</button>
+      </div>
+      <div style={deskGrid}>
+        <Card title="BOUGHT LEAPS - STRATEGY STATE" accentColor={accent}>
+          <SimpleTable
+            empty="No bought LEAPS detected in the options account."
+            head={["TICKER", "CONTRACT", "DTE", "STRATEGY", "NOW", "1Y EXPECTED"]}
+            rows={holdings.map(h => [
+              `$${h.ticker}`,
+              h.symbol,
+              h.days_to_expiration,
+              h.strategy_current,
+              h.unrealized_pct != null ? `${num(h.unrealized_pct, 2)}%` : "-",
+              `${num(h.kronos_1y?.expected_contract_1y_pct, 1)}%`,
+            ])}
+          />
+        </Card>
+        <Card title="KRONOS 1Y CONE" accentColor="#4ade80">
+          {holdings.length ? <LeapsCone item={holdings[0]} /> : <div style={{ color: muted, padding: 20 }}>Click into bought LEAPS once positions exist. The sleeve will show expected one-year contract gain and cone.</div>}
+        </Card>
+      </div>
+      <Card title="LEAPS CANDIDATE WATCHLIST" accentColor="#fbbf24">
+        <SimpleTable
+          empty="No long-term PM candidates in the latest scan."
+          head={["TICKER", "PM", "ACTION", "STRATEGY", "UNDERLYING 1Y", "CONTRACT 1Y", "CONE"]}
+          rows={candidates.map(c => [
+            `$${c.ticker}`,
+            num(c.pm_score, 1),
+            c.pm_action,
+            c.strategy_candidate,
+            `${num(c.kronos_1y?.expected_underlying_1y_pct, 1)}%`,
+            `${num(c.kronos_1y?.expected_contract_1y_pct, 1)}%`,
+            `${num(c.kronos_1y?.cone_low_pct, 1)}% / ${num(c.kronos_1y?.cone_high_pct, 1)}%`,
+          ])}
+        />
+      </Card>
+      <div style={dataPolicyBox}>
+        LEAPS POLICY: BUY LONG-DATED CALLS ONLY AFTER PM APPROVAL AND LIQUIDITY CLEARANCE. COVERED CALL/DIAGONAL OVERLAYS ARE STRATEGY STATE, NOT AUTO-EXECUTION.
+      </div>
+    </div>
+  );
+}
+
+function LeapsCone({ item }) {
+  const k = item?.kronos_1y || {};
+  const low = Number(k.cone_low_pct || 0);
+  const expected = Number(k.expected_contract_1y_pct || 0);
+  const high = Number(k.cone_high_pct || 0);
+  const min = Math.min(low, expected, high, -100);
+  const max = Math.max(low, expected, high, 100);
+  const pos = value => `${((Number(value) - min) / Math.max(1, max - min)) * 100}%`;
+  return (
+    <div>
+      <div style={{ color: accent, fontSize: 30, fontWeight: 900, marginBottom: 4 }}>${item.ticker}</div>
+      <div style={{ color: muted, fontSize: 12, marginBottom: 16 }}>{item.symbol}</div>
+      <PlanRow k="Current Strategy" v={item.strategy_current || "-"} color={accent2} />
+      <PlanRow k="1Y Contract Expected" v={`${num(k.expected_contract_1y_pct, 1)}%`} color={expected >= 0 ? "#4ade80" : "#f87171"} />
+      <PlanRow k="1Y Underlying Expected" v={`${num(k.expected_underlying_1y_pct, 1)}%`} color={k.expected_underlying_1y_pct >= 0 ? "#4ade80" : "#f87171"} />
+      <PlanRow k="Cone" v={`${num(k.cone_low_pct, 1)}% to ${num(k.cone_high_pct, 1)}%`} />
+      <div style={coneTrack}>
+        <div style={{ ...coneBand, left: pos(low), width: `calc(${pos(high)} - ${pos(low)})` }} />
+        <div style={{ ...coneMarker, left: pos(expected), background: expected >= 0 ? "#4ade80" : "#f87171" }} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", color: dim, fontSize: 10, letterSpacing: "0.12em" }}>
+        <span>{num(min, 0)}%</span><span>{num(max, 0)}%</span>
+      </div>
+    </div>
   );
 }
 
@@ -539,8 +651,13 @@ function routeBox(color) {
 const notice = { padding: "14px 18px", border: `0.5px solid ${accent2}`, background: `${accent2}10`, color: accent2, fontSize: 11, letterSpacing: "0.1em", marginBottom: 16 };
 const dataPolicyBox = { padding: "10px 14px", border: hairline, background: "rgba(255,255,255,0.025)", color: muted, fontSize: 10, letterSpacing: "0.12em", margin: "-10px 0 16px" };
 const messageBox = { padding: "10px 14px", border: `0.5px solid ${accent}`, background: `${accent}12`, color: accent, fontSize: 11, letterSpacing: "0.1em", marginBottom: 16 };
+const tabStrip = { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" };
+const tabButton = active => ({ background: active ? "rgba(200,168,75,0.18)" : "transparent", border: `0.5px solid ${active ? accent : "rgba(255,255,255,0.14)"}`, color: active ? accent : muted, fontSize: 11, padding: "9px 16px", cursor: "pointer", letterSpacing: "0.14em", fontFamily: "JetBrains Mono", fontWeight: 900 });
 const deskGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(340px, 0.75fr)", gap: 18, marginBottom: 18 };
 const barTrack = { height: 4, background: "rgba(255,255,255,0.06)", marginTop: 4, overflow: "hidden" };
 const barFill = { height: "100%" };
 const ratchetGrid = { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 10 };
 const ratchetTier = { border: hairline, background: "rgba(74,222,128,0.06)", padding: "7px 6px", color: muted, fontSize: 10, letterSpacing: "0.08em", display: "flex", justifyContent: "space-between", gap: 6 };
+const coneTrack = { position: "relative", height: 34, border: hairline, background: "rgba(255,255,255,0.04)", margin: "18px 0 8px", overflow: "hidden" };
+const coneBand = { position: "absolute", top: 10, bottom: 10, background: "rgba(94,234,212,0.20)", borderLeft: `1px solid ${accent2}`, borderRight: `1px solid ${accent2}` };
+const coneMarker = { position: "absolute", top: 4, bottom: 4, width: 3, boxShadow: "0 0 12px currentColor" };

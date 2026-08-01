@@ -876,6 +876,7 @@ async def alpha_vantage_snapshot(ticker: str) -> dict[str, Any]:
             "Symbol", "Name", "Sector", "Industry", "MarketCapitalization", "PERatio",
             "ProfitMargin", "QuarterlyEarningsGrowthYOY", "QuarterlyRevenueGrowthYOY",
             "AnalystTargetPrice", "Beta", "52WeekHigh", "52WeekLow", "DividendYield",
+            "Description",
         ]
         return {
             "ok": True,

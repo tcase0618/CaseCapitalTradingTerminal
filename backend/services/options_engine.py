@@ -401,7 +401,7 @@ def _approx_delta(strike: float, spot: float, is_call: bool) -> float:
 def _liquidity_flag(oi: int, spread: float, premium: float = 0.0, volume: int = 0) -> str:
     spread_pct = spread / premium if premium > 0 else 1.0
     bad_oi = oi < 100
-    bad_spread = spread > 0.75 and spread_pct > 0.35
+    bad_spread = spread > 0.75 or spread_pct > 0.35
     thin = oi < 50 and volume < 10
     if thin:
         return "POOR"
@@ -410,6 +410,17 @@ def _liquidity_flag(oi: int, spread: float, premium: float = 0.0, volume: int = 
     if bad_oi or bad_spread:
         return "WARN"
     return "GOOD"
+
+
+def _premium_from_quote(row: dict | Any) -> float:
+    bid = _safe_float(row.get("bid"))
+    ask = _safe_float(row.get("ask"))
+    last = _safe_float(row.get("lastPrice"))
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    if ask > 0:
+        return ask
+    return last
 
 
 def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) -> dict | None:
@@ -436,10 +447,7 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         df["bid_safe"] = df["bid"].apply(_safe_float) if "bid" in df.columns else 0.0
         df["ask_safe"] = df["ask"].apply(_safe_float) if "ask" in df.columns else 0.0
         df["last_safe"] = df["lastPrice"].apply(_safe_float) if "lastPrice" in df.columns else 0.0
-        df["premium_safe"] = df.apply(
-            lambda r: r["last_safe"] or ((r["bid_safe"] + r["ask_safe"]) / 2 if r["bid_safe"] > 0 and r["ask_safe"] > 0 else 0.0),
-            axis=1,
-        )
+        df["premium_safe"] = df.apply(_premium_from_quote, axis=1)
         df["premium_safe"] = df["premium_safe"].where(df["premium_safe"] > 0, (df["strike"] - spot).abs() * 0.05)
         df["premium_safe"] = df["premium_safe"].clip(lower=0.05)
         df["max_loss_safe"] = df["premium_safe"] * 100
@@ -467,7 +475,7 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
             (pool["oi_safe"] < 50).astype(int) * 4
             + (pool["oi_safe"] < 100).astype(int) * 1
             + (pool["volume_safe"] < 10).astype(int) * 2
-            + ((pool["spread_safe"] > 0.75) & (pool["spread_pct"] > 0.35)).astype(int) * 4
+            + ((pool["spread_safe"] > 0.75) | (pool["spread_pct"] > 0.35)).astype(int) * 4
             + (pool["ask_safe"] <= 0).astype(int) * 10
             + (pool["bid_safe"] <= 0).astype(int) * 2
         )
@@ -494,8 +502,7 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         oi = _safe_int(row.get("openInterest"))
         volume = _safe_int(row.get("volume"))
         spread = max(0.0, ask - bid)
-        # Mid-price fallback if lastPrice missing
-        premium = last or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
+        premium = ((bid + ask) / 2 if bid > 0 and ask > 0 else ask or last)
         if premium <= 0:
             premium = max(0.05, abs(spot - strike) * 0.05)
         provider_delta = _safe_float(row.get("delta"))
@@ -537,34 +544,43 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     sq_score = (stock.get("squeeze") or {}).get("score") or 0
     days = (stock.get("time_target") or {}).get("days_remaining") or 30
     iv_rank = (chain or {}).get("iv_rank", 50)
+    score = _safe_float(stock.get("score") or stock.get("case_score") or stock.get("pm_score"))
+    signal_set = {str(s) for s in signals}
 
-    is_insider = "insider_cluster_buy" in signals
-    is_earnings = "upcoming_earnings" in signals
-    is_contract = "CONTRACT_SURGE" in signals
-    is_congress = "CONGRESSIONAL_BUY" in signals
+    is_insider = "insider_cluster_buy" in signal_set
+    is_earnings = "upcoming_earnings" in signal_set
+    is_contract = "CONTRACT_SURGE" in signal_set
+    is_congress = "CONGRESSIONAL_BUY" in signal_set
+    is_bearish = bool({"BEARISH", "bearish", "risk_off", "negative_catalyst", "DARK_POOL_BEARISH"} & signal_set)
 
-    # Rule order matters
+    # Rule order matters.
     if is_earnings and days < 7:
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
-                "reason": "IV crush imminent — buy stock directly or wait until after print"}
+                "reason": "IV crush imminent - buy stock directly or wait until after print"}
     if risk_level == "EXTREME" or iv_rank > 80:
-        return {"strategy": "LOTTERY_CALL", "direction": "BULL",
-                "reason": "High risk or expensive IV — small far-OTM lottery only"}
+        return {"strategy": "BULL_CALL_SPREAD" if not is_bearish else "BEAR_PUT_SPREAD",
+                "direction": "BULL" if not is_bearish else "BEAR",
+                "reason": "High risk or expensive IV - defined-risk spread only; no naked lottery contract"}
+    if is_bearish:
+        return {"strategy": "BEAR_PUT_SPREAD" if iv_rank > 55 else "LONG_PUT", "direction": "BEAR",
+                "reason": "Bearish evidence detected - PM should express with puts only if liquidity clears"}
     if sq_score > 75 and days < 14 and iv_rank < 60:
         return {"strategy": "LONG_CALL", "direction": "BULL",
-                "reason": "High squeeze prob with near catalyst — directional bet, no spread"}
+                "reason": "High squeeze probability with a near catalyst - directional call candidate"}
     if (risk_level == "LOW" and is_contract and 21 <= days <= 60 and iv_rank > 50):
         return {"strategy": "BULL_CALL_SPREAD", "direction": "BULL",
-                "reason": "IV elevated on gov contract — spread caps cost vs crush risk"}
+                "reason": "IV elevated on government-contract catalyst - spread caps cost vs crush risk"}
     if is_insider and sq_score > 50 and days > 30 and iv_rank < 40:
         return {"strategy": "LONG_CALL", "direction": "BULL",
-                "reason": "Cheap IV entry on insider accumulation — buy calls while vol is low"}
+                "reason": "Cheap IV entry on insider accumulation - buy calls while volatility is low"}
     if is_congress and risk_level == "LOW":
         return {"strategy": "BULL_CALL_SPREAD", "direction": "BULL",
-                "reason": "High-conviction low-risk congressional setup — spread max R/R"}
+                "reason": "High-conviction low-risk congressional setup - spread maxes risk/reward"}
+    if score >= 78 and days >= 120 and iv_rank < 70:
+        return {"strategy": "LEAPS_CALL_CANDIDATE", "direction": "BULL",
+                "reason": "High-score long-horizon setup - route to LEAPS sleeve for long-dated exposure"}
     return {"strategy": "LONG_CALL", "direction": "BULL",
-            "reason": "Default directional play — pre-catalyst long call"}
-
+            "reason": "Default directional play - pre-catalyst long call"}
 
 # ---------------- IV rank (Part 5) — also exposed standalone ----------------
 async def calculate_iv_rank(ticker: str) -> dict[str, Any]:
@@ -604,19 +620,23 @@ def build_spread(chain_data: dict, direction: str, width: float = 5.0) -> dict |
         return None
 
     if direction == "BULL":
-        sell_target = primary["strike"] + width  # higher strike call
+        sell_target = primary["strike"] + width
     else:
-        sell_target = primary["strike"] - width  # lower strike put
+        sell_target = primary["strike"] - width
 
     df = df.copy()
+    if direction == "BULL":
+        df = df[df["strike"].apply(_safe_float) > float(primary["strike"])]
+    else:
+        df = df[df["strike"].apply(_safe_float) < float(primary["strike"])]
+    if df is None or len(df) == 0:
+        return None
     df["dist"] = (df["strike"] - sell_target).abs()
     sell_row = df.sort_values("dist").iloc[0]
     sell_strike = float(sell_row["strike"])
-    sell_premium = float(sell_row.get("lastPrice") or 0)
+    sell_premium = _premium_from_quote(sell_row)
     if sell_premium <= 0:
-        bid = float(sell_row.get("bid") or 0)
-        ask = float(sell_row.get("ask") or 0)
-        sell_premium = (bid + ask) / 2 if bid and ask else 0.05
+        sell_premium = 0.05
 
     buy_premium = primary["premium"]
     net_debit = round(buy_premium - sell_premium, 2)
@@ -626,17 +646,16 @@ def build_spread(chain_data: dict, direction: str, width: float = 5.0) -> dict |
     max_profit = round(spread_width * 100 - net_debit * 100, 2)
     max_loss = round(net_debit * 100, 2)
     rr = round(max_profit / max_loss, 1) if max_loss > 0 else 0.0
-    if direction == "BULL":
-        breakeven = round(primary["strike"] + net_debit, 2)
-    else:
-        breakeven = round(primary["strike"] - net_debit, 2)
+    breakeven = round(primary["strike"] + net_debit, 2) if direction == "BULL" else round(primary["strike"] - net_debit, 2)
 
-        return {
-            "direction": direction,
-            "data_provider": chain_data.get("data_provider"),
-            "data_feed": chain_data.get("data_feed"),
-            "data_quality": chain_data.get("data_quality"),
-            "buy_strike": primary["strike"],
+    return {
+        "direction": direction,
+        "type": "CALL_SPREAD" if direction == "BULL" else "PUT_SPREAD",
+        "data_provider": chain_data.get("data_provider"),
+        "data_feed": chain_data.get("data_feed"),
+        "data_quality": chain_data.get("data_quality"),
+        "buy_symbol": primary.get("symbol") or primary.get("contractSymbol"),
+        "buy_strike": primary["strike"],
         "sell_strike": sell_strike,
         "buy_premium": round(buy_premium, 2),
         "sell_premium": round(sell_premium, 2),
@@ -648,7 +667,6 @@ def build_spread(chain_data: dict, direction: str, width: float = 5.0) -> dict |
         "expiration": primary["expiration"],
         "width": spread_width,
     }
-
 
 # ---------------- unusual flow (Part 7) ----------------
 def _detect_unusual_flow_from_chain(ticker: str, chain: dict | None) -> dict[str, Any]:

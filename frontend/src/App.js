@@ -15,6 +15,7 @@ import SECPage from "@/components/SECPage";
 import GeoRiskPage from "@/components/GeoRiskPage";
 import MacroPage from "@/components/MacroPage";
 import KronosPage from "@/components/KronosPage";
+import CaseCourtPage from "@/components/CaseCourtPage";
 import TradeFloorPage from "@/components/TradeFloorPage";
 import OptionsDeskPage from "@/components/OptionsDeskPage";
 import TFEnginePage from "@/components/TFEnginePage";
@@ -47,6 +48,7 @@ function App() {
               <Route path="/georisk" element={<GeoRiskPage />} />
               <Route path="/macro" element={<MacroPage />} />
               <Route path="/kronos" element={<KronosPage />} />
+              <Route path="/case-court" element={<CaseCourtPage />} />
               <Route path="/research" element={<Navigate to="/settings" replace />} />
               <Route path="/trade-floor" element={<TradeFloorPage />} />
               <Route path="/options-desk" element={<OptionsDeskPage />} />

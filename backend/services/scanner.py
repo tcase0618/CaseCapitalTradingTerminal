@@ -407,7 +407,10 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             logger.warning("Trade Floor dispatch failed: %s", e)
         try:
             from . import options_desk as _od
-            asyncio.create_task(_od.refresh_and_auto_execute_latest())
+            if _od.options_execution_enabled():
+                asyncio.create_task(_od.refresh_and_auto_execute_latest())
+            else:
+                await log_activity("Options Desk auto-execute skipped; ENABLE_OPTIONS_EXECUTION is off", "info")
         except Exception as e:
             logger.warning("Options Desk auto-execute dispatch failed: %s", e)
     else:

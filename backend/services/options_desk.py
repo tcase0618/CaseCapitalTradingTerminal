@@ -37,11 +37,15 @@ OPTIONS_RATCHET_TIERS: list[tuple[float, float]] = [
 ]
 MIN_OPEN_INTEREST = 50
 MIN_VOLUME_WHEN_LOW_OI = 10
+MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "100") or 100)
 MAX_SPREAD_ABS = 0.75
 MAX_SPREAD_PCT = 0.35
 MIN_ABS_DELTA = 0.05
 AUTO_MAX_ORDERS_PER_SCAN = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_SCAN", "5") or 5)
 OPTIONS_ALPACA_REFRESH_LIMIT = int(os.environ.get("OPTIONS_ALPACA_REFRESH_LIMIT", "18") or 18)
+OPTIONS_EXECUTION_ENABLED = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+OPTIONS_ALLOW_INDICATIVE_EXECUTION = os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+OPTIONS_MAX_QUOTE_AGE_SECONDS = int(os.environ.get("OPTIONS_MAX_QUOTE_AGE_SECONDS", "900") or 900)
 ALPACA_DATA_BASE = "https://data.alpaca.markets"
 ALPACA_OPTIONS_FEED = os.environ.get("OPTIONS_APCA_DATA_FEED", "indicative").strip() or "indicative"
 OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
@@ -70,6 +74,10 @@ def configured() -> bool:
 
 def paper_only() -> bool:
     return "paper-api.alpaca.markets" in TRADE_BASE
+
+
+def options_execution_enabled() -> bool:
+    return OPTIONS_EXECUTION_ENABLED
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
@@ -103,6 +111,28 @@ def _fmt_pct(v: Any) -> str:
         return f"{'+' if n >= 0 else ''}{n:.1f}%"
     except (TypeError, ValueError):
         return "-"
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _quote_age_seconds(snapshot: dict[str, Any]) -> int | None:
+    ts = _parse_dt(snapshot.get("quote_time") or snapshot.get("trade_time"))
+    if not ts:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()))
+
+
+def _execution_grade_allowed(data_quality: str | None) -> bool:
+    if str(data_quality or "").upper() == "EXECUTION_GRADE":
+        return True
+    return bool(OPTIONS_ALLOW_INDICATIVE_EXECUTION)
 
 
 async def _telegram_send(text: str) -> bool:
@@ -282,11 +312,13 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
         quote = snap.get("latestQuote") or {}
         trade = snap.get("latestTrade") or {}
         greeks = snap.get("greeks") or {}
+        daily_bar = snap.get("dailyBar") or {}
         bid = _safe_float(quote.get("bp"))
         ask = _safe_float(quote.get("ap"))
         last = _safe_float(trade.get("p"))
         mid = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else 0.0
-        mark = bid or mid
+        mark = bid or mid or last
+        data_quality = "INDICATIVE" if ALPACA_OPTIONS_FEED == "indicative" else "EXECUTION_GRADE"
         return {
             "ok": True,
             "symbol": symbol,
@@ -302,6 +334,10 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
             "quote_time": quote.get("t"),
             "trade_time": trade.get("t"),
             "data_feed": ALPACA_OPTIONS_FEED,
+            "data_quality": data_quality,
+            "volume": _safe_int(daily_bar.get("v")),
+            "open_interest": _safe_int(snap.get("openInterest")),
+            "open_interest_source": "reported" if snap.get("openInterest") is not None else "unavailable",
         }
     except Exception as exc:
         return {"ok": False, "symbol": symbol, "reason": exc.__class__.__name__}
@@ -317,12 +353,13 @@ def _options_ratchet_floor_pct(gain_pct: float) -> float:
 
 def options_ratchet_state(entry_premium: float, current_bid: float | None = None, peak_premium: float | None = None) -> dict[str, Any]:
     entry = max(0.0, float(entry_premium or 0))
+    has_current = current_bid is not None
     current = max(0.0, float(current_bid or 0))
     peak = max(entry, float(peak_premium or 0), current)
     gain_pct = ((peak - entry) / entry * 100.0) if entry > 0 else 0.0
     floor_pct = _options_ratchet_floor_pct(gain_pct)
     floor_premium = entry * (1 + floor_pct / 100.0) if entry > 0 else 0.0
-    exit_triggered = bool(floor_premium > 0 and current <= floor_premium)
+    exit_triggered = bool(has_current and floor_premium > 0 and current <= floor_premium)
     return {
         "policy": "premium_ratchet_no_take_profit",
         "take_profit": None,
@@ -458,6 +495,10 @@ def _options_data_policy(alpaca_refreshes_used: int | None = None) -> dict[str, 
         "alpaca_refreshes_used": alpaca_refreshes_used,
         "refresh_order": "PM score descending",
         "skips_equity_only": True,
+        "options_execution_enabled": OPTIONS_EXECUTION_ENABLED,
+        "allow_indicative_execution": OPTIONS_ALLOW_INDICATIVE_EXECUTION,
+        "execution_grade_required": not OPTIONS_ALLOW_INDICATIVE_EXECUTION,
+        "max_quote_age_seconds": OPTIONS_MAX_QUOTE_AGE_SECONDS,
         "daily_premium_cap_usd": OPTIONS_DAILY_PREMIUM_CAP_USD,
     }
 
@@ -472,12 +513,16 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         return "PASS", ["PM did not approve active sizing."]
     if opts.get("strategy") == "AVOID_OPTIONS" or pm_row.get("option_view") == "STOCK_ONLY":
         return "EQUITY", ["Options engine says avoid options or hold stock instead."]
+    if pm_row.get("option_view") == "STOCK_PREFERRED":
+        return "EQUITY", ["PM prefers equity expression over options for this setup."]
     iv_rank = float(opts.get("iv_rank") or 50)
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
     option_ok = bool(contract or spread)
     if not option_ok:
         return "EQUITY", ["No usable option contract or spread candidate."]
+    if pm_row.get("option_view") == "SPREAD_ONLY" and not spread:
+        return "EQUITY", ["PM requires a defined-risk spread, but no spread candidate was built."]
     if score >= 78 and rr >= 2.2 and iv_rank < 65:
         return "BOTH", ["High score and clean option conditions allow both desks."]
     if score >= 64 and rr >= 1.5:
@@ -495,6 +540,10 @@ def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -
     if action not in {"ACCUMULATE", "STARTER", "WATCH"}:
         return False
     if opts.get("strategy") == "AVOID_OPTIONS" or pm_row.get("option_view") == "STOCK_ONLY":
+        return False
+    if pm_row.get("option_view") == "STOCK_PREFERRED":
+        return False
+    if pm_row.get("option_view") == "SPREAD_ONLY" and not (opts.get("spread") or {}):
         return False
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
@@ -521,15 +570,19 @@ def _risk_budget(route: str, action: str, score: float) -> float:
 
 
 def _spread_is_too_wide(instrument: dict[str, Any]) -> bool:
+    bid = float(instrument.get("bid") or 0)
+    ask = float(instrument.get("ask") or instrument.get("premium") or 0)
+    if bid <= 0 or ask <= 0:
+        return True
     spread = float(instrument.get("spread") or 0)
-    premium = float(instrument.get("ask") or instrument.get("premium") or 0)
+    premium = ask
     spread_pct = spread / premium if premium > 0 else 1.0
-    return spread > MAX_SPREAD_ABS and spread_pct > MAX_SPREAD_PCT
+    return spread > MAX_SPREAD_ABS or spread_pct > MAX_SPREAD_PCT
 
 
 def _open_interest_is_too_low(instrument: dict[str, Any]) -> bool:
     if instrument.get("open_interest_source") == "unavailable" and instrument.get("data_provider") == "ALPACA_OPTIONS":
-        return False
+        return int(instrument.get("volume") or 0) < MIN_OPTION_VOLUME_IF_OI_UNKNOWN
     oi = int(instrument.get("open_interest") or 0)
     volume = int(instrument.get("volume") or 0)
     return oi < MIN_OPEN_INTEREST and volume < MIN_VOLUME_WHEN_LOW_OI
@@ -600,19 +653,24 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
         exit_policy = options_ratchet_state(entry_premium=entry_premium)
         contracts = int(risk_budget // contract_risk) if contract_risk > 0 and risk_budget > 0 else 0
         blocked = []
+        data_provider = opts.get("data_provider") or instrument.get("data_provider")
+        data_quality = opts.get("data_quality") or instrument.get("data_quality")
+        quality_state = "EXECUTION_GRADE" if data_provider == "ALPACA_OPTIONS" and _execution_grade_allowed(data_quality) else "RESEARCH_ONLY"
         if route in {"OPTION", "BOTH"}:
+            if not OPTIONS_EXECUTION_ENABLED:
+                blocked.append("options execution is disabled")
             if not paper_only():
                 blocked.append("options desk is not pointed at Alpaca paper")
-            data_provider = opts.get("data_provider") or instrument.get("data_provider")
-            data_quality = opts.get("data_quality") or instrument.get("data_quality")
             if data_provider != "ALPACA_OPTIONS":
                 blocked.append("missing Alpaca execution-grade options data")
-            elif data_quality == "FALLBACK_RESEARCH":
-                blocked.append("fallback options data is not execution grade")
+            elif not _execution_grade_allowed(data_quality):
+                blocked.append(f"{data_quality or 'unknown'} options data is not execution grade")
             if contract_risk <= 0:
                 blocked.append("missing option max loss")
             if contract_risk > risk_budget:
                 blocked.append("contract risk exceeds PM budget")
+            if instrument.get("kind") == "spread":
+                blocked.append("multi-leg spread execution is not enabled yet")
             if instrument.get("kind") == "single_leg":
                 if _spread_is_too_wide(instrument):
                     blocked.append("spread too wide")
@@ -662,6 +720,7 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
                 "ratchet_tiers": [{"trigger_gain_pct": t, "locked_gain_pct": l} for t, l in OPTIONS_RATCHET_TIERS],
             },
             "exit_policy": exit_policy,
+            "quality_state": quality_state,
             "options_live_refresh_attempted": attempted_live_refresh,
             "contracts": contracts,
             "manual_fire_ready": route in {"OPTION", "BOTH"} and not blocked and contracts > 0,
@@ -703,6 +762,49 @@ async def candidates() -> dict[str, Any]:
     }
 
 
+async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
+    instrument = ticket.get("instrument") or {}
+    symbol = instrument.get("symbol") or instrument.get("contractSymbol")
+    if not symbol:
+        return {"ok": False, "reason": "missing_option_symbol_from_data_provider"}
+    if instrument.get("kind") != "single_leg":
+        return {"ok": False, "reason": "multi_leg_execution_not_enabled_v1"}
+    snap = await _option_snapshot(str(symbol).upper())
+    if not snap.get("ok"):
+        return {"ok": False, "reason": "fresh_option_snapshot_failed", "snapshot": snap}
+    quote_age = _quote_age_seconds(snap)
+    if quote_age is None:
+        return {"ok": False, "reason": "fresh_quote_timestamp_missing", "snapshot": snap}
+    if quote_age > OPTIONS_MAX_QUOTE_AGE_SECONDS:
+        return {"ok": False, "reason": "fresh_quote_stale", "quote_age_seconds": quote_age, "snapshot": snap}
+    if not _execution_grade_allowed(snap.get("data_quality")):
+        return {"ok": False, "reason": "fresh_quote_not_execution_grade", "snapshot": snap}
+
+    fresh = {**instrument}
+    fresh.update({
+        "symbol": str(symbol).upper(),
+        "bid": snap.get("bid"),
+        "ask": snap.get("ask"),
+        "premium": snap.get("ask") or snap.get("mid") or snap.get("last"),
+        "spread": round(_safe_float(snap.get("ask")) - _safe_float(snap.get("bid")), 2),
+        "delta": snap.get("delta") or instrument.get("delta"),
+        "volume": snap.get("volume") or instrument.get("volume"),
+        "open_interest": snap.get("open_interest") or instrument.get("open_interest"),
+        "open_interest_source": snap.get("open_interest_source") or instrument.get("open_interest_source"),
+        "data_provider": "ALPACA_OPTIONS",
+        "data_feed": snap.get("data_feed"),
+        "data_quality": snap.get("data_quality"),
+        "quote_age_seconds": quote_age,
+    })
+    if _spread_is_too_wide(fresh):
+        return {"ok": False, "reason": "fresh_spread_too_wide", "instrument": fresh, "snapshot": snap}
+    if _open_interest_is_too_low(fresh):
+        return {"ok": False, "reason": "fresh_open_interest_or_volume_too_low", "instrument": fresh, "snapshot": snap}
+    if _delta_is_too_low(fresh, ticket.get("strategy")):
+        return {"ok": False, "reason": "fresh_delta_too_low", "instrument": fresh, "snapshot": snap}
+    return {"ok": True, "symbol": str(symbol).upper(), "instrument": fresh, "snapshot": snap, "quote_age_seconds": quote_age}
+
+
 async def execute(candidate_id: str, qty: int | None = None, limit_price: float | None = None) -> dict[str, Any]:
     db = get_db()
     ticket = await db.options_desk_candidates.find_one({"candidate_id": candidate_id}, {"_id": 0})
@@ -710,6 +812,8 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         return {"ok": False, "reason": "candidate_not_found"}
     if not configured():
         return {"ok": False, "reason": "missing_options_alpaca_keys", "candidate": ticket}
+    if not OPTIONS_EXECUTION_ENABLED:
+        return {"ok": False, "reason": "options_execution_disabled", "candidate": ticket}
     if not paper_only():
         return {"ok": False, "reason": "refusing_non_paper_options_account", "candidate": ticket}
     if not ticket.get("manual_fire_ready"):
@@ -717,8 +821,14 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     instrument = ticket.get("instrument") or {}
     if (ticket.get("data_provider") or instrument.get("data_provider")) != "ALPACA_OPTIONS":
         return {"ok": False, "reason": "missing_alpaca_execution_grade_options_data", "candidate": ticket}
+    if not _execution_grade_allowed(ticket.get("data_quality") or instrument.get("data_quality")):
+        return {"ok": False, "reason": "candidate_options_data_not_execution_grade", "candidate": ticket}
     if instrument.get("kind") != "single_leg":
         return {"ok": False, "reason": "multi_leg_execution_not_enabled_v1", "candidate": ticket}
+    preflight = await _fresh_execution_preflight(ticket)
+    if not preflight.get("ok"):
+        return {"ok": False, **preflight, "candidate": ticket}
+    instrument = preflight["instrument"]
     ask = float(instrument.get("ask") or instrument.get("premium") or 0)
     order_qty = int(qty or ticket.get("contracts") or 0)
     order_limit = float(limit_price or ask)
@@ -737,7 +847,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
             "order_premium": round(order_premium, 2),
             "candidate": ticket,
         }
-    symbol = instrument.get("symbol") or instrument.get("contractSymbol")
+    symbol = preflight.get("symbol")
     if not symbol:
         return {"ok": False, "reason": "missing_option_symbol_from_data_provider", "candidate": ticket}
     payload = {
@@ -760,6 +870,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         "submitted_at": _now(),
         "status": "submitted",
         "exit_policy": exit_policy,
+        "fresh_preflight": preflight,
     })
     await db.options_desk_orders.insert_one(record)
     return {"ok": True, "order": order, "candidate": ticket, "exit_policy": exit_policy}
@@ -772,6 +883,15 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     and enforces only mechanical paper execution constraints already present in
     execute(): risk budget, valid order fields, and Alpaca acceptance.
     """
+    if not OPTIONS_EXECUTION_ENABLED:
+        return {
+            "ok": False,
+            "auto": True,
+            "reason": "options_execution_disabled",
+            "submitted": [],
+            "skipped": [],
+            "summary": {},
+        }
     db = get_db()
     rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
     if rows:
@@ -1037,6 +1157,161 @@ async def trades(limit: int = 100, sync_live: bool = True) -> dict[str, Any]:
         "trades": rows,
         "active": sum(1 for r in rows if r.get("status") == "active"),
         "closed": sum(1 for r in rows if r.get("status") == "closed"),
+    }
+
+
+def _dte(expiration: str | None) -> int:
+    try:
+        exp = datetime.fromisoformat(str(expiration)).date()
+        return (exp - datetime.now(timezone.utc).date()).days
+    except Exception:
+        return 0
+
+
+def _history_stats(closes: dict[str, float]) -> dict[str, float]:
+    values = [float(v) for _, v in sorted((closes or {}).items()) if _safe_float(v) > 0]
+    if len(values) < 3:
+        return {"last": 0.0, "mom_63": 0.0, "mom_126": 0.0, "mom_252": 0.0, "vol_annual": 0.0}
+    last = values[-1]
+    def mom(days: int) -> float:
+        idx = max(0, len(values) - 1 - days)
+        base = values[idx]
+        return ((last - base) / base * 100.0) if base > 0 else 0.0
+    returns = [(values[i] / values[i - 1] - 1.0) for i in range(1, len(values)) if values[i - 1] > 0]
+    if returns:
+        mean = sum(returns) / len(returns)
+        variance = sum((x - mean) ** 2 for x in returns) / len(returns)
+        vol_annual = (variance ** 0.5) * (252 ** 0.5) * 100.0
+    else:
+        vol_annual = 0.0
+    return {
+        "last": round(last, 2),
+        "mom_63": round(mom(63), 2),
+        "mom_126": round(mom(126), 2),
+        "mom_252": round(mom(252), 2),
+        "vol_annual": round(vol_annual, 2),
+    }
+
+
+async def _kronos_style_1y_projection(ticker: str, delta: float = 0.75, premium: float = 0.0, spot_hint: float = 0.0) -> dict[str, Any]:
+    try:
+        from . import pricer
+        closes = await pricer.get_history(ticker, days=280)
+    except Exception:
+        closes = {}
+    stats = _history_stats(closes)
+    base_underlying = (stats["mom_63"] * 0.35) + (stats["mom_126"] * 0.30) + (stats["mom_252"] * 0.35)
+    base_underlying = max(-35.0, min(80.0, base_underlying))
+    vol = stats["vol_annual"] or 28.0
+    spot = spot_hint or stats["last"]
+    leverage = max(1.0, min(8.0, (spot / max(premium, 0.25)) * abs(delta) / 10.0)) if spot else 1.0
+    expected_contract = max(-100.0, min(350.0, base_underlying * leverage))
+    return {
+        "source": "kronos_style_1y_proxy",
+        "expected_underlying_1y_pct": round(base_underlying, 2),
+        "expected_contract_1y_pct": round(expected_contract, 2),
+        "cone_low_pct": round(max(-100.0, expected_contract - vol * leverage * 0.75), 2),
+        "cone_high_pct": round(min(500.0, expected_contract + vol * leverage * 0.95), 2),
+        "history": stats,
+    }
+
+
+async def leaps_sleeve(limit_candidates: int = 12) -> dict[str, Any]:
+    db = get_db()
+    pos = await positions()
+    trade_rows = await db.options_desk_trades.find({}, {"_id": 0}).sort("last_synced_at", -1).to_list(500)
+    trade_by_symbol = {str(t.get("symbol") or "").upper(): t for t in trade_rows}
+    open_options = []
+    short_calls_by_root: dict[str, list[dict[str, Any]]] = {}
+    for p in pos.get("positions") or []:
+        symbol = str(p.get("symbol") or "").upper()
+        parsed = _parse_occ_symbol(symbol)
+        if not parsed:
+            continue
+        qty = _safe_int(p.get("qty"))
+        item = {"position": p, "parsed": parsed, "dte": _dte(parsed.get("expiration"))}
+        if parsed["type"] == "C" and qty < 0:
+            short_calls_by_root.setdefault(parsed["root"], []).append(item)
+        if parsed["type"] == "C" and qty > 0 and item["dte"] >= 180:
+            open_options.append(item)
+
+    holdings: list[dict[str, Any]] = []
+    for item in open_options:
+        p = item["position"]
+        parsed = item["parsed"]
+        trade = trade_by_symbol.get(str(p.get("symbol") or "").upper()) or {}
+        snap = await _option_snapshot(str(p.get("symbol") or "").upper())
+        ctx = _option_position_context(p, snap)
+        projection = await _kronos_style_1y_projection(
+            parsed["root"],
+            delta=abs(_safe_float(snap.get("delta")) or 0.75),
+            premium=_safe_float(ctx.get("current")) or _safe_float(ctx.get("entry")),
+        )
+        overlays = short_calls_by_root.get(parsed["root"], [])
+        strategy = "LEAPS_DIAGONAL_ACTIVE" if overlays else "LEAPS_HOLD_SELL_CALL_WHEN_PREMIUM_CLEARS"
+        holdings.append({
+            "symbol": p.get("symbol"),
+            "ticker": parsed["root"],
+            "expiration": parsed["expiration"],
+            "days_to_expiration": item["dte"],
+            "strike": parsed["strike"],
+            "qty": _safe_int(p.get("qty")),
+            "entry_premium": round(_safe_float(ctx.get("entry")), 2),
+            "current_premium": round(_safe_float(ctx.get("current")), 2),
+            "unrealized_pct": round(_safe_float(ctx.get("pnl_pct")), 2) if ctx.get("pnl_pct") is not None else None,
+            "strategy_current": strategy,
+            "covered_call_overlay_count": len(overlays),
+            "overlay_symbols": [x["position"].get("symbol") for x in overlays],
+            "kronos_1y": projection,
+            "trade": trade,
+            "data_quality": snap.get("data_quality") if snap.get("ok") else "POSITION_ONLY",
+        })
+
+    scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+    candidates: list[dict[str, Any]] = []
+    try:
+        from . import portfolio_manager
+        rows = (scan or {}).get("results") or []
+        pm_rows = portfolio_manager.evaluate_rows(rows, equity=portfolio_manager.DEFAULT_EQUITY, mode="BALANCED")
+        by_ticker = {r["ticker"]: r for r in pm_rows}
+        for row in rows:
+            ticker = str(row.get("ticker") or "").upper()
+            pm = by_ticker.get(ticker) or {}
+            if pm.get("action") not in {"ACCUMULATE", "STARTER"}:
+                continue
+            if _safe_float(pm.get("pm_score")) < 70:
+                continue
+            projection = await _kronos_style_1y_projection(ticker)
+            candidates.append({
+                "ticker": ticker,
+                "pm_action": pm.get("action"),
+                "pm_score": pm.get("pm_score"),
+                "risk_reward": pm.get("risk_reward"),
+                "strategy_candidate": "LEAPS_CALL_OR_DIAGONAL",
+                "kronos_1y": projection,
+                "reason": "High PM score with long-term upside candidate. Requires LEAPS chain liquidity before buying.",
+            })
+    except Exception:
+        candidates = []
+
+    candidates.sort(key=lambda x: _safe_float((x.get("kronos_1y") or {}).get("expected_contract_1y_pct")), reverse=True)
+    return {
+        "ok": True,
+        "generated_at": _now(),
+        "mode": "read_only_leaps_sleeve",
+        "summary": {
+            "open_leaps": len(holdings),
+            "diagonal_overlays": sum(1 for h in holdings if h.get("covered_call_overlay_count")),
+            "candidate_count": min(len(candidates), limit_candidates),
+        },
+        "holdings": holdings,
+        "candidates": candidates[:limit_candidates],
+        "policy": {
+            "min_dte": 180,
+            "preferred_dte": "365-730",
+            "strategy": "Buy long-dated calls on PM-approved long-term setups; sell short calls only when premium and strike cushion clear.",
+            "execution": "read_only_until_leaps_execution_rules_are_enabled",
+        },
     }
 
 

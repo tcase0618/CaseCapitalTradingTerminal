@@ -1140,6 +1140,24 @@ async def kronos_battle_card(ticker: str):
     return await kronos.battle_card(ticker)
 
 
+@api.get("/case_court/latest")
+async def case_court_latest(limit: int = 30):
+    from services import case_court
+    return await case_court.latest(limit=limit)
+
+
+@api.get("/case_court/trial/{ticker}")
+async def case_court_trial(ticker: str):
+    from services import case_court
+    return await case_court.trial(ticker)
+
+
+@api.post("/case_court/refresh")
+async def case_court_refresh(limit: int = 30):
+    from services import case_court
+    return await case_court.run_trials(limit=limit, persist=True)
+
+
 @api.post("/kronos/telegram/morning")
 async def kronos_telegram_morning(force: bool = False):
     from services import kronos
@@ -1880,6 +1898,18 @@ async def options_desk_sync():
 async def options_desk_trades(limit: int = 100, sync_live: bool = True):
     from services import options_desk
     return await options_desk.trades(limit=limit, sync_live=sync_live)
+
+
+@api.get("/options_desk/leaps")
+async def options_desk_leaps(limit_candidates: int = 12):
+    from services import options_desk
+    return await options_desk.leaps_sleeve(limit_candidates=limit_candidates)
+
+
+@api.post("/options_desk/leaps/refresh")
+async def options_desk_leaps_refresh(limit_candidates: int = 12):
+    from services import options_desk
+    return await options_desk.leaps_sleeve(limit_candidates=limit_candidates)
 
 
 @api.post("/options_desk/fills/sync")
