@@ -503,6 +503,69 @@ def _options_data_policy(alpaca_refreshes_used: int | None = None) -> dict[str, 
     }
 
 
+def _add_block(blocked: list[str], reason: str) -> None:
+    if reason not in blocked:
+        blocked.append(reason)
+
+
+def _normalize_candidate_execution_state(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Re-apply current execution policy to cached candidate rows.
+
+    Cached rows can outlive risk-policy and data-quality changes. The Options
+    Desk should never show or auto-use a stale ready state.
+    """
+    row = {**(ticket or {})}
+    instrument = row.get("instrument") or {}
+    route = row.get("route")
+    blocked = [str(x) for x in (row.get("blocked_reasons") or []) if x]
+    data_provider = row.get("data_provider") or instrument.get("data_provider")
+    data_quality = row.get("data_quality") or instrument.get("data_quality")
+    risk_budget = _safe_float(row.get("risk_budget"))
+    contract_risk = _contract_risk(instrument)
+    contracts = _safe_int(row.get("contracts"))
+    if contracts <= 0 and contract_risk > 0 and risk_budget > 0:
+        contracts = int(risk_budget // contract_risk)
+
+    quality_state = (
+        "EXECUTION_GRADE"
+        if data_provider == "ALPACA_OPTIONS" and _execution_grade_allowed(data_quality)
+        else "RESEARCH_ONLY"
+    )
+
+    if route in {"OPTION", "BOTH"}:
+        if not OPTIONS_EXECUTION_ENABLED:
+            _add_block(blocked, "options execution is disabled")
+        if not paper_only():
+            _add_block(blocked, "options desk is not pointed at Alpaca paper")
+        if data_provider != "ALPACA_OPTIONS":
+            _add_block(blocked, "missing Alpaca execution-grade options data")
+        elif not _execution_grade_allowed(data_quality):
+            _add_block(blocked, f"{data_quality or 'unknown'} options data is not execution grade")
+        if contract_risk <= 0:
+            _add_block(blocked, "missing option max loss")
+        if contract_risk > risk_budget:
+            _add_block(blocked, "contract risk exceeds PM budget")
+        if instrument.get("kind") == "spread":
+            _add_block(blocked, "multi-leg spread execution is not enabled yet")
+        if instrument.get("kind") == "single_leg":
+            if _spread_is_too_wide(instrument):
+                _add_block(blocked, "spread too wide")
+            if _open_interest_is_too_low(instrument):
+                _add_block(blocked, "open interest too low")
+            if _delta_is_too_low(instrument, row.get("strategy")):
+                _add_block(blocked, "delta too low")
+    elif route == "PASS":
+        _add_block(blocked, "PM route is PASS")
+    else:
+        _add_block(blocked, "PM route is EQUITY")
+
+    row["quality_state"] = quality_state
+    row["contracts"] = contracts
+    row["blocked_reasons"] = blocked
+    row["manual_fire_ready"] = route in {"OPTION", "BOTH"} and not blocked and contracts > 0
+    return row
+
+
 def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[str]]:
     opts = scan_row.get("options") or {}
     contract = opts.get("contract") or {}
@@ -751,6 +814,7 @@ async def candidates() -> dict[str, Any]:
     rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
     if not rows:
         return await build_candidates(persist=True)
+    rows = [_normalize_candidate_execution_state(x) for x in rows]
     return {
         "generated_at": _now(),
         "options_equity_basis": OPTIONS_EQUITY,
@@ -895,6 +959,7 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     db = get_db()
     rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
     if rows:
+        rows = [_normalize_candidate_execution_state(x) for x in rows]
         candidate_set = {
             "generated_at": _now(),
             "options_equity_basis": OPTIONS_EQUITY,
