@@ -80,6 +80,49 @@ def options_execution_enabled() -> bool:
     return OPTIONS_EXECUTION_ENABLED
 
 
+def _local_options_session_open(now: datetime | None = None) -> bool:
+    now_et = now.astimezone(ET) if now else datetime.now(ET)
+    if now_et.weekday() >= 5:
+        return False
+    minutes = now_et.hour * 60 + now_et.minute
+    return (9 * 60 + 30) <= minutes < (16 * 60)
+
+
+async def _options_market_status() -> dict[str, Any]:
+    """Return whether options orders should be sent right now.
+
+    Alpaca option market orders are regular-session only. The local ET guard is
+    intentionally strict even if the account clock reports an extended-hours
+    equity session.
+    """
+    local_open = _local_options_session_open()
+    status: dict[str, Any] = {
+        "ok": True,
+        "is_open": local_open,
+        "source": "local_regular_options_session",
+        "checked_at": _now(),
+    }
+    if not configured():
+        return {**status, "ok": False, "reason": "missing_options_alpaca_keys"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0, headers=HEADERS) as client:
+            r = await client.get(f"{TRADE_BASE}/v2/clock")
+        if r.status_code in (200, 201):
+            clock = r.json()
+            status.update({
+                "source": "alpaca_clock_and_local_regular_options_session",
+                "alpaca_is_open": bool(clock.get("is_open")),
+                "next_open": clock.get("next_open"),
+                "next_close": clock.get("next_close"),
+                "is_open": bool(clock.get("is_open")) and local_open,
+            })
+        else:
+            status.update({"ok": False, "reason": f"alpaca_clock_{r.status_code}", "detail": r.text[:180]})
+    except Exception as exc:
+        status.update({"ok": False, "reason": "alpaca_clock_error", "detail": str(exc)[:180]})
+    return status
+
+
 def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
         return float(v)
@@ -987,6 +1030,9 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         return {"ok": False, "reason": "options_execution_disabled", "candidate": ticket}
     if not paper_only():
         return {"ok": False, "reason": "refusing_non_paper_options_account", "candidate": ticket}
+    market_status = await _options_market_status()
+    if not market_status.get("is_open"):
+        return {"ok": False, "reason": "options_market_closed", "market_status": market_status, "candidate": ticket}
     if not ticket.get("manual_fire_ready"):
         return {"ok": False, "reason": "candidate_not_manual_fire_ready", "blocked": ticket.get("blocked_reasons"), "candidate": ticket}
     instrument = ticket.get("instrument") or {}
@@ -1167,6 +1213,9 @@ async def refresh_and_auto_execute_latest(limit: int | None = None) -> dict[str,
 async def close(symbol: str, qty: int | None = None) -> dict[str, Any]:
     if not configured():
         return {"ok": False, "reason": "missing_options_alpaca_keys"}
+    market_status = await _options_market_status()
+    if not market_status.get("is_open"):
+        return {"ok": False, "reason": "options_market_closed", "market_status": market_status}
     payload: dict[str, Any] = {"symbol": symbol, "side": "sell", "type": "market", "time_in_force": "day"}
     if qty:
         payload["qty"] = str(int(qty))
@@ -1692,6 +1741,7 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
     pos = await positions()
     checks: list[dict[str, Any]] = []
     closed: list[dict[str, Any]] = []
+    pending_closes: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for p in pos.get("positions") or []:
         symbol = str(p.get("symbol") or "").upper()
@@ -1711,7 +1761,7 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
             sort=[("submitted_at", -1)],
         )
         trade_doc = await db.options_desk_trades.find_one(
-            {"symbol": symbol, "status": {"$in": ["active", "flat_no_position"]}},
+            {"symbol": symbol, "status": {"$in": ["active", "flat_no_position", "pending_protective_close_market_closed"]}},
             {"_id": 1, "ticker": 1, "entry_premium": 1, "exit_policy": 1, "telegram": 1},
             sort=[("last_synced_at", -1)],
         )
@@ -1777,7 +1827,7 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
                 {"$set": {"exit_policy": ratchet, "last_risk_check": check}},
             )
         await db.options_desk_trades.update_many(
-            {"symbol": symbol, "status": {"$in": ["active", "flat_no_position"]}},
+            {"symbol": symbol, "status": {"$in": ["active", "flat_no_position", "pending_protective_close_market_closed"]}},
             {"$set": {
                 "status": "active",
                 "current_premium": round(current, 2),
@@ -1796,6 +1846,37 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         ratchet_exit = bool(not hard_stop and ratchet.get("exit_triggered") and current_floor > OPTIONS_INITIAL_STOP_PCT)
         exit_reason = "hard_stop" if hard_stop else "ratchet" if ratchet_exit else None
         if exit_reason and enforce_hard_stop:
+            market_status = await _options_market_status()
+            if not market_status.get("is_open"):
+                close_reason = "options_hard_stop_20pct" if exit_reason == "hard_stop" else "options_ratchet_floor"
+                pending = {
+                    "symbol": symbol,
+                    "qty": qty,
+                    "reason": close_reason,
+                    "market_status": market_status,
+                }
+                pending_closes.append(pending)
+                check["pending_close"] = pending
+                await db.options_desk_orders.update_many(
+                    {"$or": [{"order.symbol": symbol}, {"candidate.instrument.symbol": symbol}, {"candidate.instrument.contractSymbol": symbol}]},
+                    {"$set": {
+                        "status": "pending_protective_close_market_closed",
+                        "pending_close": pending,
+                        "pending_close_at": _now(),
+                        "close_reason": close_reason,
+                    }},
+                )
+                await db.options_desk_trades.update_many(
+                    {"symbol": symbol, "status": {"$in": ["active", "pending_protective_close_market_closed"]}},
+                    {"$set": {
+                        "status": "pending_protective_close_market_closed",
+                        "pending_close": pending,
+                        "pending_close_at": _now(),
+                        "close_reason": close_reason,
+                    }},
+                )
+                checks.append(check)
+                continue
             result = await close(symbol=symbol, qty=qty)
             check["close_result"] = result
             if result.get("ok"):
@@ -1825,12 +1906,13 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         "hard_stop_pct": OPTIONS_HARD_STOP_PCT,
         "positions_checked": len(checks),
         "closed": closed,
+        "pending_closes": pending_closes,
         "errors": errors,
         "checks": checks,
     }))
     if closed:
         await log_activity(f"Options risk monitor closed {len(closed)} hard-stop position(s)", "warn", {"closed": closed})
-    return {"ok": True, "positions_checked": len(checks), "closed": closed, "errors": errors, "checks": checks}
+    return {"ok": True, "positions_checked": len(checks), "closed": closed, "pending_closes": pending_closes, "errors": errors, "checks": checks}
 
 
 async def sync() -> dict[str, Any]:

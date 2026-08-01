@@ -43,6 +43,7 @@ async def _run(enforce_hard_stop: bool = True, remediate_limit: int = 18) -> dic
             "ok": options_risk.get("ok"),
             "positions_checked": options_risk.get("positions_checked"),
             "closed": options_risk.get("closed") or [],
+            "pending_closes": options_risk.get("pending_closes") or [],
             "errors": options_risk.get("errors") or [],
         },
         "remediation": {
