@@ -508,6 +508,45 @@ def _add_block(blocked: list[str], reason: str) -> None:
         blocked.append(reason)
 
 
+def _legacy_strategy_lane(row: dict[str, Any], instrument: dict[str, Any]) -> dict[str, Any]:
+    route = str(row.get("route") or "").upper()
+    strategy = str(row.get("strategy") or "").upper()
+    iv_rank = _safe_float(row.get("iv_rank"), 50.0)
+    dte = _safe_int(instrument.get("dte") or instrument.get("days_to_expiration"))
+    if route not in {"OPTION", "BOTH"}:
+        lane = "NO_OPTION_TRADE"
+        posture = "NONE"
+        preferred = "stock_or_pass"
+    elif dte >= 180:
+        lane = "LEAPS_CORE"
+        posture = "LONG_DURATION_DEFINED_PREMIUM"
+        preferred = "long_call_leap_or_diagonal_overlay"
+    elif "EARNING" in strategy or "EVENT" in strategy:
+        lane = "EVENT_DEFINED_RISK"
+        posture = "BINARY_EVENT"
+        preferred = "debit_spread_or_small_single_leg"
+    elif iv_rank >= 70:
+        lane = "HIGH_IV_SPREAD_OR_PASS"
+        posture = "VOL_EXPENSIVE"
+        preferred = "debit_spread"
+    elif "PUT" in strategy or str(row.get("direction") or "").upper() == "BEARISH":
+        lane = "BEARISH_PUT_MOMENTUM"
+        posture = "DOWNSIDE_MOMENTUM"
+        preferred = "long_put_or_debit_put_spread"
+    else:
+        lane = "TACTICAL_MOMENTUM_CALL"
+        posture = "SHORT_TO_MEDIUM_CONVEXITY"
+        preferred = "long_call"
+    return {
+        "lane": lane,
+        "risk_posture": posture,
+        "preferred_structure": preferred,
+        "iv_rank": iv_rank,
+        "dte": dte or None,
+        "reasons": ["Lane inferred from cached candidate fields; refresh candidates for full lane evidence."],
+    }
+
+
 def _normalize_candidate_execution_state(ticket: dict[str, Any]) -> dict[str, Any]:
     """Re-apply current execution policy to cached candidate rows.
 
@@ -560,6 +599,8 @@ def _normalize_candidate_execution_state(ticket: dict[str, Any]) -> dict[str, An
         _add_block(blocked, "PM route is EQUITY")
 
     row["quality_state"] = quality_state
+    if not isinstance(row.get("strategy_lane"), dict) or not row.get("strategy_lane", {}).get("lane"):
+        row["strategy_lane"] = _legacy_strategy_lane(row, instrument)
     row["contracts"] = contracts
     row["blocked_reasons"] = blocked
     row["manual_fire_ready"] = route in {"OPTION", "BOTH"} and not blocked and contracts > 0
@@ -630,6 +671,65 @@ def _risk_budget(route: str, action: str, score: float) -> float:
     if score >= 78:
         return cap
     return min(STANDARD_RISK_USD, cap)
+
+
+def _strategy_lane(pm_row: dict[str, Any], scan_row: dict[str, Any], opts: dict[str, Any], instrument: dict[str, Any], route: str) -> dict[str, Any]:
+    signals = {str(s).upper() for s in _signals(scan_row)}
+    strategy = str(opts.get("strategy") or "").upper()
+    action = str(pm_row.get("action") or "").upper()
+    iv_rank = _safe_float(opts.get("iv_rank"), 50.0)
+    dte = _safe_int(instrument.get("dte") or instrument.get("days_to_expiration"))
+    kind = instrument.get("kind") or "unknown"
+    reasons: list[str] = []
+
+    if route not in {"OPTION", "BOTH"}:
+        return {
+            "lane": "NO_OPTION_TRADE",
+            "risk_posture": "NONE",
+            "preferred_structure": "stock_or_pass",
+            "reasons": ["PM route does not require an options contract."],
+        }
+    if dte >= 180 or action == "ACCUMULATE" and route == "BOTH":
+        reasons.append("Longer-duration PM-approved setup can support a LEAPS sleeve review.")
+        lane = "LEAPS_CORE"
+        posture = "LONG_DURATION_DEFINED_PREMIUM"
+        preferred = "long_call_leap_or_diagonal_overlay"
+    elif "UPCOMING_EARNINGS" in signals or strategy in {"EARNINGS_CALL", "EVENT_CALL", "EVENT_PUT"}:
+        reasons.append("Event/binary catalyst requires defined premium risk and smaller sizing.")
+        lane = "EVENT_DEFINED_RISK"
+        posture = "BINARY_EVENT"
+        preferred = "debit_spread_or_small_single_leg"
+    elif iv_rank >= 70:
+        reasons.append("High IV makes outright premium expensive; prefer spread or pass.")
+        lane = "HIGH_IV_SPREAD_OR_PASS"
+        posture = "VOL_EXPENSIVE"
+        preferred = "debit_spread"
+    elif strategy in {"BEAR_PUT", "PUT", "DEBIT_PUT_SPREAD"} or str(opts.get("direction") or "").upper() == "BEARISH":
+        reasons.append("Bearish PM/options setup routes to put-defined premium.")
+        lane = "BEARISH_PUT_MOMENTUM"
+        posture = "DOWNSIDE_MOMENTUM"
+        preferred = "long_put_or_debit_put_spread"
+    elif "UNUSUAL_FLOW" in signals or "CALL_SWEEP" in signals or "MOMENTUM_STACK" in signals:
+        reasons.append("Flow or momentum stack favors tactical convexity.")
+        lane = "TACTICAL_MOMENTUM_CALL"
+        posture = "SHORT_TO_MEDIUM_CONVEXITY"
+        preferred = "long_call"
+    else:
+        reasons.append("General PM-approved option candidate; keep risk capped until edge is proven.")
+        lane = "GENERAL_DEFINED_PREMIUM"
+        posture = "STANDARD_OPTIONS_RISK"
+        preferred = "long_call_or_debit_spread"
+
+    if kind == "spread":
+        preferred = "debit_spread"
+    return {
+        "lane": lane,
+        "risk_posture": posture,
+        "preferred_structure": preferred,
+        "iv_rank": iv_rank,
+        "dte": dte or None,
+        "reasons": reasons,
+    }
 
 
 def _spread_is_too_wide(instrument: dict[str, Any]) -> bool:
@@ -710,6 +810,7 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
         route, route_reasons = _route(pm_row, row)
         instrument = _selected_instrument(opts)
         score = float(pm_row.get("pm_score") or 0)
+        strategy_lane = _strategy_lane(pm_row, row, opts, instrument, route)
         risk_budget = _risk_budget(route, pm_row.get("action"), score)
         contract_risk = _contract_risk(instrument)
         entry_premium = float(instrument.get("ask") or instrument.get("premium") or instrument.get("net_debit") or 0)
@@ -754,6 +855,7 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             "risk_reward": pm_row.get("risk_reward"),
             "signals": _signals(row),
             "strategy": opts.get("strategy"),
+            "strategy_lane": strategy_lane,
             "direction": opts.get("direction"),
             "strategy_reason": opts.get("strategy_reason") or opts.get("one_liner"),
             "iv_rank": opts.get("iv_rank"),

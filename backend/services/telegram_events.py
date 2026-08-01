@@ -185,17 +185,28 @@ def _top_rows(rows: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]
 
 
 async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
-    from . import case_court, data_quality, options_desk, portfolio_manager
+    from . import case_court, data_quality, edge_dashboard, execution_gate, options_desk, portfolio_manager
 
     results = scan.get("results") or []
     scan_id = str(scan.get("finished_at") or scan.get("created_at") or _now_iso())
     qc = await data_quality.overview(force_refresh=False, record_event=False)
+    gate = await execution_gate.overview(force_refresh=False)
+    edge = await edge_dashboard.overview()
     pm = await portfolio_manager.latest_portfolio_plan()
     court = await case_court.latest()
     options = await options_desk.candidates()
     pm_rows = pm.get("decisions") or pm.get("rows") or []
     court_rows = court.get("trials") or []
     opt_summary = options.get("summary") or {}
+    opt_rows = options.get("candidates") or []
+    lane_counts: dict[str, int] = {}
+    for row in opt_rows:
+        lane = ((row.get("strategy_lane") or {}).get("lane") or "UNKNOWN")
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+    lane_lines = [
+        f"{_esc(k)}: <b>{v}</b>"
+        for k, v in sorted(lane_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+    ]
     routes = _route_counts(pm_rows)
     blockers = (qc.get("summary") or {}).get("blockers", 0)
     qc_decision = (qc.get("trading_gate") or {}).get("decision") or "UNKNOWN"
@@ -209,9 +220,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         if r.get("ticker")
     ]
     court_counts = {
-        "ready": sum(1 for r in court_rows if r.get("live_run_ready")),
-        "rejected": sum(1 for r in court_rows if str(r.get("posture") or "").upper() in {"PM_REJECTED", "REJECTED"}),
-        "needs_data": sum(1 for r in court_rows if str(r.get("posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
+        "ready": sum(1 for r in court_rows if (r.get("judge") or {}).get("live_run_ready")),
+        "rejected": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() in {"PM_REJECTED", "REJECTED"}),
+        "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
     }
     text = "\n".join([
         "<b>CASE CAPITAL SCAN REPORT</b>",
@@ -231,6 +242,15 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
+        f"Execution gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> | Truth: <b>{_esc(gate.get('truth_grade') or '--')}</b>",
+        f"Ticker rejects: <b>{(scan.get('ticker_hygiene') or {}).get('rejected_count', 0)}</b>",
+        "",
+        "<b>EDGE PROOF</b>",
+        f"Sample: <b>{(edge.get('edge') or {}).get('sample', 0)}</b> | Win rate: <b>{_fmt_pct((edge.get('edge') or {}).get('win_rate'))}</b> | Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b>",
+        f"Alpha: <b>{_esc((edge.get('edge') or {}).get('alpha_grade') or 'UNPROVEN')}</b>",
+        "",
+        "<b>OPTIONS PLAYBOOK LANES</b>",
+        "\n".join(lane_lines) or "No option lanes built.",
         "",
         "<b>TOP DOCKET</b>",
         "\n".join(top_lines) or "No PM rows yet.",
@@ -245,6 +265,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
             "routes": routes,
             "qc_decision": qc_decision,
             "qc_blockers": blockers,
+            "execution_gate": {"decision": gate.get("decision"), "truth_grade": gate.get("truth_grade"), "blockers": gate.get("blockers")},
+            "edge": edge.get("edge") or {},
+            "strategy_lanes": lane_counts,
             "options": opt_summary,
             "court": court_counts,
         },
@@ -358,9 +381,12 @@ async def dispatch_qc_report(force_refresh: bool = False, send_if_clean: bool = 
 
 
 async def dispatch_daily_report() -> dict[str, Any]:
-    from . import data_quality, pnl_tracker, scheduler
+    from . import data_quality, edge_dashboard, execution_gate, options_desk, pnl_tracker, scheduler
 
     qc = await data_quality.overview(force_refresh=False, record_event=False)
+    gate = await execution_gate.overview(force_refresh=False)
+    edge = await edge_dashboard.overview()
+    opt_risk = await options_desk.latest_risk_check()
     tracker_rows = await pnl_tracker.signals_tracker_summary(limit=300)
     tracker = {"rows": tracker_rows, "tracked": len(tracker_rows)}
     snapshot = await scheduler.persist_live_position_snapshot(triggered_by="telegram_daily_report")
@@ -382,6 +408,11 @@ async def dispatch_daily_report() -> dict[str, Any]:
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc((qc.get('trading_gate') or {}).get('decision') or 'UNKNOWN')}</b> | Score: <b>{qc.get('score', '--')}</b>",
+        f"Execution gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> | Truth: <b>{_esc(gate.get('truth_grade') or '--')}</b>",
+        "",
+        "<b>EDGE / OPTIONS RISK</b>",
+        f"Edge sample: <b>{(edge.get('edge') or {}).get('sample', 0)}</b> | Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b>",
+        f"Options checked: <b>{opt_risk.get('positions_checked', 0)}</b> | Hard stops: <b>{len(opt_risk.get('closed') or [])}</b>",
     ])
     event = await emit_event(
         "daily_ops_report",
@@ -389,7 +420,7 @@ async def dispatch_daily_report() -> dict[str, Any]:
         scope="system",
         title="Daily ops report",
         summary=f"{snapshot.get('totals', {}).get('positions', 0)} positions; QC {(qc.get('trading_gate') or {}).get('decision')}",
-        details={"snapshot": snapshot, "qc_summary": qc.get("summary") or {}, "tracker": {"tracked": tracker.get("tracked")}},
+        details={"snapshot": snapshot, "qc_summary": qc.get("summary") or {}, "gate": gate, "edge": edge.get("edge") or {}, "tracker": {"tracked": tracker.get("tracked")}},
         priority="summary",
     )
     sent = await _send(text)
@@ -398,9 +429,10 @@ async def dispatch_daily_report() -> dict[str, Any]:
 
 
 async def dispatch_weekly_report() -> dict[str, Any]:
-    from . import case_court, data_quality, pnl_tracker
+    from . import case_court, data_quality, edge_dashboard, pnl_tracker
 
     qc = await data_quality.overview(force_refresh=False, record_event=False)
+    edge = await edge_dashboard.overview()
     tracker_rows = await pnl_tracker.signals_tracker_summary(limit=500)
     tracker = {"rows": tracker_rows, "tracked": len(tracker_rows)}
     court = await case_court.latest()
@@ -414,10 +446,12 @@ async def dispatch_weekly_report() -> dict[str, Any]:
         f"Tracked rows: <b>{len(rows)}</b>",
         f"Win/loss: <b>{wins}W / {losses}L</b>",
         f"Average since alert: <b>{_fmt_pct(avg)}</b>",
+        f"Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b> | Alpha: <b>{_esc((edge.get('edge') or {}).get('alpha_grade') or 'UNPROVEN')}</b>",
         "",
         "<b>CASE COURT</b>",
         f"Trials: <b>{len(court.get('trials') or [])}</b>",
-        f"Live-ready: <b>{sum(1 for r in court.get('trials', []) if r.get('live_run_ready'))}</b>",
+        f"Live-ready: <b>{sum(1 for r in court.get('trials', []) if (r.get('judge') or {}).get('live_run_ready'))}</b>",
+        f"Decision-grade: <b>{(edge.get('case_court') or {}).get('decision_grade', 0)}</b>",
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc((qc.get('trading_gate') or {}).get('decision') or 'UNKNOWN')}</b>",

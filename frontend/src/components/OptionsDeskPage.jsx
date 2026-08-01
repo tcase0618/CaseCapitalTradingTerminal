@@ -385,13 +385,14 @@ function CandidateTable({ rows, selected, onSelect }) {
   if (!rows.length) return <div style={{ color: muted, padding: 20 }}>No option candidates available. Run a scan first.</div>;
   return (
     <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
-        <thead><tr>{["TICKER", "ROUTE", "STRATEGY", "PM", "R/R", "DATA", "READY"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 920 }}>
+        <thead><tr>{["TICKER", "ROUTE", "PLAYBOOK", "STRATEGY", "PM", "R/R", "DATA", "READY"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
         <tbody>
           {rows.map(r => (
             <tr key={r.candidate_id} onClick={() => onSelect(r)} style={{ borderTop: hairline, cursor: "pointer", background: selected?.candidate_id === r.candidate_id ? "rgba(200,168,75,0.08)" : "transparent" }}>
               <td style={{ ...td, color: accent, fontWeight: 900 }}>${r.ticker}</td>
               <td style={{ ...td, color: ROUTE_COLOR[r.route] || labelLight, fontWeight: 900 }}>{r.route}</td>
+              <td style={{ ...td, color: accent2, fontWeight: 800 }}>{r.strategy_lane?.lane || "-"}</td>
               <td style={td}>{r.strategy || "-"}</td>
               <td style={td}>{num(r.pm_score, 1)}</td>
               <td style={td}>{num(r.risk_reward, 2)}</td>
@@ -423,6 +424,9 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
         <div style={{ color: ticket.manual_fire_ready ? "#4ade80" : "#f87171", fontSize: 12, fontWeight: 900 }}>{ticket.manual_fire_ready ? "READY" : "BLOCKED"}</div>
       </div>
       <PlanRow k="Strategy" v={ticket.strategy || "-"} />
+      <PlanRow k="Playbook Lane" v={ticket.strategy_lane?.lane || "-"} color={accent2} />
+      <PlanRow k="Risk Posture" v={ticket.strategy_lane?.risk_posture || "-"} color="#fbbf24" />
+      <PlanRow k="Preferred Structure" v={ticket.strategy_lane?.preferred_structure || "-"} />
       <PlanRow k="Kind" v={instrument.kind || "-"} />
       <PlanRow k="Expiration" v={instrument.expiration || ticket.expiration || "-"} />
       <PlanRow k="Strike" v={instrument.strike || instrument.buy_strike || "-"} />
@@ -448,6 +452,11 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
         </div>
       )}
       <div style={{ color: muted, fontSize: 12, lineHeight: 1.6, marginTop: 12 }}>{ticket.strategy_reason || "No thesis text."}</div>
+      {(ticket.strategy_lane?.reasons || []).length > 0 && (
+        <div style={{ color: labelLight, fontSize: 11, lineHeight: 1.55, marginTop: 10, borderTop: hairline, paddingTop: 10 }}>
+          {ticket.strategy_lane.reasons.map((reason, i) => <div key={i}>{reason}</div>)}
+        </div>
+      )}
       <div style={{ marginTop: 12 }}>
         {blocks.map(b => <div key={b} style={{ color: "#f87171", fontSize: 11, padding: "5px 0", borderTop: hairline }}>{b}</div>)}
       </div>

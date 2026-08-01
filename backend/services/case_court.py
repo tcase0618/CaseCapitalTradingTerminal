@@ -361,14 +361,20 @@ def _coverage(exhibits: list[dict[str, Any]]) -> dict[str, Any]:
     required = [e for e in exhibits if e.get("required")]
     missing_required = [e for e in exhibits if e.get("status") in {MISSING_REQUIRED, STALE_REQUIRED}]
     scored = [e for e in applicable if e.get("side") in {DEFENSE, PROSECUTOR}]
+    coverage_pct = round(len(scored) / max(1, len(applicable)) * 100, 1)
+    required_pct = round((len(required) - len(missing_required)) / max(1, len(required)) * 100, 1)
+    certified = not missing_required and coverage_pct >= 45 and required_pct >= 100
     return {
         "applicable": len(applicable),
         "scored": len(scored),
         "required": len(required),
         "missing_required": len(missing_required),
-        "decision_grade": not missing_required,
+        "decision_grade": certified,
+        "coverage_pct": coverage_pct,
+        "required_pct": required_pct,
         "coverage_label": f"{len(scored)}/{len(applicable)} scored",
         "missing_required_labels": [e.get("label") for e in missing_required],
+        "certification": "CERTIFIED" if certified else "ADVISORY_ONLY",
     }
 
 
@@ -613,6 +619,13 @@ async def _trial(
         mini_trials.append(_mini_trial("leaps", expression, exhibits, pm_action))
     coverage = _coverage(exhibits)
     judge = _judge(mini_trials, defense, prosecution, pm_row, expression)
+    if coverage.get("certification") != "CERTIFIED" and judge.get("live_run_ready"):
+        judge = {
+            **judge,
+            "live_run_ready": False,
+            "authority": "READ_ONLY_INSUFFICIENT_CERTIFICATION",
+            "detail": f"{judge.get('detail')} Evidence coverage is {coverage.get('coverage_label')}; court remains advisory.",
+        }
 
     return {
         "case_id": f"court-{ticker}-{str(scan_finished_at or _now().isoformat())[:19]}",

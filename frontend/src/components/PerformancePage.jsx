@@ -423,6 +423,9 @@ function EdgeProofCard({ edge }) {
   const e = edge?.edge || {};
   const truth = edge?.truth || {};
   const holes = edge?.holes || [];
+  const attribution = edge?.attribution || {};
+  const optionLanes = edge?.options?.by_lane || attribution.options_strategy_lanes || [];
+  const casePostures = attribution.case_postures || [];
   const gradeColor = truth.truth_grade === "A" || truth.truth_grade === "B" ? "#4ade80"
     : truth.truth_grade === "C" ? "#fbbf24" : "#f87171";
   return (
@@ -447,14 +450,18 @@ function EdgeProofCard({ edge }) {
             </div>
             <div style={edgePanel}>
               <div style={edgeLabel}>CASE COURT</div>
-              <div style={edgeText}>{edge.case_court?.live_ready || 0} live-ready / {edge.case_court?.trials || 0} trials</div>
-              <div style={edgeSub}>{edge.case_court?.needs_data || 0} need cleaner data</div>
+              <div style={edgeText}>{edge.case_court?.decision_grade || 0} certified / {edge.case_court?.trials || 0} trials</div>
+              <div style={edgeSub}>{edge.case_court?.live_ready || 0} live-ready · {edge.case_court?.neutralized_exhibits || 0} neutralized exhibits</div>
             </div>
             <div style={edgePanel}>
-              <div style={edgeLabel}>SAMPLE GRADE</div>
-              <div style={edgeText}>{e.sample_grade || "--"}</div>
-              <div style={edgeSub}>proof before scale</div>
+              <div style={edgeLabel}>DATA HYGIENE</div>
+              <div style={edgeText}>{attribution.data_truth?.ticker_rejects || 0} rejects</div>
+              <div style={edgeSub}>{(attribution.data_truth?.single_letter_tickers || []).join(", ") || "no single-letter warnings"}</div>
             </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <AttributionList title="OPTIONS PLAYBOOK LANES" rows={optionLanes} />
+            <AttributionList title="CASE COURT POSTURES" rows={casePostures} />
           </div>
           {holes.length > 0 && (
             <div style={{ borderTop: hairline, paddingTop: 10 }}>
@@ -467,6 +474,23 @@ function EdgeProofCard({ edge }) {
         </div>
       )}
     </Card>
+  );
+}
+
+function AttributionList({ title, rows }) {
+  return (
+    <div style={edgePanel}>
+      <div style={edgeLabel}>{title}</div>
+      {!rows.length ? (
+        <div style={edgeSub}>No rows yet.</div>
+      ) : rows.slice(0, 6).map((r, i) => (
+        <div key={`${r.bucket}-${i}`} style={{ display: "grid", gridTemplateColumns: "1fr 52px 52px", gap: 8, borderTop: i ? hairline : "none", padding: "7px 0", fontSize: 11 }}>
+          <span style={{ color: labelLight, overflowWrap: "anywhere" }}>{r.bucket}</span>
+          <span style={{ color: accent, textAlign: "right", fontWeight: 800 }}>{r.count ?? r.sample ?? 0}</span>
+          <span style={{ color: muted, textAlign: "right" }}>{r.ready != null ? `${r.ready} ready` : r.avg_return_pct != null ? `${fmt(r.avg_return_pct)}%` : ""}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

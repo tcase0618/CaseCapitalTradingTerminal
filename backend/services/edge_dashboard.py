@@ -21,10 +21,19 @@ def _avg(values: list[float]) -> float:
     return round(sum(values) / max(1, len(values)), 3)
 
 
+def _field(row: dict[str, Any], key: str) -> Any:
+    cur: Any = row
+    for part in key.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
 def _bucket_stats(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     buckets: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        label = row.get(key) or "UNKNOWN"
+        label = _field(row, key) or row.get(key) or "UNKNOWN"
         value = row.get("gain_pct")
         if value is None:
             continue
@@ -43,6 +52,25 @@ def _bucket_stats(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
             "grade": "PROVING" if len(values) >= 30 and _avg(values) > 0 else "EARLY" if len(values) < 30 else "WEAK",
         })
     return sorted(out, key=lambda r: (r["sample"], r["avg_return_pct"]), reverse=True)
+
+
+def _current_counts(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    counts: dict[str, int] = defaultdict(int)
+    ready: dict[str, int] = defaultdict(int)
+    for row in rows:
+        label = str(_field(row, key) or row.get(key) or "UNKNOWN")
+        counts[label] += 1
+        if row.get("manual_fire_ready") or (row.get("judge") or {}).get("live_run_ready"):
+            ready[label] += 1
+    return [
+        {
+            "bucket": label,
+            "count": count,
+            "ready": ready.get(label, 0),
+            "ready_rate": round(ready.get(label, 0) / max(1, count) * 100, 2),
+        }
+        for label, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    ]
 
 
 async def overview() -> dict[str, Any]:
@@ -64,6 +92,15 @@ async def overview() -> dict[str, Any]:
 
     opt_rows = options.get("candidates") or []
     court_rows = court.get("trials") or []
+    court_postures = [(r.get("judge") or {}).get("advisory_posture") or "UNKNOWN" for r in court_rows]
+    decision_grade = sum(1 for r in court_rows if (r.get("evidence_coverage") or {}).get("decision_grade"))
+    neutralized = sum(
+        1
+        for r in court_rows
+        for e in (r.get("exhibits") or [])
+        if e.get("status") in {"NOT_APPLICABLE", "MISSING_OPTIONAL", "STALE_OPTIONAL"}
+    )
+    live_ready = sum(1 for r in court_rows if (r.get("judge") or {}).get("live_run_ready"))
     gaps = []
     if truth.get("truth_grade") in {"D", "F"}:
         gaps.append("QC truth grade is blocking or weak.")
@@ -78,6 +115,12 @@ async def overview() -> dict[str, Any]:
             "Ticker hygiene warning: latest scan includes single-letter symbols "
             f"{', '.join((truth.get('scan') or {}).get('single_letter_tickers')[:8])}."
         )
+    if (truth.get("scan") or {}).get("ticker_hygiene_rejected_count"):
+        gaps.append(
+            f"Ticker hygiene rejected {(truth.get('scan') or {}).get('ticker_hygiene_rejected_count')} bad rows in the latest scan."
+        )
+    if court_rows and live_ready / max(1, len(court_rows)) > 0.35:
+        gaps.append("Case Court live-ready rate is still high; keep it advisory until forward outcomes prove it.")
 
     return {
         "ok": True,
@@ -97,16 +140,36 @@ async def overview() -> dict[str, Any]:
         "buckets": {
             "sector": _bucket_stats(matured, "sector")[:12],
             "strategy": _bucket_stats(matured, "options_strategy")[:12],
+            "conviction": _bucket_stats(matured, "conviction")[:12],
+            "time_horizon": _bucket_stats(matured, "time_horizon")[:12],
+        },
+        "attribution": {
+            "options_strategy_lanes": _current_counts(opt_rows, "strategy_lane.lane")[:12],
+            "options_routes": _current_counts(opt_rows, "route")[:8],
+            "case_postures": [
+                {"bucket": posture, "count": court_postures.count(posture)}
+                for posture in sorted(set(court_postures))
+            ],
+            "data_truth": {
+                "grade": truth.get("truth_grade"),
+                "decision": truth.get("decision"),
+                "ticker_rejects": (truth.get("scan") or {}).get("ticker_hygiene_rejected_count") or 0,
+                "single_letter_tickers": (truth.get("scan") or {}).get("single_letter_tickers") or [],
+            },
         },
         "options": {
             "total": len(opt_rows),
             "ready": sum(1 for r in opt_rows if r.get("manual_fire_ready")),
             "research_only": sum(1 for r in opt_rows if r.get("route") in {"OPTION", "BOTH"} and not r.get("manual_fire_ready")),
+            "by_lane": _current_counts(opt_rows, "strategy_lane.lane")[:8],
         },
         "case_court": {
             "trials": len(court_rows),
-            "live_ready": sum(1 for r in court_rows if r.get("live_run_ready")),
-            "needs_data": sum(1 for r in court_rows if str(r.get("posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
+            "live_ready": live_ready,
+            "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
+            "decision_grade": decision_grade,
+            "neutralized_exhibits": neutralized,
+            "authority": "READ_ONLY_UNTIL_FORWARD_VALIDATED",
         },
         "holes": gaps,
     }
