@@ -83,6 +83,18 @@ def _freshness(iso: Any) -> dict[str, Any]:
         return {"age_hours": None, "label": "unknown"}
 
 
+async def _safe_source(name: str, coro: Any, default: Any, timeout: float = 8.0) -> Any:
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except Exception as exc:
+        await log_activity(
+            f"Truth Review source unavailable: {name}",
+            "warning",
+            {"source": name, "error": str(exc)[:240]},
+        )
+        return default
+
+
 async def refresh_ledger(limit: int = 500) -> dict[str, Any]:
     """Append unique evidence events into truth_ledger_events.
 
@@ -93,11 +105,13 @@ async def refresh_ledger(limit: int = 500) -> dict[str, Any]:
 
     db = get_db()
     inserted = Counter()
-    scan = await scanner.latest_scan() or {}
-    pm = await portfolio_manager.latest_portfolio_plan()
-    options = await options_desk.candidates()
-    court = await case_court.latest(limit=75)
-    kronos_payload = await kronos.forecast(persist=False)
+    scan, pm, options, court, kronos_payload = await asyncio.gather(
+        _safe_source("scanner.latest_scan", scanner.latest_scan(), {}),
+        _safe_source("portfolio_manager.latest_portfolio_plan", portfolio_manager.latest_portfolio_plan(), {}),
+        _safe_source("options_desk.candidates", options_desk.candidates(), {}),
+        _safe_source("case_court.latest", case_court.latest(limit=75), {}),
+        _safe_source("kronos.forecast", kronos.forecast(persist=False), {}, timeout=12.0),
+    )
 
     docs: list[dict[str, Any]] = []
     scan_finished = scan.get("finished_at")
