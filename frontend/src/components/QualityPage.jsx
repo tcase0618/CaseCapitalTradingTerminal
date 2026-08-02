@@ -116,6 +116,7 @@ export default function QualityPage() {
         <DataConfidenceStrip
           items={[
             { label: "Trading Gate", value: data?.trading_gate?.decision || "CHECKING" },
+            { label: "Execution Score", value: data?.execution_score == null ? "--" : `${data.execution_score}`, color: data?.execution_score >= 100 ? "#4ade80" : data?.execution_score >= 65 ? "#fbbf24" : "#f87171" },
             { label: "Critical Checks", value: `${critical.filter(c => c.status === "LIVE" || c.status === "PASS").length}/${critical.length || 0}`, color: critical.every(c => !c.blocks_trading) ? "#4ade80" : "#f87171" },
             { label: "Fallbacks", value: fallback.length, color: fallback.length ? "#fbbf24" : "#4ade80", detail: "display-only tolerated" },
             { label: "Warnings", value: warnings.length, color: warnings.length ? "#fbbf24" : "#4ade80" },
@@ -145,7 +146,8 @@ export default function QualityPage() {
         </section>
 
         <section style={metricsGrid}>
-          <Metric label="QC SCORE" value={loading ? "--" : `${data?.score ?? "--"}`} sub="ALL CHECKS" color={accent} />
+          <Metric label="EXECUTION SCORE" value={loading ? "--" : `${data?.execution_score ?? "--"}`} sub={data?.trading_gate?.decision || "GATE"} color={(data?.execution_score || 0) >= 100 ? "#4ade80" : "#fbbf24"} />
+          <Metric label="DATA QUALITY" value={loading ? "--" : `${data?.data_score ?? data?.score ?? "--"}`} sub="ALL SOURCES" color={accent} />
           <Metric label="CRITICAL SCORE" value={loading ? "--" : `${data?.critical_score ?? "--"}`} sub={`${critical.length} CRITICAL`} color={accent2} />
           <Metric label="BLOCKERS" value={blockers.length} sub="TRADING IMPACT" color={blockers.length ? "#ef4444" : "#4ade80"} />
           <Metric label="WARNINGS" value={warnings.length} sub="REVIEW" color={warnings.length ? "#fbbf24" : "#4ade80"} />

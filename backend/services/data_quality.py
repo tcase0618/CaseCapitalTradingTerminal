@@ -597,8 +597,21 @@ async def overview(force_refresh: bool = False, record_event: bool = True) -> di
         gate_decision = "SCOPED_BLOCK"
     else:
         gate_decision = "ALLOW"
+    execution_scope_scores = {
+        "system": 0 if scoped_blockers["system"] else 100,
+        "equity": 0 if scoped_blockers["system"] or scoped_blockers["equity"] else 100,
+        "options": 0 if scoped_blockers["system"] or scoped_blockers["options"] else 100,
+    }
+    if gate_decision == "ALLOW":
+        execution_score = 100
+    elif gate_decision == "SCOPED_BLOCK":
+        execution_score = round(sum(execution_scope_scores.values()) / 3, 1)
+    else:
+        execution_score = 0
     trading_gate = {
         "decision": gate_decision,
+        "execution_score": execution_score,
+        "scope_scores": execution_scope_scores,
         "can_repull_fast": True,
         "max_gate_delay_ms": 1500,
         "policy": "Use fresh cached authority first; repull only stale critical sources; never wait on display-only feeds.",
@@ -610,6 +623,8 @@ async def overview(force_refresh: bool = False, record_event: bool = True) -> di
         "generated_at": _now_iso(),
         "force_refreshed": force_refresh,
         "score": avg_score,
+        "data_score": avg_score,
+        "execution_score": execution_score,
         "critical_score": critical_score,
         "trading_gate": trading_gate,
         "summary": {

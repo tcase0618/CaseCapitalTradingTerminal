@@ -34,6 +34,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -64,6 +65,50 @@ HEADERS = {
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _now_et() -> datetime:
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def _regular_equity_session_open(now: datetime | None = None) -> bool:
+    now = now or _now_et()
+    if now.weekday() > 4:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return (9 * 60 + 30) <= minutes < (16 * 60)
+
+
+def _equity_24h_session_open(now: datetime | None = None) -> bool:
+    """Alpaca 24/5 equities window for extended-hours limit orders.
+
+    Equities can route outside regular hours only as limit orders with
+    extended_hours=true. Options remain regular-session only in options_desk.
+    """
+    now = now or _now_et()
+    minutes = now.hour * 60 + now.minute
+    if now.weekday() == 6:
+        return minutes >= 20 * 60
+    if 0 <= now.weekday() <= 3:
+        return True
+    if now.weekday() == 4:
+        return minutes < 20 * 60
+    return False
+
+
+def equity_order_session(now: datetime | None = None) -> dict[str, Any]:
+    now = now or _now_et()
+    regular = _regular_equity_session_open(now)
+    extended = (not regular) and _equity_24h_session_open(now)
+    return {
+        "regular_open": regular,
+        "extended_24h_open": extended,
+        "tradable_now": regular or extended,
+        "extended_hours": extended,
+        "order_type": "limit",
+        "time_in_force": "day",
+        "checked_at": now.isoformat(),
+    }
 
 
 def _alpaca_ready() -> bool:
@@ -140,13 +185,18 @@ async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price:
         "time_in_force": "day",
         "limit_price": round(limit_price, 4),
     }
+    session = equity_order_session()
+    if session["extended_hours"]:
+        payload["extended_hours"] = True
     if client_order_id:
         payload["client_order_id"] = client_order_id
     try:
         async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as c:
             r = await c.post(f"{ALPACA_TRADE_BASE}/v2/orders", json=payload)
             if r.status_code in (200, 201):
-                return r.json()
+                order = r.json()
+                order["_case_session"] = session
+                return order
             logger.warning("alpaca limit buy %s: %s %s", ticker, r.status_code, r.text[:200])
     except Exception as e:
         logger.warning("alpaca limit buy exception %s: %s", ticker, e)
@@ -776,6 +826,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
             "hard_cap_applied": hard_cap,
             "pm_plan": pm_row,
             "limit_price": limit_price,
+            "order_session": order.get("_case_session") or equity_order_session(),
             "raw_alpaca_ask": raw_ask,
             "quote_meta": {
                 **quote_meta,

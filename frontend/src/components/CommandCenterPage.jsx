@@ -217,7 +217,8 @@ export default function CommandCenterPage() {
           { label: "Portfolio Manager", value: pmState.value, color: pmState.color },
           { label: "Trade Floor", value: tradeFloorState.value, color: tradeFloorState.color },
           { label: "Execution Gate", value: gateDecision, color: gateColor },
-          { label: "Data Quality", value: qualityOverview?.decision || qualityOverview?.quality?.decision || "CHECKING" },
+          { label: "Execution Score", value: qualityOverview?.execution_score == null ? "--" : qualityOverview.execution_score, color: Number(qualityOverview?.execution_score || 0) >= 100 ? "#4ade80" : "#fbbf24" },
+          { label: "Data Quality", value: qualityOverview?.data_score ?? qualityOverview?.score ?? "CHECKING" },
           { label: "Backend Refresh", value: backendRefreshing ? "SYNCING" : "20S", color: backendRefreshing ? "#fbbf24" : accent2 },
         ]}
       />
