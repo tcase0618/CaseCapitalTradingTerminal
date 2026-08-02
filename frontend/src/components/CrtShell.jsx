@@ -45,7 +45,7 @@ const NAV = [
   { to: "/contracts",   label: "CONTRACTS",   icon: "▦", group: "CORE" },
   { to: "/sec",         label: "SEC FILINGS", icon: "§", group: "CORE" },
   { to: "/earnings",    label: "EARNINGS",    icon: "▤", group: "CORE" },
-  { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "CORE" },
+  { to: "/lottery",     label: "LOTTERY",     icon: "◈", group: "TRADE FLOOR" },
   { to: "/pharma",      label: "PHARMA",      icon: "🧬", group: "CORE" },
   { to: "/trade-floor", label: "TRADE FLOOR", icon: "⚡", group: "TRADE FLOOR" },
   { to: "/options-desk", label: "OPTIONS DESK", icon: "OD", group: "TRADE FLOOR" },
