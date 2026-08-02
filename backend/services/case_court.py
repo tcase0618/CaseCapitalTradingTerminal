@@ -206,16 +206,21 @@ def _pm_exhibit(pm_row: dict[str, Any]) -> dict[str, Any]:
     if action in {"ACCUMULATE", "STARTER"}:
         return _exhibit("pm", "Portfolio Manager", "BULLISH", DEFENSE, min(25, score * 0.28), f"PM says {action}; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
     if action == "REJECT":
-        return _exhibit("pm", "Portfolio Manager", "BEARISH", PROSECUTOR, min(22, max(12, (55 - score) * 0.7)), f"PM rejects sizing; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
+        pm_gap = max(0.0, 60.0 - score)
+        rr_penalty = 10.0 if rr < 1.0 else 6.0 if rr < 1.3 else 0.0
+        return _exhibit("pm", "Portfolio Manager", "BEARISH", PROSECUTOR, min(32, max(18, pm_gap * 0.55 + rr_penalty)), f"PM rejects sizing; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
     return _exhibit("pm", "Portfolio Manager", "NEUTRAL", NEUTRAL, 0, f"PM is watching; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
 
 
 def _entry_exhibit(scan_row: dict[str, Any], pm_row: dict[str, Any]) -> dict[str, Any]:
+    action = str(pm_row.get("action") or "UNKNOWN").upper()
     entry = _entry_position(scan_row, pm_row)
     price = _num(pm_row.get("price") or scan_row.get("price"))
     low = _num(pm_row.get("entry_low") or scan_row.get("entry_low"))
     high = _num(pm_row.get("entry_high") or scan_row.get("entry_high"))
     if entry == "IN_BAND":
+        if action == "REJECT":
+            return _exhibit("entry", "Entry Band", "NEUTRAL", NEUTRAL, 0, f"Price {price:.2f} is inside {low:.2f}-{high:.2f}, but PM rejected the trade.", "portfolio_manager")
         return _exhibit("entry", "Entry Band", "BULLISH", DEFENSE, 10, f"Price {price:.2f} is inside {low:.2f}-{high:.2f}.", "portfolio_manager")
     if entry == "ABOVE_BAND":
         return _exhibit("entry", "Entry Band", "BEARISH", PROSECUTOR, 16, f"Price {price:.2f} is above entry band {low:.2f}-{high:.2f}.", "portfolio_manager")
@@ -223,12 +228,15 @@ def _entry_exhibit(scan_row: dict[str, Any], pm_row: dict[str, Any]) -> dict[str
 
 
 def _risk_exhibit(scan_row: dict[str, Any], pm_row: dict[str, Any]) -> dict[str, Any]:
+    action = str(pm_row.get("action") or "UNKNOWN").upper()
     risk_score = _num((scan_row.get("risk") or {}).get("score"))
     downside = _num(pm_row.get("downside_pct"))
     if risk_score >= 75:
         return _exhibit("risk", "Risk Engine", "BEARISH", PROSECUTOR, 20, f"Risk score is elevated at {risk_score:.1f}; downside to stop {downside:.1f}%.", "risk_target")
     if risk_score >= 55:
         return _exhibit("risk", "Risk Engine", "NEUTRAL", NEUTRAL, 0, f"Risk score is watch-level at {risk_score:.1f}.", "risk_target")
+    if action == "REJECT":
+        return _exhibit("risk", "Risk Engine", "NEUTRAL", NEUTRAL, 0, f"Risk score is contained at {risk_score:.1f}, but PM rejected sizing; risk containment alone cannot support the Defense.", "risk_target")
     return _exhibit("risk", "Risk Engine", "BULLISH", DEFENSE, 8, f"Risk score is contained at {risk_score:.1f}; downside to stop {downside:.1f}%.", "risk_target")
 
 
@@ -268,7 +276,10 @@ def _qc_exhibits(qc: dict[str, Any], expression: str) -> list[dict[str, Any]]:
             freshness=f"{b.get('age_minutes')}m" if b.get("age_minutes") is not None else "",
             data={"refresh_endpoint": b.get("refresh_endpoint"), "warnings": b.get("warnings") or []},
         ))
-    if not blockers or not blocking_labels:
+    decision = str(gate.get("decision") or "").upper()
+    if decision == "BLOCK":
+        out.insert(0, _exhibit("qc", "QC Gate", "BEARISH", PROSECUTOR, 20, f"QC decision BLOCK for {expression}; execution cannot be treated as clean even if no scoped blocker was parsed.", "data_quality", required=True, data={"decision": gate.get("decision")}))
+    elif not blockers or not blocking_labels:
         out.insert(0, _exhibit("qc", "QC Gate", "BULLISH", DEFENSE, 9, f"QC decision {gate.get('decision')}; no required blocker for {expression}.", "data_quality", required=True, data={"decision": gate.get("decision")}))
     return out
 
@@ -334,7 +345,7 @@ def _sec_exhibit(sec_rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _precedent_exhibit(count: int, row: dict[str, Any]) -> dict[str, Any]:
     if count <= 0:
         return _exhibit("precedent", "Historical Precedent", "MISSING_OPTIONAL", detail="No historical signal record for this ticker yet.", source="signal_performance")
-    return _exhibit("precedent", "Historical Precedent", "BULLISH", DEFENSE, min(10, 3 + count * 0.8), f"{count} stored signal-performance record(s) exist for precedent review.", "signal_performance", data={"records": count})
+    return _exhibit("precedent", "Historical Precedent", "NEUTRAL", NEUTRAL, 0, f"{count} stored signal-performance record(s) exist, but precedent is neutral until win-rate/return evidence is attached.", "signal_performance", data={"records": count})
 
 
 def _intel_exhibit(ticker: str, news_rows: list[dict[str, Any]]) -> dict[str, Any]:
