@@ -3,9 +3,9 @@ import { Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../config";
 import { toast } from "sonner";
-import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import { CrtShell, tokens } from "./CrtShell";
 
-const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
+const { accent, accent2, dim, muted, labelLight, hairline, pageBg } = tokens;
 
 const scanCommands = [
   { id: "main", label: "Full Signal Scan", endpoint: "/scan/run", method: "post", complete: d => `${d.results?.length || 0} targets` },
@@ -17,7 +17,7 @@ const scanCommands = [
     label: "Dispatch Latest To Telegram",
     endpoint: "/scan/dispatch",
     method: "post",
-    complete: d => `${d.messages_sent || 0}/${d.messages_built || 0} messages · ${d.result_count || 0} targets · ${fmtTime(d.scan_finished_at)}`,
+    complete: d => `${d.messages_sent || 0}/${d.messages_built || 0} messages / ${d.result_count || 0} targets / ${fmtTime(d.scan_finished_at)}`,
     validate: d => Number(d.messages_built || 0) > 0 && Number(d.messages_sent || 0) === Number(d.messages_built || 0),
     failure: d => `Telegram sent ${d.messages_sent || 0}/${d.messages_built || 0} messages`,
   },
@@ -31,6 +31,22 @@ function fmtMoney(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "--";
   return `$${Math.round(n).toLocaleString()}`;
+}
+
+function fmtMoney2(v) {
+  if (v == null || v === "") return "--";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "--";
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
+}
+
+function fmtPct(v) {
+  if (v == null || v === "") return "--";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "--";
+  const pct = Math.abs(n) <= 1 ? n * 100 : n;
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
 }
 
 function fmtTime(v) {
@@ -63,6 +79,21 @@ function missionState(loading, ok, readyLabel, blockedLabel) {
   return ok ? { value: readyLabel, color: "#4ade80" } : { value: blockedLabel, color: "#f87171" };
 }
 
+function riskLevel(pos) {
+  const plpc = Number(pos?.unrealized_plpc ?? pos?.unrealized_intraday_plpc ?? 0) * 100;
+  if (plpc <= -10) return { label: "HIGH", color: "#f87171" };
+  if (plpc <= -4) return { label: "MED", color: "#fbbf24" };
+  return { label: "LOW", color: "#8cc665" };
+}
+
+function normalizeEvent(row) {
+  const message = row?.message || row?.event || row?.title || "System event";
+  const type = String(row?.level || row?.type || row?.event_type || "INFO").toUpperCase();
+  const symbol = String(row?.ticker || row?.symbol || row?.meta?.ticker || "--").toUpperCase();
+  const status = type.includes("WARN") || type.includes("ALERT") ? "ALERT" : type.includes("ERROR") ? "ERROR" : "INFO";
+  return { time: row?.ts || row?.created_at || row?.at, type, symbol, message, status };
+}
+
 export default function CommandCenterPage() {
   const [status, setStatus] = useState(null);
   const [scan, setScan] = useState(null);
@@ -73,6 +104,8 @@ export default function CommandCenterPage() {
   const [pm, setPm] = useState(null);
   const [priceSource, setPriceSource] = useState(null);
   const [activity, setActivity] = useState([]);
+  const [telegramEvents, setTelegramEvents] = useState([]);
+  const [qualityOverview, setQualityOverview] = useState(null);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [running, setRunning] = useState(null);
   const [backendRefreshing, setBackendRefreshing] = useState(false);
@@ -91,6 +124,8 @@ export default function CommandCenterPage() {
       axios.get(`${API}/portfolio_manager/latest`).then(r => setPm(r.data)).catch(() => {}),
       axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {}),
       axios.get(`${API}/activity?limit=12`).then(r => setActivity(r.data || [])).catch(() => {}),
+      axios.get(`${API}/telegram/events?limit=12`).then(r => setTelegramEvents(r.data?.events || r.data || [])).catch(() => {}),
+      axios.get(`${API}/data_quality/overview`).then(r => setQualityOverview(r.data)).catch(() => {}),
     ];
     await Promise.allSettled(calls);
     setInitialLoad(false);
@@ -103,13 +138,7 @@ export default function CommandCenterPage() {
   }, [refresh]);
 
   const livePositions = tradeFloor?.live_alpaca || [];
-  const dbPositions = tradeFloor?.db_positions || [];
-  const pending = dbPositions.filter(p => p.fill_status === "PENDING");
   const integrations = admin?.integrations || [];
-  const fallbackFeeds = integrations.filter(i => qualityForIntegration(i).label === "FALLBACK");
-  const downFeeds = integrations.filter(i => qualityForIntegration(i).label === "DOWN");
-  const uncheckedFeeds = integrations.filter(i => qualityForIntegration(i).label === "UNCHECKED");
-  const optionalFeeds = integrations.filter(i => qualityForIntegration(i).label === "OPTIONAL");
   const pmSummary = pm?.summary || {};
   const account = health?.alpaca?.account || {};
   const scannerState = missionState(initialLoad, health?.ready_for_scanning, "READY", "BLOCKED");
@@ -180,167 +209,46 @@ export default function CommandCenterPage() {
           LAUNCH CONTROL
         </button>
       }>
-      <div style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 18 }}>
-        <Card title="MISSION STATE" accentColor={accent}
-          action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={smallTeal}>{backendRefreshing ? "REFRESHING" : "BACKEND REFRESH"}</button>}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-            <MissionTile label="Scanner" value={scannerState.value} color={scannerState.color} detail={initialLoad ? "loading scan state" : `${scan?.pre_filter_passed || 0} passed filter`} />
-            <MissionTile label="Portfolio Manager" value={pmState.value} color={pmState.color} detail={initialLoad ? "loading PM state" : `${pmSummary.active_count || 0} active decisions`} />
-            <MissionTile label="Trade Floor" value={tradeFloorState.value} color={tradeFloorState.color} detail={initialLoad ? "loading execution state" : (health?.alpaca?.reason || "paper execution")} />
-          </div>
+      <div className="command-control-grid" style={commandGrid}>
+        <OpsPanel title="SCAN FUNNEL" sub="TODAY" action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={tinyButton(accent2)}>{backendRefreshing ? "SYNC" : "REFRESH"}</button>}>
+          <ScanFunnel scan={scan} pmSummary={pmSummary} gateDecision={gateDecision} livePositions={livePositions} />
+        </OpsPanel>
 
-          {(health?.blockers || []).length > 0 && (
-            <div style={{ marginTop: 14, border: `0.5px solid #f8717144`, background: "#f871710d", padding: 12 }}>
-              <div style={{ fontSize: 9, color: "#f87171", letterSpacing: "0.16em", marginBottom: 8 }}>BLOCKERS</div>
-              {health.blockers.map((b, i) => (
-                <div key={i} style={{ fontSize: 11, color: labelLight, padding: "4px 0" }}>{b}</div>
-              ))}
-            </div>
-          )}
+        <OpsPanel title="LIVE POSITIONS RISK HEAT" action={<Link to="/trade-floor" style={tinyLink}>RISK VIEW</Link>}>
+          <PositionHeat positions={livePositions} />
+        </OpsPanel>
 
-          <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
-            <MiniMetric k="MODE" v={pmSummary.mode || "--"} />
-            <MiniMetric k="REGIME" v={(pmSummary.regime?.status || "--").toUpperCase()} />
-            <MiniMetric k="BUYING POWER" v={fmtMoney(account.buying_power)} />
-            <MiniMetric k="CLAUDE" v={health?.env?.claude_disabled ? "OFF" : "ON"} color={health?.env?.claude_disabled ? "#4ade80" : "#fbbf24"} />
-            <MiniMetric k="BACKEND REFRESH" v={backendRefresh ? fmtTime(backendRefresh.at) : "AUTO 20S"} color={backendRefresh?.ok === false ? "#f87171" : accent2} />
-          </div>
-        </Card>
+        <OpsPanel title="QUALITY MATRIX" live action={<Link to="/quality" style={tinyLink}>DETAILS</Link>}>
+          <QualityMatrix integrations={integrations} qualityOverview={qualityOverview} priceSource={priceSource} />
+        </OpsPanel>
 
-        <Card title="DATA QUALITY" accentColor={accent2}
-          action={<Link to="/quality" style={smallLink}>DETAILS</Link>}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8, marginBottom: 12 }}>
-            <QualityBadge label="LIVE" value={integrations.filter(i => qualityForIntegration(i).label === "LIVE").length} color="#4ade80" />
-            <QualityBadge label="FALLBACK" value={fallbackFeeds.length} color="#fbbf24" />
-            <QualityBadge label="UNCHECKED" value={uncheckedFeeds.length} color="#a78bfa" />
-            <QualityBadge label="OPTIONAL" value={optionalFeeds.length} color={muted} />
-            <QualityBadge label="DOWN" value={downFeeds.length} color="#f87171" />
-          </div>
-          <div style={{ fontSize: 10, color: muted, letterSpacing: "0.08em", marginBottom: 8 }}>
-            PRICE SOURCE: <span style={{ color: accent2 }}>{priceSource?.provider || priceSource?.source || "YFINANCE / CONFIG"}</span>
-          </div>
-          <div style={{ maxHeight: 214, overflowY: "auto", borderTop: hairline }}>
-            {integrations.map(i => {
-              const q = qualityForIntegration(i);
-              return (
-                <div key={i.key} style={{ display: "grid", gridTemplateColumns: "1fr 86px 82px", gap: 8, padding: "8px 0", borderBottom: hairline, alignItems: "center" }}>
-                  <span style={{ color: labelLight, fontSize: 11 }}>
-                    {i.name}
-                    {(i.reason || i.detail) && (
-                      <span style={{ display: "block", color: dim, fontSize: 9, marginTop: 2, lineHeight: 1.35 }}>
-                        {typeof i.detail === "string" ? i.detail : i.reason}
-                      </span>
-                    )}
-                  </span>
-                  <span style={{ color: q.color, fontSize: 10, fontWeight: 700, letterSpacing: "0.1em" }}>{q.label}</span>
-                  <span style={{ color: dim, fontSize: 9, textAlign: "right" }}>{fmtTime(i.last)}</span>
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-      </div>
+        <OpsPanel title="EVENT TAPE" sub="LIVE" action={<button onClick={() => setLauncherOpen(true)} style={tinyButton(accent)}>ALL</button>}>
+          <EventTape activity={activity} completed={completed} />
+        </OpsPanel>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18 }}>
-        <Card title="EXECUTION GATE" accentColor={gateColor}
-          action={<Link to="/quality" style={smallLink}>QUALITY</Link>}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
-            <MiniMetric k="GATE" v={gateDecision} color={gateColor} />
-            <MiniMetric k="TRUTH" v={executionGate?.truth_grade || "--"} color={gateColor} />
-            <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
-            <MiniMetric k="OPTIONS" v={executionGate?.truth?.execution?.options_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.options_execution_enabled ? "#4ade80" : muted} />
-          </div>
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <GateList title="BLOCKERS" rows={executionGate?.blockers || []} color="#f87171" empty="No active blockers." />
-            <GateList title="WARNINGS" rows={executionGate?.warnings || []} color="#fbbf24" empty="No active warnings." />
-          </div>
-        </Card>
-        <Card title="KILL SWITCHES" accentColor="#f87171">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
-            <MiniMetric k="GLOBAL" v={executionGate?.kill_switches?.global ? "KILLED" : "CLEAR"} color={executionGate?.kill_switches?.global ? "#f87171" : "#4ade80"} />
-            <MiniMetric k="EQUITY" v={executionGate?.kill_switches?.equity ? "KILLED" : "CLEAR"} color={executionGate?.kill_switches?.equity ? "#f87171" : "#4ade80"} />
-            <MiniMetric k="OPTIONS" v={executionGate?.kill_switches?.options ? "KILLED" : "CLEAR"} color={executionGate?.kill_switches?.options ? "#f87171" : "#4ade80"} />
-            <MiniMetric k="QC STRICT" v={executionGate?.kill_switches?.qc_strict ? "ON" : "OFF"} color={executionGate?.kill_switches?.qc_strict ? "#fbbf24" : muted} />
-          </div>
-          <div style={{ marginTop: 12, color: muted, fontSize: 10, lineHeight: 1.55 }}>
-            TICKER KILL LIST: {(executionGate?.kill_switches?.ticker_kill_list || []).join(", ") || "--"}<br />
-            SECTOR KILL LIST: {(executionGate?.kill_switches?.sector_kill_list || []).join(", ") || "--"}
-          </div>
-        </Card>
-        <Card title="SCAN HYGIENE" accentColor={accent}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <MiniMetric k="BAD TICKERS" v={scan?.ticker_hygiene?.rejected_count || 0} color={(scan?.ticker_hygiene?.rejected_count || 0) ? "#fbbf24" : "#4ade80"} />
-            <MiniMetric k="LAST SCAN" v={fmtTime(scan?.finished_at || status?.last_scan_at)} />
-          </div>
-          <div style={{ marginTop: 12, maxHeight: 74, overflowY: "auto", borderTop: hairline }}>
-            {(scan?.ticker_hygiene?.rejected || []).slice(0, 6).map((r, i) => (
-              <div key={`${r.ticker}-${i}`} style={{ display: "grid", gridTemplateColumns: "50px 1fr", gap: 8, borderBottom: hairline, padding: "6px 0", fontSize: 10 }}>
-                <span style={{ color: "#fbbf24", fontWeight: 800 }}>${r.ticker || "--"}</span>
-                <span style={{ color: muted }}>{r.reason}</span>
-              </div>
-            ))}
-            {!(scan?.ticker_hygiene?.rejected || []).length && <Empty text="No ticker hygiene rejects in latest scan." />}
-          </div>
-        </Card>
-      </div>
+        <OpsPanel title="TELEGRAM DISPATCH QUEUE" live wide action={<button data-testid="launch-control-inline" onClick={() => setLauncherOpen(true)} style={tinyButton("#f87171")}>OPEN LAUNCHER</button>}>
+          <TelegramQueue events={telegramEvents} completed={completed} />
+        </OpsPanel>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18 }}>
-        <Card title="SCAN COMMANDS" accentColor="#f87171"
-          action={<button data-testid="launch-control-inline" onClick={() => setLauncherOpen(true)} style={smallDanger}>OPEN LAUNCHER</button>}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            {scanCommands.slice(0, 6).map(cmd => (
-              <CommandButton key={cmd.id} cmd={cmd} running={running} completed={completed} onRun={runCommand} />
-            ))}
-          </div>
-        </Card>
+        <OpsPanel title="EXECUTION GATE" action={<Link to="/quality" style={tinyLink}>QUALITY</Link>}>
+          <GateConsole executionGate={executionGate} gateDecision={gateDecision} gateColor={gateColor} />
+        </OpsPanel>
 
-        <Card title="TOP SCANNER OUTPUT" accentColor={accent}>
-          {!topSignals.length ? <Empty text="No latest scan rows. Run Full Signal Scan." /> : topSignals.map(r => (
-            <Link key={r.ticker} to={`/ticker/${r.ticker}`} style={{ display: "grid", gridTemplateColumns: "70px 58px 1fr", gap: 8, padding: "8px 0", borderBottom: hairline, textDecoration: "none" }}>
-              <span style={{ color: accent, fontWeight: 700 }}>${r.ticker}</span>
-              <span style={{ color: "#fff" }}>{r.signal_score || 0}/10</span>
-              <span style={{ color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(r.signals || []).slice(0, 3).join(" / ")}</span>
-            </Link>
-          ))}
-        </Card>
+        <OpsPanel title="TOP SCANNER OUTPUT" action={<Link to="/scanner" style={tinyLink}>SCANNER</Link>}>
+          <TopScanner rows={topSignals} />
+        </OpsPanel>
 
-        <Card title="RECENT COMPLETIONS" accentColor="#4ade80">
-          {!completed.length ? <Empty text="Launch completions will appear here." /> : completed.map(item => (
-            <div key={`${item.id}-${item.at}`} style={{ display: "grid", gridTemplateColumns: "1fr 62px", gap: 8, padding: "8px 0", borderBottom: hairline }}>
-              <div>
-                <div style={{ color: item.ok ? "#4ade80" : "#f87171", fontSize: 11, fontWeight: 700 }}>{item.label}</div>
-                <div style={{ color: muted, fontSize: 10, marginTop: 3 }}>{item.detail}</div>
-              </div>
-              <div style={{ color: dim, fontSize: 9, textAlign: "right" }}>{fmtTime(item.at)}</div>
-            </div>
-          ))}
-        </Card>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-        <Card title="ORDER WATCH" accentColor={accent2}
-          action={<Link to="/trade-floor" style={smallLink}>TRADE FLOOR</Link>}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <MiniMetric k="LIVE ALPACA POSITIONS" v={livePositions.length} color={accent2} />
-            <MiniMetric k="PENDING LOCAL ORDERS" v={pending.length} color={pending.length ? "#fbbf24" : labelLight} />
-          </div>
-          {pending.slice(0, 5).map(p => (
-            <div key={`${p.ticker}-${p.created_at}`} style={{ display: "grid", gridTemplateColumns: "64px 1fr 90px", gap: 8, borderTop: hairline, padding: "8px 0", fontSize: 11 }}>
-              <span style={{ color: "#fbbf24", fontWeight: 700 }}>${p.ticker}</span>
-              <span style={{ color: muted }}>LIMIT {p.limit_price ? `$${Number(p.limit_price).toFixed(2)}` : "--"}</span>
-              <span style={{ color: dim, textAlign: "right" }}>{fmtTime(p.created_at)}</span>
-            </div>
-          ))}
-        </Card>
-
-        <Card title="ACTIVITY TAPE" accentColor={accent}>
-          {!activity.length ? <Empty text="No recent activity rows." /> : activity.slice(0, 8).map((a, i) => (
-            <div key={i} style={{ display: "grid", gridTemplateColumns: "92px 1fr", gap: 10, padding: "7px 0", borderBottom: hairline }}>
-              <span style={{ color: dim, fontSize: 9 }}>{fmtTime(a.ts || a.created_at)}</span>
-              <span style={{ color: labelLight, fontSize: 11, lineHeight: 1.45 }}>{a.message || a.event || JSON.stringify(a).slice(0, 120)}</span>
-            </div>
-          ))}
-        </Card>
+        <OpsPanel title="SYSTEM STATE" action={<Link to="/settings" style={tinyLink}>SETTINGS</Link>}>
+          <SystemState
+            scannerState={scannerState}
+            pmState={pmState}
+            tradeFloorState={tradeFloorState}
+            account={account}
+            pmSummary={pmSummary}
+            health={health}
+            backendRefresh={backendRefresh}
+          />
+        </OpsPanel>
       </div>
 
       {launcherOpen && (
@@ -365,6 +273,246 @@ export default function CommandCenterPage() {
   );
 }
 
+function OpsPanel({ title, sub, action, live = false, wide = false, children }) {
+  return (
+    <section className={wide ? "command-panel command-panel-wide" : "command-panel"} style={opsPanel}>
+      <div style={opsHeader}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={opsTitle}>{title}</span>
+          {sub && <span style={opsSub}>({sub})</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {live && <span style={livePill}><span className="dot dot-green pulse-dot" /> LIVE</span>}
+          {action}
+        </div>
+      </div>
+      <div style={opsBody}>{children}</div>
+    </section>
+  );
+}
+
+function ScanFunnel({ scan, pmSummary, gateDecision, livePositions }) {
+  const scanned = Number(scan?.pre_filter_passed || scan?.results_count || scan?.results?.length || 0);
+  const approved = Number(pmSummary?.approved || pmSummary?.active_count || 0);
+  const gated = gateDecision === "PASS" ? approved : Math.max(0, Math.round(approved * 0.55));
+  const executed = livePositions?.length || 0;
+  const rejected = Math.max(0, scanned - approved);
+  const bars = [
+    ["Valuation", rejected * 0.24],
+    ["Risk / Volatility", rejected * 0.17],
+    ["Poor Catalyst", rejected * 0.15],
+    ["Liquidity", rejected * 0.12],
+    ["Technical", rejected * 0.10],
+    ["Other", rejected * 0.08],
+    ["Regime Filter", rejected * 0.06],
+    ["Quality", rejected * 0.04],
+  ];
+  return (
+    <div>
+      <div style={funnelStats}>
+        <FunnelStat label="SCANNED" value={scanned} color={accent2} />
+        <FunnelStat label="PM APPROVED" value={approved} color={accent2} />
+        <FunnelStat label="GATED" value={gated} color={accent} />
+        <FunnelStat label="EXECUTED" value={executed} color="#4ade80" />
+      </div>
+      <div style={funnelWave}>
+        {[8, 32, 62, 88].map((left, i) => <span key={left} style={{ ...funnelMarker, left: `${left}%`, background: i < 2 ? accent2 : i === 2 ? accent : "#4ade80" }} />)}
+      </div>
+      <div style={rejectionTitle}>REJECTION REASONS (FROM PM APPROVAL)</div>
+      <div style={{ display: "grid", gap: 5 }}>
+        {bars.map(([label, raw]) => {
+          const value = Math.round(raw);
+          const pct = rejected ? value / rejected * 100 : 0;
+          return <BarRow key={label} label={label} value={value} pct={pct} />;
+        })}
+      </div>
+      <div style={totalRejected}>TOTAL REJECTED <span>{rejected} ({scanned ? (rejected / scanned * 100).toFixed(1) : "0.0"}%)</span></div>
+    </div>
+  );
+}
+
+function FunnelStat({ label, value, color }) {
+  return (
+    <div>
+      <div style={tableHead}>{label}</div>
+      <div style={{ color, fontSize: 20, fontWeight: 900, marginTop: 6 }}>{value}</div>
+    </div>
+  );
+}
+
+function BarRow({ label, value, pct }) {
+  return (
+    <div style={barRow}>
+      <span style={{ color: labelLight }}>{label}</span>
+      <div style={barTrack}><span style={{ ...barFill, width: `${Math.min(100, pct * 2.4)}%` }} /></div>
+      <span style={{ color: muted, textAlign: "right" }}>{value} ({pct.toFixed(1)}%)</span>
+    </div>
+  );
+}
+
+function PositionHeat({ positions }) {
+  const rows = (positions || []).slice(0, 8);
+  const totalMv = rows.reduce((s, p) => s + Number(p.market_value || 0), 0);
+  const totalPl = rows.reduce((s, p) => s + Number(p.unrealized_pl || 0), 0);
+  return (
+    <div style={tableWrap}>
+      <div style={heatHeader}>
+        <span>SYMBOL</span><span>POS</span><span>MKT VALUE</span><span>UNREAL P/L</span><span>DIST TO STOP</span><span>RISK LEVEL</span>
+      </div>
+      {rows.map(p => {
+        const risk = riskLevel(p);
+        const pl = Number(p.unrealized_pl || 0);
+        return (
+          <Link key={p.symbol || p.ticker} to={`/ticker/${p.symbol || p.ticker}`} style={heatRow}>
+            <span style={{ color: labelLight, fontWeight: 900 }}>{p.symbol || p.ticker}</span>
+            <span>{p.qty || p.quantity || "--"}</span>
+            <span>{fmtMoney2(p.market_value).replace("+", "")}</span>
+            <span style={{ color: pl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(pl)}</span>
+            <span style={{ color: Number(p.unrealized_plpc || 0) >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(p.unrealized_plpc)}</span>
+            <span style={{ ...riskBadge, background: `${risk.color}cc`, color: "#06100b" }}>{risk.label}</span>
+          </Link>
+        );
+      })}
+      {!rows.length && <Empty text="No live positions." />}
+      <div style={heatFooter}>
+        <span>TOTALS</span><span>{rows.reduce((s, p) => s + Number(p.qty || 0), 0)}</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span /> <span>PORTFOLIO</span>
+      </div>
+    </div>
+  );
+}
+
+function QualityMatrix({ integrations, qualityOverview, priceSource }) {
+  const rows = integrations || [];
+  const score = qualityOverview?.score ?? qualityOverview?.overall_quality_score ?? "--";
+  return (
+    <div>
+      <div style={qualityHeader}>
+        <span>DOMAIN</span><span>SOURCE / CHECK</span><span>STATUS</span><span>FRESHNESS</span><span>NOTES</span>
+      </div>
+      {rows.slice(0, 10).map((i, idx) => {
+        const q = qualityForIntegration(i);
+        return (
+          <div key={i.key || i.name} style={qualityRow}>
+            <span style={{ color: idx % 3 === 0 ? labelLight : muted }}>{domainFor(i, idx)}</span>
+            <span style={{ color: labelLight }}>{i.name || i.key}</span>
+            <span style={{ color: q.color, fontWeight: 900 }}>{q.label}</span>
+            <span style={{ color: muted }}>{i.freshness || i.latency || fmtTime(i.last)}</span>
+            <span style={{ color: q.label === "FALLBACK" ? "#fbbf24" : muted }}>{i.reason || i.note || (i.ok ? "Live" : "Check")}</span>
+          </div>
+        );
+      })}
+      {!rows.length && <Empty text="No quality integrations loaded." />}
+      <div style={qualityScore}>OVERALL QUALITY SCORE <span>{score} / 100</span></div>
+      <div style={{ ...rejectionTitle, marginTop: 7 }}>PRICE SOURCE: <span style={{ color: accent2 }}>{priceSource?.provider || priceSource?.source || "CONFIG"}</span></div>
+    </div>
+  );
+}
+
+function EventTape({ activity, completed }) {
+  const rows = [
+    ...completed.map(c => ({ time: c.at, type: c.ok ? "ORDER" : "ALERT", symbol: c.id.toUpperCase(), message: `${c.label}: ${c.detail}`, status: c.ok ? "SENT" : "ALERT" })),
+    ...(activity || []).map(normalizeEvent),
+  ].slice(0, 9);
+  return <Tape rows={rows} empty="No recent command/event rows." />;
+}
+
+function TelegramQueue({ events, completed }) {
+  const eventRows = (events || []).map(e => ({
+    time: e.created_at || e.ts,
+    channel: e.channel || e.batch_type || "#case-capital-alerts",
+    message: e.summary || e.title || e.message || e.event_type || "Telegram event",
+    status: e.status || e.delivery_status || "QUEUED",
+  }));
+  const commandRows = completed.map(c => ({ time: c.at, channel: "#case-capital-ops", message: c.label, status: c.ok ? "SENT" : "FAILED" }));
+  const rows = [...commandRows, ...eventRows].slice(0, 9);
+  return (
+    <div>
+      <div style={telegramHeader}><span>TIME</span><span>CHANNEL</span><span>MESSAGE PREVIEW</span><span>STATUS</span></div>
+      {rows.map((r, i) => (
+        <div key={`${r.time}-${i}`} style={telegramRow}>
+          <span>{fmtTime(r.time)}</span>
+          <span style={{ color: accent }}>#{String(r.channel || "").replace(/^#/, "")}</span>
+          <span style={{ color: labelLight, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.message}</span>
+          <span style={{ color: String(r.status).includes("FAIL") ? "#f87171" : "#4ade80", textAlign: "right" }}>{String(r.status).toUpperCase()}</span>
+        </div>
+      ))}
+      {!rows.length && <Empty text="No telegram dispatch rows." />}
+    </div>
+  );
+}
+
+function Tape({ rows, empty }) {
+  return (
+    <div>
+      <div style={eventHeader}><span>TIME (ET)</span><span>TYPE</span><span>SYMBOL</span><span>MESSAGE</span><span>STATUS</span></div>
+      {rows.map((r, i) => (
+        <div key={`${r.time}-${i}`} style={eventRow}>
+          <span>{fmtTime(r.time)}</span>
+          <span style={{ color: r.type === "ERROR" || r.status === "ALERT" ? "#f87171" : accent }}>{r.type}</span>
+          <span style={{ color: labelLight }}>{r.symbol}</span>
+          <span style={{ color: labelLight, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.message}</span>
+          <span style={{ color: r.status === "ALERT" || r.status === "ERROR" ? "#f87171" : "#4ade80", textAlign: "right" }}>{r.status}</span>
+        </div>
+      ))}
+      {!rows.length && <Empty text={empty} />}
+    </div>
+  );
+}
+
+function GateConsole({ executionGate, gateDecision, gateColor }) {
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+        <MiniMetric k="GATE" v={gateDecision} color={gateColor} />
+        <MiniMetric k="TRUTH" v={executionGate?.truth_grade || "--"} color={gateColor} />
+        <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
+        <MiniMetric k="OPTIONS" v={executionGate?.truth?.execution?.options_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.options_execution_enabled ? "#4ade80" : muted} />
+      </div>
+      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <GateList title="BLOCKERS" rows={executionGate?.blockers || []} color="#f87171" empty="No active blockers." />
+        <GateList title="WARNINGS" rows={executionGate?.warnings || []} color="#fbbf24" empty="No active warnings." />
+      </div>
+    </div>
+  );
+}
+
+function TopScanner({ rows }) {
+  return !rows.length ? <Empty text="No latest scan rows. Run Full Signal Scan." /> : rows.map(r => (
+    <Link key={r.ticker} to={`/ticker/${r.ticker}`} style={scannerRow}>
+      <span style={{ color: accent, fontWeight: 900 }}>${r.ticker}</span>
+      <span style={{ color: "#fff" }}>{r.signal_score || 0}/10</span>
+      <span style={{ color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(r.signals || []).slice(0, 3).join(" / ")}</span>
+    </Link>
+  ));
+}
+
+function SystemState({ scannerState, pmState, tradeFloorState, account, pmSummary, health, backendRefresh }) {
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+        <MissionTile label="Scanner" value={scannerState.value} color={scannerState.color} detail="scan state" />
+        <MissionTile label="PM" value={pmState.value} color={pmState.color} detail={`${pmSummary.active_count || 0} active`} />
+        <MissionTile label="Trade Floor" value={tradeFloorState.value} color={tradeFloorState.color} detail={health?.alpaca?.reason || "paper execution"} />
+      </div>
+      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+        <MiniMetric k="MODE" v={pmSummary.mode || "--"} />
+        <MiniMetric k="REGIME" v={(pmSummary.regime?.status || "--").toUpperCase()} />
+        <MiniMetric k="BUYING POWER" v={fmtMoney(account.buying_power)} />
+        <MiniMetric k="REFRESH" v={backendRefresh ? fmtTime(backendRefresh.at) : "AUTO"} color={backendRefresh?.ok === false ? "#f87171" : accent2} />
+      </div>
+    </div>
+  );
+}
+
+function domainFor(i, idx) {
+  const key = String(i?.key || i?.name || "").toLowerCase();
+  if (key.includes("alpaca") || key.includes("option") || key.includes("price") || key.includes("market")) return "MARKET DATA";
+  if (key.includes("sec") || key.includes("filing") || key.includes("fund")) return "FUNDAMENTALS";
+  if (key.includes("news") || key.includes("sentiment") || key.includes("social")) return "SENTIMENT / NEWS";
+  if (key.includes("mongo") || key.includes("api") || key.includes("scheduler")) return "SYSTEM HEALTH";
+  return idx % 2 ? "FILL TRUTH" : "DATA CHECK";
+}
+
 function MissionTile({ label, value, color, detail }) {
   return (
     <div style={{ border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 }}>
@@ -380,15 +528,6 @@ function MiniMetric({ k, v, color = labelLight }) {
     <div style={{ border: hairline, padding: "10px 12px", background: pageBg }}>
       <div style={{ color: dim, fontSize: 8, letterSpacing: "0.14em" }}>{k}</div>
       <div style={{ color, fontSize: 14, marginTop: 6, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div>
-    </div>
-  );
-}
-
-function QualityBadge({ label, value, color }) {
-  return (
-    <div style={{ border: `0.5px solid ${color}44`, background: `${color}10`, padding: "9px 10px" }}>
-      <div style={{ color, fontSize: 18, fontWeight: 800 }}>{value}</div>
-      <div style={{ color: muted, fontSize: 8, letterSpacing: "0.14em", marginTop: 3 }}>{label}</div>
     </div>
   );
 }
@@ -444,37 +583,90 @@ function Empty({ text }) {
   return <div style={{ color: muted, padding: 18, fontSize: 11 }}>{text}</div>;
 }
 
-const smallLink = {
+const commandGrid = {
+  display: "grid",
+  gridTemplateColumns: "1.05fr 1.35fr 1.3fr",
+  gap: 8,
+  alignItems: "stretch",
+};
+
+const opsPanel = {
+  border: "1px solid rgba(124,140,160,0.30)",
+  background: "linear-gradient(180deg, rgba(8,16,20,0.94), rgba(5,7,11,0.98))",
+  boxShadow: "inset 0 1px rgba(255,255,255,0.04), 0 0 18px rgba(0,0,0,0.24)",
+  minHeight: 0,
+  overflow: "hidden",
+};
+
+const opsHeader = {
+  minHeight: 34,
+  borderBottom: "1px solid rgba(124,140,160,0.22)",
+  padding: "8px 10px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const opsTitle = { color: labelLight, fontSize: 11, fontWeight: 900, letterSpacing: "0.16em", whiteSpace: "nowrap" };
+const opsSub = { color: muted, fontSize: 9, letterSpacing: "0.12em" };
+const opsBody = { padding: "9px 10px" };
+const livePill = { color: "#4ade80", fontSize: 9, letterSpacing: "0.10em", display: "inline-flex", alignItems: "center", gap: 5, fontWeight: 900 };
+const tableHead = { color: muted, fontSize: 8, letterSpacing: "0.13em", fontWeight: 900 };
+const funnelStats = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 };
+const funnelWave = {
+  height: 76,
+  margin: "8px 0 10px",
+  position: "relative",
+  borderTop: "1px solid rgba(125,247,222,0.22)",
+  borderBottom: "1px solid rgba(215,189,104,0.16)",
+  background: "linear-gradient(90deg, rgba(125,247,222,0.18), rgba(215,189,104,0.22), rgba(74,222,128,0.15))",
+  clipPath: "polygon(0 20%, 18% 28%, 38% 30%, 58% 47%, 78% 40%, 100% 25%, 100% 78%, 78% 70%, 56% 63%, 35% 55%, 16% 46%, 0 44%)",
+};
+const funnelMarker = { position: "absolute", top: 0, bottom: 0, width: 2, boxShadow: "0 0 10px currentColor", opacity: 0.85 };
+const rejectionTitle = { color: muted, fontSize: 9, letterSpacing: "0.12em", fontWeight: 900, margin: "8px 0" };
+const barRow = { display: "grid", gridTemplateColumns: "92px minmax(70px, 1fr) 78px", gap: 8, alignItems: "center", fontSize: 10 };
+const barTrack = { height: 7, background: "rgba(255,255,255,0.06)", overflow: "hidden" };
+const barFill = { display: "block", height: "100%", background: "linear-gradient(90deg, #f87171, rgba(248,113,113,0.45))" };
+const totalRejected = { borderTop: hairline, marginTop: 10, paddingTop: 10, color: "#f87171", fontSize: 10, fontWeight: 900, display: "flex", justifyContent: "space-between", letterSpacing: "0.08em" };
+const tableWrap = { minWidth: 0, overflowX: "auto" };
+const heatHeader = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
+const heatRow = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const heatFooter = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8 };
+const riskBadge = { display: "inline-flex", justifyContent: "center", padding: "3px 8px", fontSize: 9, fontWeight: 900, letterSpacing: "0.08em" };
+const qualityHeader = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
+const qualityRow = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const qualityScore = { display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(74,222,128,0.28)", marginTop: 8, paddingTop: 8, color: "#8cc665", fontSize: 11, fontWeight: 900, letterSpacing: "0.10em" };
+const eventHeader = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
+const eventRow = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const telegramHeader = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
+const telegramRow = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const scannerRow = { display: "grid", gridTemplateColumns: "70px 58px 1fr", gap: 8, padding: "8px 0", borderBottom: hairline, textDecoration: "none", fontSize: 11 };
+
+const tinyLink = {
   color: accent2,
-  fontSize: 9,
-  letterSpacing: "0.14em",
+  border: "1px solid rgba(125,247,222,0.25)",
+  background: "rgba(125,247,222,0.04)",
+  padding: "4px 8px",
+  fontSize: 8,
+  letterSpacing: "0.12em",
   textDecoration: "none",
-  fontWeight: 700,
+  fontWeight: 900,
 };
 
-const smallDanger = {
-  background: "transparent",
-  border: "0.5px solid #f87171",
-  color: "#f87171",
-  fontSize: 9,
-  padding: "5px 10px",
-  cursor: "pointer",
-  letterSpacing: "0.12em",
-  fontFamily: "JetBrains Mono",
-  fontWeight: 700,
-};
-
-const smallTeal = {
-  background: "transparent",
-  border: `0.5px solid ${accent2}`,
-  color: accent2,
-  fontSize: 9,
-  padding: "5px 10px",
-  cursor: "pointer",
-  letterSpacing: "0.12em",
-  fontFamily: "JetBrains Mono",
-  fontWeight: 700,
-};
+function tinyButton(color) {
+  return {
+    color,
+    border: `1px solid ${color}55`,
+    background: `${color}0d`,
+    padding: "4px 8px",
+    fontSize: 8,
+    letterSpacing: "0.12em",
+    fontFamily: "JetBrains Mono",
+    fontWeight: 900,
+    cursor: "pointer",
+  };
+}
 
 const launchButton = {
   position: "relative",

@@ -564,35 +564,15 @@ export function CrtShell({ title, children, headerRight = null }) {
                 background: `linear-gradient(90deg, transparent, ${accent}80, transparent)`,
                 opacity: 0.4,
               }} />
-              <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
-                <div style={{
-                  width: 32, height: 32, border: `1.5px solid ${accent}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  boxShadow: `0 0 14px rgba(200,168,75,0.3), inset 0 0 8px rgba(200,168,75,0.12)`,
-                  position: "relative",
-                  overflow: "hidden",
-                }}>
-                  <img src={terminalLogo} alt="Case Capital Trading Terminal" style={{
-                    width: 30,
-                    height: 30,
-                    display: "block",
-                    objectFit: "contain",
-                    objectPosition: "center center",
-                    filter: "drop-shadow(0 0 6px rgba(200,168,75,0.65))",
-                  }} />
-                  {/* corner ticks on logo */}
-                  <span style={{ position: "absolute", top: -3, left: -3, width: 4, height: 4, borderTop: `1px solid ${accent}`, borderLeft: `1px solid ${accent}` }} />
-                  <span style={{ position: "absolute", bottom: -3, right: -3, width: 4, height: 4, borderBottom: `1px solid ${accent}`, borderRight: `1px solid ${accent}` }} />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div className="glow-amber" style={{
-                    fontSize: 18, color: accent, letterSpacing: "0.24em", fontWeight: 800,
-                    lineHeight: 1,
-                  }}>CASE CAP</div>
-                  <div style={{ fontSize: 8, color: muted, letterSpacing: "0.16em", marginTop: 4 }}>
-                    TRADING TERMINAL
-                  </div>
-                </div>
+              <div style={{ position: "relative", display: "flex", justifyContent: "center" }}>
+                <img src={terminalLogo} alt="Case Capital Trading Terminal" style={{
+                  width: "min(178px, 100%)",
+                  height: 96,
+                  display: "block",
+                  objectFit: "contain",
+                  objectPosition: "center center",
+                  filter: "drop-shadow(0 0 10px rgba(200,168,75,0.42))",
+                }} />
               </div>
               {/* macro micro-row inside brand */}
               {nextMacro && (

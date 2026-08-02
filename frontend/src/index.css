@@ -215,6 +215,16 @@ body {
     radial-gradient(circle at 82% 14%, rgba(125,247,222,0.07), transparent 26%),
     linear-gradient(180deg, #080b12 0%, #030408 100%);
 }
+
+.command-panel-wide {
+  grid-column: span 2;
+}
+
+@media (min-width: 1180px) {
+  .command-panel-wide {
+    grid-column: span 2;
+  }
+}
 .terminal-frame {
   isolation: isolate;
 }
@@ -995,6 +1005,16 @@ body {
     font-size: 17px !important;
     line-height: 1.16 !important;
     overflow-wrap: anywhere !important;
+  }
+  .command-control-grid {
+    grid-template-columns: 1fr !important;
+    gap: 10px !important;
+  }
+  .command-panel {
+    min-width: 0 !important;
+  }
+  .command-panel-wide {
+    grid-column: auto !important;
   }
 
   .terminal-page-body [style*="minHeight"],
