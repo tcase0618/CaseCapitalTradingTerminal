@@ -66,6 +66,10 @@ def _alpaca_ready() -> bool:
     return bool(ALPACA_KEY and ALPACA_SECRET)
 
 
+def paper_only() -> bool:
+    return "paper-api.alpaca.markets" in ALPACA_TRADE_BASE
+
+
 # ─────── Alpaca thin client ───────
 async def get_account() -> dict[str, Any] | None:
     if not _alpaca_ready():
@@ -108,6 +112,21 @@ async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price:
                                           client_order_id: str | None = None) -> dict[str, Any] | None:
     """Limit DAY order for fractional notional. NEVER market."""
     if not _alpaca_ready() or notional <= 0 or limit_price <= 0:
+        return None
+    try:
+        from . import safety
+        enabled, status = await safety.trading_enabled(scope="equity_submit")
+        if not enabled:
+            await log_activity(
+                f"Trade Floor submit blocked by safety halt: {ticker}",
+                "warn",
+                {"ticker": ticker, "safety": status},
+            )
+            return None
+    except Exception:
+        return None
+    if not paper_only() and os.environ.get("ALLOW_LIVE_EQUITY_EXECUTION", "").strip().lower() not in {"1", "true", "yes", "on", "explicit-yes-i-mean-it"}:
+        await log_activity("Trade Floor submit blocked: non-paper equity account", "warn", {"ticker": ticker, "base": ALPACA_TRADE_BASE})
         return None
     payload: dict[str, Any] = {
         "symbol": ticker.upper(),
@@ -206,8 +225,8 @@ async def execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_ord
 submit_fractional_buy = submit_fractional_limit_buy
 
 
-async def get_latest_ask(ticker: str) -> float | None:
-    """Sole source for the limit price at order-submission time: Alpaca."""
+async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
+    """Sole source for executable limit-price metadata: Alpaca latest quote."""
     if not _alpaca_ready():
         return None
     try:
@@ -220,9 +239,29 @@ async def get_latest_ask(ticker: str) -> float | None:
                 return None
             q = (r.json() or {}).get("quote") or {}
             ask = float(q.get("ap") or 0)
-            return ask if ask > 0 else None
+            if ask <= 0:
+                return None
+            try:
+                from . import safety
+                age_s = safety.quote_age_seconds(q.get("t"))
+            except Exception:
+                age_s = None
+            return {
+                "price": ask,
+                "ts": q.get("t"),
+                "age_s": age_s,
+                "source": "alpaca_iex_latest_quote",
+                "bid": float(q.get("bp") or 0),
+                "ask": ask,
+                "raw": q,
+            }
     except Exception:
         return None
+
+
+async def get_latest_ask(ticker: str) -> float | None:
+    meta = await get_latest_ask_meta(ticker)
+    return float(meta["price"]) if meta and meta.get("price") else None
 
 
 async def cancel_order(order_id: str) -> bool:
@@ -325,7 +364,8 @@ async def regime_status() -> dict[str, Any]:
     spy_last, spy_ema, vix = await loop.run_in_executor(None, _yf_calc)
     if vix is None or spy_last is None:
         return {"status": "unknown", "vix": None, "spy_last": None, "spy_ema200": None,
-                 "halt_new_entries": False}
+                 "halt_new_entries": True, "reason": "regime_data_unavailable",
+                 "source": "yfinance_degraded_failed", "checked_at": _now().isoformat()}
     halt = vix >= VIX_HALT_THRESHOLD or spy_last < spy_ema
     color = "red" if halt else ("yellow" if vix >= 20 else "green")
     return {
@@ -406,7 +446,7 @@ async def _gate_check(scan_row: dict[str, Any], *,
         return False, f"only {len(signals)} signal type(s) firing"
     if regime is None:
         regime = await regime_status()
-    if not pm_managed and regime.get("halt_new_entries"):
+    if regime.get("halt_new_entries"):
         return False, f"regime halt (vix={regime.get('vix')}, spy_ema_break={regime.get('spy_last',0) < regime.get('spy_ema200',0)})"
     # Earnings within 10d gate
     earnings = scan_row.get("earnings") or {}
@@ -443,11 +483,22 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     orders happens immediately before EVERY single submit attempt. A
     ticker that already has a position or a queued/working order will
     never receive a duplicate order."""
-    from . import execution_gate, portfolio_manager, pm_rules, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
+    from . import execution_gate, portfolio_manager, pm_rules, safety, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     started = _now()
+    enabled, safety_status = await safety.trading_enabled(scope="equity")
+    if not enabled:
+        await log_activity("Trade Floor: blocked by global safety halt", "warn", safety_status)
+        return {
+            "executed": [],
+            "rejected": [],
+            "halted": True,
+            "reason": safety_status.get("reason") or "safety_halt",
+            "safety": safety_status,
+            "started_at": started.isoformat(),
+        }
     if not _alpaca_ready():
         await log_activity("Trade Floor: ALPACA NOT CONFIGURED — no executions", "warn")
         return {"executed": [], "rejected": [], "compression_ratio": None,
@@ -474,6 +525,17 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
         await log_activity("Trade Floor: cannot reach Alpaca account", "warn")
         return {"executed": [], "rejected": [], "compression_ratio": None,
                  "alpaca_ready": False}
+    breaker = await safety.check_daily_loss(account, source="equity_execute")
+    if breaker.get("tripped"):
+        return {
+            "executed": [],
+            "rejected": [],
+            "halted": True,
+            "reason": "daily_loss_breaker",
+            "daily_loss_breaker": breaker,
+            "alpaca_ready": True,
+            "started_at": started.isoformat(),
+        }
     equity = float(account.get("equity") or 0)
 
     # Pre-fetch live Alpaca state once for the per-row gate (then re-check
@@ -545,15 +607,20 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
 
         risk_pct = float(pm_row.get("risk_usd") or 0) / equity if equity > 0 else 0.0
         hard_cap = float(pm_row.get("allocation_usd") or 0)
-        # Determine entry price = current Alpaca ask (sole source).
-        ask = await get_latest_ask(ticker)
-        if not ask:
-            # Fallback: scanner-known price for sizing only.
-            ask = float(row.get("price") or row.get("current_price") or 0)
-        if not ask or ask <= 0:
+        # Determine executable entry price from a fresh Alpaca ask. Scanner
+        # prices are intentionally not executable because they may be stale.
+        quote_meta = await get_latest_ask_meta(ticker)
+        if not quote_meta:
             rejected.append({"ticker": ticker, "score": score,
-                              "reason": "no_ask_quote_from_alpaca"})
+                              "reason": "no_fresh_ask"})
             continue
+        fresh, age_s = safety.quote_is_fresh(quote_meta)
+        quote_meta["age_s"] = age_s
+        if not fresh:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "stale_quote", "quote_meta": quote_meta})
+            continue
+        ask = float(quote_meta["price"])
         raw_ask = float(ask)
         entry_high = float(pm_row.get("entry_high") or row.get("entry_high") or 0)
         scanner_price = float(pm_row.get("price") or row.get("price") or 0)
@@ -595,7 +662,12 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
                               "reason": f"notional<${notional}_too_small"})
             continue
 
-        # FINAL dedup check immediately before submission — fresh fetch
+        # FINAL safety + dedup check immediately before submission.
+        enabled, safety_status = await safety.trading_enabled(scope="equity_row")
+        if not enabled:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "safety_halt", "safety": safety_status})
+            continue
         try:
             live_positions_now = await list_positions()
             live_orders_now = await list_orders(status="open")
@@ -648,6 +720,11 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
             "pm_plan": pm_row,
             "limit_price": limit_price,
             "raw_alpaca_ask": raw_ask,
+            "quote_meta": {
+                **quote_meta,
+                "price_used": limit_price,
+                "guard_adjusted": limit_price != round(raw_ask, 4),
+            },
             "limit_price_guard": {
                 "entry_high": entry_high,
                 "scanner_price": scanner_price,

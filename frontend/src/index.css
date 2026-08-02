@@ -205,6 +205,43 @@ body {
 }
 
 /* ── v5.4 · Mobile responsive rules ── */
+.terminal-execution-strip {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.8fr) minmax(120px, 0.75fr) minmax(160px, 1fr) minmax(150px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 18px;
+  border-bottom: 0.5px solid rgba(255,255,255,0.06);
+  background: rgba(5,5,10,0.94);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.22);
+  font-family: "JetBrains Mono", "Courier New", monospace;
+  letter-spacing: 0.12em;
+}
+.terminal-execution-metric {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.terminal-execution-metric span {
+  color: #6b7280;
+  font-weight: 800;
+}
+.terminal-execution-metric strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  font-weight: 900;
+}
+.terminal-execution-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 @media (max-width: 768px) {
   html, body, #root {
     width: 100%;
@@ -243,6 +280,34 @@ body {
     top: 0 !important;
     z-index: 40 !important;
     box-shadow: 0 14px 34px rgba(0,0,0,0.38);
+  }
+  .terminal-execution-strip {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 5px !important;
+    padding: 5px 9px !important;
+    font-size: 8px !important;
+  }
+  .terminal-execution-metric {
+    min-height: 22px !important;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.012);
+    padding: 3px 6px;
+    gap: 5px !important;
+  }
+  .terminal-execution-metric span,
+  .terminal-execution-metric strong {
+    font-size: 7px !important;
+    letter-spacing: 0.08em !important;
+  }
+  .terminal-execution-actions {
+    grid-column: 1 / -1;
+    justify-content: stretch !important;
+    gap: 6px !important;
+  }
+  .terminal-execution-actions button {
+    flex: 1;
+    min-height: 28px;
+    font-size: 8px !important;
   }
   [data-testid="global-news-strip"] {
     grid-template-columns: 66px minmax(0, 1fr) 36px !important;

@@ -72,9 +72,12 @@ async def register_webhook(public_base_url: str) -> dict[str, Any]:
         return {"ok": False, "reason": "no token"}
     url = f"{public_base_url.rstrip('/')}/api/telegram/webhook"
     try:
+        payload = {"url": url, "drop_pending_updates": True}
+        webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+        if webhook_secret:
+            payload["secret_token"] = webhook_secret
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(_api_url("setWebhook"),
-                                    json={"url": url, "drop_pending_updates": True})
+            r = await client.post(_api_url("setWebhook"), json=payload)
         data = r.json()
         await get_db().bot_state.update_one(
             {"_id": "state"},
@@ -650,6 +653,14 @@ async def handle_update(update: dict[str, Any]) -> None:
     chat = msg.get("chat") or {}
     chat_id = str(chat.get("id") or "")
     if not text or not chat_id:
+        return
+    allowed_chat = str(os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if allowed_chat and chat_id != allowed_chat:
+        await log_activity(
+            f"Telegram cmd ignored from unauthorized chat {chat_id}: {text[:80]}",
+            "warn",
+            {"chat_id": chat_id, "allowed_chat": allowed_chat},
+        )
         return
     await log_activity(f"Telegram cmd from {chat_id}: {text[:80]}", "info")
 

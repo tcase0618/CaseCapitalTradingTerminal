@@ -114,10 +114,10 @@ async def _alpaca_market_sell(ticker: str, qty: float,
 
 
 async def _current_price(ticker: str) -> float | None:
-    """Strict pricer waterfall: Alpaca → Finnhub → yfinance (per spec)."""
+    """Fresh price for live exit checks; bypass the normal latest-price cache."""
     try:
         from . import pricer
-        return await pricer.get_latest_close(ticker)
+        return await pricer.refresh_price(ticker)
     except Exception as e:
         logger.debug("price waterfall %s: %s", ticker, e)
         return None

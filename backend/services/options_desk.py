@@ -80,6 +80,11 @@ def options_execution_enabled() -> bool:
     return OPTIONS_EXECUTION_ENABLED
 
 
+def _candidate_order_id(candidate_id: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9_-]+", "-", str(candidate_id or "").strip())
+    return f"od-{clean}"[:120]
+
+
 def _local_options_session_open(now: datetime | None = None) -> bool:
     now_et = now.astimezone(ET) if now else datetime.now(ET)
     if now_et.weekday() >= 5:
@@ -1015,9 +1020,12 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
 
 
 async def execute(candidate_id: str, qty: int | None = None, limit_price: float | None = None) -> dict[str, Any]:
-    from . import execution_gate
+    from . import execution_gate, safety
 
     db = get_db()
+    enabled, safety_status = await safety.trading_enabled(scope="options")
+    if not enabled:
+        return {"ok": False, "reason": "safety_halt", "safety": safety_status}
     ticket = await db.options_desk_candidates.find_one({"candidate_id": candidate_id}, {"_id": 0})
     if not ticket:
         return {"ok": False, "reason": "candidate_not_found"}
@@ -1067,6 +1075,35 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     symbol = preflight.get("symbol")
     if not symbol:
         return {"ok": False, "reason": "missing_option_symbol_from_data_provider", "candidate": ticket}
+    client_order_id = _candidate_order_id(candidate_id)
+    existing_local = await db.options_desk_orders.find_one(
+        {
+            "$or": [
+                {"order.client_order_id": client_order_id},
+                {"client_order_id": client_order_id},
+            ],
+            "status": {"$in": ["submitted", "auto_submitted", "filled"]},
+        },
+        {"_id": 0},
+    )
+    if existing_local:
+        return {
+            "ok": False,
+            "reason": "duplicate_client_order_id",
+            "client_order_id": client_order_id,
+            "existing_order": existing_local.get("order"),
+            "candidate": ticket,
+        }
+    live_orders = await orders(status="all", limit=200)
+    for existing in live_orders.get("orders") or []:
+        if existing.get("client_order_id") == client_order_id:
+            return {
+                "ok": False,
+                "reason": "duplicate_client_order_id",
+                "client_order_id": client_order_id,
+                "existing_order": existing,
+                "candidate": ticket,
+            }
     payload = {
         "symbol": symbol,
         "qty": str(order_qty),
@@ -1074,6 +1111,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         "type": "limit",
         "time_in_force": "day",
         "limit_price": round(order_limit, 2),
+        "client_order_id": client_order_id,
     }
     async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
         r = await client.post(f"{TRADE_BASE}/v2/orders", json=payload)
@@ -1084,6 +1122,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     record = stamped({
         "candidate": ticket,
         "order": order,
+        "client_order_id": client_order_id,
         "submitted_at": _now(),
         "status": "submitted",
         "exit_policy": exit_policy,
@@ -1100,8 +1139,19 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     and enforces only mechanical paper execution constraints already present in
     execute(): risk budget, valid order fields, and Alpaca acceptance.
     """
-    from . import execution_gate
+    from . import execution_gate, safety
 
+    enabled, safety_status = await safety.trading_enabled(scope="options_auto")
+    if not enabled:
+        return {
+            "ok": False,
+            "auto": True,
+            "reason": "safety_halt",
+            "safety": safety_status,
+            "submitted": [],
+            "skipped": [],
+            "summary": {},
+        }
     if not OPTIONS_EXECUTION_ENABLED:
         return {
             "ok": False,

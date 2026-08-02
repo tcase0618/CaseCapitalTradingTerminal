@@ -290,6 +290,106 @@ function useNewsStrip() {
   return state;
 }
 
+function useSafetyFrame() {
+  const [state, setState] = useState({
+    trading: null,
+    gate: null,
+    regime: null,
+    loading: true,
+  });
+
+  const load = async () => {
+    const [trading, gate, regime] = await Promise.all([
+      axios.get(`${API}/admin/trading_status`, { timeout: 5000 }).then(res => res.data).catch(() => null),
+      axios.get(`${API}/execution_gate/overview`, { timeout: 7000 }).then(res => res.data).catch(() => null),
+      axios.get(`${API}/trade_floor/regime`, { timeout: 8000 }).then(res => res.data).catch(() => null),
+    ]);
+    setState({ trading, gate, regime, loading: false });
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const guardedLoad = async () => {
+      try {
+        await load();
+      } catch {
+        if (!cancelled) setState(prev => ({ ...prev, loading: false }));
+      }
+    };
+    guardedLoad();
+    const id = setInterval(guardedLoad, 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  return { ...state, refresh: load };
+}
+
+function ExecutionControlStrip({ safety }) {
+  const tradingKnown = safety.trading?.trading_enabled != null;
+  const tradingEnabled = safety.trading?.trading_enabled === true;
+  const gateDecision = String(safety.gate?.decision || (safety.loading ? "SYNC" : "UNKNOWN")).toUpperCase();
+  const regime = safety.regime || {};
+  const breaker = safety.trading?.daily_loss_breaker?.last_check || safety.trading?.daily_loss_breaker || {};
+  const gateColor = gateDecision === "PASS" || gateDecision === "ALLOW" ? "#4ade80" : gateDecision === "WATCH" ? "#fbbf24" : "#f87171";
+  const regimeText = regime.status ? `${String(regime.status).toUpperCase()}${regime.halt_new_entries ? " / HALT" : ""}` : "SYNC";
+  const regimeColor = regime.halt_new_entries ? "#f87171" : regime.status === "yellow" ? "#fbbf24" : regime.status === "green" ? "#4ade80" : muted;
+  const ddText = breaker.drawdown_pct != null
+    ? `${Number(breaker.drawdown_pct).toFixed(2)}% / ${breaker.threshold_pct || 3}%`
+    : "--";
+
+  const halt = async () => {
+    if (!window.confirm("Halt all new paper-trading execution?")) return;
+    await axios.post(`${API}/admin/halt`, null, { params: { reason: "operator_shell_halt" } });
+    await safety.refresh();
+  };
+
+  const resume = async () => {
+    if (!window.confirm("Resume paper-trading execution?")) return;
+    await axios.post(`${API}/admin/resume`, null, { params: { reason: "operator_shell_resume" } });
+    await safety.refresh();
+  };
+
+  return (
+    <div className="terminal-execution-strip">
+      <StripMetric
+        label="EXECUTION"
+        value={tradingKnown ? (tradingEnabled ? "ENABLED" : "HALTED") : "SYNC"}
+        color={tradingKnown ? (tradingEnabled ? "#4ade80" : "#f87171") : muted}
+      />
+      <StripMetric label="GATE" value={gateDecision} color={gateColor} />
+      <StripMetric label="REGIME" value={regimeText} color={regimeColor} />
+      <StripMetric label="DAILY DD" value={ddText} color={breaker.tripped ? "#f87171" : accent2} />
+      <div className="terminal-execution-actions">
+        <button type="button" onClick={halt} style={stripButton("#f87171")}>HALT</button>
+        <button type="button" onClick={resume} style={stripButton(accent2)}>RESUME</button>
+      </div>
+    </div>
+  );
+}
+
+function StripMetric({ label, value, color }) {
+  return (
+    <div className="terminal-execution-metric">
+      <span>{label}</span>
+      <strong style={{ color }}>{value}</strong>
+    </div>
+  );
+}
+
+function stripButton(color) {
+  return {
+    border: `0.5px solid ${color}88`,
+    color,
+    background: `${color}10`,
+    padding: "5px 10px",
+    fontFamily: "inherit",
+    fontSize: 9,
+    letterSpacing: "0.14em",
+    fontWeight: 900,
+    cursor: "pointer",
+  };
+}
+
 function GlobalNewsStrip({ label = "NEWSWIRE", items, loading, cache, accentColor = accent2, speed = 42 }) {
   const tape = Array.isArray(items) ? items : [];
   const loopTape = tape.length ? [...tape, ...tape] : [];
@@ -403,6 +503,7 @@ export function CrtShell({ title, children, headerRight = null }) {
   const nextMacro = useNextMacroEvent();
   const alerts = useLiveAlertCounts();
   const newsStrip = useNewsStrip();
+  const safety = useSafetyFrame();
   const [isMobile, setIsMobile] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   useEffect(() => {
@@ -630,6 +731,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           {/* Sticky system bar */}
           <div className="terminal-sticky-bars" style={{ position: "sticky", top: 0, zIndex: 20 }}>
             <SystemBar />
+            <ExecutionControlStrip safety={safety} />
             <GlobalNewsStrip
               label="ACTIVE"
               items={newsStrip.active.items}

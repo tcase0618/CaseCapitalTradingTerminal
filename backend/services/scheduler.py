@@ -443,6 +443,20 @@ def start_scheduler():
     )
 
     # v5.0 — position monitor every 15 min during market hours
+    async def _day_start_equity_snapshot_job():
+        try:
+            from . import safety
+            result = await safety.snapshot_day_start_equity(source="scheduler_0928")
+            await log_activity("Daily loss baseline refreshed", "info", result)
+        except Exception as e:
+            logger.warning("daily loss baseline: %s", e)
+    _scheduler.add_job(
+        _day_start_equity_snapshot_job,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=28, timezone=ET),
+        id="daily_loss_baseline_0928",
+        replace_existing=True,
+    )
+
     async def _trading_halt_job():
         try:
             from . import trading_halts
@@ -461,6 +475,11 @@ def start_scheduler():
         try:
             from . import options_desk, pm_ratchet, trade_floor, trade_floor_phases
             await trade_floor.sync_positions_and_close_settled()
+            try:
+                from . import safety
+                await safety.check_daily_loss(source="position_monitor")
+            except Exception as breaker_exc:
+                logger.warning("daily loss breaker: %s", breaker_exc)
             await pm_ratchet.process_open_ratchets()
             await options_desk.monitor_open_positions(enforce_hard_stop=True)
             # v5.3 — run the three-phase exit logic on every sync
@@ -492,7 +511,7 @@ def start_scheduler():
 
     _scheduler.add_job(
         _position_monitor_with_snapshot,
-        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15", timezone=ET),
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
         id="position_monitor", replace_existing=True,
     )
 

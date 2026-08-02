@@ -190,6 +190,41 @@ async def status():
     }
 
 
+@api.get("/admin/trading_status")
+async def admin_trading_status():
+    from services import safety
+    return await safety.trading_status()
+
+
+@api.post("/admin/halt")
+async def admin_halt(reason: str = "operator_halt"):
+    from services import safety, trade_floor
+    status = await safety.set_trading(False, reason=reason)
+    cancelled = await trade_floor.cancel_stale_orders(max_age_hours=0)
+    try:
+        from services import telegram_events
+        await telegram_events.emit_event(
+            "operator_trading_halt",
+            severity="critical",
+            scope="risk",
+            title="Trading halted",
+            summary=f"Trading halted by operator: {reason}",
+            details={"status": status, "cancelled": cancelled},
+            priority="critical",
+        )
+    except Exception:
+        pass
+    return {"ok": True, "status": status, "cancelled": cancelled}
+
+
+@api.post("/admin/resume")
+async def admin_resume(reason: str = "operator_resume"):
+    from services import safety
+    status = await safety.set_trading(True, reason=reason)
+    baseline = await safety.snapshot_day_start_equity(source="operator_resume")
+    return {"ok": True, "status": status, "daily_loss_baseline": baseline}
+
+
 @api.get("/position_monitor/latest")
 async def position_monitor_latest():
     db = get_db()
@@ -1360,6 +1395,11 @@ async def analyze(ticker: str):
 # ---------- Telegram webhook ----------
 @api.post("/telegram/webhook")
 async def telegram_webhook(req: Request, bg: BackgroundTasks):
+    webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if webhook_secret:
+        provided = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not hmac.compare_digest(provided, webhook_secret):
+            raise HTTPException(status_code=403, detail="invalid telegram webhook secret")
     try:
         update = await req.json()
     except Exception:
