@@ -4,6 +4,7 @@ import { API } from "../config";
 import { toast } from "sonner";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, LineChart, Line, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
@@ -84,6 +85,17 @@ export default function PerformancePage() {
             style={btnPrimary(seeding)}>{seeding ? "SEEDING..." : "[ SEED BACKTEST ]"}</button>
         </div>
       }>
+      <DataConfidenceStrip
+        title="PERFORMANCE DATA CONFIDENCE"
+        items={[
+          { label: "Price Source", value: priceSource?.source ? priceSource.source.toUpperCase().replace("+", " + ") : "CHECKING", color: priceSource?.finnhub_available || priceSource?.massive_available ? "#4ade80" : "#fbbf24" },
+          { label: "Signals", value: tracker?.tracked ?? "--", detail: "tracked records" },
+          { label: "Benchmark", value: benchmarkCurve?.benchmark || "SPY", color: accent },
+          { label: "Forward Proof", value: proof?.rows?.length || proof?.sample_size || 0, color: accent2 },
+          { label: "Edge State", value: edge?.headline?.decision || edge?.decision || "REVIEW" },
+        ]}
+      />
+
       {/* Summary stat strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
         <Stat label="SIGNALS TRACKED" value={tracker?.tracked || 0}

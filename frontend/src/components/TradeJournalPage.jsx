@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
@@ -78,6 +79,22 @@ export function TradeJournalView() {
           </button>
         ))}
       </div>
+
+      <DataConfidenceStrip
+        title={`${instrument} JOURNAL CONFIDENCE`}
+        items={instrument === "OPTIONS" ? [
+          { label: "Orders", value: optionsJournal?.orders?.length ?? "--", color: accent },
+          { label: "Candidates", value: optionsJournal?.candidates?.length ?? "--", color: accent2 },
+          { label: "Source", value: "OPTIONS DESK", detail: "separate account records" },
+          { label: "Mode", value: "APPEND", color: "#4ade80" },
+        ] : [
+          { label: "PM Decisions", value: summary.decision_count || 0, color: accent },
+          { label: "Matured", value: summary.matured_outcomes || 0, color: accent2 },
+          { label: "Pending", value: summary.pending_outcomes || 0, color: "#fbbf24" },
+          { label: "Evidence Rows", value: journal?.evidence_locker?.length || 0 },
+          { label: "Mode", value: "APPEND", color: "#4ade80" },
+        ]}
+      />
 
       {instrument === "OPTIONS" && <OptionsJournalView data={optionsJournal} />}
 

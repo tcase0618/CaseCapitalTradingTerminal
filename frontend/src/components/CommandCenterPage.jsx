@@ -4,6 +4,7 @@ import axios from "axios";
 import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, tokens } from "./CrtShell";
+import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline, pageBg } = tokens;
 
@@ -209,6 +210,18 @@ export default function CommandCenterPage() {
           LAUNCH CONTROL
         </button>
       }>
+      <DataConfidenceStrip
+        title="TERMINAL READINESS"
+        items={[
+          { label: "Scanner", value: scannerState.value, color: scannerState.color },
+          { label: "Portfolio Manager", value: pmState.value, color: pmState.color },
+          { label: "Trade Floor", value: tradeFloorState.value, color: tradeFloorState.color },
+          { label: "Execution Gate", value: gateDecision, color: gateColor },
+          { label: "Data Quality", value: qualityOverview?.decision || qualityOverview?.quality?.decision || "CHECKING" },
+          { label: "Backend Refresh", value: backendRefreshing ? "SYNCING" : "20S", color: backendRefreshing ? "#fbbf24" : accent2 },
+        ]}
+      />
+
       <div className="command-control-grid" style={commandGrid}>
         <OpsPanel title="SCAN FUNNEL" sub="TODAY" action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={tinyButton(accent2)}>{backendRefreshing ? "SYNC" : "REFRESH"}</button>}>
           <ScanFunnel scan={scan} pmSummary={pmSummary} gateDecision={gateDecision} livePositions={livePositions} />

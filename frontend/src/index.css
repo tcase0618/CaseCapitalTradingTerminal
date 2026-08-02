@@ -1397,3 +1397,358 @@ body {
   }
 }
 
+/* Institutional v2 shared polish layer */
+.inst-confidence-strip {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 0;
+  align-items: stretch;
+  margin-bottom: 18px;
+  border: 0.5px solid rgba(94,234,212,0.18);
+  background:
+    linear-gradient(90deg, rgba(94,234,212,0.045), transparent 34%),
+    rgba(5,7,12,0.82);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+}
+
+.inst-confidence-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 16px;
+  border-right: 0.5px solid rgba(255,255,255,0.08);
+  color: #9ff7eb;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.inst-confidence-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+}
+
+.inst-confidence-item {
+  min-width: 0;
+  padding: 12px 14px;
+  border-right: 0.5px solid rgba(255,255,255,0.07);
+}
+
+.inst-confidence-label,
+.inst-mini-label,
+.inst-action-label {
+  color: rgba(139,148,168,0.9);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.inst-confidence-value,
+.inst-mini-value {
+  margin-top: 6px;
+  font-family: "JetBrains Mono", "Courier New", monospace;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.inst-confidence-detail,
+.inst-mini-detail,
+.inst-action-detail {
+  margin-top: 5px;
+  color: rgba(174,178,191,0.78);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.inst-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 0.5px solid;
+  font-family: "JetBrains Mono", "Courier New", monospace;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+}
+
+.inst-status-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.inst-ops-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.58fr);
+  gap: 18px;
+  margin-bottom: 18px;
+  padding: 22px;
+  border: 0.5px solid rgba(200,168,75,0.25);
+  background:
+    radial-gradient(circle at 16% 0%, rgba(200,168,75,0.13), transparent 34%),
+    linear-gradient(135deg, rgba(10,14,21,0.96), rgba(5,7,12,0.92));
+}
+
+.inst-eyebrow {
+  color: #9ff7eb;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.inst-ops-copy h1 {
+  margin: 8px 0 0;
+  color: #d6bd63;
+  font-size: clamp(28px, 3vw, 48px);
+  line-height: 1.02;
+  letter-spacing: 0.06em;
+}
+
+.inst-ops-copy p {
+  max-width: 780px;
+  margin: 12px 0 0;
+  color: rgba(174,178,191,0.88);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.inst-ops-side,
+.inst-ops-status,
+.inst-action-item,
+.inst-health-header > div {
+  display: flex;
+  align-items: center;
+}
+
+.inst-ops-side {
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.inst-ops-status {
+  width: 100%;
+  gap: 11px;
+  padding: 13px;
+  border: 0.5px solid rgba(94,234,212,0.18);
+  background: rgba(255,255,255,0.025);
+}
+
+.inst-ops-status strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 22px;
+  letter-spacing: 0.12em;
+}
+
+.inst-mini-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.inst-mini-readout {
+  min-width: 0;
+  padding: 11px;
+  border: 0.5px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.22);
+}
+
+.inst-hero-actions {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.inst-empty-state {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px;
+  border: 0.5px solid rgba(200,168,75,0.2);
+  background: rgba(200,168,75,0.045);
+  color: rgba(214,218,230,0.9);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.inst-empty-state p {
+  margin: 4px 0 0;
+  color: rgba(139,148,168,0.9);
+  font-size: 12px;
+}
+
+.inst-action-rail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.inst-action-item {
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 0.5px solid rgba(255,255,255,0.075);
+  background: rgba(255,255,255,0.022);
+}
+
+.inst-health-frame {
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+
+.inst-health-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 0.5px solid rgba(255,255,255,0.08);
+}
+
+.inst-health-header > div {
+  gap: 8px;
+  color: rgba(214,218,230,0.9);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.command-control-grid {
+  grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.15fr) minmax(330px, 1fr) !important;
+  gap: 10px !important;
+  align-items: start !important;
+}
+
+.command-panel {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+.command-panel-body,
+.terminal-card,
+.terminal-card-inner {
+  min-width: 0 !important;
+}
+
+.command-panel-event-tape,
+.command-panel-telegram-dispatch-queue {
+  align-self: stretch;
+}
+
+.case-court-command {
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr) !important;
+}
+
+.case-court-ruling-metrics {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)) !important;
+  gap: 10px !important;
+}
+
+.case-court-ruling-metrics > div,
+.case-court-coverage-grid > div,
+.case-court-record-grid > div {
+  min-width: 0 !important;
+}
+
+.case-court-main-panel,
+.case-court-layout,
+.case-court-doc-title {
+  min-width: 0 !important;
+}
+
+.case-court-posture {
+  max-width: 100% !important;
+}
+
+@media (max-width: 1320px) {
+  .command-control-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  }
+
+  .command-panel-quality-matrix,
+  .command-panel-system-state,
+  .command-panel-execution-gate {
+    grid-column: auto !important;
+  }
+}
+
+@media (max-width: 920px) {
+  .inst-confidence-strip,
+  .inst-ops-hero,
+  .case-court-command {
+    grid-template-columns: 1fr !important;
+  }
+
+  .inst-confidence-title {
+    border-right: 0 !important;
+    border-bottom: 0.5px solid rgba(255,255,255,0.08);
+  }
+
+  .command-control-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 768px) {
+  body,
+  #root {
+    overflow-x: hidden;
+  }
+
+  .inst-confidence-items,
+  .inst-mini-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .inst-confidence-item {
+    border-right: 0;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+  }
+
+  .terminal-card-header,
+  .inst-health-header {
+    flex-wrap: wrap;
+    align-items: flex-start !important;
+  }
+
+  .terminal-stat {
+    min-width: 50% !important;
+    border-bottom: 0.5px solid rgba(255,255,255,0.06);
+  }
+}
+
+@media (max-width: 520px) {
+  .terminal-stat {
+    min-width: 100% !important;
+    border-right: 0 !important;
+  }
+
+  .inst-confidence-title,
+  .inst-confidence-item,
+  .inst-ops-hero {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .case-court-tabs button,
+  .inst-status-pill {
+    width: 100%;
+    justify-content: center;
+  }
+}
+

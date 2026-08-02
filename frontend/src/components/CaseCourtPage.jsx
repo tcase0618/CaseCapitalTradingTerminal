@@ -3,6 +3,7 @@ import axios from "axios";
 import { FileText, Gavel, RefreshCw, Scale, ShieldAlert, ShieldCheck } from "lucide-react";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, muted, labelLight, hairline, cardBg, cardBgHi } = tokens;
 
@@ -113,6 +114,18 @@ export default function CaseCourtPage() {
       }
     >
       {error && <div style={errorBox}><ShieldAlert size={16} /> {error}</div>}
+
+      <DataConfidenceStrip
+        title="COURT EVIDENCE CONFIDENCE"
+        items={[
+          { label: "Authority", value: "READ ONLY", color: accent2 },
+          { label: "Trials", value: summary.trials ?? trials.length, color: accent },
+          { label: "Decision Grade", value: summary.decision_grade ?? 0, color: (summary.decision_grade || 0) ? "#4ade80" : "#fbbf24" },
+          { label: "Neutralized Exhibits", value: summary.neutralized_exhibits ?? 0, color: muted },
+          { label: "Data Holds", value: summary.requires_cleaner_data ?? 0, color: summary.requires_cleaner_data ? "#f87171" : "#4ade80" },
+          { label: "Session", value: data?.session_id ? shortId(data.session_id) : "SYNCING", color: data?.stale ? "#fbbf24" : accent2 },
+        ]}
+      />
 
       <div className="case-court-command" style={commandStrip}>
         <div>

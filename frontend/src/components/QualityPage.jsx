@@ -3,6 +3,7 @@ import axios from "axios";
 import { RefreshCw, ShieldCheck, ShieldAlert, Zap, Wrench } from "lucide-react";
 import { API } from "../config";
 import { CrtShell } from "./CrtShell";
+import { DataConfidenceStrip, InstitutionalEmpty } from "./Institutional";
 
 const accent = "#c8a84b";
 const accent2 = "#5eead4";
@@ -112,6 +113,16 @@ export default function QualityPage() {
       }
     >
       <div style={{ display: "grid", gap: 18 }}>
+        <DataConfidenceStrip
+          items={[
+            { label: "Trading Gate", value: data?.trading_gate?.decision || "CHECKING" },
+            { label: "Critical Checks", value: `${critical.filter(c => c.status === "LIVE" || c.status === "PASS").length}/${critical.length || 0}`, color: critical.every(c => !c.blocks_trading) ? "#4ade80" : "#f87171" },
+            { label: "Fallbacks", value: fallback.length, color: fallback.length ? "#fbbf24" : "#4ade80", detail: "display-only tolerated" },
+            { label: "Warnings", value: warnings.length, color: warnings.length ? "#fbbf24" : "#4ade80" },
+            { label: "Auto Remediation", value: remediation.pending_count ? "PENDING" : "CLEAR", detail: shortStamp(remediation.last_run_at) },
+          ]}
+        />
+
         <section style={hero}>
           <div>
             <div style={eyebrow}>QC CONTROL ROOM</div>
@@ -170,7 +181,7 @@ export default function QualityPage() {
                 </div>
               </div>
             ))}
-            {!attempts.length && <Empty text="No auto-remediation has run yet. Use Auto Fix Degraded to probe warnings and fallbacks." />}
+            {!attempts.length && <InstitutionalEmpty title="No remediation history yet." detail="Use Auto Fix Degraded to probe warnings, stale sources, and fallbacks." />}
           </div>
         </Card>
 

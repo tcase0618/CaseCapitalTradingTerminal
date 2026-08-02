@@ -3,6 +3,7 @@ import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
+import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
@@ -184,6 +185,17 @@ export default function OptionsDeskPage() {
       <div style={dataPolicyBox}>
         ALPACA OPTIONS DATA IS RESERVED FOR THE HIGHEST-RATED PM OPTION CANDIDATES. EQUITY-ONLY ROUTES SKIP LIVE CHAIN REFRESH.
       </div>
+
+      <DataConfidenceStrip
+        title="OPTIONS DESK CONTROL CHECK"
+        items={[
+          { label: "Account", value: account?.ok ? "ARMED" : "DISABLED", detail: account?.reason || acct.status },
+          { label: "PM Routes", value: `${deskSummary.option + deskSummary.both}/${deskSummary.total}`, color: deskSummary.option + deskSummary.both ? "#fbbf24" : muted, detail: "option or both" },
+          { label: "Manual Ready", value: `${deskSummary.ready}/${deskSummary.total}`, color: deskSummary.ready ? "#4ade80" : "#f87171" },
+          { label: "Alpaca Chain Pulls", value: `${dataPolicy.alpaca_refreshes_used ?? 0}/${dataPolicy.alpaca_refresh_limit ?? 18}`, color: accent2 },
+          { label: "Risk Sweep", value: `${risk?.positions_checked || 0} checked`, color: "#f87171", detail: "20% hard stop" },
+        ]}
+      />
 
       {message && <div style={messageBox}>{message}</div>}
 

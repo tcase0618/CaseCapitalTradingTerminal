@@ -17,6 +17,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
 
@@ -251,6 +252,17 @@ export default function KronosPage() {
           <KronosStatusPanel status={kronosStatus} lseHealth={lseHealth} pm={pm} lastSync={lastSync} />
         </div>
       </div>
+
+      <DataConfidenceStrip
+        title="KRONOS SOURCE CONFIDENCE"
+        items={[
+          { label: "Forecast Engine", value: kronosStatus?.health || "CHECKING" },
+          { label: "LSE Feed", value: lseHealth?.ok ? "ONLINE" : "DEGRADED" },
+          { label: "PM Map", value: `${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0}`, color: (kronosStatus?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80" },
+          { label: "Open Audits", value: kronosStatus?.open_disagreement_audits ?? 0, color: kronosStatus?.open_disagreement_audits ? "#fbbf24" : "#4ade80" },
+          { label: "Last Sync", value: fmtTime(lastSync), color: accent2 },
+        ]}
+      />
 
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="MODEL HEALTH" value={kronosStatus?.health || "CHECKING"} sub={`snapshot ${ageText(kronosStatus?.snapshot_age_minutes)}`} color={healthColor(kronosStatus?.health)} accentBar />
