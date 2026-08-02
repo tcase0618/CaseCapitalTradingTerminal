@@ -522,6 +522,7 @@ def start_scheduler():
     async def _position_monitor():
         try:
             from . import options_desk, pm_ratchet, trade_floor, trade_floor_phases
+            await trade_floor.flush_queued_equity_orders(limit=25)
             await trade_floor.sync_positions_and_close_settled()
             try:
                 from . import safety
@@ -566,6 +567,25 @@ def start_scheduler():
         _lottery_active_monitor_job,
         CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
         id="lottery_active_monitor_5m",
+        replace_existing=True,
+    )
+
+    async def _equity_queue_flush_job():
+        try:
+            from . import trade_floor
+            result = await trade_floor.flush_queued_equity_orders(limit=25)
+            if result.get("submitted"):
+                await log_activity(
+                    f"Equity queue flush: {len(result.get('submitted', []))} order(s) submitted",
+                    "success",
+                    result,
+                )
+        except Exception as e:
+            logger.warning("equity queue flush: %s", e)
+    _scheduler.add_job(
+        _equity_queue_flush_job,
+        CronTrigger(day_of_week="sun-fri", hour="0-23", minute="*", timezone=ET),
+        id="equity_queue_flush_24h",
         replace_existing=True,
     )
 

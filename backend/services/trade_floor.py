@@ -157,6 +157,94 @@ async def list_orders(status: str = "all", limit: int = 100) -> list[dict[str, A
         return []
 
 
+async def active_queued_equity_orders(limit: int = 200) -> list[dict[str, Any]]:
+    db = get_db()
+    return await db.tf_queued_orders.find(
+        {"status": {"$in": ["QUEUED", "SUBMIT_FAILED_RETRYABLE"]}},
+        {"_id": 0},
+    ).sort("queued_at", 1).to_list(limit)
+
+
+async def _queue_fractional_limit_buy(
+    ticker: str,
+    notional: float,
+    limit_price: float,
+    *,
+    client_order_id: str | None,
+    session: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    db = get_db()
+    ticker = ticker.upper()
+    client_order_id = client_order_id or f"tf-{ticker}-{int(_now().timestamp())}"
+    now = _now().isoformat()
+    doc = {
+        "ticker": ticker,
+        "symbol": ticker,
+        "notional": round(notional, 2),
+        "limit_price": round(limit_price, 4),
+        "client_order_id": client_order_id,
+        "side": "buy",
+        "type": "limit",
+        "time_in_force": "day",
+        "session": session,
+        "reason": reason,
+        "queued_at": now,
+        "updated_at": now,
+        "status": "QUEUED",
+    }
+    await db.tf_queued_orders.update_one(
+        {"ticker": ticker, "status": {"$in": ["QUEUED", "SUBMIT_FAILED_RETRYABLE"]}},
+        {"$setOnInsert": stamped(doc), "$set": {"updated_at": now, "session": session, "reason": reason}},
+        upsert=True,
+    )
+    await log_activity(
+        f"Trade Floor queued equity order for next 24/5 session: {ticker}",
+        "info",
+        {"ticker": ticker, "notional": notional, "limit_price": limit_price, "reason": reason, "session": session},
+    )
+    return {
+        "id": f"queued-{client_order_id}",
+        "symbol": ticker,
+        "status": "queued_for_next_equity_session",
+        "client_order_id": client_order_id,
+        "limit_price": round(limit_price, 4),
+        "notional": round(notional, 2),
+        "_case_session": session,
+        "_case_queued": True,
+    }
+
+
+async def _submit_fractional_limit_buy_now(
+    ticker: str,
+    notional: float,
+    limit_price: float,
+    *,
+    client_order_id: str | None,
+    session: dict[str, Any],
+) -> dict[str, Any] | None:
+    payload: dict[str, Any] = {
+        "symbol": ticker.upper(),
+        "notional": round(notional, 2),
+        "side": "buy",
+        "type": "limit",
+        "time_in_force": "day",
+        "limit_price": round(limit_price, 4),
+    }
+    if session["extended_hours"]:
+        payload["extended_hours"] = True
+    if client_order_id:
+        payload["client_order_id"] = client_order_id
+    async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as c:
+        r = await c.post(f"{ALPACA_TRADE_BASE}/v2/orders", json=payload)
+        if r.status_code in (200, 201):
+            order = r.json()
+            order["_case_session"] = session
+            return order
+        logger.warning("alpaca limit buy %s: %s %s", ticker, r.status_code, r.text[:200])
+    return None
+
+
 async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price: float,
                                           client_order_id: str | None = None) -> dict[str, Any] | None:
     """Limit DAY order for fractional notional. NEVER market."""
@@ -177,27 +265,24 @@ async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price:
     if not paper_only() and os.environ.get("ALLOW_LIVE_EQUITY_EXECUTION", "").strip().lower() not in {"1", "true", "yes", "on", "explicit-yes-i-mean-it"}:
         await log_activity("Trade Floor submit blocked: non-paper equity account", "warn", {"ticker": ticker, "base": ALPACA_TRADE_BASE})
         return None
-    payload: dict[str, Any] = {
-        "symbol": ticker.upper(),
-        "notional": round(notional, 2),
-        "side": "buy",
-        "type": "limit",
-        "time_in_force": "day",
-        "limit_price": round(limit_price, 4),
-    }
     session = equity_order_session()
-    if session["extended_hours"]:
-        payload["extended_hours"] = True
-    if client_order_id:
-        payload["client_order_id"] = client_order_id
+    if not session["tradable_now"]:
+        return await _queue_fractional_limit_buy(
+            ticker,
+            notional,
+            limit_price,
+            client_order_id=client_order_id,
+            session=session,
+            reason="outside_alpaca_equity_24h_window",
+        )
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as c:
-            r = await c.post(f"{ALPACA_TRADE_BASE}/v2/orders", json=payload)
-            if r.status_code in (200, 201):
-                order = r.json()
-                order["_case_session"] = session
-                return order
-            logger.warning("alpaca limit buy %s: %s %s", ticker, r.status_code, r.text[:200])
+        return await _submit_fractional_limit_buy_now(
+            ticker,
+            notional,
+            limit_price,
+            client_order_id=client_order_id,
+            session=session,
+        )
     except Exception as e:
         logger.warning("alpaca limit buy exception %s: %s", ticker, e)
     return None
@@ -273,6 +358,77 @@ async def execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_ord
     except Exception:
         pass
     return result
+
+
+async def flush_queued_equity_orders(limit: int = 25) -> dict[str, Any]:
+    """Submit PM-approved queued equity intents when Alpaca can accept them."""
+    session = equity_order_session()
+    if not session["tradable_now"]:
+        return {"ok": True, "submitted": [], "skipped": [], "session": session, "reason": "equity_session_closed"}
+    from . import safety
+
+    enabled, safety_status = await safety.trading_enabled(scope="equity_queue")
+    if not enabled:
+        return {"ok": False, "submitted": [], "skipped": [], "session": session, "reason": "safety_halt", "safety": safety_status}
+
+    db = get_db()
+    rows = await active_queued_equity_orders(limit=limit)
+    submitted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    try:
+        live_positions = await list_positions()
+        live_orders = await list_orders(status="open")
+        held = {p.get("symbol", "").upper() for p in live_positions}
+        pending = {o.get("symbol", "").upper() for o in live_orders}
+    except Exception:
+        held, pending = set(), set()
+
+    for row in rows:
+        ticker = (row.get("ticker") or row.get("symbol") or "").upper()
+        if not ticker:
+            continue
+        if ticker in held or ticker in pending:
+            await db.tf_queued_orders.update_one(
+                {"client_order_id": row.get("client_order_id")},
+                {"$set": {"status": "CANCELLED_DUPLICATE", "updated_at": _now().isoformat(), "duplicate_reason": "held_or_pending_in_alpaca"}},
+            )
+            skipped.append({"ticker": ticker, "reason": "held_or_pending_in_alpaca"})
+            continue
+        try:
+            order = await _submit_fractional_limit_buy_now(
+                ticker,
+                float(row.get("notional") or 0),
+                float(row.get("limit_price") or 0),
+                client_order_id=row.get("client_order_id"),
+                session=session,
+            )
+        except Exception as exc:
+            order = None
+            skipped.append({"ticker": ticker, "reason": exc.__class__.__name__})
+        if order:
+            now = _now().isoformat()
+            await db.tf_queued_orders.update_one(
+                {"client_order_id": row.get("client_order_id")},
+                {"$set": {"status": "SUBMITTED", "submitted_at": now, "updated_at": now, "order": order, "order_id": order.get("id"), "submit_session": session}},
+            )
+            await db.tf_trades.update_one(
+                {"client_order_id": row.get("client_order_id")},
+                {"$set": {"status": "OPEN", "fill_status": "PENDING", "order_id": order.get("id"), "submitted_at": now, "order_session": session}},
+            )
+            pending.add(ticker)
+            submitted.append({"ticker": ticker, "order_id": order.get("id"), "limit_price": row.get("limit_price")})
+        else:
+            await db.tf_queued_orders.update_one(
+                {"client_order_id": row.get("client_order_id")},
+                {"$set": {"status": "SUBMIT_FAILED_RETRYABLE", "updated_at": _now().isoformat(), "last_failure": skipped[-1] if skipped else {"reason": "alpaca_rejected"}}},
+            )
+    if submitted or skipped:
+        await log_activity(
+            f"Trade Floor queue flush: {len(submitted)} submitted / {len(skipped)} skipped",
+            "success" if submitted else "info",
+            {"submitted": submitted, "skipped": skipped[:12], "session": session},
+        )
+    return {"ok": True, "submitted": submitted, "skipped": skipped, "session": session}
 
 
 # Backwards-compatible alias used by legacy code paths
@@ -568,6 +724,8 @@ async def _gate_check(scan_row: dict[str, Any], *,
         held_tickers = {p.get("symbol", "").upper() for p in positions}
         open_orders = await list_orders(status="open")
         pending_tickers = {o.get("symbol", "").upper() for o in open_orders}
+        queued_orders = await active_queued_equity_orders()
+        pending_tickers |= {(q.get("ticker") or q.get("symbol") or "").upper() for q in queued_orders}
     if ticker in held_tickers:
         return False, "ticker_already_open_in_alpaca"
     if ticker in pending_tickers:
@@ -645,6 +803,8 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     held_tickers = {p.get("symbol", "").upper() for p in positions}
     open_orders = await list_orders(status="open")
     pending_tickers = {o.get("symbol", "").upper() for o in open_orders}
+    queued_orders = await active_queued_equity_orders()
+    pending_tickers |= {(q.get("ticker") or q.get("symbol") or "").upper() for q in queued_orders}
     regime = await regime_status()
     pm_mode = portfolio_manager._mode_from_regime(regime)
     ruleset = await pm_rules.get_ruleset()
@@ -780,6 +940,8 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
             live_orders_now = await list_orders(status="open")
             live_held = {p.get("symbol", "").upper() for p in live_positions_now}
             live_pending = {o.get("symbol", "").upper() for o in live_orders_now}
+            live_queued = await active_queued_equity_orders()
+            live_pending |= {(q.get("ticker") or q.get("symbol") or "").upper() for q in live_queued}
         except Exception:
             live_held, live_pending = held_tickers, pending_tickers
         if ticker in live_held:
@@ -803,6 +965,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
 
         # Update local sets so subsequent rows in the same scan don't double-submit.
         pending_tickers.add(ticker)
+        order_queued = bool(order.get("_case_queued"))
 
         # Log to TF Learning Engine via the standard tf_trades record + the
         # learning helper (records limit_price/stop/breakdown for recal).
@@ -846,8 +1009,8 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
             "hold_window_days": int(hold_days or 30),
             "sector": sector,
             "regime": regime.get("status"),
-            "status": "OPEN",
-            "fill_status": "PENDING",
+            "status": "QUEUED" if order_queued else "OPEN",
+            "fill_status": "QUEUED" if order_queued else "PENDING",
             "submitted_at": _now().isoformat(),
             # v5.3 — three-phase exit system
             "axiom_target": axiom_target,
@@ -862,6 +1025,11 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
             "peak_price_since_entry": None,
         })
         await db.tf_trades.insert_one(trade_doc)
+        if order_queued:
+            await db.tf_queued_orders.update_one(
+                {"client_order_id": cli_id},
+                {"$set": {"trade_doc_id": str(trade_doc.get("_id")), "trade_status": "QUEUED"}},
+            )
         try:
             await tfle.log_trade_initiation(trade_doc)
         except Exception as e:
@@ -871,7 +1039,8 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
                           "pm_action": pm_row.get("action"),
                           "limit_price": limit_price,
                           "stop_price": stop_price, "stop_pct": stop_calc["stop_pct"],
-                          "order_id": order.get("id")})
+                          "order_id": order.get("id"),
+                          "queued": order_queued})
 
     compression = (len(executed) / max(1, len(scan_results)))
     finished = _now()
