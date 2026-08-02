@@ -308,19 +308,20 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
 
 function ScanFunnel({ scan, pmSummary, gateDecision, livePositions }) {
   const scanned = Number(scan?.pre_filter_passed || scan?.results_count || scan?.results?.length || 0);
-  const approved = Number(pmSummary?.approved || pmSummary?.active_count || 0);
-  const gated = gateDecision === "PASS" ? approved : Math.max(0, Math.round(approved * 0.55));
+  const accumulate = Number(pmSummary?.accumulate || 0);
+  const starter = Number(pmSummary?.starter || 0);
+  const watch = Number(pmSummary?.watch || 0);
+  const rejected = Number(pmSummary?.reject || pmSummary?.rejected || 0);
+  const approved = Number(pmSummary?.approved ?? pmSummary?.active_count ?? (accumulate + starter));
+  const reviewed = approved + watch + rejected;
+  const unclassified = Math.max(0, scanned - reviewed);
+  const gated = ["PASS", "ALLOW"].includes(gateDecision) ? approved : 0;
   const executed = livePositions?.length || 0;
-  const rejected = Math.max(0, scanned - approved);
   const bars = [
-    ["Valuation", rejected * 0.24],
-    ["Risk / Volatility", rejected * 0.17],
-    ["Poor Catalyst", rejected * 0.15],
-    ["Liquidity", rejected * 0.12],
-    ["Technical", rejected * 0.10],
-    ["Other", rejected * 0.08],
-    ["Regime Filter", rejected * 0.06],
-    ["Quality", rejected * 0.04],
+    ["Approved", approved, "#4ade80"],
+    ["Watch", watch, "#fbbf24"],
+    ["Rejected", rejected, "#f87171"],
+    ["Unclassified", unclassified, muted],
   ];
   return (
     <div>
@@ -333,15 +334,15 @@ function ScanFunnel({ scan, pmSummary, gateDecision, livePositions }) {
       <div style={funnelWave}>
         {[8, 32, 62, 88].map((left, i) => <span key={left} style={{ ...funnelMarker, left: `${left}%`, background: i < 2 ? accent2 : i === 2 ? accent : "#4ade80" }} />)}
       </div>
-      <div style={rejectionTitle}>REJECTION REASONS (FROM PM APPROVAL)</div>
+      <div style={rejectionTitle}>PM OUTCOME BREAKDOWN</div>
       <div style={{ display: "grid", gap: 5 }}>
-        {bars.map(([label, raw]) => {
-          const value = Math.round(raw);
-          const pct = rejected ? value / rejected * 100 : 0;
-          return <BarRow key={label} label={label} value={value} pct={pct} />;
+        {bars.map(([label, raw, color]) => {
+          const value = Math.round(Number(raw || 0));
+          const pct = scanned ? value / scanned * 100 : 0;
+          return <BarRow key={label} label={label} value={value} pct={pct} color={color} />;
         })}
       </div>
-      <div style={totalRejected}>TOTAL REJECTED <span>{rejected} ({scanned ? (rejected / scanned * 100).toFixed(1) : "0.0"}%)</span></div>
+      <div style={totalRejected}>TOTAL PM REJECTED <span>{rejected} ({scanned ? (rejected / scanned * 100).toFixed(1) : "0.0"}%)</span></div>
     </div>
   );
 }
@@ -355,11 +356,11 @@ function FunnelStat({ label, value, color }) {
   );
 }
 
-function BarRow({ label, value, pct }) {
+function BarRow({ label, value, pct, color = "#f87171" }) {
   return (
     <div style={barRow}>
       <span style={{ color: labelLight }}>{label}</span>
-      <div style={barTrack}><span style={{ ...barFill, width: `${Math.min(100, pct * 2.4)}%` }} /></div>
+      <div style={barTrack}><span style={{ ...barFill, background: color, width: `${Math.min(100, pct)}%` }} /></div>
       <span style={{ color: muted, textAlign: "right" }}>{value} ({pct.toFixed(1)}%)</span>
     </div>
   );
@@ -502,11 +503,12 @@ function TopScanner({ rows }) {
 }
 
 function SystemState({ scannerState, pmState, tradeFloorState, account, pmSummary, health, backendRefresh }) {
+  const activeCount = Number(pmSummary.active_count ?? ((pmSummary.accumulate || 0) + (pmSummary.starter || 0)));
   return (
     <div>
       <div className="command-mini-grid command-mini-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
         <MissionTile label="Scanner" value={scannerState.value} color={scannerState.color} detail="scan state" />
-        <MissionTile label="PM" value={pmState.value} color={pmState.color} detail={`${pmSummary.active_count || 0} active`} />
+        <MissionTile label="PM" value={pmState.value} color={pmState.color} detail={`${activeCount} active`} />
         <MissionTile label="Trade Floor" value={tradeFloorState.value} color={tradeFloorState.color} detail={health?.alpaca?.reason || "paper execution"} />
       </div>
       <div className="command-mini-grid command-mini-grid-4" style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
