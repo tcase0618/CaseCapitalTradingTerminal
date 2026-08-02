@@ -228,9 +228,9 @@ body {
 }
 
 .terminal-brand-logo {
-  width: min(176px, 100%);
+  width: min(128px, 72%);
   height: auto;
-  aspect-ratio: 182 / 146;
+  aspect-ratio: 1 / 1;
 }
 
 .command-panel {
