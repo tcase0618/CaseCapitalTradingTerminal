@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { FileText, Gavel, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { FileText, Gavel, RefreshCw, Scale, ShieldAlert, ShieldCheck } from "lucide-react";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
@@ -20,17 +20,43 @@ const postureColors = {
 export default function CaseCourtPage() {
   const [data, setData] = useState(null);
   const [selectedTicker, setSelectedTicker] = useState(null);
+  const [selectedSession, setSelectedSession] = useState("");
+  const [sessions, setSessions] = useState([]);
+  const [record, setRecord] = useState(null);
   const [tab, setTab] = useState("DOCKET");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
 
-  const load = useCallback(async () => {
+  const loadSessions = useCallback(async () => {
+    try {
+      const { data: payload } = await axios.get(`${API}/case_court/sessions`, { params: { limit: 16 }, timeout: 8000 });
+      const rows = payload.sessions || [];
+      setSessions(rows);
+      setSelectedSession(prev => prev || rows[0]?.session_id || "");
+    } catch {
+      setSessions([]);
+    }
+  }, []);
+
+  const loadRecord = useCallback(async () => {
+    try {
+      const { data: payload } = await axios.get(`${API}/case_court/record`, { params: { days: 30 }, timeout: 8000 });
+      setRecord(payload);
+    } catch {
+      setRecord(null);
+    }
+  }, []);
+
+  const load = useCallback(async (sessionId = selectedSession) => {
     setLoading(true);
     setError(null);
     try {
-      const { data: payload } = await axios.get(`${API}/case_court/latest`, { params: { limit: 30 }, timeout: 18000 });
+      const params = { limit: 30 };
+      if (sessionId) params.session_id = sessionId;
+      const { data: payload } = await axios.get(`${API}/case_court/latest`, { params, timeout: 8000 });
       setData(payload);
+      if (payload.session_id) setSelectedSession(payload.session_id);
       const rows = payload.trials || [];
       setSelectedTicker(prev => prev && rows.some(r => r.ticker === prev) ? prev : rows[0]?.ticker || null);
     } catch (e) {
@@ -38,13 +64,18 @@ export default function CaseCourtPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedSession]);
 
   useEffect(() => {
-    load();
+    loadSessions();
+    loadRecord();
+  }, [loadSessions, loadRecord]);
+
+  useEffect(() => {
+    load(selectedSession);
     const id = setInterval(load, 60000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, selectedSession]);
 
   const refreshCourt = async () => {
     if (refreshing) return;
@@ -53,8 +84,11 @@ export default function CaseCourtPage() {
     try {
       const { data: payload } = await axios.post(`${API}/case_court/refresh`, null, { params: { limit: 30 }, timeout: 30000 });
       setData(payload);
+      if (payload.session_id) setSelectedSession(payload.session_id);
       const rows = payload.trials || [];
       setSelectedTicker(prev => prev && rows.some(r => r.ticker === prev) ? prev : rows[0]?.ticker || null);
+      await loadSessions();
+      await loadRecord();
     } catch (e) {
       setError(e.message || "Case Court refresh failed");
     } finally {
@@ -92,28 +126,54 @@ export default function CaseCourtPage() {
         </div>
       </div>
 
+      <div className="case-court-audit-strip" style={auditStrip}>
+        <div style={sessionBox}>
+          <div style={smallLabel}>COURT SESSION</div>
+          <select
+            value={selectedSession}
+            onChange={e => {
+              setSelectedSession(e.target.value);
+              load(e.target.value);
+            }}
+            style={selectStyle}
+          >
+            {!sessions.length && <option value="">No persisted sessions</option>}
+            {sessions.map(s => (
+              <option key={s.session_id} value={s.session_id}>
+                {shortDate(s.session_generated_at)} / {s.trials} cases
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={sessionMeta}>
+          <Mini label="Session" value={data?.session_id ? shortId(data.session_id) : "--"} color={accent2} />
+          <Mini label="Source" value={data?.source || "--"} color={accent} />
+          <Mini label="Stale" value={data?.stale ? "YES" : "NO"} color={data?.stale ? "#fb7185" : "#4ade80"} />
+        </div>
+      </div>
+
       <div className="case-court-stats" style={statRow}>
         <Stat label="TRIALS" value={loading ? "--" : summary.trials ?? trials.length} sub="LATEST SCAN DOCKET" color={accent} accentBar />
         <Stat label="SUPPORTS PM" value={summary.supports_pm ?? 0} sub="ADVISORY ONLY" color="#4ade80" />
         <Stat label="WATCH ONLY" value={summary.bullish_watch ?? 0} sub="NO PM AUTHORITY" color="#fbbf24" />
-        <Stat label="READY" value={summary.live_run_ready ?? 0} sub="PM APPROVED ONLY" color="#38bdf8" />
+        <Stat label="ALIGNED" value={summary.advisory_alignment_ok ?? 0} sub="ADVISORY ONLY" color="#38bdf8" />
         <Stat label="PM REJECT" value={summary.pm_rejected ?? 0} sub="NO AUTHORITY" color="#fb7185" />
         <Stat label="DATA HOLDS" value={summary.requires_cleaner_data ?? 0} sub="CLEAN DATA FIRST" color={summary.requires_cleaner_data ? "#ef4444" : "#4ade80"} />
       </div>
 
       <div className="case-court-tabs" style={tabBar}>
-        {["DOCKET", "COURT DOCS", "LIVE READINESS"].map(x => (
+        {["DOCKET", "COURT DOCS", "ADVISORY ALIGNMENT"].map(x => (
           <button key={x} onClick={() => setTab(x)} style={tabButton(tab === x)}>{x}</button>
         ))}
       </div>
 
-      {tab === "LIVE READINESS" && (
-        <Card title="LIVE RUN READINESS" accentColor={accent2}>
-          <ReadinessBoard summary={summary} trials={trials} />
+      {tab === "ADVISORY ALIGNMENT" && (
+        <Card title="ADVISORY ALIGNMENT" accentColor={accent2}>
+          <ReadinessBoard summary={summary} trials={trials} record={record} />
         </Card>
       )}
 
-      {tab !== "LIVE READINESS" && <div className="case-court-layout" style={layout}>
+      {tab !== "ADVISORY ALIGNMENT" && <div className="case-court-layout" style={layout}>
         <Card title="COURT DOCKET" accentColor={accent}>
           <div style={docket}>
             {trials.map(t => (
@@ -304,24 +364,25 @@ function CourtDocs({ trial, loading }) {
   );
 }
 
-function ReadinessBoard({ summary, trials }) {
-  const ready = trials.filter(t => t.judge?.live_run_ready);
-  const holds = trials.filter(t => !t.judge?.live_run_ready);
+function ReadinessBoard({ summary, trials, record }) {
+  const ready = trials.filter(t => t.judge?.advisory_alignment_ok);
+  const holds = trials.filter(t => !t.judge?.advisory_alignment_ok);
   return (
     <div style={readinessGrid}>
       <div>
-        <div style={eyebrow}>READ-ONLY LIVE RUN</div>
+        <div style={eyebrow}>READ-ONLY ADVISORY REVIEW</div>
         <h2 style={sectionH}>Case Court is prepared as an advisory layer only.</h2>
         <div style={noteBox}>
           It can run against the newest scan, preserve court docs, neutralize non-applicable evidence, and flag which records are clean enough for review. It still has no execution authority and does not override PM.
         </div>
       </div>
       <div className="case-court-coverage-grid" style={coverageGrid}>
-        <Mini label="Live Ready" value={summary.live_run_ready ?? ready.length} color="#38bdf8" />
+        <Mini label="Advisory Aligned" value={summary.advisory_alignment_ok ?? ready.length} color="#38bdf8" />
         <Mini label="Decision Grade" value={summary.decision_grade ?? 0} color="#4ade80" />
         <Mini label="Cleaner Data" value={summary.requires_cleaner_data ?? 0} color="#fb7185" />
         <Mini label="Neutralized" value={summary.neutralized_exhibits ?? 0} color={muted} />
       </div>
+      <CourtRecord record={record} />
       <div className="case-court-split-list" style={splitList}>
         <div>
           <div style={smallLabel}>READY DOCKET</div>
@@ -333,6 +394,40 @@ function ReadinessBoard({ summary, trials }) {
           {holds.slice(0, 12).map(t => <div key={t.ticker} style={compactRow}>${t.ticker}<span>{labelPosture(t.judge?.advisory_posture)}</span></div>)}
           {!holds.length && <div style={metaLine}>No held cases.</div>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function CourtRecord({ record }) {
+  const support = record?.by_posture?.COURT_SUPPORTS_PM || {};
+  const objects = record?.by_posture?.COURT_OBJECTS || {};
+  return (
+    <div className="case-court-record-grid" style={recordGrid}>
+      <div style={recordPanel}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
+          <Scale size={17} color={accent2} />
+          <div style={smallLabel}>30D COURT RECORD</div>
+        </div>
+        <div style={coverageGrid}>
+          <Mini label="Graded" value={record?.graded ?? "--"} color={accent2} />
+          <Mini label="Open" value={record?.open_trials ?? "--"} color={accent} />
+          <Mini label="Support Hit" value={support.hit_rate == null ? "--" : `${support.hit_rate}%`} color={rateColor(support.hit_rate)} />
+          <Mini label="Object Hit" value={objects.hit_rate == null ? "--" : `${objects.hit_rate}%`} color={rateColor(objects.hit_rate)} />
+        </div>
+        {record?.sample_note && <div style={{ ...metaLine, marginTop: 10 }}>{record.sample_note}</div>}
+      </div>
+      <div style={recordPanel}>
+        <div style={smallLabel}>RECENT GRADED CASES</div>
+        {(record?.rows || []).slice(0, 8).map(r => (
+          <div key={`${r.case_id}-${r.horizon}`} style={compactRow}>
+            ${r.ticker}
+            <span style={{ color: r.win ? "#4ade80" : "#fb7185" }}>
+              {r.win ? "WIN" : "LOSS"} / {signed(r.return_pct)}% {r.horizon}
+            </span>
+          </div>
+        ))}
+        {!(record?.rows || []).length && <div style={metaLine}>No matured court records yet.</div>}
       </div>
     </div>
   );
@@ -353,6 +448,26 @@ function Empty({ loading }) {
 
 function labelPosture(v) {
   return String(v || "UNKNOWN").replaceAll("_", " ");
+}
+
+function shortId(v) {
+  const s = String(v || "");
+  return s.length > 18 ? `${s.slice(0, 12)}...${s.slice(-5)}` : s || "--";
+}
+
+function shortDate(v) {
+  if (!v) return "Unknown session";
+  try {
+    return new Date(v).toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return String(v).slice(0, 16);
+  }
+}
+
+function rateColor(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return muted;
+  return n >= 55 ? "#4ade80" : n >= 45 ? "#fbbf24" : "#fb7185";
 }
 
 function verdictColor(v) {
@@ -409,6 +524,27 @@ const commandMeta = {
   gap: 10,
 };
 const smallLabel = { color: muted, fontSize: 10, letterSpacing: "0.16em", fontWeight: 800, textTransform: "uppercase", marginBottom: 6 };
+const auditStrip = {
+  display: "grid",
+  gridTemplateColumns: "minmax(280px, 0.65fr) minmax(360px, 1fr)",
+  gap: 12,
+  alignItems: "stretch",
+  marginBottom: 16,
+};
+const sessionBox = { border: hairline, background: cardBg, padding: 12, minWidth: 0 };
+const sessionMeta = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 };
+const selectStyle = {
+  width: "100%",
+  minHeight: 38,
+  border: `1px solid ${accent2}55`,
+  background: "#07090f",
+  color: labelLight,
+  padding: "8px 10px",
+  fontFamily: "inherit",
+  fontSize: 12,
+  letterSpacing: "0.08em",
+  outline: "none",
+};
 const errorBox = {
   border: "1px solid rgba(248,113,113,0.45)",
   color: "#fca5a5",
@@ -468,6 +604,8 @@ const readinessGrid = { display: "grid", gap: 18 };
 const sectionH = { color: accent, fontSize: 24, letterSpacing: "0.08em", lineHeight: 1.15, margin: 0 };
 const splitList = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 };
 const compactRow = { borderBottom: hairline, color: accent, padding: "9px 0", display: "flex", justifyContent: "space-between", gap: 12, fontWeight: 900 };
+const recordGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 };
+const recordPanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 12 };
 
 function docketRow(active, color) {
   return {

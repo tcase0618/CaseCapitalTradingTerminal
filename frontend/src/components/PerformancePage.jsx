@@ -451,7 +451,7 @@ function EdgeProofCard({ edge }) {
             <div style={edgePanel}>
               <div style={edgeLabel}>CASE COURT</div>
               <div style={edgeText}>{edge.case_court?.decision_grade || 0} certified / {edge.case_court?.trials || 0} trials</div>
-              <div style={edgeSub}>{edge.case_court?.live_ready || 0} live-ready · {edge.case_court?.neutralized_exhibits || 0} neutralized exhibits</div>
+              <div style={edgeSub}>{edge.case_court?.advisory_alignment || 0} advisory aligned · {edge.case_court?.neutralized_exhibits || 0} neutralized exhibits</div>
             </div>
             <div style={edgePanel}>
               <div style={edgeLabel}>DATA HYGIENE</div>

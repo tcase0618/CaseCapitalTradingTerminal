@@ -1253,9 +1253,21 @@ async def kronos_battle_card(ticker: str):
 
 
 @api.get("/case_court/latest")
-async def case_court_latest(limit: int = 30):
+async def case_court_latest(limit: int = 30, session_id: str | None = None):
     from services import case_court
-    return await case_court.latest(limit=limit)
+    return await case_court.latest(limit=limit, session_id=session_id)
+
+
+@api.get("/case_court/sessions")
+async def case_court_sessions(limit: int = 12):
+    from services import case_court
+    return await case_court.sessions(limit=limit)
+
+
+@api.get("/case_court/record")
+async def case_court_record(days: int = 30):
+    from services import case_court
+    return await case_court.record(days=days)
 
 
 @api.get("/case_court/trial/{ticker}")

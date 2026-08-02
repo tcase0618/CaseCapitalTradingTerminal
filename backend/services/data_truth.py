@@ -104,7 +104,7 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
     court_rows = court.get("trials") or []
     option_ready = [r for r in opt_rows if r.get("manual_fire_ready")]
     option_research = [r for r in opt_rows if r.get("route") in {"OPTION", "BOTH"} and not r.get("manual_fire_ready")]
-    court_ready = [r for r in court_rows if (r.get("judge") or {}).get("live_run_ready")]
+    court_ready = [r for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok")]
     qc_decision = (qc.get("trading_gate") or {}).get("decision")
     data_blocked = qc_decision == "BLOCK" and bool(scoped_blockers.get("system"))
     truth_decision = "BLOCK" if data_blocked else "WATCH" if truth_grade in {"C", "D", "F"} else "PASS"
@@ -150,7 +150,7 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
         },
         "case_court": {
             "trials": len(court_rows),
-            "live_ready": len(court_ready),
+            "advisory_alignment": len(court_ready),
             "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
         },
     }

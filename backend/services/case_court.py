@@ -8,15 +8,17 @@ the specific mini-trial being judged.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import get_db, stamped
 
 
 MAX_TRIALS = 30
+RUBRIC_VERSION = "case-court-v2.2-auditable-sessions"
 DEFENSE = "DEFENSE"
 PROSECUTOR = "PROSECUTOR"
 NEUTRAL = "NEUTRAL"
@@ -72,6 +74,33 @@ def _age_hours(iso: str | None) -> float | None:
         return max(0.0, (_now() - dt).total_seconds() / 3600.0)
     except Exception:
         return None
+
+
+def _date_prefix(iso: str | None) -> str | None:
+    if not iso:
+        return None
+    try:
+        return str(iso)[:10]
+    except Exception:
+        return None
+
+
+def _session_id(scan_finished_at: str | None, generated_at: str | None = None) -> str:
+    basis = f"{scan_finished_at or 'unknown-scan'}|{generated_at or _now().isoformat()}"
+    digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+    safe_ts = basis.replace(":", "").replace(".", "").replace("+", "z")[:24]
+    return f"cc-{safe_ts}-{digest}"
+
+
+def _case_id(ticker: str, session_id: str, scan_row: dict[str, Any], pm_row: dict[str, Any]) -> str:
+    material = "|".join([
+        ticker,
+        session_id,
+        str(pm_row.get("action") or ""),
+        str(pm_row.get("pm_score") or ""),
+        ",".join(_signals(scan_row)),
+    ])
+    return f"court-{ticker}-{session_id}-{hashlib.sha1(material.encode('utf-8')).hexdigest()[:8]}"
 
 
 async def _bounded(label: str, awaitable, timeout: float = 6.0) -> Any:
@@ -179,6 +208,8 @@ def _exhibit(
 
 
 def _scanner_exhibit(row: dict[str, Any], scan_age: float | None) -> dict[str, Any]:
+    if row.get("synthetic_from_pm"):
+        return _exhibit("scanner", "Scanner Evidence", MISSING_REQUIRED, score=14, detail="Ticker was not present in the latest stock scan; PM-only row cannot borrow scanner freshness.", source="scan_results", required=True)
     sigs = _signals(row)
     score = min(25, sum(SIGNAL_QUALITY.get(s, 4) for s in sigs))
     if not sigs:
@@ -208,7 +239,7 @@ def _pm_exhibit(pm_row: dict[str, Any]) -> dict[str, Any]:
     if action == "REJECT":
         pm_gap = max(0.0, 60.0 - score)
         rr_penalty = 10.0 if rr < 1.0 else 6.0 if rr < 1.3 else 0.0
-        return _exhibit("pm", "Portfolio Manager", "BEARISH", PROSECUTOR, min(32, max(18, pm_gap * 0.55 + rr_penalty)), f"PM rejects sizing; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
+        return _exhibit("pm", "Portfolio Manager", "BEARISH", PROSECUTOR, min(25, max(18, pm_gap * 0.55 + rr_penalty)), f"PM rejects sizing; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
     return _exhibit("pm", "Portfolio Manager", "NEUTRAL", NEUTRAL, 0, f"PM is watching; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
 
 
@@ -522,7 +553,7 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
         "defense_minus_prosecutor": spread,
         "detail": detail,
         "authority": "READ_ONLY_NO_EXECUTION_NO_PM_OVERRIDE",
-        "live_run_ready": posture in {"COURT_SUPPORTS_PM", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and pm_action in {"ACCUMULATE", "STARTER"} and equity_ok,
+        "advisory_alignment_ok": posture in {"COURT_SUPPORTS_PM", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and pm_action in {"ACCUMULATE", "STARTER"} and equity_ok,
     }
 
 
@@ -596,6 +627,7 @@ async def _trial(
     qc: dict[str, Any],
     scan_finished_at: str | None,
     news_rows: list[dict[str, Any]],
+    session_id: str,
 ) -> dict[str, Any]:
     ticker = _ticker(scan_row.get("ticker") or pm_row.get("ticker"))
     scan_age = _age_hours(scan_finished_at)
@@ -630,17 +662,18 @@ async def _trial(
         mini_trials.append(_mini_trial("leaps", expression, exhibits, pm_action))
     coverage = _coverage(exhibits)
     judge = _judge(mini_trials, defense, prosecution, pm_row, expression)
-    if coverage.get("certification") != "CERTIFIED" and judge.get("live_run_ready"):
+    if coverage.get("certification") != "CERTIFIED" and judge.get("advisory_alignment_ok"):
         judge = {
             **judge,
-            "live_run_ready": False,
+            "advisory_alignment_ok": False,
             "authority": "READ_ONLY_INSUFFICIENT_CERTIFICATION",
             "detail": f"{judge.get('detail')} Evidence coverage is {coverage.get('coverage_label')}; court remains advisory.",
         }
 
     return {
-        "case_id": f"court-{ticker}-{str(scan_finished_at or _now().isoformat())[:19]}",
-        "rubric_version": "case-court-v2-scoped-exhibits",
+        "case_id": _case_id(ticker, session_id, scan_row, pm_row),
+        "session_id": session_id,
+        "rubric_version": RUBRIC_VERSION,
         "ticker": ticker,
         "court_status": "ADVISORY_TRIAL",
         "charge": "Potential capital allocation",
@@ -682,7 +715,7 @@ def _summary(trials: list[dict[str, Any]], context: dict[str, Any]) -> dict[str,
                 neutralized += 1
     return {
         "authority": "READ_ONLY_NO_EXECUTION",
-        "rubric_version": "case-court-v2-scoped-exhibits",
+        "rubric_version": RUBRIC_VERSION,
         "trials": len(trials),
         "supports_pm": postures.count("COURT_SUPPORTS_PM"),
         "bullish_watch": postures.count("BULLISH_WATCH"),
@@ -691,7 +724,7 @@ def _summary(trials: list[dict[str, Any]], context: dict[str, Any]) -> dict[str,
         "conflicts": postures.count("EVIDENCE_CONFLICT"),
         "requires_cleaner_data": postures.count("REQUIRES_CLEANER_DATA"),
         "equity_only_until_options_clean": postures.count("EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"),
-        "live_run_ready": sum(1 for t in trials if (t.get("judge") or {}).get("live_run_ready")),
+        "advisory_alignment_ok": sum(1 for t in trials if (t.get("judge") or {}).get("advisory_alignment_ok")),
         "decision_grade": sum(1 for t in trials if (t.get("evidence_coverage") or {}).get("decision_grade")),
         "neutralized_exhibits": neutralized,
         "scan_finished_at": context.get("scan_finished_at"),
@@ -719,12 +752,14 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
     kronos_rows = _by_ticker(kronos_payload if isinstance(kronos_payload, dict) else {}, "forecasts")
     scan_finished_at = (scan if isinstance(scan, dict) else {}).get("finished_at")
     news_list = news_rows if isinstance(news_rows, list) else []
+    generated_at = _now().isoformat()
+    session_id = _session_id(scan_finished_at, generated_at)
 
     trials = []
     for pm_row in pm_rows[:limit]:
         ticker = _ticker(pm_row.get("ticker"))
-        scan_row = scan_rows.get(ticker, {"ticker": ticker, "signals": pm_row.get("signals") or []})
-        trials.append(await _trial(scan_row, pm_row, options_rows.get(ticker), kronos_rows.get(ticker), qc if isinstance(qc, dict) else {}, scan_finished_at, news_list))
+        scan_row = scan_rows.get(ticker, {"ticker": ticker, "signals": pm_row.get("signals") or [], "synthetic_from_pm": True})
+        trials.append(await _trial(scan_row, pm_row, options_rows.get(ticker), kronos_rows.get(ticker), qc if isinstance(qc, dict) else {}, scan_finished_at, news_list, session_id))
 
     context = {
         "scan_finished_at": scan_finished_at,
@@ -740,32 +775,96 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
         "summary": _summary(trials, context),
         "context": {k: v for k, v in context.items() if k != "qc"},
         "trials": trials,
+        "session_id": session_id,
+        "generated_at": generated_at,
     }
     if persist:
         db = get_db()
-        await db.case_court_trials.delete_many({})
         if trials:
-            await db.case_court_trials.insert_many([stamped(t) for t in trials])
+            await db.case_court_trials.insert_many([stamped({**t, "session_id": session_id, "session_generated_at": generated_at}) for t in trials])
         await db.bot_state.update_one(
             {"_id": "case_court_latest"},
-            {"$set": stamped({"summary": payload["summary"], "updated_at": _now().isoformat()})},
+            {"$set": stamped({"session_id": session_id, "summary": payload["summary"], "updated_at": generated_at})},
             upsert=True,
         )
+        await _prune_old_sessions(days=90)
     return payload
 
 
-async def latest(limit: int = MAX_TRIALS) -> dict[str, Any]:
+async def _prune_old_sessions(days: int = 90) -> None:
+    try:
+        cutoff = (_now() - timedelta(days=days)).isoformat()
+        db = get_db()
+        await db.case_court_trials.delete_many({"session_generated_at": {"$lt": cutoff}})
+    except Exception:
+        return
+
+
+async def _latest_session_id() -> str | None:
     db = get_db()
-    rows = await db.case_court_trials.find({}, {"_id": 0}).sort("generated_at", -1).to_list(limit)
-    if rows and rows[0].get("rubric_version") == "case-court-v2-scoped-exhibits":
+    state = await db.bot_state.find_one({"_id": "case_court_latest"}, {"_id": 0, "session_id": 1})
+    if state and state.get("session_id"):
+        return str(state["session_id"])
+    row = await db.case_court_trials.find_one({"rubric_version": RUBRIC_VERSION}, {"_id": 0, "session_id": 1}, sort=[("session_generated_at", -1), ("generated_at", -1)])
+    return str(row["session_id"]) if row and row.get("session_id") else None
+
+
+async def sessions(limit: int = 12) -> dict[str, Any]:
+    db = get_db()
+    pipeline = [
+        {"$match": {"rubric_version": RUBRIC_VERSION, "session_id": {"$exists": True}}},
+        {"$group": {
+            "_id": "$session_id",
+            "session_id": {"$first": "$session_id"},
+            "session_generated_at": {"$max": "$session_generated_at"},
+            "scan_finished_at": {"$first": "$scan_finished_at"},
+            "trials": {"$sum": 1},
+        }},
+        {"$sort": {"session_generated_at": -1}},
+        {"$limit": max(1, min(int(limit or 12), 50))},
+    ]
+    rows = await db.case_court_trials.aggregate(pipeline).to_list(max(1, min(int(limit or 12), 50)))
+    return {"ok": True, "sessions": rows, "rubric_version": RUBRIC_VERSION}
+
+
+async def latest(limit: int = MAX_TRIALS, session_id: str | None = None) -> dict[str, Any]:
+    db = get_db()
+    sid = session_id or await _latest_session_id()
+    if not sid:
+        return {
+            "ok": True,
+            "mode": "advisory_only",
+            "summary": _summary([], {"scan_finished_at": None, "qc": {}}),
+            "trials": [],
+            "source": "persisted",
+            "stale": True,
+            "reason": "no_persisted_session",
+            "rubric_version": RUBRIC_VERSION,
+        }
+    rows = await db.case_court_trials.find(
+        {"session_id": sid, "rubric_version": RUBRIC_VERSION},
+        {"_id": 0},
+    ).sort("generated_at", -1).to_list(limit)
+    if rows:
         return {
             "ok": True,
             "mode": "advisory_only",
             "summary": _summary(rows, {"scan_finished_at": rows[0].get("scan_finished_at"), "qc": {}}),
             "trials": rows,
             "source": "persisted",
+            "session_id": sid,
         }
-    return await run_trials(limit=limit, persist=False)
+    return {
+        "ok": True,
+        "mode": "advisory_only",
+        "summary": _summary([], {"scan_finished_at": None, "qc": {}}),
+        "trials": [],
+        "source": "persisted",
+        "stale": True,
+        "reason": "session_not_found",
+        "session_id": sid,
+        "rubric_version": RUBRIC_VERSION,
+    }
 
 
 async def trial(ticker: str) -> dict[str, Any]:
@@ -777,3 +876,77 @@ async def trial(ticker: str) -> dict[str, Any]:
     if row:
         return {"ok": True, "trial": row, "source": latest_payload.get("source", "live")}
     return {"ok": False, "error": "trial_not_found", "ticker": t}
+
+
+async def record(days: int = 30) -> dict[str, Any]:
+    db = get_db()
+    days = max(1, min(int(days or 30), 180))
+    cutoff = (_now() - timedelta(days=days)).isoformat()
+    trials = await db.case_court_trials.find(
+        {
+            "rubric_version": RUBRIC_VERSION,
+            "generated_at": {"$gte": cutoff},
+            "judge.advisory_posture": {"$in": ["COURT_SUPPORTS_PM", "COURT_OBJECTS"]},
+        },
+        {"_id": 0},
+    ).to_list(1000)
+
+    graded = []
+    for t in trials:
+        ticker = _ticker(t.get("ticker"))
+        generated = str(t.get("generated_at") or t.get("session_generated_at") or "")
+        query = {"ticker": ticker}
+        generated_date = _date_prefix(generated)
+        if generated_date:
+            query["date"] = {"$gte": generated_date}
+        perf = await db.signal_performance.find_one(
+            query,
+            {"_id": 0},
+            sort=[("date", -1), ("ts", -1)],
+        )
+        if not perf:
+            continue
+        ret = perf.get("return_30d")
+        horizon = "30d"
+        if ret is None:
+            ret = perf.get("return_7d")
+            horizon = "7d"
+        if ret is None:
+            continue
+        posture = (t.get("judge") or {}).get("advisory_posture")
+        win = bool(ret > 0) if posture == "COURT_SUPPORTS_PM" else bool(ret < 0)
+        graded.append({
+            "ticker": ticker,
+            "case_id": t.get("case_id"),
+            "session_id": t.get("session_id"),
+            "posture": posture,
+            "return_pct": ret,
+            "horizon": horizon,
+            "win": win,
+            "generated_at": generated,
+        })
+
+    by_posture: dict[str, dict[str, Any]] = {}
+    for posture in ["COURT_SUPPORTS_PM", "COURT_OBJECTS"]:
+        rows = [r for r in graded if r["posture"] == posture]
+        returns = [_num(r.get("return_pct")) for r in rows]
+        wins = sum(1 for r in rows if r.get("win"))
+        by_posture[posture] = {
+            "n": len(rows),
+            "wins": wins,
+            "losses": len(rows) - wins,
+            "hit_rate": round(wins / max(1, len(rows)) * 100, 2) if rows else None,
+            "avg_return_pct": round(sum(returns) / max(1, len(returns)), 2) if returns else None,
+            "sample_note": "Sample under 30; read as directional only." if len(rows) < 30 else "",
+        }
+
+    return {
+        "ok": True,
+        "days": days,
+        "rubric_version": RUBRIC_VERSION,
+        "graded": len(graded),
+        "open_trials": len(trials) - len(graded),
+        "by_posture": by_posture,
+        "rows": graded[:100],
+        "sample_note": "Court record is still building; require n>=30 before treating hit rates as reliable." if len(graded) < 30 else "",
+    }

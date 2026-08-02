@@ -220,7 +220,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         if r.get("ticker")
     ]
     court_counts = {
-        "ready": sum(1 for r in court_rows if (r.get("judge") or {}).get("live_run_ready")),
+        "ready": sum(1 for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok")),
         "rejected": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() in {"PM_REJECTED", "REJECTED"}),
         "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
     }
@@ -238,7 +238,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Options ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('total', 0)}",
         "",
         "<b>CASE COURT</b>",
-        f"Live-ready: <b>{court_counts['ready']}</b> | Needs data: <b>{court_counts['needs_data']}</b> | Rejected: <b>{court_counts['rejected']}</b>",
+        f"Advisory aligned: <b>{court_counts['ready']}</b> | Needs data: <b>{court_counts['needs_data']}</b> | Rejected: <b>{court_counts['rejected']}</b>",
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
@@ -450,7 +450,7 @@ async def dispatch_weekly_report() -> dict[str, Any]:
         "",
         "<b>CASE COURT</b>",
         f"Trials: <b>{len(court.get('trials') or [])}</b>",
-        f"Live-ready: <b>{sum(1 for r in court.get('trials', []) if (r.get('judge') or {}).get('live_run_ready'))}</b>",
+        f"Advisory aligned: <b>{sum(1 for r in court.get('trials', []) if (r.get('judge') or {}).get('advisory_alignment_ok'))}</b>",
         f"Decision-grade: <b>{(edge.get('case_court') or {}).get('decision_grade', 0)}</b>",
         "",
         "<b>QC</b>",

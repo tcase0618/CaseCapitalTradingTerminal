@@ -956,7 +956,10 @@ body {
     overflow-wrap: anywhere !important;
   }
   .case-court-command > div:last-child,
+  .case-court-audit-strip,
+  .case-court-audit-strip > div:last-child,
   .case-court-coverage-grid,
+  .case-court-record-grid,
   .case-court-split-list {
     grid-template-columns: 1fr !important;
   }

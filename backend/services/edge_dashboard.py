@@ -60,7 +60,7 @@ def _current_counts(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]
     for row in rows:
         label = str(_field(row, key) or row.get(key) or "UNKNOWN")
         counts[label] += 1
-        if row.get("manual_fire_ready") or (row.get("judge") or {}).get("live_run_ready"):
+        if row.get("manual_fire_ready") or (row.get("judge") or {}).get("advisory_alignment_ok"):
             ready[label] += 1
     return [
         {
@@ -100,7 +100,7 @@ async def overview() -> dict[str, Any]:
         for e in (r.get("exhibits") or [])
         if e.get("status") in {"NOT_APPLICABLE", "MISSING_OPTIONAL", "STALE_OPTIONAL"}
     )
-    live_ready = sum(1 for r in court_rows if (r.get("judge") or {}).get("live_run_ready"))
+    advisory_alignment = sum(1 for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok"))
     gaps = []
     if truth.get("truth_grade") in {"D", "F"}:
         gaps.append("QC truth grade is blocking or weak.")
@@ -108,8 +108,8 @@ async def overview() -> dict[str, Any]:
         gaps.append("Not enough matured trade samples for a credible edge read.")
     if sum(1 for r in opt_rows if r.get("manual_fire_ready")) == 0 and truth.get("execution", {}).get("options_execution_enabled"):
         gaps.append("Options execution is enabled but no current option tickets are execution-ready.")
-    if len(court_rows) and sum(1 for r in court_rows if r.get("live_run_ready")) / max(1, len(court_rows)) > 0.5:
-        gaps.append("Case Court may still be too permissive; too many trials are passing live-ready.")
+    if len(court_rows) and sum(1 for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok")) / max(1, len(court_rows)) > 0.5:
+        gaps.append("Case Court may still be too permissive; too many trials are passing advisory alignment.")
     if (truth.get("scan") or {}).get("single_letter_tickers"):
         gaps.append(
             "Ticker hygiene warning: latest scan includes single-letter symbols "
@@ -119,8 +119,8 @@ async def overview() -> dict[str, Any]:
         gaps.append(
             f"Ticker hygiene rejected {(truth.get('scan') or {}).get('ticker_hygiene_rejected_count')} bad rows in the latest scan."
         )
-    if court_rows and live_ready / max(1, len(court_rows)) > 0.35:
-        gaps.append("Case Court live-ready rate is still high; keep it advisory until forward outcomes prove it.")
+    if court_rows and advisory_alignment / max(1, len(court_rows)) > 0.35:
+        gaps.append("Case Court advisory alignment rate is still high; keep it advisory until forward outcomes prove it.")
 
     return {
         "ok": True,
@@ -165,7 +165,7 @@ async def overview() -> dict[str, Any]:
         },
         "case_court": {
             "trials": len(court_rows),
-            "live_ready": live_ready,
+            "advisory_alignment": advisory_alignment,
             "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
             "decision_grade": decision_grade,
             "neutralized_exhibits": neutralized,
