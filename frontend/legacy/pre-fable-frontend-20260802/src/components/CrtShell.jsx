@@ -26,16 +26,16 @@ import {
 } from "lucide-react";
 import terminalLogo from "../assets/case-terminal-logo.png";
 
-const accent = "#d7bd68";
-const accent2 = "#7df7de";
-const dim = "#3f4857";
-const muted = "#7d8796";
-const labelLight = "#c4c9d2";
-const cardBg = "#0b0d12";
-const cardBgHi = "#12151d";
-const pageBg = "#05070b";
-const hairline = "1px solid rgba(198,207,224,0.08)";
-const hairlineAccent = "1px solid rgba(215,189,104,0.22)";
+const accent = "#c8a84b";
+const accent2 = "#5eead4";
+const dim = "#374151";
+const muted = "#6b7280";
+const labelLight = "#9ca3af";
+const cardBg = "#0c0c12";
+const cardBgHi = "#10101a";
+const pageBg = "#06060a";
+const hairline = "0.5px solid rgba(255,255,255,0.06)";
+const hairlineAccent = "0.5px solid rgba(200,168,75,0.18)";
 
 const NAV = [
   { to: "/portfolio-manager", label: "PORTFOLIO MGR", icon: "PM", group: "TRADE FLOOR" },
@@ -519,11 +519,11 @@ export function CrtShell({ title, children, headerRight = null }) {
       <div className="crt-vignette" />
       <div className="scanline-overlay" />
       <div className="crt-grain" />
-      <div className="terminal-frame" style={{
+      <div style={{
         height: "100vh", overflow: "hidden",
         background: pageBg, color: "#e5e7eb",
         display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "248px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : "230px 1fr",
         fontFamily: "JetBrains Mono, Courier New, monospace",
         position: "relative", zIndex: 1,
       }}>
@@ -538,10 +538,10 @@ export function CrtShell({ title, children, headerRight = null }) {
         )}
         {/* ── Sidebar ── */}
         <aside className="terminal-sidebar" style={{
-          background: `linear-gradient(180deg, rgba(14,17,24,0.98) 0%, rgba(5,7,11,0.99) 100%)`,
+          background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 100%)`,
           borderRight: hairline,
-          padding: "18px 14px 18px 16px",
-          display: "flex", flexDirection: "column", gap: 16,
+          padding: "16px 12px 16px 14px",
+          display: "flex", flexDirection: "column", gap: 18,
           height: "100vh", overflowY: "auto",
           position: isMobile ? "fixed" : "static",
           top: 0, left: 0, width: isMobile ? 260 : "auto",
@@ -755,9 +755,8 @@ export function CrtShell({ title, children, headerRight = null }) {
             padding: isMobile ? "14px 14px" : "22px 30px",
             borderBottom: hairline,
             display: "flex", alignItems: "center", justifyContent: "space-between",
-          background: "linear-gradient(180deg, rgba(13,16,23,0.94) 0%, rgba(5,7,11,0.98) 100%)",
-          boxShadow: "0 16px 42px rgba(0,0,0,0.18)",
-          gap: 10,
+            background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 100%)`,
+            gap: 10,
           }}>
             {isMobile && (
               <button
@@ -825,7 +824,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           </div>
 
           {/* Page body */}
-          <div className="terminal-page-body fade-in fade-in-2" style={{ padding: isMobile ? "14px 12px" : "24px 32px 32px", flex: 1 }}>
+          <div className="terminal-page-body fade-in fade-in-2" style={{ padding: isMobile ? "14px 12px" : "22px 30px", flex: 1 }}>
             {children}
           </div>
         </main>
@@ -971,28 +970,25 @@ export const tokens = {
 export function Card({ title, children, action = null, accentColor = accent }) {
   return (
     <div className="corner-brackets fade-in terminal-card" style={{
-      background: `linear-gradient(180deg, rgba(18,21,29,0.86) 0%, rgba(8,10,16,0.94) 100%)`,
+      background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
       border: hairline,
-      marginBottom: 20,
+      marginBottom: 22,
       position: "relative",
-      boxShadow: "0 18px 48px rgba(0,0,0,0.26), inset 0 1px 0 rgba(255,255,255,0.035)",
-      backdropFilter: "blur(10px)",
-      overflow: "hidden",
     }}>
       {/* Accent stripe */}
       <div style={{
         position: "absolute", top: 0, left: 0, right: 0,
         height: 1, background: `linear-gradient(90deg, ${accentColor} 0%, ${accentColor}33 30%, transparent 100%)`,
       }} />
-      <div className="terminal-card-inner" style={{ padding: "17px 22px 20px" }}>
+      <div className="terminal-card-inner" style={{ padding: "16px 22px 18px" }}>
         <div className="terminal-card-header" style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
-          marginBottom: 16, paddingBottom: 11, borderBottom: hairline,
+          marginBottom: 14, paddingBottom: 10, borderBottom: hairline,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ color: accentColor, fontSize: 9 }}>▸</span>
             <span style={{
-              fontSize: 10, color: labelLight, letterSpacing: "0.18em", fontWeight: 800,
+              fontSize: 10, color: labelLight, letterSpacing: "0.18em", fontWeight: 600,
             }}>{title}</span>
           </div>
           {action}
@@ -1012,12 +1008,11 @@ export function Stat({ label, value, color = "#e5e7eb", sub = null,
                        trend = null, accentBar = false, testid = null }) {
   const trendColor = trend === "up" ? "#4ade80" : trend === "down" ? "#f87171" : muted;
   return (
-    <div data-testid={testid} className="terminal-stat row-hover" style={{
-      padding: "17px 22px", borderRight: hairline, flex: 1,
+    <div data-testid={testid} style={{
+      padding: "18px 22px", borderRight: hairline, flex: 1,
       position: "relative", transition: "background 0.15s",
-      background: accentBar ? `linear-gradient(90deg, rgba(215,189,104,0.06) 0%, transparent 88%)` : "transparent",
-      minWidth: 0,
-    }}>
+      background: accentBar ? `linear-gradient(90deg, rgba(200,168,75,0.04) 0%, transparent 100%)` : "transparent",
+    }} className="row-hover">
       {accentBar && (
         <div style={{
           position: "absolute", left: 0, top: 14, bottom: 14, width: 2,
@@ -1025,18 +1020,16 @@ export function Stat({ label, value, color = "#e5e7eb", sub = null,
         }} />
       )}
       <div style={{
-        fontSize: 9, color: muted, letterSpacing: "0.18em", fontWeight: 800,
+        fontSize: 9, color: muted, letterSpacing: "0.18em", fontWeight: 600,
         display: "flex", alignItems: "center", gap: 6,
       }}>
         <span style={{ color: dim, fontSize: 8 }}>▸</span>
         {label}
       </div>
       <div className="num" style={{
-        fontSize: 25, color, marginTop: 8, fontWeight: 800,
+        fontSize: 26, color, marginTop: 8, fontWeight: 600,
         fontFamily: "JetBrains Mono", letterSpacing: "0.02em",
         display: "flex", alignItems: "baseline", gap: 6,
-        minWidth: 0,
-        overflowWrap: "anywhere",
       }}>
         {value}
         {trend && (
