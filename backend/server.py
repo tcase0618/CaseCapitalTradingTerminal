@@ -1722,6 +1722,7 @@ async def tf_positions():
     from services import trade_floor
     db_pos = await trade_floor.open_positions_view()
     live = await trade_floor.list_positions()
+    live = trade_floor.annotate_live_positions_with_stops(live, db_pos)
     last_log = await trade_floor.latest_scan_log()
     return {"db_positions": db_pos, "live_alpaca": live, "last_scan_log": last_log}
 
@@ -1749,6 +1750,12 @@ async def tf_close(ticker: str):
 async def tf_sync():
     from services import trade_floor
     return await trade_floor.sync_positions_and_close_settled()
+
+
+@api.post("/trade_floor/reconcile_positions")
+async def tf_reconcile_positions():
+    from services import trade_floor
+    return await trade_floor.reconcile_live_positions()
 
 
 @api.post("/trade_floor/execute_pm_ticker")

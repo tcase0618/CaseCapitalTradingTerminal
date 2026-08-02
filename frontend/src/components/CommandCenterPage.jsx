@@ -81,10 +81,33 @@ function missionState(loading, ok, readyLabel, blockedLabel) {
 }
 
 function riskLevel(pos) {
+  if (pos?.below_stop) return { label: "STOP", color: "#f87171" };
+  const dist = Number(pos?.dist_to_stop_pct);
+  if (Number.isFinite(dist)) {
+    if (dist <= 1) return { label: "HIGH", color: "#f87171" };
+    if (dist <= 3) return { label: "MED", color: "#fbbf24" };
+    return { label: "LOW", color: "#8cc665" };
+  }
   const plpc = Number(pos?.unrealized_plpc ?? pos?.unrealized_intraday_plpc ?? 0) * 100;
   if (plpc <= -10) return { label: "HIGH", color: "#f87171" };
   if (plpc <= -4) return { label: "MED", color: "#fbbf24" };
   return { label: "LOW", color: "#8cc665" };
+}
+
+function stopDistanceLabel(pos) {
+  if (pos?.below_stop) return "BREACHED";
+  const dist = Number(pos?.dist_to_stop_pct);
+  if (Number.isFinite(dist)) return `${dist >= 0 ? "+" : ""}${dist.toFixed(2)}%`;
+  return "NO STOP";
+}
+
+function stopDistanceColor(pos) {
+  if (pos?.below_stop) return "#f87171";
+  const dist = Number(pos?.dist_to_stop_pct);
+  if (!Number.isFinite(dist)) return muted;
+  if (dist <= 1) return "#f87171";
+  if (dist <= 3) return "#fbbf24";
+  return "#4ade80";
 }
 
 function normalizeEvent(row) {
@@ -384,7 +407,7 @@ function PositionHeat({ positions }) {
             <span>{p.qty || p.quantity || "--"}</span>
             <span>{fmtMoney2(p.market_value).replace("+", "")}</span>
             <span style={{ color: pl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(pl)}</span>
-            <span style={{ color: Number(p.unrealized_plpc || 0) >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(p.unrealized_plpc)}</span>
+            <span title={p.current_stop ? `Stop $${Number(p.current_stop).toFixed(2)}` : "No stop ledger record"} style={{ color: stopDistanceColor(p) }}>{stopDistanceLabel(p)}</span>
             <span style={{ ...riskBadge, background: `${risk.color}cc`, color: "#06100b" }}>{risk.label}</span>
           </Link>
         );

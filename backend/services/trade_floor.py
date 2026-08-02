@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from . import stop_engine
 from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,15 @@ HEADERS = {
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
     "Content-Type": "application/json",
 }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
 def _now() -> datetime:
@@ -1075,6 +1085,7 @@ async def sync_positions_and_close_settled():
         return {"updated": 0, "closed": 0}
     db = get_db()
     positions = await list_positions()
+    reconciled = await reconcile_live_positions(positions=positions)
     pos_by_t = {p.get("symbol", "").upper(): p for p in positions}
 
     # Detect fills by pulling recent filled orders.
@@ -1165,7 +1176,175 @@ async def sync_positions_and_close_settled():
             asyncio.create_task(tfle.log_trade_outcomes(newly_closed))
         except Exception as e:
             logger.warning("tfle.log_trade_outcomes dispatch: %s", e)
-    return {"updated": len(open_trades) - closed, "closed": closed}
+    return {"updated": len(open_trades) - closed, "closed": closed, "reconciled": reconciled}
+
+
+async def reconcile_live_positions(
+    positions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Ensure broker-held equity positions have local stop-ledger records.
+
+    Alpaca is the broker source of truth. If a position exists there but the
+    terminal has no OPEN tf_trades row, the phase exit worker cannot enforce
+    stops. This rebuilds a conservative OPEN/FILLED ledger row from Alpaca
+    position data and the latest matching filled Trade Floor buy order.
+    """
+    if not _alpaca_ready():
+        return {"ok": False, "reason": "alpaca_not_configured", "created": 0}
+    db = get_db()
+    positions = positions if positions is not None else await list_positions()
+    live_by_symbol = {
+        str(p.get("symbol") or "").upper(): p
+        for p in (positions or [])
+        if str(p.get("symbol") or "").strip()
+    }
+    if not live_by_symbol:
+        return {"ok": True, "created": 0, "checked": 0, "symbols": []}
+
+    existing = await db.tf_trades.find(
+        {"status": "OPEN", "ticker": {"$in": list(live_by_symbol)}},
+        {"_id": 0, "ticker": 1},
+    ).to_list(500)
+    existing_symbols = {str(t.get("ticker") or "").upper() for t in existing}
+
+    filled_orders = await list_orders(status="all", limit=200)
+    orders_by_symbol: dict[str, dict[str, Any]] = {}
+    for order in filled_orders:
+        symbol = str(order.get("symbol") or "").upper()
+        if not symbol or not str(order.get("client_order_id") or "").startswith("tf-"):
+            continue
+        if str(order.get("side") or "").lower() != "buy" or not order.get("filled_at"):
+            continue
+        previous = orders_by_symbol.get(symbol)
+        if not previous or str(order.get("filled_at") or "") > str(previous.get("filled_at") or ""):
+            orders_by_symbol[symbol] = order
+
+    created: list[dict[str, Any]] = []
+    for symbol, position in live_by_symbol.items():
+        if symbol in existing_symbols:
+            continue
+        qty = _safe_float(position.get("qty"))
+        entry = _safe_float(position.get("avg_entry_price"))
+        current = _safe_float(position.get("current_price"))
+        if qty <= 0 or entry <= 0:
+            continue
+        order = orders_by_symbol.get(symbol) or {}
+        stop_calc = await stop_engine.compute_stop(
+            ticker=symbol,
+            entry_price=entry,
+            signal_combo=["RECONCILED_POSITION"],
+            score=30,
+            hold_window_days=30,
+            sector=None,
+            instrument="fractional",
+        )
+        target = round(entry * 1.15, 4)
+        now_iso = _now().isoformat()
+        client_order_id = (
+            order.get("client_order_id")
+            or f"tf-reconciled-{symbol}-{int(_now().timestamp())}"
+        )
+        doc = stamped({
+            "client_order_id": client_order_id,
+            "order_id": order.get("id"),
+            "ticker": symbol,
+            "symbol": symbol,
+            "company": position.get("asset_class") or "Reconciled live Alpaca position",
+            "entry_score": None,
+            "trade_score": 30,
+            "signal_combo": ["RECONCILED_POSITION"],
+            "instrument": "fractional",
+            "notional": round(entry * qty, 2),
+            "market_value": _safe_float(position.get("market_value")),
+            "limit_price": entry,
+            "entry_price_ref": entry,
+            "filled_avg_price": entry,
+            "filled_at": order.get("filled_at") or now_iso,
+            "fill_seconds": None,
+            "qty_total": qty,
+            "qty_remaining": qty,
+            "qty": qty,
+            "unrealized_pl": _safe_float(position.get("unrealized_pl")),
+            "unrealized_plpc": _safe_float(position.get("unrealized_plpc")),
+            "current_mark": current,
+            "lowest_price_reached": current if current > 0 else entry,
+            "peak_price_since_entry": max(entry, current),
+            "stop_price": stop_calc["stop_price"],
+            "current_stop": stop_calc["stop_price"],
+            "pm_active_stop": stop_calc["stop_price"],
+            "stop_pct": stop_calc["stop_pct"],
+            "stop_breakdown": stop_calc["breakdown"],
+            "target_price": target,
+            "take_profit_price": target,
+            "phase1_target": target,
+            "pm_active_target": target,
+            "hold_window_days": 30,
+            "status": "OPEN",
+            "fill_status": "FILLED",
+            "side": "buy",
+            "phase": 1,
+            "phases_hit": {},
+            "source": "alpaca_reconciliation",
+            "submitted_at": order.get("submitted_at") or now_iso,
+            "last_synced_at": now_iso,
+            "reconciled_from_alpaca_position": True,
+            "reconciled_at": now_iso,
+            "reconciliation_reason": "live_alpaca_position_missing_tf_trade",
+        })
+        try:
+            await db.tf_trades.insert_one(doc)
+            created.append({
+                "ticker": symbol,
+                "qty": qty,
+                "entry": entry,
+                "current": current,
+                "stop": stop_calc["stop_price"],
+                "client_order_id": client_order_id,
+            })
+        except Exception as exc:
+            logger.warning("tf position reconciliation failed for %s: %s", symbol, exc)
+
+    if created:
+        await log_activity(
+            f"Trade Floor reconciled {len(created)} live Alpaca position(s) into stop ledger",
+            "warn",
+            {"positions": created},
+        )
+    return {
+        "ok": True,
+        "checked": len(live_by_symbol),
+        "created": len(created),
+        "symbols": [c["ticker"] for c in created],
+        "details": created,
+    }
+
+
+def annotate_live_positions_with_stops(
+    live_positions: list[dict[str, Any]],
+    db_positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stops_by_symbol = {
+        str(t.get("ticker") or t.get("symbol") or "").upper(): t
+        for t in (db_positions or [])
+    }
+    annotated: list[dict[str, Any]] = []
+    for position in live_positions or []:
+        row = dict(position)
+        symbol = str(row.get("symbol") or row.get("ticker") or "").upper()
+        trade = stops_by_symbol.get(symbol) or {}
+        current = _safe_float(row.get("current_price") or row.get("current_mark"))
+        stop = _safe_float(trade.get("current_stop") or trade.get("stop_price"))
+        row["current_stop"] = stop or None
+        row["stop_price"] = stop or None
+        row["stop_source"] = "tf_trades" if stop else None
+        row["below_stop"] = bool(stop and current and current <= stop)
+        row["dist_to_stop_pct"] = (
+            round(((current - stop) / current) * 100, 2)
+            if stop and current else None
+        )
+        row["stop_client_order_id"] = trade.get("client_order_id")
+        annotated.append(row)
+    return annotated
 
 
 async def _write_journal_entries(trades: list[dict[str, Any]]):
