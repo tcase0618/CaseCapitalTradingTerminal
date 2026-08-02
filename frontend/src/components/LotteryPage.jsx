@@ -101,6 +101,10 @@ export default function LotteryPage() {
   const candidates = board?.candidates || [];
   const tickets = board?.tickets || [];
   const grades = board?.jackpot_board || {};
+  const truth = board?.truth_board || {};
+  const truthCombined = truth?.combined || {};
+  const learning = truth?.learning || {};
+  const learnedConfig = truth?.learned_config || {};
   const book = board?.book || {};
   const gate = board?.gate || {};
   const top = candidates[0] || null;
@@ -136,8 +140,8 @@ export default function LotteryPage() {
         <Stat label="JACKPOT TIER" value={jackpot} sub="SCORE >= 80" color={TIER.JACKPOT} />
         <Stat label="OPEN TICKETS" value={tickets.length} sub={`${book.max_open_tickets || 6} MAX`} color="#4ade80" />
         <Stat label="CAP USAGE" value={fmtPct(book.cap_usage_pct)} sub={`${fmtMoney(book.deployed_dollars)} DEPLOYED`} color={accent} />
-        <Stat label="EV/TICKET" value={fmtPct(grades.ev_per_ticket_pct_haircut)} sub="HAIRCUT BASIS" color={(grades.ev_per_ticket_pct_haircut ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
-        <Stat label="KILL STATUS" value={grades.kill_status || "GATHERING"} sub={`${grades.n_to_variant_decision ?? 60} TO DECISION`} color={grades.kill_status === "RETIRE_VARIANT" ? "#f87171" : accent2} />
+        <Stat label="EV/TICKET" value={fmtPct(truthCombined.ev_per_ticket_pct_haircut ?? grades.ev_per_ticket_pct_haircut)} sub="CLOSED / HAIRCUT" color={(truthCombined.ev_per_ticket_pct_haircut ?? grades.ev_per_ticket_pct_haircut ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
+        <Stat label="KILL STATUS" value={truthCombined.decision_status || grades.kill_status || "GATHERING"} sub={`${truthCombined.n_to_decision ?? grades.n_to_variant_decision ?? 60} TO DECISION`} color={truthCombined.decision_status === "RETIRE" || grades.kill_status === "RETIRE_VARIANT" ? "#f87171" : accent2} />
       </div>
 
       <div className="lottery-league-grid" style={leagueGrid}>
@@ -182,6 +186,8 @@ export default function LotteryPage() {
         {[
           ["candidates", "CANDIDATE BOARD"],
           ["tickets", "LIVE TICKETS"],
+          ["truth", "TRUTH BOARD"],
+          ["learning", "LEARNING ENGINE"],
           ["variants", "VARIANT BOOK"],
           ["method", "METHODOLOGY"],
         ].map(([key, label]) => (
@@ -207,6 +213,35 @@ export default function LotteryPage() {
             {!tickets.length && <Empty text="No open Lottery League tickets." />}
           </div>
         </Card>
+      )}
+
+      {tab === "truth" && (
+        <div style={truthStack}>
+          <Card title="TRUTH BOARD - CLOSED TICKETS ONLY">
+            <div className="lottery-jackpot-grid" style={jackpotGrid}>
+              <Proof label="Closed" value={truthCombined.n || 0} />
+              <Proof label="EV Haircut" value={fmtPct(truthCombined.ev_per_ticket_pct_haircut)} />
+              <Proof label="Median" value={fmtPct(truthCombined.median_ticket_pct)} />
+              <Proof label="Hit +30%" value={fmtRate(truthCombined.hit_rate_30)} />
+              <Proof label="Hit +100%" value={fmtRate(truthCombined.hit_rate_100)} />
+              <Proof label="MFE Gap" value={fmtPct(truthCombined.mfe_vs_realized_gap_pct)} />
+            </div>
+            <div style={haircutLine}>
+              RAW IS DIAGNOSTIC. HEADLINE TRUTH USES +1.0% ENTRY / -1.5% EXIT HAIRCUT.
+            </div>
+          </Card>
+          <SegmentTable title="VARIANT TRUTH" rows={truth?.segments?.variant || []} />
+          <SegmentTable title="CATALYST / FLOAT / SCORE BUCKETS" rows={[
+            ...(truth?.segments?.catalyst_class || []),
+            ...(truth?.segments?.float_tier || []),
+            ...(truth?.segments?.score_bucket || []),
+          ]} />
+          <GradeRows rows={truth?.latest_grades || []} />
+        </div>
+      )}
+
+      {tab === "learning" && (
+        <LearningPanel learning={learning} learnedConfig={learnedConfig} truth={truthCombined} reload={load} showToast={showToast} />
       )}
 
       {tab === "variants" && (
@@ -344,6 +379,143 @@ function Proof({ label, value }) {
   );
 }
 
+function SegmentTable({ title, rows }) {
+  return (
+    <Card title={title}>
+      <div style={tableWrap}>
+        <table className="lottery-truth-table" style={truthTable}>
+          <thead>
+            <tr>
+              <th>SEGMENT</th>
+              <th>DIM</th>
+              <th>N</th>
+              <th>EV</th>
+              <th>MEDIAN</th>
+              <th>+30</th>
+              <th>+100</th>
+              <th>MFE GAP</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(rows || []).slice(0, 36).map((r, idx) => (
+              <tr key={`${r.dimension}-${r.segment}-${idx}`}>
+                <td>{r.segment}</td>
+                <td>{r.dimension}</td>
+                <td>{r.n}</td>
+                <td style={{ color: Number(r.ev_per_ticket_pct_haircut || 0) >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(r.ev_per_ticket_pct_haircut)}</td>
+                <td>{fmtPct(r.median_ticket_pct)}</td>
+                <td>{fmtRate(r.hit_rate_30)}</td>
+                <td>{fmtRate(r.hit_rate_100)}</td>
+                <td>{fmtPct(r.mfe_vs_realized_gap_pct)}</td>
+                <td style={{ color: r.decision_status === "RETIRE" ? "#f87171" : accent2 }}>{r.decision_status || "GATHERING"}</td>
+              </tr>
+            ))}
+            {!rows?.length && <tr><td colSpan="9">NO CLOSED GRADED TICKETS YET</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function GradeRows({ rows }) {
+  return (
+    <Card title="LATEST COURT-ADMISSIBLE GRADES">
+      <div style={tableWrap}>
+        <table className="lottery-truth-table" style={truthTable}>
+          <thead>
+            <tr>
+              <th>TICKER</th>
+              <th>VARIANT</th>
+              <th>EXIT</th>
+              <th>REALIZED</th>
+              <th>PEAK</th>
+              <th>MAE</th>
+              <th>RAW</th>
+              <th>HAIRCUT</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(rows || []).slice(0, 24).map(g => {
+              const truth = g.truth || {};
+              const exit = g.exit || {};
+              return (
+                <tr key={g.ticket_id}>
+                  <td>${g.ticker}</td>
+                  <td>{g.variant}</td>
+                  <td>{exit.exit_reason}</td>
+                  <td>{truth.realized_multiple}x</td>
+                  <td>{truth.peak_multiple}x</td>
+                  <td>{fmtPct(truth.mae_pct)}</td>
+                  <td>{fmtPct(truth.raw_return_pct)}</td>
+                  <td style={{ color: Number(truth.haircut_return_pct || 0) >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(truth.haircut_return_pct)}</td>
+                </tr>
+              );
+            })}
+            {!rows?.length && <tr><td colSpan="8">OPEN TICKETS DO NOT COUNT. CLOSED FILLS WILL APPEAR HERE.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function LearningPanel({ learning, learnedConfig, truth, reload, showToast }) {
+  const [running, setRunning] = useState(false);
+  const run = async () => {
+    setRunning(true);
+    try {
+      const { data } = await axios.post(`${API}/lottery/learning/run`);
+      showToast(data.ok ? "ok" : "err", data.ok ? `Lottery learning complete - ${data.changes?.length || 0} changes` : "Lottery learning failed");
+      await reload();
+    } catch (e) {
+      showToast("err", `Learning failed: ${e?.response?.data?.detail || e?.message || "unknown"}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+  return (
+    <div style={truthStack}>
+      <Card title="LOTTERY LEARNING ENGINE">
+        <div style={learningGrid}>
+          <Info label="Status" value={learnedConfig?.status || "GATHERING"} color={learnedConfig?.status === "RETIRE_LEAGUE" ? "#f87171" : accent2} />
+          <Info label="Sample" value={`${learnedConfig?.sample_count || truth?.n || 0}/150`} note="closed graded tickets" />
+          <Info label="Min Score" value={learnedConfig?.min_ticket_score ?? 60} note="learned gate recommendation" />
+          <Info label="Ladder Bias" value={learnedConfig?.ladder_bias || "baseline"} />
+        </div>
+        <p style={learningNote}>{learnedConfig?.reason || "Learning waits for closed, graded Lottery tickets before changing thresholds."}</p>
+        <button onClick={run} disabled={running} style={primaryBtn(running)}>{running ? "RUNNING..." : "RUN LOTTERY LEARNING"}</button>
+      </Card>
+      <Card title="LATEST LEARNING NOTES">
+        <div style={methodGrid}>
+          {(learning?.notes || ["No learning run has completed yet."]).map((note, idx) => (
+            <div key={idx} style={methodCard}><p>{note}</p></div>
+          ))}
+        </div>
+      </Card>
+      <Card title="PREFERRED / PENALIZED SEGMENTS">
+        <div style={variantGrid}>
+          <LearnList title="PREFERRED" rows={learnedConfig?.preferred_segments || []} color="#4ade80" />
+          <LearnList title="PENALIZED" rows={learnedConfig?.penalized_segments || []} color="#f87171" />
+          <LearnList title="RETIRED VARIANTS" rows={(learnedConfig?.retired_variants || []).map(x => ({ segment: x, dimension: "variant" }))} color="#f87171" />
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function LearnList({ title, rows, color }) {
+  return (
+    <div style={variantCard}>
+      <div style={{ ...eyebrow, color }}>{title}</div>
+      {(rows || []).length ? rows.slice(0, 10).map((r, idx) => (
+        <p key={idx} style={learnRow}>{r.dimension || "-"} / {r.segment} {r.ev != null ? `EV ${fmtPct(r.ev)}` : ""} {r.n != null ? `n=${r.n}` : ""}</p>
+      )) : <p style={learnRow}>No sample-size qualified segments yet.</p>}
+    </div>
+  );
+}
+
 function Empty({ text }) {
   return <div style={{ color: muted, padding: 18, fontSize: 12 }}>{text}</div>;
 }
@@ -406,7 +578,9 @@ const candidateGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, 
 const ticketGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 12 };
 const variantGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 };
 const methodGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 };
+const truthStack = { display: "grid", gap: 14 };
 const jackpotGrid = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 };
+const learningGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 };
 const chipRow = { display: "flex", flexWrap: "wrap", gap: 5, margin: "10px 0" };
 const chip = { color: accent2, border: "1px solid rgba(94,234,212,0.22)", background: "rgba(94,234,212,0.05)", padding: "4px 7px", fontSize: 9, letterSpacing: "0.1em" };
 const scoreBars = { display: "grid", gap: 6, margin: "10px 0" };
@@ -423,6 +597,10 @@ const ladder = { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 7,
 const variantCard = { border: hairline, background: pageBg, padding: 14, minHeight: 170 };
 const methodCard = { border: hairline, background: pageBg, padding: 14, minHeight: 140 };
 const haircutLine = { marginTop: 10, paddingTop: 10, borderTop: hairline, color: accent, fontSize: 10, letterSpacing: "0.12em", fontWeight: 900 };
+const tableWrap = { overflowX: "auto", border: hairline, background: pageBg };
+const truthTable = { width: "100%", borderCollapse: "collapse", minWidth: 820, color: labelLight, fontSize: 11, letterSpacing: "0.06em" };
+const learningNote = { color: muted, fontSize: 12, lineHeight: 1.55, margin: "12px 0" };
+const learnRow = { color: muted, fontSize: 11, lineHeight: 1.45, margin: "10px 0 0" };
 const toastBox = { position: "fixed", right: 22, bottom: 22, zIndex: 1000, border: "1px solid", background: "#030306e6", padding: "11px 16px", fontSize: 11, letterSpacing: "0.10em", fontFamily: "JetBrains Mono", fontWeight: 900, maxWidth: 440 };
 
 function candidateCard(color) {

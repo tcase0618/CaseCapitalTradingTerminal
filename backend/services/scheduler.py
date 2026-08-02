@@ -669,6 +669,25 @@ def start_scheduler():
         id="learning_cycle",
         replace_existing=True,
     )
+    async def _lottery_learning_job():
+        try:
+            from . import lottery_grader
+            res = await lottery_grader.run_learning_cycle(triggered_by="scheduler")
+            await log_activity(
+                f"Lottery Learning cycle: {res.get('sample_count', 0)} closed tickets, "
+                f"{len(res.get('changes') or [])} changes",
+                "info",
+                {"status": (res.get("learned_config") or {}).get("status")},
+            )
+        except Exception as e:
+            logger.exception("lottery learning cycle failed: %s", e)
+
+    _scheduler.add_job(
+        _lottery_learning_job,
+        CronTrigger(day_of_week="sun", hour=2, minute=20, timezone=ET),
+        id="lottery_learning_cycle",
+        replace_existing=True,
+    )
     _scheduler.start()
     logger.info(
         "Scheduler: stock scans + Lottery League 8:45/9:36/10:00/12:00/15:35 "

@@ -427,6 +427,11 @@ async def issue_ticket(ticker: str, entry_price: float, variant: str = "V1_DAY2_
     duplicate = await db.ll_tickets.find_one({"ticker": t, "date": _today()}, {"_id": 1})
     if duplicate:
         return {"ok": False, "reason": "no_reentry_same_ticker_same_day"}
+    latest_scan = await db.ll_scans.find_one({"_id": "current"}, {"_id": 0, "candidates": 1})
+    candidate = next(
+        (c for c in (latest_scan or {}).get("candidates", []) if _clean_ticker(c.get("ticker")) == t),
+        {},
+    )
 
     stop_price = round(max(entry_price * 0.60, entry_price - (entry_price * 0.40)), 4)
     doc = stamped({
@@ -437,9 +442,33 @@ async def issue_ticket(ticker: str, entry_price: float, variant: str = "V1_DAY2_
         "variant": variant,
         "status": "OPEN",
         "entry_price": round(float(entry_price), 4),
+        "entry_fill_price": round(float(entry_price), 4),
         "current_price": round(float(entry_price), 4),
+        "peak_price": round(float(entry_price), 4),
+        "trough_price": round(float(entry_price), 4),
         "ticket_notional": TICKET_NOTIONAL,
-        "score": score,
+        "score": score if score is not None else candidate.get("score"),
+        "entry_snapshot": {
+            "score": score if score is not None else candidate.get("score"),
+            "tier": candidate.get("tier"),
+            "components": candidate.get("components") or {},
+            "penalties": candidate.get("penalties") or [],
+            "triggers": candidate.get("triggers") or [],
+            "float_proxy": candidate.get("float_proxy"),
+            "float_confidence": candidate.get("float_confidence"),
+            "relative_volume": candidate.get("relative_volume"),
+            "rotation": candidate.get("rotation"),
+            "change_pct": candidate.get("change_pct"),
+            "quote_age_seconds": candidate.get("quote_age_seconds"),
+            "dilution": candidate.get("dilution") or {},
+            "halt_status": candidate.get("halt_status"),
+            "source": candidate.get("source"),
+            "captured_at": _now().isoformat(),
+        },
+        "triggers": candidate.get("triggers") or [],
+        "float_proxy": candidate.get("float_proxy"),
+        "float_confidence": candidate.get("float_confidence"),
+        "quote_age_seconds": candidate.get("quote_age_seconds"),
         "regime": regime,
         "ladder": [
             {"level": 0.30, "fraction": 1 / 3, "status": "WAITING"},
@@ -473,9 +502,11 @@ async def refresh_settlements() -> dict[str, Any]:
             continue
         entry = _num(ticket.get("entry_price"), 0)
         peak = max(_num(ticket.get("peak_price"), entry), price)
+        trough = min(x for x in [_num(ticket.get("trough_price"), entry), price, entry] if x > 0)
         update: dict[str, Any] = {
             "current_price": round(price, 4),
             "peak_price": round(peak, 4),
+            "trough_price": round(trough, 4),
             "mark_updated_at": _now().isoformat(),
         }
         if entry and price <= _num(ticket.get("stop_price"), 0):
@@ -499,6 +530,7 @@ async def settle_ticket(ticket_id: str, exit_price: float, reason: str = "operat
     update = {
         "status": "CLOSED",
         "exit_price": round(float(exit_price), 4),
+        "exit_fill_price": round(float(exit_price), 4),
         "closed_at": _now().isoformat(),
         "exit_reason": reason,
         "raw_return_pct": round(raw_pct, 2),
@@ -506,8 +538,11 @@ async def settle_ticket(ticket_id: str, exit_price: float, reason: str = "operat
         "realized_multiple": round(exit_price / entry, 3) if entry else None,
     }
     await db.ll_tickets.update_one({"ticket_id": ticket_id}, {"$set": update})
-    grade = stamped({**ticket, **update, "graded_at": _now().isoformat(), "rubric_version": LL_RUBRIC_VERSION})
-    await db.ll_grades.update_one({"ticket_id": ticket_id}, {"$set": grade}, upsert=True)
+    try:
+        from . import lottery_grader
+        await lottery_grader.grade_closed_tickets()
+    except Exception as exc:
+        logger.warning("lottery grade on settle failed: %s", exc)
     return {"ok": True, "ticket_id": ticket_id, **update}
 
 
@@ -576,6 +611,11 @@ async def board() -> dict[str, Any]:
         gate = {"status": "DISABLED", "reason": f"Regime {status} manages exits only", "color": "red"}
     else:
         gate = {"status": "ISSUANCE_OPEN", "reason": f"{daily_limit} ticket/day budget", "color": "green"}
+    try:
+        from . import lottery_grader
+        truth = await lottery_grader.truth_board(limit=300)
+    except Exception as exc:
+        truth = {"ok": False, "reason": exc.__class__.__name__}
     return {
         "ok": True,
         "rubric_version": LL_RUBRIC_VERSION,
@@ -596,6 +636,7 @@ async def board() -> dict[str, Any]:
             "cap_usage_pct": round(deployed / cap * 100, 1) if cap else None,
         },
         "gate": gate,
+        "truth_board": truth,
         "honesty": {
             "negative_skew_truth": "Lottery-profile stocks underperform on average; this book tests whether catalyst, float rotation, and structure lift the right tail enough to overcome the base rate.",
             "kill_criteria": "EV <= 0 after 60 graded tickets retires a variant; EV <= 0 after 150 League tickets retires the League.",

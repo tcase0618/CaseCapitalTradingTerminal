@@ -2137,6 +2137,30 @@ async def lottery_league_board():
     return await lottery.board()
 
 
+@api.get("/lottery/truth")
+async def lottery_truth_board(limit: int = 300):
+    from services import lottery_grader
+    return await lottery_grader.truth_board(limit=limit)
+
+
+@api.post("/lottery/grade")
+async def lottery_grade_closed_tickets():
+    from services import lottery_grader
+    return await lottery_grader.grade_closed_tickets()
+
+
+@api.post("/lottery/learning/run")
+async def lottery_learning_run():
+    from services import lottery_grader
+    return await lottery_grader.run_learning_cycle(triggered_by="operator")
+
+
+@api.get("/lottery/learning/status")
+async def lottery_learning_status():
+    from services import lottery_grader
+    return await lottery_grader.truth_board(limit=300)
+
+
 @api.get("/lottery/candidates")
 async def lottery_league_candidates():
     from services import lottery
