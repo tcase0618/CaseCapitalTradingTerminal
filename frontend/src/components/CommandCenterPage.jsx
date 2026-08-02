@@ -187,12 +187,49 @@ export default function CommandCenterPage() {
           LAUNCH CONTROL
         </button>
       }>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", background: cardBg, border: hairline, marginBottom: 22 }}>
-        <Stat label="READINESS" value={`${readyCount}/4`} sub="SYSTEM GATES" color={readyCount >= 3 ? "#4ade80" : "#fbbf24"} accentBar />
-        <Stat label="LAST SCAN" value={scan?.results?.length || 0} sub={fmtTime(scan?.finished_at || status?.last_scan_at)} color={accent} />
-        <Stat label="LIVE POS" value={livePositions.length} sub={`${pending.length} PENDING`} color={accent2} />
-        <Stat label="EQUITY" value={fmtMoney(account.equity)} sub={`CASH ${fmtMoney(account.cash)}`} color="#e5e7eb" />
-      </div>
+      <section className="acropolis-command-deck">
+        <div className="acropolis-identity">
+          <div className="acropolis-relief" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+          <div>
+            <div className="acropolis-kicker">ACROPOLIS COMMAND</div>
+            <h2>Capital command state</h2>
+            <p>
+              Live operating picture for scan readiness, safety gates, portfolio routing,
+              and data truth before capital moves.
+            </p>
+          </div>
+        </div>
+
+        <div className="acropolis-metrics">
+          <CommandDeckMetric label="Readiness" value={`${readyCount}/4`} detail="system gates" color={readyCount >= 3 ? "#4ade80" : "#fbbf24"} />
+          <CommandDeckMetric label="Latest scan" value={scan?.results?.length || 0} detail={fmtTime(scan?.finished_at || status?.last_scan_at)} color={accent} />
+          <CommandDeckMetric label="Live positions" value={livePositions.length} detail={`${pending.length} pending`} color={accent2} />
+          <CommandDeckMetric label="Equity" value={fmtMoney(account.equity)} detail={`cash ${fmtMoney(account.cash)}`} color="#e8ecf3" />
+        </div>
+
+        <div className="acropolis-control">
+          <div className="acropolis-control-row">
+            <span>Execution gate</span>
+            <strong style={{ color: gateColor }}>{gateDecision}</strong>
+          </div>
+          <div className="acropolis-control-row">
+            <span>Scanner</span>
+            <strong style={{ color: scannerState.color }}>{scannerState.value}</strong>
+          </div>
+          <div className="acropolis-control-row">
+            <span>PM</span>
+            <strong style={{ color: pmState.color }}>{pmState.value}</strong>
+          </div>
+          <button data-testid="launch-control-open-deck" onClick={() => setLauncherOpen(true)} className="acropolis-launch">
+            LAUNCH CONTROL
+          </button>
+        </div>
+      </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 18 }}>
         <Card title="MISSION STATE" accentColor={accent}
@@ -385,6 +422,16 @@ function MissionTile({ label, value, color, detail }) {
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.16em" }}>{label}</div>
       <div style={{ color, fontSize: 22, fontWeight: 800, marginTop: 8, letterSpacing: "0.08em" }}>{value}</div>
       <div style={{ color: muted, fontSize: 10, marginTop: 6, lineHeight: 1.4 }}>{detail}</div>
+    </div>
+  );
+}
+
+function CommandDeckMetric({ label, value, detail, color }) {
+  return (
+    <div className="acropolis-metric">
+      <span>{label}</span>
+      <strong style={{ color }}>{value}</strong>
+      <em>{detail}</em>
     </div>
   );
 }

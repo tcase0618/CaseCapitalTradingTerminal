@@ -332,6 +332,174 @@ body {
   background: rgba(255,255,255,0.026) !important;
 }
 
+.acropolis-command-deck {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.12fr) minmax(420px, 1.45fr) minmax(240px, 0.72fr);
+  gap: 18px;
+  margin-bottom: 22px;
+}
+.acropolis-identity,
+.acropolis-metrics,
+.acropolis-control {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(198,207,224,0.09);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.045), transparent 32%),
+    linear-gradient(180deg, rgba(18,21,29,0.9), rgba(7,9,15,0.96));
+  box-shadow: 0 22px 58px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.acropolis-identity {
+  min-height: 210px;
+  padding: 24px;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 20px;
+  align-items: center;
+}
+.acropolis-identity::before,
+.acropolis-control::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(215,189,104,0.28), transparent 34%),
+    repeating-linear-gradient(90deg, rgba(215,189,104,0.045) 0 1px, transparent 1px 22px);
+  opacity: 0.42;
+}
+.acropolis-relief {
+  position: relative;
+  width: 104px;
+  height: 136px;
+  border: 1px solid rgba(215,189,104,0.18);
+  background:
+    radial-gradient(circle at 50% 22%, rgba(215,189,104,0.18), transparent 34%),
+    linear-gradient(180deg, rgba(222,226,232,0.08), rgba(215,189,104,0.035));
+  box-shadow: inset 0 0 42px rgba(255,255,255,0.035);
+}
+.acropolis-relief span {
+  position: absolute;
+  bottom: 22px;
+  width: 11px;
+  height: 70px;
+  border: 1px solid rgba(232,236,243,0.22);
+  background: linear-gradient(180deg, rgba(232,236,243,0.10), rgba(215,189,104,0.055));
+}
+.acropolis-relief span:nth-child(1) { left: 20px; height: 58px; }
+.acropolis-relief span:nth-child(2) { left: 40px; height: 78px; }
+.acropolis-relief span:nth-child(3) { left: 60px; height: 92px; }
+.acropolis-relief span:nth-child(4) { left: 80px; height: 66px; }
+.acropolis-kicker {
+  color: #7df7de;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  font-weight: 900;
+  margin-bottom: 10px;
+}
+.acropolis-identity h2 {
+  color: #d7bd68;
+  font-size: 30px;
+  line-height: 1.08;
+  letter-spacing: 0.05em;
+  font-weight: 850;
+  margin: 0;
+}
+.acropolis-identity p {
+  color: #8f98a8;
+  max-width: 52ch;
+  font-size: 12px;
+  line-height: 1.65;
+  margin: 14px 0 0;
+}
+.acropolis-metrics {
+  min-height: 210px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.acropolis-metric {
+  position: relative;
+  min-width: 0;
+  padding: 22px 24px;
+  border-right: 1px solid rgba(198,207,224,0.07);
+  border-bottom: 1px solid rgba(198,207,224,0.07);
+  background: rgba(255,255,255,0.012);
+}
+.acropolis-metric:nth-child(2n) {
+  border-right: 0;
+}
+.acropolis-metric span,
+.acropolis-control-row span {
+  display: block;
+  color: #7d8796;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+.acropolis-metric strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.acropolis-metric em {
+  display: block;
+  margin-top: 9px;
+  color: #8f98a8;
+  font-size: 11px;
+  font-style: normal;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.acropolis-control {
+  min-height: 210px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.acropolis-control-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(198,207,224,0.08);
+}
+.acropolis-control-row strong {
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  font-weight: 900;
+}
+.acropolis-launch {
+  position: relative;
+  margin-top: auto;
+  min-height: 52px;
+  border: 1px solid rgba(248,113,113,0.72);
+  background: linear-gradient(180deg, rgba(127,29,29,0.62), rgba(43,6,6,0.92));
+  color: #fecaca;
+  font-family: "JetBrains Mono", "Courier New", monospace;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  font-weight: 950;
+  cursor: pointer;
+  box-shadow: 0 16px 42px rgba(248,113,113,0.18);
+}
+.acropolis-launch::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 10px;
+  background: #f87171;
+  box-shadow: 0 0 18px rgba(248,113,113,0.85);
+}
+
 .terminal-page-body > div[style*="display: grid"],
 .terminal-page-body > section[style*="display: grid"] {
   gap: 18px !important;
@@ -362,6 +530,12 @@ body {
   }
   .terminal-stat {
     border-bottom: 1px solid rgba(198,207,224,0.06);
+  }
+  .acropolis-command-deck {
+    grid-template-columns: 1fr !important;
+  }
+  .acropolis-identity {
+    min-height: 170px;
   }
 }
 
@@ -608,6 +782,55 @@ body {
   .terminal-page-body section[style*="grid-template-columns"] {
     grid-template-columns: 1fr !important;
     gap: 10px !important;
+  }
+  .acropolis-command-deck {
+    grid-template-columns: 1fr !important;
+    gap: 10px !important;
+    margin-bottom: 12px !important;
+  }
+  .acropolis-identity {
+    grid-template-columns: 72px minmax(0, 1fr) !important;
+    min-height: 0 !important;
+    padding: 15px !important;
+    gap: 13px !important;
+  }
+  .acropolis-relief {
+    width: 66px !important;
+    height: 88px !important;
+  }
+  .acropolis-relief span {
+    bottom: 14px !important;
+    width: 7px !important;
+  }
+  .acropolis-relief span:nth-child(1) { left: 12px !important; height: 38px !important; }
+  .acropolis-relief span:nth-child(2) { left: 25px !important; height: 50px !important; }
+  .acropolis-relief span:nth-child(3) { left: 38px !important; height: 60px !important; }
+  .acropolis-relief span:nth-child(4) { left: 51px !important; height: 43px !important; }
+  .acropolis-kicker {
+    font-size: 7px !important;
+    letter-spacing: 0.14em !important;
+  }
+  .acropolis-identity h2 {
+    font-size: 19px !important;
+  }
+  .acropolis-identity p {
+    font-size: 10px !important;
+    line-height: 1.45 !important;
+    margin-top: 8px !important;
+  }
+  .acropolis-metrics {
+    min-height: 0 !important;
+    grid-template-columns: 1fr 1fr !important;
+  }
+  .acropolis-metric {
+    padding: 13px 12px !important;
+  }
+  .acropolis-metric strong {
+    font-size: 21px !important;
+  }
+  .acropolis-control {
+    min-height: 0 !important;
+    padding: 14px !important;
   }
   .terminal-page-body [data-testid^="metric-"] {
     width: 100% !important;
