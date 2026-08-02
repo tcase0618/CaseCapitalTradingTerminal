@@ -584,7 +584,7 @@ def start_scheduler():
             logger.warning("equity queue flush: %s", e)
     _scheduler.add_job(
         _equity_queue_flush_job,
-        CronTrigger(day_of_week="sun-fri", hour="0-23", minute="*", timezone=ET),
+        CronTrigger(hour="0-23", minute="*", timezone=ET),
         id="equity_queue_flush_24h",
         replace_existing=True,
     )
