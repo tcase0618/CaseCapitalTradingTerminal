@@ -137,6 +137,40 @@ async def _pnl_refresh_job():
         logger.exception("P&L refresh job failed: %s", e)
 
 
+async def _dedicated_lottery_scan_job(triggered_by: str = "scheduler") -> None:
+    """Run the fenced Lottery League scanner on market-session days only."""
+    try:
+        market_day, reason = await _stock_scan_market_day_now()
+        if not market_day:
+            await log_activity(f"Scheduled Lottery League scan skipped: {reason}", "info")
+            return
+        result = await lottery.run_dedicated_lottery_scan(triggered_by=triggered_by)
+        await log_activity(
+            f"Lottery League scan complete: {result.get('count', 0)} candidates",
+            "info",
+            {"triggered_by": triggered_by, "count": result.get("count", 0)},
+        )
+    except Exception as e:
+        logger.exception("dedicated lottery scan job failed: %s", e)
+
+
+async def _lottery_active_monitor_job() -> None:
+    """Refresh open Lottery League equity tickets every 5 minutes only when active."""
+    try:
+        tickets = await lottery.list_manual_plays(active_only=True)
+        if not tickets:
+            return
+        result = await lottery.refresh_settlements()
+        await log_activity(
+            f"Lottery League active monitor: {result.get('updated', 0)} marks refreshed, "
+            f"{result.get('stop_reviews', 0)} stop reviews",
+            "warn" if result.get("stop_reviews") else "info",
+            result,
+        )
+    except Exception as e:
+        logger.warning("lottery active monitor: %s", e)
+
+
 def _num(value, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -285,6 +319,20 @@ def start_scheduler():
             _daily_scan_job,
             CronTrigger(day_of_week="mon-fri", hour=hr, minute=0, timezone=ET),
             id=tag, replace_existing=True,
+        )
+    for tag, hr, minute in [
+        ("lottery_premarket_845", 8, 45),
+        ("lottery_open_pass_936", 9, 36),
+        ("lottery_open_followup_1000", 10, 0),
+        ("lottery_midday_1200", 12, 0),
+        ("lottery_decision_1535", 15, 35),
+    ]:
+        _scheduler.add_job(
+            _dedicated_lottery_scan_job,
+            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
+            args=[tag],
+            id=tag,
+            replace_existing=True,
         )
     # v5.1 — auto-digest goes out 5 min after each scheduled scan
     # Grouped Telegram scan reports are dispatched by _daily_scan_job. There
@@ -514,6 +562,12 @@ def start_scheduler():
         CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
         id="position_monitor", replace_existing=True,
     )
+    _scheduler.add_job(
+        _lottery_active_monitor_job,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
+        id="lottery_active_monitor_5m",
+        replace_existing=True,
+    )
 
     async def _live_position_snapshot_job():
         try:
@@ -616,7 +670,10 @@ def start_scheduler():
         replace_existing=True,
     )
     _scheduler.start()
-    logger.info("Scheduler: 8AM/12:01/15:30 scans + 5m alerts + 15m flow + P&L + Sunday 2AM learning")
+    logger.info(
+        "Scheduler: stock scans + Lottery League 8:45/9:36/10:00/12:00/15:35 "
+        "+ 5m active lottery monitor + alerts/flow/P&L/learning"
+    )
 
 
 def shutdown_scheduler():
