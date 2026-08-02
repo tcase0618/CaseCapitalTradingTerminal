@@ -314,6 +314,40 @@ def start_scheduler():
         id="flow_refresh",
         replace_existing=True,
     )
+    # Options open sweep: close/refresh risk first, then submit PM-approved buys.
+    async def _options_open_auto_execute_job():
+        try:
+            from . import options_desk, telegram_events
+
+            result = await options_desk.refresh_and_auto_execute_latest()
+            await log_activity(
+                f"Options open auto-execute 9:35: {len(result.get('submitted', []))} submitted, "
+                f"{len(result.get('skipped', []))} skipped",
+                "success" if result.get("submitted") else "info",
+                result,
+            )
+            if not result.get("submitted"):
+                await telegram_events.emit_event(
+                    "options_open_no_orders",
+                    severity="info",
+                    scope="options",
+                    title="Options open sweep complete",
+                    summary=f"No option buys submitted; {len(result.get('skipped', []))} skipped by gate/preflight.",
+                    details={
+                        "ready": result.get("ready"),
+                        "skipped": (result.get("skipped") or [])[:8],
+                        "pre_execution_risk_check": result.get("pre_execution_risk_check"),
+                    },
+                    priority="summary",
+                )
+        except Exception as e:
+            logger.warning("options open auto-execute: %s", e)
+    _scheduler.add_job(
+        _options_open_auto_execute_job,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=35, timezone=ET),
+        id="options_open_auto_execute_935",
+        replace_existing=True,
+    )
     # Nightly P&L refresh — 23:00 ET (also runs at 02:00 ET below)
     _scheduler.add_job(
         _pnl_refresh_job,

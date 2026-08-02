@@ -1991,7 +1991,8 @@ async def mark_accuracy_audit(persist: bool = True) -> dict[str, Any]:
         if entry <= 0:
             issues.append({"severity": "CRITICAL", "code": "missing_entry_premium"})
         if position and live_current <= 0:
-            issues.append({"severity": "CRITICAL", "code": "missing_live_mark"})
+            code = "zero_live_mark_hard_stop_due" if entry > 0 else "missing_live_mark"
+            issues.append({"severity": "CRITICAL", "code": code})
         if stored_current > 0 and live_current > 0:
             drift_pct = abs(stored_current - live_current) / max(0.01, live_current) * 100.0
             if drift_pct >= 10.0:
