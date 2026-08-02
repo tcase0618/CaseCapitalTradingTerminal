@@ -242,11 +242,11 @@ body {
 }
 
 .command-panel-live-positions-risk-heat {
-  grid-column: span 4;
+  grid-column: span 8;
 }
 
 .command-panel-quality-matrix {
-  grid-column: span 5;
+  grid-column: span 12;
 }
 
 .command-panel-event-tape {
@@ -1690,12 +1690,6 @@ body {
   text-transform: uppercase;
 }
 
-.command-control-grid {
-  grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.15fr) minmax(330px, 1fr) !important;
-  gap: 10px !important;
-  align-items: start !important;
-}
-
 .command-panel {
   min-width: 0 !important;
   overflow: hidden !important;
@@ -1743,10 +1737,13 @@ body {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
   }
 
-  .command-panel-quality-matrix,
   .command-panel-system-state,
   .command-panel-execution-gate {
     grid-column: auto !important;
+  }
+
+  .command-panel-quality-matrix {
+    grid-column: 1 / -1 !important;
   }
 }
 
