@@ -610,33 +610,9 @@ body {
   box-shadow: 0 0 18px rgba(248,113,113,0.85);
 }
 
-.terminal-page-body > div[style*="display: grid"],
-.terminal-page-body > section[style*="display: grid"] {
-  gap: 18px !important;
-}
-.terminal-page-body > div[style*="repeat(4"],
-.terminal-page-body > section[style*="repeat(4"],
-.terminal-page-body > div[style*="repeat(5"],
-.terminal-page-body > section[style*="repeat(5"] {
-  overflow: hidden;
-}
-
 @media (max-width: 1320px) and (min-width: 769px) {
   .terminal-page-body {
     padding: 20px 22px 28px !important;
-  }
-  .terminal-page-body > div[style*="repeat(5"],
-  .terminal-page-body > section[style*="repeat(5"] {
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-  }
-  .terminal-page-body > div[style*="repeat(4"],
-  .terminal-page-body > section[style*="repeat(4"] {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  }
-  .terminal-page-body > div[style*="grid-template-columns: 1.15fr"],
-  .terminal-page-body > div[style*="grid-template-columns: 1fr 1fr"],
-  .terminal-page-body > section[style*="grid-template-columns: 1fr 1fr"] {
-    grid-template-columns: 1fr !important;
   }
   .terminal-stat {
     border-bottom: 1px solid rgba(198,207,224,0.06);
@@ -646,6 +622,93 @@ body {
   }
   .acropolis-identity {
     min-height: 170px;
+  }
+}
+
+.command-center-grid {
+  gap: 12px !important;
+}
+.command-panel * {
+  min-width: 0;
+}
+.command-panel-header,
+.command-panel-body {
+  min-width: 0;
+}
+.command-panel-header > div:first-child {
+  min-width: 0;
+  overflow: hidden;
+}
+.command-panel-actions {
+  max-width: 44%;
+}
+.command-panel-actions a,
+.command-panel-actions button {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.command-metric-value {
+  line-height: 1.12 !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+}
+.command-mini-metric,
+.command-mission-tile {
+  overflow: hidden;
+}
+.options-stat-grid,
+.kronos-stat-grid {
+  overflow: hidden;
+}
+.options-stat-grid .terminal-stat,
+.kronos-stat-grid .terminal-stat {
+  min-width: 0 !important;
+  width: auto !important;
+  padding: 16px 18px !important;
+}
+.options-stat-grid .terminal-stat .num,
+.kronos-stat-grid .terminal-stat .num {
+  font-size: clamp(18px, 1.45vw, 25px) !important;
+  white-space: normal !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+}
+.options-stat-grid .terminal-stat > div:first-child,
+.kronos-stat-grid .terminal-stat > div:first-child {
+  min-height: 26px;
+  align-items: flex-start !important;
+}
+.options-stat-grid [data-testid^="metric-"],
+.kronos-stat-grid [data-testid^="metric-"] {
+  min-width: 0 !important;
+}
+.options-stat-grid [data-testid^="metric-"] > div,
+.kronos-stat-grid [data-testid^="metric-"] > div {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+@media (max-width: 1480px) and (min-width: 769px) {
+  .command-panel-execution-gate,
+  .command-panel-top-scanner-output,
+  .command-panel-system-state {
+    grid-column: span 6;
+  }
+  .options-stat-grid,
+  .kronos-stat-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  .options-stat-grid .terminal-stat,
+  .kronos-stat-grid .terminal-stat {
+    min-height: 96px !important;
+  }
+}
+
+@media (max-width: 1180px) and (min-width: 769px) {
+  .command-mini-grid-4,
+  .command-mini-grid-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 }
 

@@ -170,7 +170,7 @@ export default function OptionsDeskPage() {
         ))}
       </div>
 
-      <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
+      <div className="options-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(9, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
         <Stat label="DESK STATUS" value={account?.ok ? "ARMED" : "DISABLED"} sub={account?.reason || "OPTIONS PAPER"} color={account?.ok ? "#4ade80" : "#f87171"} accentBar />
         <Stat label="EQUITY BASIS" value={`$${Number(candidates?.options_equity_basis || 20000).toLocaleString()}`} sub="OPTIONS PM" color={accent} />
         <Stat label="BUYING POWER" value={acct.buying_power ? `$${Number(acct.buying_power).toFixed(0)}` : "-"} sub={acct.status || "NO ACCOUNT"} color={accent2} />

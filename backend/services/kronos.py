@@ -581,11 +581,11 @@ async def status() -> dict[str, Any]:
         {"generated_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}}
     )
     health = _freshness_status(age)
-    if summary.get("unmapped_pm", 0) and summary.get("positions", 0):
-        health = "DEGRADED" if health == "LIVE" else health
+    pm_coverage = "FULL" if not summary.get("unmapped_pm", 0) else "PARTIAL"
     return {
         "ok": True,
         "health": health,
+        "pm_context_health": pm_coverage,
         "latest_snapshot_at": (latest or {}).get("generated_at"),
         "snapshot_age_minutes": round(age, 1) if age is not None else None,
         "positions": summary.get("positions", 0),

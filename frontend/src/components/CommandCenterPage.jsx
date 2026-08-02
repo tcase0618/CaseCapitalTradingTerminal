@@ -223,7 +223,7 @@ export default function CommandCenterPage() {
         ]}
       />
 
-      <div className="command-control-grid" style={commandGrid}>
+      <div className="command-control-grid command-center-grid" style={commandGrid}>
         <OpsPanel title="SCAN FUNNEL" sub="TODAY" action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={tinyButton(accent2)}>{backendRefreshing ? "SYNC" : "REFRESH"}</button>}>
           <ScanFunnel scan={scan} pmSummary={pmSummary} gateDecision={gateDecision} livePositions={livePositions} />
         </OpsPanel>
@@ -291,12 +291,12 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
   const slug = String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
   return (
     <section className={`command-panel command-panel-${slug}${wide ? " command-panel-wide" : ""}`} style={opsPanel}>
-      <div style={opsHeader}>
+      <div className="command-panel-header" style={opsHeader}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <span style={opsTitle}>{title}</span>
           {sub && <span style={opsSub}>({sub})</span>}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="command-panel-actions" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           {live && <span style={livePill}><span className="dot dot-green pulse-dot" /> LIVE</span>}
           {action}
         </div>
@@ -408,11 +408,11 @@ function QualityMatrix({ integrations, qualityOverview, priceSource }) {
         const q = qualityForIntegration(i);
         return (
           <div key={i.key || i.name} style={qualityRow}>
-            <span style={{ color: idx % 3 === 0 ? labelLight : muted }}>{domainFor(i, idx)}</span>
-            <span style={{ color: labelLight }}>{i.name || i.key}</span>
-            <span style={{ color: q.color, fontWeight: 900 }}>{q.label}</span>
-            <span style={{ color: muted }}>{i.freshness || i.latency || fmtTime(i.last)}</span>
-            <span style={{ color: q.label === "FALLBACK" ? "#fbbf24" : muted }}>{i.reason || i.note || (i.ok ? "Live" : "Check")}</span>
+            <span style={{ ...qualityCell, color: idx % 3 === 0 ? labelLight : muted }}>{domainFor(i, idx)}</span>
+            <span style={{ ...qualityCell, color: labelLight }}>{i.name || i.key}</span>
+            <span style={{ ...qualityCell, color: q.color, fontWeight: 900 }}>{q.label}</span>
+            <span style={{ ...qualityCell, color: muted }}>{i.freshness || i.latency || fmtTime(i.last)}</span>
+            <span style={{ ...qualityCell, color: q.label === "FALLBACK" ? "#fbbf24" : muted }}>{i.reason || i.note || (i.ok ? "Live" : "Check")}</span>
           </div>
         );
       })}
@@ -477,13 +477,13 @@ function Tape({ rows, empty }) {
 function GateConsole({ executionGate, gateDecision, gateColor }) {
   return (
     <div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+      <div className="command-mini-grid command-mini-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
         <MiniMetric k="GATE" v={gateDecision} color={gateColor} />
         <MiniMetric k="TRUTH" v={executionGate?.truth_grade || "--"} color={gateColor} />
         <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
         <MiniMetric k="OPTIONS" v={executionGate?.truth?.execution?.options_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.options_execution_enabled ? "#4ade80" : muted} />
       </div>
-      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <div className="command-mini-grid command-mini-grid-2" style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
         <GateList title="BLOCKERS" rows={executionGate?.blockers || []} color="#f87171" empty="No active blockers." />
         <GateList title="WARNINGS" rows={executionGate?.warnings || []} color="#fbbf24" empty="No active warnings." />
       </div>
@@ -504,12 +504,12 @@ function TopScanner({ rows }) {
 function SystemState({ scannerState, pmState, tradeFloorState, account, pmSummary, health, backendRefresh }) {
   return (
     <div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+      <div className="command-mini-grid command-mini-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
         <MissionTile label="Scanner" value={scannerState.value} color={scannerState.color} detail="scan state" />
         <MissionTile label="PM" value={pmState.value} color={pmState.color} detail={`${pmSummary.active_count || 0} active`} />
         <MissionTile label="Trade Floor" value={tradeFloorState.value} color={tradeFloorState.color} detail={health?.alpaca?.reason || "paper execution"} />
       </div>
-      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+      <div className="command-mini-grid command-mini-grid-4" style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
         <MiniMetric k="MODE" v={pmSummary.mode || "--"} />
         <MiniMetric k="REGIME" v={(pmSummary.regime?.status || "--").toUpperCase()} />
         <MiniMetric k="BUYING POWER" v={fmtMoney(account.buying_power)} />
@@ -530,9 +530,9 @@ function domainFor(i, idx) {
 
 function MissionTile({ label, value, color, detail }) {
   return (
-    <div style={{ border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 }}>
+    <div className="command-mission-tile" style={{ border: hairline, background: "rgba(255,255,255,0.015)", padding: 12, minWidth: 0 }}>
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.16em" }}>{label}</div>
-      <div style={{ color, fontSize: 22, fontWeight: 800, marginTop: 8, letterSpacing: "0.08em" }}>{value}</div>
+      <div className="command-metric-value" style={{ color, fontSize: 22, fontWeight: 800, marginTop: 8, letterSpacing: "0.08em" }}>{value}</div>
       <div style={{ color: muted, fontSize: 10, marginTop: 6, lineHeight: 1.4 }}>{detail}</div>
     </div>
   );
@@ -540,9 +540,9 @@ function MissionTile({ label, value, color, detail }) {
 
 function MiniMetric({ k, v, color = labelLight }) {
   return (
-    <div style={{ border: hairline, padding: "10px 12px", background: pageBg }}>
+    <div className="command-mini-metric" style={{ border: hairline, padding: "10px 12px", background: pageBg, minWidth: 0 }}>
       <div style={{ color: dim, fontSize: 8, letterSpacing: "0.14em" }}>{k}</div>
-      <div style={{ color, fontSize: 14, marginTop: 6, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div>
+      <div className="command-metric-value" style={{ color, fontSize: 14, marginTop: 6, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div>
     </div>
   );
 }
@@ -624,8 +624,8 @@ const opsHeader = {
   gap: 8,
 };
 
-const opsTitle = { color: labelLight, fontSize: 11, fontWeight: 900, letterSpacing: "0.16em", whiteSpace: "nowrap" };
-const opsSub = { color: muted, fontSize: 9, letterSpacing: "0.12em" };
+const opsTitle = { color: labelLight, fontSize: 11, fontWeight: 900, letterSpacing: "0.16em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+const opsSub = { color: muted, fontSize: 9, letterSpacing: "0.12em", whiteSpace: "nowrap" };
 const opsBody = { padding: "9px 10px", minWidth: 0 };
 const livePill = { color: "#4ade80", fontSize: 9, letterSpacing: "0.10em", display: "inline-flex", alignItems: "center", gap: 5, fontWeight: 900 };
 const tableHead = { color: muted, fontSize: 8, letterSpacing: "0.13em", fontWeight: 900 };
@@ -650,8 +650,10 @@ const heatHeader = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 
 const heatRow = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
 const heatFooter = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8 };
 const riskBadge = { display: "inline-flex", justifyContent: "center", padding: "3px 8px", fontSize: 9, fontWeight: 900, letterSpacing: "0.08em" };
-const qualityHeader = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const qualityRow = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
+const qualityColumns = "minmax(54px, 0.7fr) minmax(95px, 1.45fr) minmax(54px, 0.72fr) minmax(54px, 0.72fr) minmax(62px, 0.85fr)";
+const qualityHeader = { display: "grid", gridTemplateColumns: qualityColumns, gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
+const qualityRow = { display: "grid", gridTemplateColumns: qualityColumns, gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
+const qualityCell = { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const qualityScore = { display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(74,222,128,0.28)", marginTop: 8, paddingTop: 8, color: "#8cc665", fontSize: 11, fontWeight: 900, letterSpacing: "0.10em" };
 const eventHeader = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
 const eventRow = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };

@@ -6,7 +6,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceL
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { DataConfidenceStrip } from "./Institutional";
 
-const { accent, dim, muted, labelLight, hairline } = tokens;
+const { accent, accent2, dim, muted, labelLight, hairline } = tokens;
 
 export default function PerformancePage() {
   const [perf, setPerf] = useState(null);

@@ -307,8 +307,6 @@ def scheduled_jobs() -> list[dict[str, str]]:
          "cron": "00:00, 08:00, 13:00, 18:00 ET daily"},
         {"id": "regime_gate", "name": "Regime Gate",
          "cron": "Every 30 min (Mon-Fri, 09:00-16:30 ET)"},
-        {"id": "trading_halt_monitor", "name": "Trading Halt Monitor",
-         "cron": "Every 1 min (Mon-Fri, 04:00-20:59 ET)"},
         {"id": "position_monitor", "name": "Position Monitor",
          "cron": "Every 15 min (Mon-Fri, 09:00-16:30 ET)"},
         {"id": "kronos_morning_forecast_930", "name": "Kronos Morning Forecast",

@@ -1023,7 +1023,9 @@ export function Stat({ label, value, color = "#e5e7eb", sub = null,
         fontFamily: "JetBrains Mono", letterSpacing: "0.02em",
         display: "flex", alignItems: "baseline", gap: 6,
         minWidth: 0,
-        overflowWrap: "anywhere",
+        overflowWrap: "normal",
+        wordBreak: "normal",
+        lineHeight: 1.12,
       }}>
         {value}
         {trend && (

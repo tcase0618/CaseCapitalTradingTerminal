@@ -258,13 +258,13 @@ export default function KronosPage() {
         items={[
           { label: "Forecast Engine", value: kronosStatus?.health || "CHECKING" },
           { label: "LSE Feed", value: lseHealth?.ok ? "ONLINE" : "DEGRADED" },
-          { label: "PM Map", value: `${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0}`, color: (kronosStatus?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80" },
+          { label: "PM Context", value: kronosStatus?.pm_context_health || "CHECKING", color: (kronosStatus?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80", detail: `${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0} mapped` },
           { label: "Open Audits", value: kronosStatus?.open_disagreement_audits ?? 0, color: kronosStatus?.open_disagreement_audits ? "#fbbf24" : "#4ade80" },
           { label: "Last Sync", value: fmtTime(lastSync), color: accent2 },
         ]}
       />
 
-      <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
+      <div className="kronos-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(9, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
         <Stat label="MODEL HEALTH" value={kronosStatus?.health || "CHECKING"} sub={`snapshot ${ageText(kronosStatus?.snapshot_age_minutes)}`} color={healthColor(kronosStatus?.health)} accentBar />
         <Stat label="OPEN UNDERLYINGS" value={stats.underlyings} sub={`${activeForecasts.length} instruments`} color={accent} />
         <Stat label="SPY TODAY" value={`${market.direction || "UNKNOWN"} ${signed(market.forecast_pct)}%`} sub={`cone ${signed(market.cone_low_pct)} to ${signed(market.cone_high_pct)}%`} color={marketColor(market.direction)} />
@@ -392,7 +392,7 @@ function KronosStatusPanel({ status, lseHealth, pm, lastSync }) {
     <>
       <div style={bootRow}><span>MODEL HEALTH</span><strong style={{ color: healthColor(status?.health) }}>{status?.health || "CHECKING"}</strong></div>
       <div style={bootRow}><span>SNAPSHOT AGE</span><strong>{ageText(status?.snapshot_age_minutes)}</strong></div>
-      <div style={bootRow}><span>PM MAP</span><strong style={{ color: (status?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80" }}>{status?.mapped_pm ?? 0}/{status?.positions ?? 0}</strong></div>
+      <div style={bootRow}><span>PM CONTEXT</span><strong style={{ color: (status?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80" }}>{status?.pm_context_health || "CHECKING"} / {status?.mapped_pm ?? 0}/{status?.positions ?? 0}</strong></div>
       <div style={bootRow}><span>OPEN AUDITS</span><strong style={{ color: status?.open_disagreement_audits ? "#fbbf24" : "#4ade80" }}>{status?.open_disagreement_audits ?? 0}</strong></div>
       <div style={bootRow}><span>LSE DATA</span><strong style={{ color: lseHealth?.ok ? "#4ade80" : "#fbbf24" }}>{lseHealth?.ok ? "ONLINE" : "DEGRADED"}</strong></div>
       <div style={bootRow}><span>PM LINK</span><strong>{pm?.error ? "DEGRADED" : "READING"}</strong></div>

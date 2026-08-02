@@ -505,20 +505,6 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    async def _trading_halt_job():
-        try:
-            from . import trading_halts
-
-            await trading_halts.check_and_alert()
-        except Exception as e:
-            logger.warning("trading halt monitor: %s", e)
-    _scheduler.add_job(
-        _trading_halt_job,
-        CronTrigger(day_of_week="mon-fri", hour="4-20", minute="*", timezone=ET),
-        id="trading_halt_monitor",
-        replace_existing=True,
-    )
-
     async def _position_monitor():
         try:
             from . import options_desk, pm_ratchet, trade_floor, trade_floor_phases
