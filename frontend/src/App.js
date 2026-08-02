@@ -22,6 +22,7 @@ import TFEnginePage from "@/components/TFEnginePage";
 import PortfolioManagerPage from "@/components/PortfolioManagerPage";
 import AuditLogsPage from "@/components/AuditLogsPage";
 import QualityPage from "@/components/QualityPage";
+import TruthReviewPage from "@/components/TruthReviewPage";
 import StartupGate from "@/components/StartupGate";
 import TerminalErrorBoundary from "@/components/TerminalErrorBoundary";
 import { Toaster } from "sonner";
@@ -56,6 +57,7 @@ function App() {
               <Route path="/ticker/:ticker" element={<TickerPage />} />
               <Route path="/audit-logs" element={<AuditLogsPage />} />
               <Route path="/quality" element={<QualityPage />} />
+              <Route path="/truth-review" element={<TruthReviewPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </BrowserRouter>

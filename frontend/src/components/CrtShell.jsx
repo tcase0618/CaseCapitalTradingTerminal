@@ -12,6 +12,7 @@ import {
   BriefcaseBusiness,
   ClipboardPenLine,
   Cog,
+  FileCheck2,
   Gavel,
   Globe2,
   GraduationCap,
@@ -56,6 +57,7 @@ const NAV = [
   { to: "/tf-engine",   label: "TRADE ENGINE", icon: "▼", group: "ANALYSIS" },
   { to: "/audit-logs",  label: "AUDIT LOGS",  icon: "AL", group: "SYSTEM" },
   { to: "/quality",     label: "QUALITY",     icon: "QC", group: "SYSTEM" },
+  { to: "/truth-review", label: "TRUTH REVIEW", icon: "TR", group: "SYSTEM" },
   { to: "/settings",    label: "SETTINGS",    icon: "▥", group: "SYSTEM" },
 ];
 
@@ -88,6 +90,7 @@ const NAV_LOGOS = {
   "/tf-engine": { logo: "TE", Icon: Cog, color: "#f97316" },
   "/audit-logs": { logo: "AL", Icon: Archive, color: "#e879f9" },
   "/quality": { logo: "QC", Icon: SprayBottleIcon, color: "#5eead4" },
+  "/truth-review": { logo: "TR", Icon: FileCheck2, color: "#7df7de" },
   "/settings": { logo: "ST", Icon: Cog, color: "#9ca3af" },
 };
 

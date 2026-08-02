@@ -307,6 +307,38 @@ async def edge_overview():
     return await edge_dashboard.overview()
 
 
+@api.get("/truth_review/overview")
+async def truth_review_overview(force_refresh: bool = False, persist: bool = False):
+    from services import truth_review
+    return await truth_review.overview(force_refresh=force_refresh, persist=persist)
+
+
+@api.post("/truth_review/refresh")
+async def truth_review_refresh():
+    from services import truth_review
+    ledger = await truth_review.refresh_ledger()
+    overview = await truth_review.overview(force_refresh=False, persist=True)
+    return {"ok": True, "ledger": ledger, "overview": overview}
+
+
+@api.get("/truth_review/ledger")
+async def truth_review_ledger(limit: int = 150, event_type: str = "all", ticker: str | None = None):
+    from services import truth_review
+    return await truth_review.ledger(limit=limit, event_type=event_type, ticker=ticker)
+
+
+@api.post("/truth_review/weekly_packet")
+async def truth_review_weekly_packet():
+    from services import truth_review
+    return await truth_review.weekly_packet(force_refresh=True)
+
+
+@api.get("/truth_review/packets")
+async def truth_review_packets(limit: int = 20):
+    from services import truth_review
+    return await truth_review.packets(limit=limit)
+
+
 @api.get("/telegram/events")
 async def telegram_events_recent(limit: int = 80):
     from services import telegram_events

@@ -688,6 +688,25 @@ def start_scheduler():
         id="lottery_learning_cycle",
         replace_existing=True,
     )
+    async def _truth_review_weekly_job():
+        try:
+            from . import truth_review
+            packet = await truth_review.weekly_packet(force_refresh=True)
+            await log_activity(
+                f"Truth Review weekly packet: {packet.get('overall', {}).get('rating')} "
+                f"{packet.get('overall', {}).get('score')}/100",
+                "info",
+                {"week_of": packet.get("week_of")},
+            )
+        except Exception as e:
+            logger.exception("truth review weekly packet failed: %s", e)
+
+    _scheduler.add_job(
+        _truth_review_weekly_job,
+        CronTrigger(day_of_week="sun", hour=19, minute=50, timezone=ET),
+        id="truth_review_weekly_packet",
+        replace_existing=True,
+    )
     _scheduler.start()
     logger.info(
         "Scheduler: stock scans + Lottery League 8:45/9:36/10:00/12:00/15:35 "
