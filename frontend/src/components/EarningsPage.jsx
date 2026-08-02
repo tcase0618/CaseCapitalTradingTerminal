@@ -105,6 +105,7 @@ export default function EarningsPage() {
 
   return (
     <CrtShell title="EARNINGS WAR ROOM">
+      <div className="earnings-war-room">
       <div style={weekNav}>
         <button style={weekButton} onClick={() => setWeekOffset(v => v - 1)}>{"<"} PRIOR WEEK</button>
         <div style={{ textAlign: "center" }}>
@@ -119,7 +120,7 @@ export default function EarningsPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
+      <div className="earnings-stat-strip" style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="WEEK OF" value={data?.week_of?.slice(5) || "-"} sub={data?.week_end?.slice(5) || ""} accentBar />
         <Stat label="ENRICHED PRINTS" value={total} sub={data?.calendar_limited ? `${data.raw_calendar_total} RAW` : "FULL BOARD"} color={accent} />
         <Stat label="TRADEABLE" value={tradeable} color="#4ade80" />
@@ -153,7 +154,7 @@ export default function EarningsPage() {
 
       {topSetups.length > 0 && (
         <Card title="SETUP LEADERBOARD">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
+          <div className="earnings-setup-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
             {topSetups.map((r, i) => (
               <button key={`${r.ticker}-${r.earnings_date}-top`} onClick={() => setSelected(r)}
                 className="corner-brackets" style={setupCardStyle(r)}>
@@ -193,8 +194,8 @@ export default function EarningsPage() {
               <div style={{ color: dim, fontSize: 10, letterSpacing: "0.16em", marginBottom: 8 }}>
                 {day} | {rows.length} REPORTING
               </div>
-              <div style={{ width: "100%" }}>
-                <table style={earningsTable}>
+              <div className="earnings-table-wrap" style={{ width: "100%" }}>
+                <table className="earnings-table" style={earningsTable}>
                   <thead>
                     <tr style={{ color: dim, letterSpacing: "0.08em", textAlign: "left" }}>
                       <th style={{ ...th, width: "10%" }}>TICKER</th>
@@ -243,7 +244,7 @@ export default function EarningsPage() {
         })}
       </Card>
 
-      <div style={belowBoardGrid}>
+      <div className="earnings-below-grid" style={belowBoardGrid}>
           <Card title="DIVERGENCE RADAR">
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
               <div style={{ color: muted, fontSize: 12 }}>
@@ -320,6 +321,7 @@ export default function EarningsPage() {
       </div>
 
       {selected && <BattleCard row={selected} onClose={() => setSelected(null)} />}
+      </div>
     </CrtShell>
   );
 }
@@ -336,8 +338,8 @@ function BattleCard({ row, onClose }) {
   const synopsis = card.earnings_call_synopsis || {};
   const divergence = row.earnings_divergence || card.divergence || {};
   return (
-    <div style={modalOverlay} onClick={onClose}>
-      <div style={modalPanel} onClick={(e) => e.stopPropagation()}>
+    <div className="earnings-battle-overlay" style={modalOverlay} onClick={onClose}>
+      <div className="earnings-battle-panel" style={modalPanel} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start" }}>
           <div>
             <div style={{ color: dim, fontSize: 11, letterSpacing: "0.16em" }}>
