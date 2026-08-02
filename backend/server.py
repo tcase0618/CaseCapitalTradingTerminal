@@ -2131,6 +2131,50 @@ async def lottery_dedicated_scan():
     return await lottery.run_dedicated_lottery_scan()
 
 
+@api.get("/lottery/board")
+async def lottery_league_board():
+    from services import lottery
+    return await lottery.board()
+
+
+@api.get("/lottery/candidates")
+async def lottery_league_candidates():
+    from services import lottery
+    return await lottery.league_candidates()
+
+
+@api.get("/lottery/tickets")
+async def lottery_league_tickets(active_only: bool = False):
+    from services import lottery
+    return await lottery.league_tickets(active_only=active_only)
+
+
+class LotteryTicketEntry(BaseModel):
+    ticker: str
+    entry_price: float
+    variant: str = "V1_DAY2_CONTINUATION"
+    score: float | None = None
+    reason: str = "operator"
+
+
+@api.post("/lottery/ticket")
+async def lottery_league_issue_ticket(payload: LotteryTicketEntry):
+    from services import lottery
+    return await lottery.issue_ticket(
+        payload.ticker,
+        payload.entry_price,
+        variant=payload.variant,
+        score=payload.score,
+        reason=payload.reason,
+    )
+
+
+@api.post("/lottery/ticket/settle")
+async def lottery_league_settle_ticket(ticket_id: str, exit_price: float, reason: str = "operator_settle"):
+    from services import lottery
+    return await lottery.settle_ticket(ticket_id, exit_price, reason=reason)
+
+
 @api.get("/lottery/screener")
 async def lottery_screener():
     from services import lottery

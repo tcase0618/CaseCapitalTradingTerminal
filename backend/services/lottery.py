@@ -1,33 +1,81 @@
-"""Lottery Picks — high-payoff, low-cost contract finder + history tracker.
+"""Lottery League v2.
 
-Scores each scanned ticker on 4 factors → 0-100 lottery score:
-  • Squeeze compression  (0-30 pts)  — sourced from existing squeeze.score
-  • Unusual options flow (0-25 pts)  — from existing flow_score or claude opts
-  • Catalyst proximity   (0-25 pts)  — earnings/contract/macro proximity
-  • Cheap-IV bonus       (0-20 pts)  — IV rank < 35
-
-Short-interest pile-on adds up to +15 pts (capped).
-
-Tiers: JACKPOT ≥80 · HOT ≥65 · WARM ≥50 · COLD <50.
-
-Contract finder pulls calls 10-20% OTM, $0.10-$0.75 premium, 14-28 DTE
-via yfinance options chains. EV math:
-  • P(double) ≈ delta × 0.55      (rough heuristic)
-  • P(10x)    ≈ max(0, delta × 0.08)
-  • P(total loss) = 1 - P(any return)
+The League is a fenced moonshot research book. It does not borrow the old
+options-lottery probability model and it never calls yfinance. Candidates are
+scored from observable low-float runner evidence, stored in ll_* collections,
+and graded with a synthetic haircut so paper fills cannot look cleaner than
+the data deserves.
 """
 from __future__ import annotations
-import asyncio
+
 import logging
+import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+import httpx
 
 from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
 
+LL_RUBRIC_VERSION = "lottery-league-v2.0-moonshot-desk"
+FINVIZ_URL = (
+    "https://finviz.com/screener.ashx?v=111"
+    "&f=sh_price_1to20,sh_relvol_o2,sh_short_o15"
+    "&o=-volume"
+)
+ENTRY_HAIRCUT_PCT = 1.0
+EXIT_HAIRCUT_PCT = 1.5
+ROUND_TRIP_HAIRCUT_PCT = ENTRY_HAIRCUT_PCT + EXIT_HAIRCUT_PCT
+TICKET_NOTIONAL = 10.0
+MAX_DAILY_TICKETS = 2
+MAX_OPEN_TICKETS = 6
+LEAGUE_CAP_PCT = 0.05
 
-TIER_LIMITS = {"JACKPOT": 500, "HOT": 200, "WARM": 100, "COLD": 50}
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _today() -> str:
+    return _now().date().isoformat()
+
+
+def _clean_ticker(value: Any) -> str:
+    text = re.sub(r"[^A-Za-z.]", "", str(value or "").upper()).replace(".", "-")
+    return text[:8]
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace("$", "").replace(",", "").replace("%", "").strip()
+            if value in {"", "-", "N/A"}:
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _pct(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.replace("%", "").replace("+", "").replace(",", "").strip()
+        return float(value)
+    except Exception:
+        return None
+
+
+def _money(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"${value:,.2f}"
 
 
 def tier_for(score: float) -> str:
@@ -36,613 +84,572 @@ def tier_for(score: float) -> str:
     if score >= 65:
         return "HOT"
     if score >= 50:
-        return "WARM"
-    return "COLD"
+        return "WATCH"
+    return "REJECT"
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
+def _component_score(value: float, tiers: list[tuple[float, float]]) -> float:
+    for threshold, score in tiers:
+        if value >= threshold:
+            return score
+    return 0.0
 
 
-def score_lottery(result: dict[str, Any]) -> dict[str, Any]:
-    """Score a single scan result row (the row from scanner output) for
-    lottery potential. Returns {score, factors, tier}."""
-    factors: dict[str, float] = {}
-    # 1) Squeeze compression
-    sq = (result.get("squeeze") or {}).get("score") or 0
-    factors["squeeze"] = min(30.0, sq * 0.3)
-    # 2) Unusual flow
-    flow = 0.0
-    flow_meta = result.get("flow") or {}
-    flow_dir = (flow_meta.get("direction") or "").upper()
-    flow_score_raw = float(flow_meta.get("score") or 0)
-    if "UNUSUAL_FLOW" in (result.get("signals") or []):
-        flow = 20.0
-    if "CALL_SWEEP" in (result.get("signals") or []):
-        flow += 5.0
-    if flow_dir == "BULLISH":
-        flow += 2.0
-    factors["flow"] = min(25.0, flow + flow_score_raw * 5)
-    # 3) Catalyst proximity
-    cat = 0.0
-    if "upcoming_earnings" in (result.get("signals") or []):
-        cat += 12.0
-    if "CONTRACT_SURGE" in (result.get("signals") or []):
-        cat += 10.0
-    if result.get("dark_horse"):
-        cat += 8.0
-    factors["catalyst"] = min(25.0, cat)
-    # 4) IV cheap bonus
-    opt = result.get("options") or {}
-    iv_rank = opt.get("iv_rank")
-    if iv_rank is not None:
-        if iv_rank < 25:
-            factors["iv_cheap"] = 20.0
-        elif iv_rank < 35:
-            factors["iv_cheap"] = 12.0
-        elif iv_rank < 50:
-            factors["iv_cheap"] = 5.0
-        else:
-            factors["iv_cheap"] = 0.0
-    else:
-        factors["iv_cheap"] = 6.0
-    # Short interest bonus (squeeze fuel)
-    short_pct = result.get("short_float_pct")
-    si_bonus = 0.0
-    if isinstance(short_pct, (int, float)):
-        if short_pct > 25:
-            si_bonus = 15.0
-        elif short_pct > 15:
-            si_bonus = 10.0
-        elif short_pct > 8:
-            si_bonus = 5.0
-    factors["si_bonus"] = si_bonus
+async def _latest_regime() -> dict[str, Any]:
+    try:
+        from . import trade_floor
 
-    total = sum(factors.values())
-    total = min(100.0, total)
+        return await trade_floor.regime_status()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unknown",
+            "weather": "unknown",
+            "halt_new_entries": True,
+            "reason": str(exc),
+        }
+
+
+async def _account_equity() -> float:
+    try:
+        from . import trade_floor
+
+        account = await trade_floor.get_account()
+        return _num(account.get("equity") or account.get("portfolio_value"), 0)
+    except Exception:
+        return 0.0
+
+
+async def _halted_symbols() -> set[str]:
+    try:
+        from . import trading_halts
+
+        payload = await trading_halts.fetch_halts()
+        return {str(h.get("symbol") or "").upper() for h in payload.get("halts", []) if h.get("active")}
+    except Exception:
+        return set()
+
+
+async def _dilution_flag(ticker: str) -> dict[str, Any]:
+    db = get_db()
+    cutoff = (_now() - timedelta(days=90)).isoformat()
+    forms = ["S-1", "S-3", "424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8", "FWP"]
+    rows = await db.sec_filings.find(
+        {
+            "ticker": ticker,
+            "$or": [{"form": {"$in": forms}}, {"title": {"$regex": "ATM|offering|prospectus", "$options": "i"}}],
+            "created_at": {"$gte": cutoff},
+        },
+        {"_id": 0, "form": 1, "filing_date": 1, "created_at": 1, "title": 1, "url": 1},
+    ).sort("created_at", -1).to_list(5)
     return {
-        "score": round(total, 1),
-        "tier": tier_for(total),
-        "factors": {k: round(v, 1) for k, v in factors.items()},
+        "active": bool(rows),
+        "penalty": 25 if rows else 0,
+        "forms": rows,
+        "label": "DILUTION WATCH" if rows else "CLEAR",
     }
 
 
-async def find_contract(ticker: str, current_price: float | None) -> dict[str, Any] | None:
-    """Find a call contract 10-20% OTM, $0.10-$0.75 premium, 14-28 DTE.
-    Returns {strike, ask, total_cost, breakeven, delta, dte, exp} or None."""
-    if not current_price or current_price <= 0:
-        return None
-    def _sync():
-        try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            today = _now().date()
-            best = None
-            for exp_str in (t.options or [])[:6]:
-                try:
-                    exp_d = datetime.strptime(exp_str, "%Y-%m-%d").date()
-                except Exception:
-                    continue
-                dte = (exp_d - today).days
-                if dte < 14 or dte > 28:
-                    continue
-                try:
-                    chain = t.option_chain(exp_str)
-                    calls = chain.calls
-                except Exception:
-                    continue
-                if calls is None or len(calls) == 0:
-                    continue
-                lower = current_price * 1.10
-                upper = current_price * 1.20
-                candidates = calls[
-                    (calls["strike"] >= lower) & (calls["strike"] <= upper)
-                    & (calls["ask"].fillna(0) >= 0.10) & (calls["ask"].fillna(0) <= 0.75)
-                ]
-                if candidates is None or len(candidates) == 0:
-                    continue
-                # Pick highest delta (most likely to pay off)
-                if "delta" in candidates.columns:
-                    cand = candidates.sort_values("delta", ascending=False).iloc[0]
-                else:
-                    cand = candidates.iloc[0]
-                strike = float(cand["strike"])
-                ask = float(cand["ask"])
-                delta = float(cand.get("delta", 0)) if "delta" in candidates.columns else None
-                pick = {
-                    "strike": strike, "ask": ask,
-                    "total_cost": round(ask * 100, 2),
-                    "breakeven": round(strike + ask, 2),
-                    "delta": round(delta, 3) if delta else None,
-                    "dte": dte, "exp": exp_str,
-                    "iv": float(cand.get("impliedVolatility", 0)) if "impliedVolatility" in candidates.columns else None,
-                }
-                if best is None or (pick.get("delta") or 0) > (best.get("delta") or 0):
-                    best = pick
-            return best
-        except Exception as e:
-            logger.debug("find_contract %s: %s", ticker, e)
-            return None
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+def _catalyst_score(row: dict[str, Any]) -> tuple[float, list[str]]:
+    signals = {str(s).upper() for s in (row.get("signals") or [])}
+    chips: list[str] = []
+    score = 0.0
+    if row.get("pharma") or "PHARMA_PDUFA" in signals or "PDUFA" in signals:
+        score = max(score, 25.0)
+        chips.append("PHARMA/FDA")
+    if row.get("contract") or row.get("contracts") or "CONTRACT_SURGE" in signals:
+        score = max(score, 20.0)
+        chips.append("CONTRACT")
+    if row.get("pead") or row.get("earnings_this_week") or "UPCOMING_EARNINGS" in signals:
+        score = max(score, 15.0)
+        chips.append("EARNINGS")
+    if row.get("x_factor") or "X_FACTOR" in signals or "DARK_HORSE" in signals:
+        score = max(score, 10.0)
+        chips.append("ATTENTION")
+    return score, chips
 
 
-def ev_math(delta: float | None) -> dict[str, float]:
-    """Heuristic expected-value breakdown."""
-    if delta is None or delta <= 0:
-        return {"p_double": 0.0, "p_10x": 0.0, "p_total_loss": 0.95}
-    p_double = round(min(0.65, delta * 0.55), 3)
-    p_10x = round(max(0.0, delta * 0.08), 3)
-    p_total_loss = round(max(0.20, 1 - (p_double + p_10x * 1.5)), 3)
-    return {"p_double": p_double, "p_10x": p_10x, "p_total_loss": p_total_loss}
+def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
+    ticker = _clean_ticker(row.get("ticker"))
+    price = _num(row.get("price") or row.get("last") or row.get("current_price"), 0)
+    change_pct = _pct(row.get("change_pct") or row.get("day_change_pct") or row.get("change")) or 0.0
+    rel_vol = _num(row.get("relative_volume") or row.get("rel_volume") or row.get("rvol"), 0)
+    volume = _num(row.get("volume"), 0)
+    float_proxy = _num(row.get("float") or row.get("float_shares") or row.get("shares_outstanding"), 0)
+    high = _num(row.get("day_high") or row.get("high"), 0)
+    low = _num(row.get("day_low") or row.get("low"), 0)
+    close_position = ((price - low) / (high - low)) if price and high > low else None
+
+    gap_surge = _component_score(change_pct, [(40, 20), (25, 17), (15, 13), (10, 9), (5, 4)])
+    rvol_score = _component_score(rel_vol, [(15, 15), (10, 12), (5, 9), (2, 4)])
+    if rel_vol <= 0 and volume >= 2_000_000:
+        rvol_score = 5
+
+    float_score = 0.0
+    float_label = "UNKNOWN"
+    if float_proxy:
+        if float_proxy < 10_000_000:
+            float_score, float_label = 15, "<=10M SO-basis"
+        elif float_proxy < 30_000_000:
+            float_score, float_label = 10, "<=30M SO-basis"
+        elif float_proxy < 60_000_000:
+            float_score, float_label = 5, "<=60M SO-basis"
+        else:
+            float_label = ">60M SO-basis"
+    elif price and price <= 20:
+        float_score, float_label = 3, "UNKNOWN FLOAT"
+
+    rotation = (volume / float_proxy) if volume and float_proxy else 0.0
+    rotation_score = _component_score(rotation, [(1.5, 15), (0.8, 11), (0.4, 6), (0.2, 3)])
+    catalyst_score, catalyst_chips = _catalyst_score(row)
+    structure_score = 0.0
+    if close_position is not None:
+        structure_score = _component_score(close_position, [(0.85, 10), (0.70, 7), (0.55, 4)])
+
+    spread_pct = _num(row.get("spread_pct") or row.get("spread"), 0)
+    penalties: list[dict[str, Any]] = []
+    if spread_pct > 1:
+        penalties.append({"key": "spread", "label": "Spread >1%", "points": 10})
+    if ticker in halted:
+        penalties.append({"key": "halt", "label": "Active halt", "points": 15})
+    if row.get("failed_breakout_today"):
+        penalties.append({"key": "failed_breakout", "label": "Failed breakout", "points": 5})
+    if row.get("reverse_split_30d"):
+        penalties.append({"key": "reverse_split", "label": "Reverse split <30d", "points": 10})
+
+    components = {
+        "gap_surge": round(gap_surge, 1),
+        "rvol": round(rvol_score, 1),
+        "float_tier": round(float_score, 1),
+        "rotation": round(rotation_score, 1),
+        "catalyst": round(catalyst_score, 1),
+        "structure": round(structure_score, 1),
+    }
+    raw = sum(components.values())
+    penalty_total = sum(p["points"] for p in penalties)
+    score = max(0.0, min(100.0, raw - penalty_total))
+    triggers = []
+    if change_pct >= 10:
+        triggers.append("GAP/SURGE")
+    if rel_vol >= 5:
+        triggers.append("RVOL")
+    if rotation >= 0.8:
+        triggers.append("ROTATION")
+    triggers.extend(catalyst_chips)
+
+    return {
+        "ticker": ticker,
+        "company": row.get("company") or row.get("name") or ticker,
+        "sector": row.get("sector") or "-",
+        "price": round(price, 4) if price else None,
+        "change_pct": round(change_pct, 2),
+        "volume": int(volume) if volume else None,
+        "relative_volume": round(rel_vol, 2) if rel_vol else None,
+        "float_proxy": int(float_proxy) if float_proxy else None,
+        "float_confidence": float_label,
+        "rotation": round(rotation, 2) if rotation else None,
+        "spread_pct": round(spread_pct, 2) if spread_pct else None,
+        "quote_age_seconds": row.get("quote_age_seconds"),
+        "score": round(score, 1),
+        "tier": tier_for(score),
+        "components": components,
+        "penalties": penalties,
+        "triggers": list(dict.fromkeys(triggers)),
+        "source": row.get("source") or "scanner_or_lottery_universe",
+        "rubric_version": LL_RUBRIC_VERSION,
+        "eligible": score >= 60 and ticker not in halted,
+    }
 
 
-async def evaluate_for_scan(scan_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Score every scan result + find contract for tier ≥ WARM.
-    Returns the full sorted lottery list."""
-    if not scan_results:
+async def _finviz_candidates() -> list[dict[str, Any]]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 CaseCapitalTerminal/1.0",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
         return []
-    picks: list[dict[str, Any]] = []
-    for r in scan_results:
-        ticker = r.get("ticker")
+
+    try:
+        async with httpx.AsyncClient(timeout=18.0, headers=headers, follow_redirects=True) as client:
+            response = await client.get(FINVIZ_URL)
+        if response.status_code != 200:
+            return []
+        soup = BeautifulSoup(response.text, "html.parser")
+        rows: list[dict[str, Any]] = []
+        for table_row in soup.select("table.screener_table tr, table#screener-table tr"):
+            cells = [cell.get_text(" ", strip=True) for cell in table_row.find_all("td")]
+            if len(cells) < 9 or not cells[1].isalpha():
+                continue
+            rows.append({
+                "ticker": cells[1].upper(),
+                "company": cells[2] if len(cells) > 2 else "",
+                "sector": cells[3] if len(cells) > 3 else "",
+                "price": _num(cells[8] if len(cells) > 8 else None, 0),
+                "change_pct": _pct(cells[9] if len(cells) > 9 else None),
+                "volume": _num(cells[10] if len(cells) > 10 else None, 0),
+                "source": "finviz_low_float_screen",
+            })
+        return rows[:80]
+    except Exception as exc:
+        logger.warning("Lottery League Finviz universe failed: %s", exc)
+        return []
+
+
+async def _latest_scan_rows() -> list[dict[str, Any]]:
+    db = get_db()
+    scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1}, sort=[("finished_at", -1)])
+    rows = []
+    for row in (scan or {}).get("results") or []:
+        rows.append({**row, "source": row.get("source") or "latest_terminal_scan"})
+    return rows
+
+
+async def _enrich_candidate(candidate: dict[str, Any], halted: set[str]) -> dict[str, Any]:
+    scored = _score_candidate(candidate, halted)
+    dilution = await _dilution_flag(scored["ticker"])
+    scored["dilution"] = dilution
+    if dilution.get("active"):
+        scored["penalties"].append({"key": "dilution", "label": "Offering/ATM shelf", "points": 25})
+        scored["score"] = max(0, round(scored["score"] - 25, 1))
+        scored["tier"] = tier_for(scored["score"])
+        scored["eligible"] = scored["score"] >= 60 and scored["ticker"] not in halted
+    if scored["ticker"] in halted:
+        scored["halt_status"] = "HALTED"
+    else:
+        scored["halt_status"] = "CLEAR"
+    return scored
+
+
+async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str, Any]:
+    """Run the League universe scan and persist an ll_scans snapshot."""
+    db = get_db()
+    halted = await _halted_symbols()
+    finviz = await _finviz_candidates()
+    latest = await _latest_scan_rows()
+
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in finviz + latest:
+        ticker = _clean_ticker(row.get("ticker"))
         if not ticker:
             continue
-        scored = score_lottery(r)
-        contract = None
-        ev = None
-        if scored["score"] >= 50:
-            contract = await find_contract(ticker, r.get("price"))
-            if contract:
-                ev = ev_math(contract.get("delta"))
-        picks.append({
-            "ticker": ticker,
-            "score": scored["score"],
-            "tier": scored["tier"],
-            "factors": scored["factors"],
-            "max_bet": TIER_LIMITS[scored["tier"]],
-            "current_price": r.get("price"),
-            "signals": r.get("signals") or [],
-            "contract": contract,
-            "ev": ev,
-            "evaluated_at": _now().isoformat(),
-        })
-    picks.sort(key=lambda x: -x["score"])
-    return picks
+        existing = by_ticker.get(ticker) or {}
+        by_ticker[ticker] = {**existing, **row, "ticker": ticker}
 
+    candidates = []
+    for row in list(by_ticker.values())[:120]:
+        candidates.append(await _enrich_candidate(row, halted))
+    candidates.sort(key=lambda r: (r.get("score") or 0), reverse=True)
 
-AUTO_BUY_SCORE = 50.0  # ≥ this auto-logs as bought into track record
-
-
-async def log_picks(picks: list[dict[str, Any]]) -> int:
-    """Auto-log every pick scoring ≥ AUTO_BUY_SCORE (50/100) as 'bought'
-    into the lottery track record. Each pick must have a discovered contract.
-    Idempotent per (ticker, date, strike, exp)."""
-    db = get_db()
-    n = 0
-    today = _now().date().isoformat()
-    for p in picks:
-        if (p.get("score") or 0) < AUTO_BUY_SCORE:
-            continue
-        if not p.get("contract"):
-            continue
-        # Idempotent per-day-per-ticker-per-strike
-        key = {
-            "ticker": p["ticker"],
-            "date": today,
-            "strike": p["contract"]["strike"],
-            "exp": p["contract"]["exp"],
-        }
-        await db.lottery_history.update_one(
-            key,
-            {"$set": stamped({
-                **key,
-                "tier": p["tier"],
-                "score": p["score"],
-                "entry_ask": p["contract"]["ask"],
-                "entry_breakeven": p["contract"]["breakeven"],
-                "entry_delta": p["contract"]["delta"],
-                "entry_current_price": p["current_price"],
-                "auto_bought": True,
-                "logged_at": _now().isoformat(),
-            })},
-            upsert=True,
-        )
-        n += 1
-    if n:
-        await log_activity(f"Lottery: auto-bought {n} picks (score ≥ {AUTO_BUY_SCORE:.0f})", "info")
-    return n
-
-
-async def _fetch_current_ask(ticker: str, exp: str, strike: float) -> float | None:
-    """Fetch the current ask (or mid) for a logged lottery call."""
-    def _sync():
-        try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            chain = t.option_chain(exp)
-            calls = chain.calls
-            if calls is None or len(calls) == 0:
-                return None
-            d = (calls["strike"] - strike).abs()
-            idx = d.idxmin()
-            row = calls.loc[idx]
-            ask = float(row.get("ask") or 0)
-            if ask > 0:
-                return ask
-            last = float(row.get("lastPrice") or 0)
-            if last > 0:
-                return last
-            bid = float(row.get("bid") or 0)
-            return (bid + ask) / 2 if bid and ask else (bid or None)
-        except Exception as e:
-            logger.debug("fetch_current_ask %s/%s/%s: %s", ticker, exp, strike, e)
-            return None
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
-
-
-async def refresh_settlements() -> dict[str, int]:
-    """For every auto-bought lottery row:
-      • Update `current_ask` to the live ask (for running P&L on open contracts).
-      • If the contract has expired, freeze `settled_ask` to the final value
-        (intrinsic at expiration if any data, otherwise 0)."""
-    db = get_db()
-    today = _now().date().isoformat()
-    rows = await db.lottery_history.find({}, {"_id": 0}).to_list(2000)
-    live = 0
-    settled = 0
-    for r in rows:
-        if r.get("settled_ask") is not None:
-            continue  # already settled
-        exp = r.get("exp")
-        ticker = r.get("ticker")
-        strike = r.get("strike")
-        if not (exp and ticker and strike is not None):
-            continue
-        cur = await _fetch_current_ask(ticker, exp, float(strike))
-        update: dict[str, Any] = {
-            "current_ask_refreshed_at": _now().isoformat(),
-        }
-        if cur is not None:
-            update["current_ask"] = round(cur, 4)
-            live += 1
-        if exp < today:
-            # Expired — freeze settlement. If we couldn't pull a chain price,
-            # treat it as worthless (calls expiring OTM = $0).
-            update["settled_ask"] = round(cur, 4) if cur is not None else 0.0
-            update["settled_at"] = _now().isoformat()
-            settled += 1
-        await db.lottery_history.update_one(
-            {"ticker": ticker, "date": r.get("date"), "strike": strike, "exp": exp},
-            {"$set": update},
-        )
-    if live or settled:
-        await log_activity(
-            f"Lottery settlements: refreshed {live} live · settled {settled} expired",
-            "info",
-        )
-    return {"refreshed": live, "settled": settled}
-
-
-async def track_record() -> dict[str, Any]:
-    """Running track record across all auto-bought lottery picks.
-    Includes both settled outcomes and unrealized P&L on open positions."""
-    db = get_db()
-    rows = await db.lottery_history.find({}, {"_id": 0}).to_list(2000)
-    if not rows:
-        return {
-            "total": 0, "open": 0, "settled": 0, "winners": 0,
-            "hit_rate": None, "avg_winner_pct": None,
-            "unrealized_avg_pct": None, "unrealized_winners": 0,
-        }
-    settled = [r for r in rows if r.get("settled_ask") is not None]
-    winners = [r for r in settled if (r["settled_ask"] or 0) > (r["entry_ask"] or 0) * 2]
-    avg_winner = (sum((r["settled_ask"] - r["entry_ask"]) / r["entry_ask"] * 100
-                       for r in winners) / len(winners)) if winners else None
-
-    open_rows = [r for r in rows
-                 if r.get("settled_ask") is None
-                 and r.get("current_ask") is not None
-                 and r.get("entry_ask")]
-    unrealized_pcts = [
-        (r["current_ask"] - r["entry_ask"]) / r["entry_ask"] * 100
-        for r in open_rows if r["entry_ask"] > 0
-    ]
-    unrealized_avg = (sum(unrealized_pcts) / len(unrealized_pcts)) if unrealized_pcts else None
-    unrealized_winners = sum(1 for p in unrealized_pcts if p > 0)
-    return {
-        "total": len(rows),
-        "open": len(rows) - len(settled),
-        "settled": len(settled),
-        "winners": len(winners),
-        "hit_rate": round(len(winners) / len(settled), 3) if settled else None,
-        "avg_winner_pct": round(avg_winner, 1) if avg_winner is not None else None,
-        "unrealized_avg_pct": round(unrealized_avg, 1) if unrealized_avg is not None else None,
-        "unrealized_winners": unrealized_winners,
-    }
-
-
-async def recent_picks(days: int = 14, tier: str | None = None) -> list[dict[str, Any]]:
-    db = get_db()
-    cutoff = (_now() - timedelta(days=days)).date().isoformat()
-    q: dict[str, Any] = {"date": {"$gte": cutoff}}
-    if tier:
-        q["tier"] = tier
-    return await db.lottery_history.find(q, {"_id": 0}).sort("date", -1).to_list(200)
-
-
-async def manual_settle_track_pick(ticker: str, exit_ask: float, play_date: str) -> dict[str, Any]:
-    """Manually lock realized P&L on an auto-tracked lottery pick. Overrides
-    any auto-fetched settled_ask with the user's actual exit ask price."""
-    db = get_db()
-    row = await db.lottery_history.find_one({"ticker": ticker.upper(), "date": play_date}, {"_id": 0})
-    if not row:
-        return {"ok": False, "reason": "pick not found"}
-    realized_pct = None
-    entry = row.get("entry_ask") or 0
-    if entry > 0:
-        realized_pct = round((exit_ask - entry) / entry * 100, 2)
-    await db.lottery_history.update_one(
-        {"ticker": ticker.upper(), "date": play_date},
-        {"$set": {
-            "settled_ask": round(exit_ask, 4),
-            "manual_settle": True,
-            "manual_settled_at": _now().isoformat(),
-            "realized_pct": realized_pct,
-        }},
-    )
-    await log_activity(
-        f"Lottery track: manual settle {ticker} @ ${exit_ask} → {realized_pct}%",
-        "info",
-    )
-    return {"ok": True, "ticker": ticker.upper(), "exit_ask": exit_ask, "realized_pct": realized_pct}
-
-
-async def delete_track_pick(ticker: str, play_date: str) -> dict[str, Any]:
-    """Remove an auto-tracked lottery pick from the track record entirely
-    (e.g. if it was entered in error)."""
-    db = get_db()
-    res = await db.lottery_history.delete_one({"ticker": ticker.upper(), "date": play_date})
-    if res.deleted_count:
-        await log_activity(f"Lottery track: deleted {ticker} {play_date}", "info")
-    return {"ok": bool(res.deleted_count), "deleted": res.deleted_count}
-
-
-
-
-# ─────── v5.1 — Dedicated Lottery Scan (Finviz screener) ───────
-async def run_dedicated_lottery_scan() -> dict[str, Any]:
-    """Runs a Finviz screener filtered to LOTTERY-grade microcaps:
-      • Float < 20M
-      • Price $1-$20
-      • Relative volume > 2× (today vs 20-day avg)
-      • Short interest > 15%
-    Then applies lottery score bonuses (float<10M, days-to-cover>5, X-Factor
-    spike, catalyst<14d, Form 4 cluster, congressional buy, PDUFA match,
-    SEC Form 4 cluster). Pure-stock play — no options evaluation.
-    """
-    import httpx
-    from bs4 import BeautifulSoup
-
-    # Finviz screener — float u20 + price $1-$20 + relative volume 2+
-    #   + short float 15+
-    # See: https://finviz.com/screener.ashx?v=111&f=...
-    url = (
-        "https://finviz.com/screener.ashx?v=111"
-        "&f=sh_float_u20,sh_price_1to20,sh_relvol_o2,sh_short_o15"
-        "&o=-volume"
-    )
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-    }
-    candidates: list[dict[str, Any]] = []
-    try:
-        async with httpx.AsyncClient(timeout=20.0, headers=headers,
-                                       follow_redirects=True) as c:
-            r = await c.get(url)
-            if r.status_code != 200:
-                return {"candidates": [], "fetched_at": _now().isoformat(),
-                         "error": f"finviz HTTP {r.status_code}"}
-            soup = BeautifulSoup(r.text, "html.parser")
-            table = soup.find("table", class_="screener_table") or \
-                     soup.find("table", attrs={"id": "screener-table"})
-            if not table:
-                return {"candidates": [], "fetched_at": _now().isoformat(),
-                         "error": "table not found"}
-            for tr in table.find_all("tr")[1:]:
-                cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-                if len(cells) < 8:
-                    continue
-                try:
-                    candidates.append({
-                        "ticker": cells[1].upper(),
-                        "company": cells[2] if len(cells) > 2 else "",
-                        "sector": cells[3] if len(cells) > 3 else "",
-                        "price": float(cells[8].replace("$", "").replace(",", "")) if len(cells) > 8 else None,
-                    })
-                except (ValueError, IndexError):
-                    continue
-    except Exception as e:
-        logger.warning("dedicated lottery scan fetch failed: %s", e)
-        return {"candidates": [], "fetched_at": _now().isoformat(), "error": str(e)}
-
-    # Enrich with score bonuses from existing collections
-    db = get_db()
-    last_scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1},
-                                                  sort=[("started_at", -1)])
-    scan_by_t: dict[str, dict] = {}
-    if last_scan:
-        for r in (last_scan.get("results") or []):
-            scan_by_t[(r.get("ticker") or "").upper()] = r
-
-    today = _now().date().isoformat()
-    enriched: list[dict[str, Any]] = []
-    for cand in candidates:
-        t = cand["ticker"]
-        bonuses: list[str] = []
-        score = 50  # base score for passing the Finviz screen
-        sr = scan_by_t.get(t) or {}
-        sigs = sr.get("signals") or {}
-        if isinstance(sigs, dict):
-            if "insider_cluster_buy" in sigs:
-                score += 10
-                bonuses.append("INSIDER_CLUSTER")
-            if "CONGRESSIONAL_BUY" in sigs:
-                score += 8
-                bonuses.append("CONGRESS_BUY")
-            if "UNUSUAL_FLOW" in sigs:
-                score += 8
-                bonuses.append("UNUSUAL_FLOW")
-            if "upcoming_earnings" in sigs:
-                score += 6
-                bonuses.append("CATALYST")
-        # PDUFA cross-ref
-        if await db.pharma_pdufa.count_documents({"ticker": t}):
-            score += 10
-            bonuses.append("PHARMA_PDUFA")
-        # SEC Form 4 cluster cross-ref (last 7d)
-        if await db.sec_filings.count_documents(
-            {"ticker": t, "form": "Form 4",
-              "created_at": {"$gte": (_now() - timedelta(days=7)).isoformat()}}
-        ) >= 2:
-            score += 8
-            bonuses.append("SEC_FORM4_CLUSTER")
-        # X-Factor social spike
-        if await db.x_factor_alerts.count_documents(
-            {"ticker": t, "fired_at": {"$gte": (_now() - timedelta(days=3)).isoformat()}}
-        ):
-            score += 6
-            bonuses.append("X_FACTOR")
-        tier = tier_for(score)
-        suggested_risk = TIER_LIMITS.get(tier, 50)
-        enriched.append({
-            **cand,
-            "lottery_score": min(100, score),
-            "tier": tier,
-            "bonuses": bonuses,
-            "suggested_risk": suggested_risk,
-            "scanned_at": _now().isoformat(),
-        })
-    enriched.sort(key=lambda x: -x["lottery_score"])
-    # Persist as dedicated_lottery_scan
-    await db.lottery_dedicated_scan.update_one(
-        {"_id": "current"},
-        {"$set": {"candidates": enriched, "scanned_at": _now().isoformat(),
-                   "date": today}},
-        upsert=True,
-    )
-    await log_activity(
-        f"Dedicated lottery scan: {len(enriched)} candidates (Finviz microcap screen)",
-        "info",
-    )
-    return {"candidates": enriched, "fetched_at": _now().isoformat(),
-             "count": len(enriched)}
+    regime = await _latest_regime()
+    doc = stamped({
+        "scan_id": f"ll-{_now().strftime('%Y%m%d%H%M%S')}",
+        "date": _today(),
+        "scanned_at": _now().isoformat(),
+        "triggered_by": triggered_by,
+        "rubric_version": LL_RUBRIC_VERSION,
+        "source_counts": {"finviz": len(finviz), "latest_scan": len(latest), "deduped": len(candidates)},
+        "regime": regime,
+        "candidates": candidates,
+    })
+    await db.ll_scans.insert_one(doc)
+    await db.ll_scans.update_one({"_id": "current"}, {"$set": {k: v for k, v in doc.items() if k != "_id"}}, upsert=True)
+    await log_activity(f"Lottery League scan: {len(candidates)} candidates", "info")
+    return {"ok": True, "count": len(candidates), "candidates": candidates, "scan": {k: v for k, v in doc.items() if k != "_id"}}
 
 
 async def latest_dedicated_lottery() -> list[dict[str, Any]]:
     db = get_db()
-    doc = await db.lottery_dedicated_scan.find_one({"_id": "current"}, {"_id": 0})
-    return doc.get("candidates", []) if doc else []
+    doc = await db.ll_scans.find_one({"_id": "current"}, {"_id": 0})
+    if doc:
+        return doc.get("candidates") or []
+    legacy = await db.lottery_dedicated_scan.find_one({"_id": "current"}, {"_id": 0})
+    return legacy.get("candidates", []) if legacy else []
 
 
-async def add_manual_play(ticker: str, entry_price: float,
-                            lottery_score: int | None = None,
-                            risk_amount: float | None = None) -> dict[str, Any]:
-    """User clicks ADD on a screener result and types their entry price."""
+async def evaluate_for_scan(scan_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Scanner compatibility hook. It tags rows with League-style score only."""
+    halted = await _halted_symbols()
+    picks = [_score_candidate({**row, "source": "scan_bridge"}, halted) for row in (scan_results or [])]
+    picks = [p for p in picks if p["score"] >= 50]
+    picks.sort(key=lambda x: -x["score"])
+    return picks
+
+
+async def log_picks(picks: list[dict[str, Any]]) -> int:
+    """Persist scanner bridge observations without creating tickets."""
+    if not picks:
+        return 0
     db = get_db()
-    today = _now().date().isoformat()
     doc = stamped({
-        "ticker": ticker.upper(),
-        "date": today,
-        "entry_price": float(entry_price),
-        "peak_price": float(entry_price),
-        "current_price": float(entry_price),
-        "lottery_score": lottery_score,
-        "risk_amount": float(risk_amount) if risk_amount else None,
-        "is_manual": True,
-        "is_active": True,
-        "hold_end": (_now().date() + timedelta(days=14)).isoformat(),
-        "sent_to_trade_floor": False,
-        "added_at": _now().isoformat(),
+        "date": _today(),
+        "rubric_version": LL_RUBRIC_VERSION,
+        "source": "scanner_bridge",
+        "picks": picks,
     })
-    await db.lottery_manual_plays.insert_one(doc)
-    await log_activity(f"Lottery: manual play added · {ticker} @ ${entry_price}", "info")
+    await db.ll_scanner_bridge.update_one({"date": _today()}, {"$set": doc}, upsert=True)
+    return len(picks)
+
+
+async def _tickets(active_only: bool = False) -> list[dict[str, Any]]:
+    db = get_db()
+    query = {"status": {"$in": ["OPEN", "HALTED"]}} if active_only else {}
+    return await db.ll_tickets.find(query, {"_id": 0}).sort("opened_at", -1).to_list(500)
+
+
+def _ticket_multiple(ticket: dict[str, Any]) -> float | None:
+    entry = _num(ticket.get("entry_price"), 0)
+    current = _num(ticket.get("current_price") or ticket.get("exit_price"), 0)
+    if not entry or not current:
+        return None
+    return round(current / entry, 3)
+
+
+async def issue_ticket(ticker: str, entry_price: float, variant: str = "V1_DAY2_CONTINUATION",
+                       score: float | None = None, reason: str = "operator") -> dict[str, Any]:
+    """Create a fenced paper ticket. This does not send an equity/options order."""
+    db = get_db()
+    t = _clean_ticker(ticker)
+    if not t or entry_price <= 0:
+        return {"ok": False, "reason": "invalid_ticket"}
+    regime = await _latest_regime()
+    status = str(regime.get("status") or regime.get("weather") or "").lower()
+    if status in {"red", "doomsday"} or regime.get("halt_new_entries"):
+        return {"ok": False, "reason": f"league_disabled_by_regime:{status or 'unknown'}", "regime": regime}
+    open_count = await db.ll_tickets.count_documents({"status": {"$in": ["OPEN", "HALTED"]}})
+    today_count = await db.ll_tickets.count_documents({"date": _today()})
+    if open_count >= MAX_OPEN_TICKETS:
+        return {"ok": False, "reason": "max_open_tickets", "open": open_count}
+    daily_limit = 1 if status == "downtrend" else MAX_DAILY_TICKETS
+    if today_count >= daily_limit:
+        return {"ok": False, "reason": "daily_ticket_budget_used", "today": today_count, "limit": daily_limit}
+    duplicate = await db.ll_tickets.find_one({"ticker": t, "date": _today()}, {"_id": 1})
+    if duplicate:
+        return {"ok": False, "reason": "no_reentry_same_ticker_same_day"}
+
+    stop_price = round(max(entry_price * 0.60, entry_price - (entry_price * 0.40)), 4)
+    doc = stamped({
+        "ticket_id": f"llt-{t}-{_now().strftime('%Y%m%d%H%M%S')}",
+        "book": "lottery",
+        "ticker": t,
+        "date": _today(),
+        "variant": variant,
+        "status": "OPEN",
+        "entry_price": round(float(entry_price), 4),
+        "current_price": round(float(entry_price), 4),
+        "ticket_notional": TICKET_NOTIONAL,
+        "score": score,
+        "regime": regime,
+        "ladder": [
+            {"level": 0.30, "fraction": 1 / 3, "status": "WAITING"},
+            {"level": 1.00, "fraction": 1 / 3, "status": "WAITING"},
+            {"level": "trail_20pct", "fraction": 1 / 3, "status": "WAITING"},
+        ],
+        "stop_price": stop_price,
+        "time_stop_date": (_now().date() + timedelta(days=7)).isoformat(),
+        "opened_at": _now().isoformat(),
+        "opened_by": reason,
+        "haircut": {"entry_pct": ENTRY_HAIRCUT_PCT, "exit_pct": EXIT_HAIRCUT_PCT},
+    })
+    await db.ll_tickets.insert_one(doc)
+    await log_activity(f"Lottery League ticket opened: {t} @ ${entry_price}", "info")
     doc.pop("_id", None)
-    return doc
+    return {"ok": True, "ticket": doc}
+
+
+async def refresh_settlements() -> dict[str, Any]:
+    """Refresh open ticket marks and detect stale stop/time states."""
+    from . import pricer
+
+    db = get_db()
+    tickets = await _tickets(active_only=True)
+    updated = 0
+    stop_hits = 0
+    for ticket in tickets:
+        ticker = ticket.get("ticker")
+        price = await pricer.get_latest_close(ticker)
+        if price is None:
+            continue
+        entry = _num(ticket.get("entry_price"), 0)
+        peak = max(_num(ticket.get("peak_price"), entry), price)
+        update: dict[str, Any] = {
+            "current_price": round(price, 4),
+            "peak_price": round(peak, 4),
+            "mark_updated_at": _now().isoformat(),
+        }
+        if entry and price <= _num(ticket.get("stop_price"), 0):
+            update["risk_state"] = "STOP_TRIGGERED_REVIEW"
+            stop_hits += 1
+        if str(ticket.get("time_stop_date") or "") <= _today():
+            update["risk_state"] = "TIME_STOP_REVIEW"
+        await db.ll_tickets.update_one({"ticket_id": ticket["ticket_id"]}, {"$set": update})
+        updated += 1
+    return {"ok": True, "updated": updated, "open": len(tickets), "stop_reviews": stop_hits}
+
+
+async def settle_ticket(ticket_id: str, exit_price: float, reason: str = "operator_settle") -> dict[str, Any]:
+    db = get_db()
+    ticket = await db.ll_tickets.find_one({"ticket_id": ticket_id}, {"_id": 0})
+    if not ticket:
+        return {"ok": False, "reason": "ticket_not_found"}
+    entry = _num(ticket.get("entry_price"), 0)
+    raw_pct = ((exit_price - entry) / entry * 100) if entry else 0
+    haircut_pct = raw_pct - ROUND_TRIP_HAIRCUT_PCT
+    update = {
+        "status": "CLOSED",
+        "exit_price": round(float(exit_price), 4),
+        "closed_at": _now().isoformat(),
+        "exit_reason": reason,
+        "raw_return_pct": round(raw_pct, 2),
+        "haircut_return_pct": round(haircut_pct, 2),
+        "realized_multiple": round(exit_price / entry, 3) if entry else None,
+    }
+    await db.ll_tickets.update_one({"ticket_id": ticket_id}, {"$set": update})
+    grade = stamped({**ticket, **update, "graded_at": _now().isoformat(), "rubric_version": LL_RUBRIC_VERSION})
+    await db.ll_grades.update_one({"ticket_id": ticket_id}, {"$set": grade}, upsert=True)
+    return {"ok": True, "ticket_id": ticket_id, **update}
+
+
+def _aggregate_grades(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [r for r in rows if r.get("status") == "CLOSED" or r.get("closed_at")]
+    open_rows = [r for r in rows if r.get("status") in {"OPEN", "HALTED"}]
+    returns = [_num(r.get("haircut_return_pct"), 0) for r in closed]
+    raw_returns = [_num(r.get("raw_return_pct"), 0) for r in closed]
+    wins_30 = [r for r in returns if r >= 30]
+    wins_100 = [r for r in returns if r >= 100]
+    wins_300 = [r for r in returns if r >= 300]
+    total = sum(returns)
+    sorted_abs = sorted([abs(r) for r in returns], reverse=True)
+    top1 = (sorted_abs[0] / sum(sorted_abs) * 100) if sorted_abs and sum(sorted_abs) else None
+    top5 = (sum(sorted_abs[:5]) / sum(sorted_abs) * 100) if sorted_abs and sum(sorted_abs) else None
+    ev = (total / len(closed)) if closed else None
+    kill = "GATHERING"
+    if len(closed) >= 60 and (ev or 0) <= 0:
+        kill = "RETIRE_VARIANT"
+    elif len(closed) >= 60:
+        kill = "VALIDATED_POSITIVE"
+    return {
+        "total_tickets": len(rows),
+        "open": len(open_rows),
+        "closed": len(closed),
+        "ev_per_ticket_pct_haircut": round(ev, 2) if ev is not None else None,
+        "ev_per_ticket_pct_raw": round(sum(raw_returns) / len(raw_returns), 2) if raw_returns else None,
+        "hit_rate_30": round(len(wins_30) / len(closed), 3) if closed else None,
+        "hit_rate_100": round(len(wins_100) / len(closed), 3) if closed else None,
+        "hit_rate_300": round(len(wins_300) / len(closed), 3) if closed else None,
+        "median_ticket_pct": round(sorted(returns)[len(returns) // 2], 2) if returns else None,
+        "top1_concentration_pct": round(top1, 1) if top1 is not None else None,
+        "top5_concentration_pct": round(top5, 1) if top5 is not None else None,
+        "kill_status": kill,
+        "n_to_variant_decision": max(0, 60 - len(closed)),
+        "haircut": {"entry_pct": ENTRY_HAIRCUT_PCT, "exit_pct": EXIT_HAIRCUT_PCT, "round_trip_pct": ROUND_TRIP_HAIRCUT_PCT},
+    }
+
+
+async def track_record() -> dict[str, Any]:
+    rows = await _tickets(active_only=False)
+    return _aggregate_grades(rows)
+
+
+async def recent_picks(days: int = 14, tier: str | None = None) -> list[dict[str, Any]]:
+    cutoff = (_now() - timedelta(days=days)).date().isoformat()
+    rows = await _tickets(active_only=False)
+    out = [r for r in rows if str(r.get("date") or "") >= cutoff]
+    if tier:
+        out = [r for r in out if r.get("tier") == tier]
+    return out[:200]
+
+
+async def board() -> dict[str, Any]:
+    db = get_db()
+    scan = await db.ll_scans.find_one({"_id": "current"}, {"_id": 0}) or {}
+    tickets = await _tickets(active_only=False)
+    active = [t for t in tickets if t.get("status") in {"OPEN", "HALTED"}]
+    account_equity = await _account_equity()
+    cap = account_equity * LEAGUE_CAP_PCT if account_equity else None
+    deployed = sum(_num(t.get("ticket_notional"), TICKET_NOTIONAL) for t in active)
+    regime = scan.get("regime") or await _latest_regime()
+    status = str(regime.get("status") or regime.get("weather") or "unknown").lower()
+    daily_limit = 1 if status == "downtrend" else MAX_DAILY_TICKETS
+    if status in {"red", "doomsday"} or regime.get("halt_new_entries"):
+        gate = {"status": "DISABLED", "reason": f"Regime {status} manages exits only", "color": "red"}
+    else:
+        gate = {"status": "ISSUANCE_OPEN", "reason": f"{daily_limit} ticket/day budget", "color": "green"}
+    return {
+        "ok": True,
+        "rubric_version": LL_RUBRIC_VERSION,
+        "generated_at": _now().isoformat(),
+        "scan": scan,
+        "candidates": scan.get("candidates") or [],
+        "tickets": active,
+        "all_tickets": tickets[:300],
+        "jackpot_board": _aggregate_grades(tickets),
+        "book": {
+            "ticket_notional": TICKET_NOTIONAL,
+            "max_daily_tickets": daily_limit,
+            "max_open_tickets": MAX_OPEN_TICKETS,
+            "league_cap_pct": LEAGUE_CAP_PCT,
+            "account_equity": account_equity or None,
+            "cap_dollars": round(cap, 2) if cap is not None else None,
+            "deployed_dollars": round(deployed, 2),
+            "cap_usage_pct": round(deployed / cap * 100, 1) if cap else None,
+        },
+        "gate": gate,
+        "honesty": {
+            "negative_skew_truth": "Lottery-profile stocks underperform on average; this book tests whether catalyst, float rotation, and structure lift the right tail enough to overcome the base rate.",
+            "kill_criteria": "EV <= 0 after 60 graded tickets retires a variant; EV <= 0 after 150 League tickets retires the League.",
+            "paper_fill_haircut": f"Headline grades subtract {ROUND_TRIP_HAIRCUT_PCT}% round trip: +{ENTRY_HAIRCUT_PCT}% entry and -{EXIT_HAIRCUT_PCT}% exit.",
+            "data_limits": "Free float is a proxy unless verified from SEC/companyfacts; IEX/free intraday data is not Level 2 tape.",
+        },
+    }
+
+
+async def league_candidates() -> dict[str, Any]:
+    db = get_db()
+    scan = await db.ll_scans.find_one({"_id": "current"}, {"_id": 0}) or {}
+    return {"ok": True, "scan": scan, "candidates": scan.get("candidates") or []}
+
+
+async def league_tickets(active_only: bool = False) -> dict[str, Any]:
+    return {"ok": True, "tickets": await _tickets(active_only=active_only)}
+
+
+async def add_manual_play(ticker: str, entry_price: float, lottery_score: int | None = None,
+                          risk_amount: float | None = None) -> dict[str, Any]:
+    """Legacy endpoint now creates a League ticket."""
+    return await issue_ticket(ticker, entry_price, score=lottery_score, reason="manual_legacy_endpoint")
 
 
 async def settle_manual_play(ticker: str, exit_price: float, play_date: str) -> dict[str, Any]:
-    """User enters EXACT exit price — calculates realized P&L permanently."""
-    db = get_db()
-    play = await db.lottery_manual_plays.find_one(
-        {"ticker": ticker.upper(), "date": play_date, "is_active": True},
-        {"_id": 0},
-    )
-    if not play:
-        return {"ok": False, "reason": "play_not_found"}
-    entry = play["entry_price"]
-    realized_pct = ((exit_price - entry) / entry * 100) if entry else 0
-    update = {
-        "exit_price": float(exit_price),
-        "realized_pct": round(realized_pct, 2),
-        "is_active": False,
-        "settled_at": _now().isoformat(),
-    }
-    await db.lottery_manual_plays.update_one(
-        {"ticker": ticker.upper(), "date": play_date}, {"$set": update},
-    )
-    await log_activity(
-        f"Lottery: settled {ticker} · entry ${entry} → exit ${exit_price} "
-        f"({realized_pct:+.2f}%)", "info",
-    )
-    return {"ok": True, "realized_pct": realized_pct}
+    tickets = await _tickets(active_only=True)
+    match = next((t for t in tickets if t.get("ticker") == _clean_ticker(ticker) and t.get("date") == play_date), None)
+    if not match:
+        return {"ok": False, "reason": "ticket_not_found"}
+    return await settle_ticket(match["ticket_id"], exit_price, reason="manual_legacy_settle")
 
 
 async def update_manual_peak_marks(refresh: bool = True) -> int:
-    """Refresh current_price + peak_price for every active manual play."""
-    if not refresh:
-        return 0
-    from . import pricer
-    db = get_db()
-    plays = await db.lottery_manual_plays.find({"is_active": True}, {"_id": 0}).to_list(200)
-    updated = 0
-    for p in plays:
-        cur = await pricer.get_latest_close(p["ticker"])
-        if cur is None:
-            continue
-        peak = max(p.get("peak_price") or 0, cur)
-        await db.lottery_manual_plays.update_one(
-            {"ticker": p["ticker"], "date": p["date"]},
-            {"$set": {"current_price": cur, "peak_price": peak,
-                       "marks_updated_at": _now().isoformat()}},
-        )
-        updated += 1
-    return updated
+    result = await refresh_settlements() if refresh else {"updated": 0}
+    return int(result.get("updated") or 0)
 
 
 async def list_manual_plays(active_only: bool = False) -> list[dict[str, Any]]:
-    db = get_db()
-    q = {"is_active": True} if active_only else {}
-    return await db.lottery_manual_plays.find(q, {"_id": 0}).sort("added_at", -1).to_list(500)
+    return await _tickets(active_only=active_only)
 
 
 async def lottery_manual_track_record() -> dict[str, Any]:
-    """Completely isolated from any other tracker."""
-    plays = await list_manual_plays(active_only=False)
-    settled = [p for p in plays if not p.get("is_active")]
-    winners = [p for p in settled if (p.get("realized_pct") or 0) > 0]
-    total_pnl = sum((p.get("realized_pct") or 0) for p in settled)
-    avg_winner = (sum(p["realized_pct"] for p in winners) / len(winners)) if winners else None
-    losers = [p for p in settled if (p.get("realized_pct") or 0) <= 0]
-    avg_loser = (sum(p["realized_pct"] for p in losers) / len(losers)) if losers else None
-    return {
-        "total_plays": len(plays),
-        "settled": len(settled),
-        "winners": len(winners),
-        "losers": len(losers),
-        "win_rate": round(len(winners) / len(settled), 3) if settled else None,
-        "avg_winner_pct": round(avg_winner, 2) if avg_winner is not None else None,
-        "avg_loser_pct": round(avg_loser, 2) if avg_loser is not None else None,
-        "total_pnl_pct": round(total_pnl, 2),
-        "history": settled,
-    }
+    record = await track_record()
+    rows = await _tickets(active_only=False)
+    record["history"] = [r for r in rows if r.get("status") == "CLOSED" or r.get("closed_at")]
+    return record
 
+
+async def manual_settle_track_pick(ticker: str, exit_ask: float, play_date: str) -> dict[str, Any]:
+    return await settle_manual_play(ticker, exit_ask, play_date)
+
+
+async def delete_track_pick(ticker: str, play_date: str) -> dict[str, Any]:
+    db = get_db()
+    res = await db.ll_tickets.delete_one({"ticker": _clean_ticker(ticker), "date": play_date})
+    return {"ok": bool(res.deleted_count), "deleted": res.deleted_count}
