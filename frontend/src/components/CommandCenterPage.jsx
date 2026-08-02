@@ -110,13 +110,6 @@ export default function CommandCenterPage() {
   const downFeeds = integrations.filter(i => qualityForIntegration(i).label === "DOWN");
   const uncheckedFeeds = integrations.filter(i => qualityForIntegration(i).label === "UNCHECKED");
   const optionalFeeds = integrations.filter(i => qualityForIntegration(i).label === "OPTIONAL");
-  const readyCount = [
-    health?.ready_for_scanning,
-    health?.ready_for_pm,
-    health?.ready_for_trade_floor,
-    health?.ready_for_journal_learning,
-  ].filter(Boolean).length;
-
   const pmSummary = pm?.summary || {};
   const account = health?.alpaca?.account || {};
   const scannerState = missionState(initialLoad, health?.ready_for_scanning, "READY", "BLOCKED");
@@ -187,50 +180,6 @@ export default function CommandCenterPage() {
           LAUNCH CONTROL
         </button>
       }>
-      <section className="acropolis-command-deck">
-        <div className="acropolis-identity">
-          <div className="acropolis-relief" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-            <span />
-          </div>
-          <div>
-            <div className="acropolis-kicker">ACROPOLIS COMMAND</div>
-            <h2>Capital command state</h2>
-            <p>
-              Live operating picture for scan readiness, safety gates, portfolio routing,
-              and data truth before capital moves.
-            </p>
-          </div>
-        </div>
-
-        <div className="acropolis-metrics">
-          <CommandDeckMetric label="Readiness" value={`${readyCount}/4`} detail="system gates" color={readyCount >= 3 ? "#4ade80" : "#fbbf24"} />
-          <CommandDeckMetric label="Latest scan" value={scan?.results?.length || 0} detail={fmtTime(scan?.finished_at || status?.last_scan_at)} color={accent} />
-          <CommandDeckMetric label="Live positions" value={livePositions.length} detail={`${pending.length} pending`} color={accent2} />
-          <CommandDeckMetric label="Equity" value={fmtMoney(account.equity)} detail={`cash ${fmtMoney(account.cash)}`} color="#e8ecf3" />
-        </div>
-
-        <div className="acropolis-control">
-          <div className="acropolis-control-row">
-            <span>Execution gate</span>
-            <strong style={{ color: gateColor }}>{gateDecision}</strong>
-          </div>
-          <div className="acropolis-control-row">
-            <span>Scanner</span>
-            <strong style={{ color: scannerState.color }}>{scannerState.value}</strong>
-          </div>
-          <div className="acropolis-control-row">
-            <span>PM</span>
-            <strong style={{ color: pmState.color }}>{pmState.value}</strong>
-          </div>
-          <button data-testid="launch-control-open-deck" onClick={() => setLauncherOpen(true)} className="acropolis-launch">
-            LAUNCH CONTROL
-          </button>
-        </div>
-      </section>
-
       <div style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 18 }}>
         <Card title="MISSION STATE" accentColor={accent}
           action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={smallTeal}>{backendRefreshing ? "REFRESHING" : "BACKEND REFRESH"}</button>}>
@@ -422,16 +371,6 @@ function MissionTile({ label, value, color, detail }) {
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.16em" }}>{label}</div>
       <div style={{ color, fontSize: 22, fontWeight: 800, marginTop: 8, letterSpacing: "0.08em" }}>{value}</div>
       <div style={{ color: muted, fontSize: 10, marginTop: 6, lineHeight: 1.4 }}>{detail}</div>
-    </div>
-  );
-}
-
-function CommandDeckMetric({ label, value, detail, color }) {
-  return (
-    <div className="acropolis-metric">
-      <span>{label}</span>
-      <strong style={{ color }}>{value}</strong>
-      <em>{detail}</em>
     </div>
   );
 }
