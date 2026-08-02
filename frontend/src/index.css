@@ -216,13 +216,88 @@ body {
     linear-gradient(180deg, #080b12 0%, #030408 100%);
 }
 
-.command-panel-wide {
-  grid-column: span 2;
+.terminal-brand-card {
+  min-height: 126px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
-@media (min-width: 1180px) {
-  .command-panel-wide {
-    grid-column: span 2;
+.terminal-brand-logo-wrap {
+  width: 100%;
+}
+
+.terminal-brand-logo {
+  width: min(176px, 100%);
+  height: auto;
+  aspect-ratio: 182 / 146;
+}
+
+.command-panel {
+  grid-column: span 4;
+}
+
+.command-panel-scan-funnel {
+  grid-column: span 3;
+}
+
+.command-panel-live-positions-risk-heat {
+  grid-column: span 4;
+}
+
+.command-panel-quality-matrix {
+  grid-column: span 5;
+}
+
+.command-panel-event-tape {
+  grid-column: span 5;
+}
+
+.command-panel-telegram-dispatch-queue {
+  grid-column: span 7;
+}
+
+.command-panel-execution-gate,
+.command-panel-top-scanner-output,
+.command-panel-system-state {
+  grid-column: span 4;
+}
+
+.command-panel-body {
+  min-width: 0;
+}
+
+@media (max-width: 1540px) {
+  .command-panel-scan-funnel,
+  .command-panel-live-positions-risk-heat {
+    grid-column: span 6;
+  }
+
+  .command-panel-quality-matrix,
+  .command-panel-event-tape,
+  .command-panel-telegram-dispatch-queue {
+    grid-column: span 12;
+  }
+
+  .command-panel-execution-gate,
+  .command-panel-top-scanner-output,
+  .command-panel-system-state {
+    grid-column: span 4;
+  }
+}
+
+@media (max-width: 1180px) {
+  .command-panel,
+  .command-panel-wide,
+  .command-panel-scan-funnel,
+  .command-panel-live-positions-risk-heat,
+  .command-panel-quality-matrix,
+  .command-panel-event-tape,
+  .command-panel-telegram-dispatch-queue,
+  .command-panel-execution-gate,
+  .command-panel-top-scanner-output,
+  .command-panel-system-state {
+    grid-column: span 12;
   }
 }
 .terminal-frame {

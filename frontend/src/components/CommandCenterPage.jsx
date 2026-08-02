@@ -274,8 +274,9 @@ export default function CommandCenterPage() {
 }
 
 function OpsPanel({ title, sub, action, live = false, wide = false, children }) {
+  const slug = String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
   return (
-    <section className={wide ? "command-panel command-panel-wide" : "command-panel"} style={opsPanel}>
+    <section className={`command-panel command-panel-${slug}${wide ? " command-panel-wide" : ""}`} style={opsPanel}>
       <div style={opsHeader}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <span style={opsTitle}>{title}</span>
@@ -286,7 +287,7 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
           {action}
         </div>
       </div>
-      <div style={opsBody}>{children}</div>
+      <div className="command-panel-body" style={opsBody}>{children}</div>
     </section>
   );
 }
@@ -585,8 +586,8 @@ function Empty({ text }) {
 
 const commandGrid = {
   display: "grid",
-  gridTemplateColumns: "1.05fr 1.35fr 1.3fr",
-  gap: 8,
+  gridTemplateColumns: "repeat(12, minmax(0, 1fr))",
+  gap: 10,
   alignItems: "stretch",
 };
 
@@ -595,13 +596,14 @@ const opsPanel = {
   background: "linear-gradient(180deg, rgba(8,16,20,0.94), rgba(5,7,11,0.98))",
   boxShadow: "inset 0 1px rgba(255,255,255,0.04), 0 0 18px rgba(0,0,0,0.24)",
   minHeight: 0,
+  minWidth: 0,
   overflow: "hidden",
 };
 
 const opsHeader = {
-  minHeight: 34,
+  minHeight: 32,
   borderBottom: "1px solid rgba(124,140,160,0.22)",
-  padding: "8px 10px",
+  padding: "7px 10px",
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
@@ -610,12 +612,12 @@ const opsHeader = {
 
 const opsTitle = { color: labelLight, fontSize: 11, fontWeight: 900, letterSpacing: "0.16em", whiteSpace: "nowrap" };
 const opsSub = { color: muted, fontSize: 9, letterSpacing: "0.12em" };
-const opsBody = { padding: "9px 10px" };
+const opsBody = { padding: "9px 10px", minWidth: 0 };
 const livePill = { color: "#4ade80", fontSize: 9, letterSpacing: "0.10em", display: "inline-flex", alignItems: "center", gap: 5, fontWeight: 900 };
 const tableHead = { color: muted, fontSize: 8, letterSpacing: "0.13em", fontWeight: 900 };
 const funnelStats = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 };
 const funnelWave = {
-  height: 76,
+  height: 62,
   margin: "8px 0 10px",
   position: "relative",
   borderTop: "1px solid rgba(125,247,222,0.22)",
@@ -629,19 +631,19 @@ const barRow = { display: "grid", gridTemplateColumns: "92px minmax(70px, 1fr) 7
 const barTrack = { height: 7, background: "rgba(255,255,255,0.06)", overflow: "hidden" };
 const barFill = { display: "block", height: "100%", background: "linear-gradient(90deg, #f87171, rgba(248,113,113,0.45))" };
 const totalRejected = { borderTop: hairline, marginTop: 10, paddingTop: 10, color: "#f87171", fontSize: 10, fontWeight: 900, display: "flex", justifyContent: "space-between", letterSpacing: "0.08em" };
-const tableWrap = { minWidth: 0, overflowX: "auto" };
+const tableWrap = { minWidth: 0, overflowX: "auto", overflowY: "hidden" };
 const heatHeader = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const heatRow = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const heatRow = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
 const heatFooter = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8 };
 const riskBadge = { display: "inline-flex", justifyContent: "center", padding: "3px 8px", fontSize: 9, fontWeight: 900, letterSpacing: "0.08em" };
 const qualityHeader = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const qualityRow = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const qualityRow = { display: "grid", gridTemplateColumns: "84px 1fr 78px 78px 82px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
 const qualityScore = { display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(74,222,128,0.28)", marginTop: 8, paddingTop: 8, color: "#8cc665", fontSize: 11, fontWeight: 900, letterSpacing: "0.10em" };
 const eventHeader = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const eventRow = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
+const eventRow = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
 const telegramHeader = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const telegramRow = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline };
-const scannerRow = { display: "grid", gridTemplateColumns: "70px 58px 1fr", gap: 8, padding: "8px 0", borderBottom: hairline, textDecoration: "none", fontSize: 11 };
+const telegramRow = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
+const scannerRow = { display: "grid", gridTemplateColumns: "70px 58px 1fr", gap: 8, padding: "7px 0", borderBottom: hairline, textDecoration: "none", fontSize: 11 };
 
 const tinyLink = {
   color: accent2,

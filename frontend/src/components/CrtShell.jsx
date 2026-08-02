@@ -558,7 +558,7 @@ export function CrtShell({ title, children, headerRight = null }) {
         }}>
           {/* Brand block */}
           <Link to="/" style={{ textDecoration: "none" }}>
-            <div className="corner-brackets" style={{
+            <div className="corner-brackets terminal-brand-card" style={{
               padding: "14px 12px",
               border: hairlineAccent,
               background: `linear-gradient(135deg, rgba(200,168,75,0.06) 0%, transparent 70%)`,
@@ -570,10 +570,8 @@ export function CrtShell({ title, children, headerRight = null }) {
                 background: `linear-gradient(90deg, transparent, ${accent}80, transparent)`,
                 opacity: 0.4,
               }} />
-              <div style={{ position: "relative", display: "flex", justifyContent: "center" }}>
-                <img src={terminalLogo} alt="Case Capital Trading Terminal" style={{
-                  width: "min(178px, 100%)",
-                  height: 96,
+              <div className="terminal-brand-logo-wrap" style={{ position: "relative", display: "flex", justifyContent: "center" }}>
+                <img className="terminal-brand-logo" src={terminalLogo} alt="Case Capital Trading Terminal" style={{
                   display: "block",
                   objectFit: "contain",
                   objectPosition: "center center",
