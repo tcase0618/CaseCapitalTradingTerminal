@@ -10,6 +10,7 @@ import asyncio
 import calendar
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -565,7 +566,11 @@ async def disagreement_performance(limit: int = 200) -> dict[str, Any]:
 async def status() -> dict[str, Any]:
     db = get_db()
     latest = await db.kronos_forecast_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
-    disagreements = await db.kronos_pm_disagreements.count_documents({"status": "OPEN_AUDIT"})
+    latest_key = (latest or {}).get("snapshot_key") or _snapshot_key((latest or {}).get("generated_at") or _now().isoformat())
+    disagreements = await db.kronos_pm_disagreements.count_documents({
+        "status": "OPEN_AUDIT",
+        "audit_id": {"$regex": f"^{re.escape(str(latest_key))}"},
+    })
     age = _age_minutes((latest or {}).get("generated_at"))
     summary = (latest or {}).get("summary") or {}
     now = _now()
