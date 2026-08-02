@@ -332,7 +332,13 @@ function ExecutionControlStrip({ safety }) {
   const breaker = safety.trading?.daily_loss_breaker?.last_check || safety.trading?.daily_loss_breaker || {};
   const gateColor = gateDecision === "PASS" || gateDecision === "ALLOW" ? "#4ade80" : gateDecision === "WATCH" ? "#fbbf24" : "#f87171";
   const regimeText = regime.status ? `${String(regime.status).toUpperCase()}${regime.halt_new_entries ? " / HALT" : ""}` : "SYNC";
-  const regimeColor = regime.halt_new_entries ? "#f87171" : regime.status === "yellow" ? "#fbbf24" : regime.status === "green" ? "#4ade80" : muted;
+  const regimeColor = regime.halt_new_entries || regime.status === "doomsday"
+    ? "#f87171"
+    : regime.status === "red"
+      ? "#fb7185"
+      : regime.status === "yellow" || regime.status === "downtrend"
+        ? "#fbbf24"
+        : regime.status === "green" ? "#4ade80" : muted;
   const ddText = breaker.drawdown_pct != null
     ? `${Number(breaker.drawdown_pct).toFixed(2)}% / ${breaker.threshold_pct || 3}%`
     : "--";

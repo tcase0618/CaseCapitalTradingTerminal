@@ -7,8 +7,10 @@ Alpaca paper API. All learning happens in `trade_floor_learning.py`.
 Execution Gates (ALL must pass simultaneously):
   • Trade Score > 20
   • ≥2 distinct signal types firing
-  • Regime gate clear (VIX < 25, SPY > 200-d EMA)
-  • No earnings in 10d (unless beat_prob > 65% AND spread structure)
+  • Regime gate clear unless DEFCON/unknown. RED and DOWNTREND do not
+    blindly halt; they force stricter PM modes and regime-specific tags.
+  • Pre-earnings prediction is not an execution override. PEAD-style rows
+    can flow after the print, but binary pre-print entries stay guarded.
   • < 10 open positions
   • Ticker NOT already in Alpaca open positions OR open orders
     (checked twice: at gate AND immediately before submission)
@@ -49,7 +51,9 @@ if ALPACA_TRADE_BASE.endswith("/v2"):
 ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
 
 MAX_OPEN_POSITIONS = 10
-VIX_HALT_THRESHOLD = 25.0
+VIX_RED_THRESHOLD = 25.0
+VIX_DOOMSDAY_THRESHOLD = 40.0
+SPY_INTRADAY_DOOMSDAY_DROP_PCT = -4.0
 TRADE_SCORE_MIN = 20
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -346,32 +350,79 @@ async def close_position(ticker: str) -> dict[str, Any] | None:
 
 # ─────── Regime gate ───────
 async def regime_status() -> dict[str, Any]:
-    """VIX + SPY 200-d EMA snapshot. Status = green/yellow/red."""
-    from . import pricer
+    """Four-weather market snapshot.
+
+    GREEN: SPY above 200d EMA and VIX below 25.
+    DOWNTREND: SPY below 200d EMA while volatility is not a shock.
+    RED: VIX shock. This dominates downtrend.
+    DOOMSDAY: crash/data-failure posture. This is the only automatic
+    hard-halt from this regime function.
+    """
     import yfinance as yf
 
     def _yf_calc():
         try:
-            spy = yf.Ticker("SPY").history(period="220d")["Close"]
+            spy_hist = yf.Ticker("SPY").history(period="220d")
+            spy = spy_hist["Close"]
             ema200 = spy.ewm(span=200, adjust=False).mean()
             spy_last = float(spy.iloc[-1])
+            spy_prev = float(spy.iloc[-2]) if len(spy) >= 2 else spy_last
             spy_ema = float(ema200.iloc[-1])
             vix = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-            return spy_last, spy_ema, vix
+            spy_day_change_pct = ((spy_last - spy_prev) / spy_prev * 100.0) if spy_prev else 0.0
+            return spy_last, spy_ema, vix, spy_day_change_pct
         except Exception:
-            return None, None, None
+            return None, None, None, None
     loop = asyncio.get_event_loop()
-    spy_last, spy_ema, vix = await loop.run_in_executor(None, _yf_calc)
+    spy_last, spy_ema, vix, spy_day_change_pct = await loop.run_in_executor(None, _yf_calc)
     if vix is None or spy_last is None:
-        return {"status": "unknown", "vix": None, "spy_last": None, "spy_ema200": None,
-                 "halt_new_entries": True, "reason": "regime_data_unavailable",
-                 "source": "yfinance_degraded_failed", "checked_at": _now().isoformat()}
-    halt = vix >= VIX_HALT_THRESHOLD or spy_last < spy_ema
-    color = "red" if halt else ("yellow" if vix >= 20 else "green")
+        return {
+            "status": "unknown",
+            "weather": "UNKNOWN",
+            "vix": None,
+            "spy_last": None,
+            "spy_ema200": None,
+            "spy_day_change_pct": None,
+            "halt_new_entries": True,
+            "reason": "regime_data_unavailable",
+            "playbook": "DATA_FAIL_SAFE",
+            "source": "yfinance_degraded_failed",
+            "checked_at": _now().isoformat(),
+        }
+
+    below_ema = spy_last < spy_ema
+    doomsday = vix >= VIX_DOOMSDAY_THRESHOLD or spy_day_change_pct <= SPY_INTRADAY_DOOMSDAY_DROP_PCT
+    if doomsday:
+        status = "doomsday"
+        playbook = "FREEZE_AND_TRIAGE"
+        halt = True
+        reason = "doomsday_trigger"
+    elif vix >= VIX_RED_THRESHOLD:
+        status = "red"
+        playbook = "VOL_SHOCK_HALF_SIZE"
+        halt = False
+        reason = "volatility_shock"
+    elif below_ema:
+        status = "downtrend"
+        playbook = "GRIND_RAISED_LONG_BAR"
+        halt = False
+        reason = "spy_below_200d_ema"
+    else:
+        status = "green"
+        playbook = "RISK_ON"
+        halt = False
+        reason = "risk_on"
     return {
-        "status": color, "vix": round(vix, 2),
-        "spy_last": round(spy_last, 2), "spy_ema200": round(spy_ema, 2),
+        "status": status,
+        "weather": status.upper(),
+        "vix": round(vix, 2),
+        "spy_last": round(spy_last, 2),
+        "spy_ema200": round(spy_ema, 2),
+        "spy_day_change_pct": round(spy_day_change_pct, 2),
+        "spy_below_200d": bool(below_ema),
         "halt_new_entries": bool(halt),
+        "reason": reason,
+        "playbook": playbook,
         "checked_at": _now().isoformat(),
     }
 
@@ -447,7 +498,7 @@ async def _gate_check(scan_row: dict[str, Any], *,
     if regime is None:
         regime = await regime_status()
     if regime.get("halt_new_entries"):
-        return False, f"regime halt (vix={regime.get('vix')}, spy_ema_break={regime.get('spy_last',0) < regime.get('spy_ema200',0)})"
+        return False, f"regime halt ({regime.get('status')}: {regime.get('reason')})"
     # Earnings within 10d gate
     earnings = scan_row.get("earnings") or {}
     days_to_er = earnings.get("days_until")
@@ -548,7 +599,13 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     pm_mode = portfolio_manager._mode_from_regime(regime)
     ruleset = await pm_rules.get_ruleset()
     profile_override = await pm_rules.profile_override_for(pm_mode)
-    pm_rows = portfolio_manager.evaluate_rows(scan_results, equity=equity, mode=pm_mode, profile_override=profile_override)
+    pm_rows = portfolio_manager.evaluate_rows(
+        scan_results,
+        equity=equity,
+        mode=pm_mode,
+        profile_override=profile_override,
+        regime=regime,
+    )
     pm_by_ticker = {r["ticker"]: r for r in pm_rows}
 
     for row in scan_results:

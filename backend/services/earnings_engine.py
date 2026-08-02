@@ -696,6 +696,64 @@ def _earnings_divergence(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def pead_signal(row: dict[str, Any]) -> dict[str, Any]:
+    """Post-earnings announcement drift signal.
+
+    This deliberately ignores pre-print beat predictions. It only activates
+    after a completed post-print reaction confirms direction. Guidance is
+    proxied by free headline/call-tone and growth fields until a transcript
+    source is connected.
+    """
+    reaction = row.get("post_earnings_reaction") or {}
+    reaction_pct = _num(reaction.get("reaction_pct"))
+    if reaction.get("status") != "complete" or reaction_pct is None:
+        return {
+            "active": False,
+            "direction": "NONE",
+            "reason": "post_print_reaction_not_complete",
+            "source": "earnings_engine",
+        }
+    tone = ((row.get("earnings_call_tone") or {}).get("tone") or "UNKNOWN").upper()
+    beat = _num(row.get("beat_probability_pct"))
+    setup_score = _num(row.get("earnings_setup_score"))
+    setup_rating = row.get("earnings_setup_rating")
+    bullish_context = tone == "BULLISH" or (beat is not None and beat >= 58) or (setup_score is not None and setup_score >= 62)
+    bearish_context = tone == "BEARISH" or (beat is not None and beat <= 42) or setup_rating == "AVOID"
+
+    if reaction_pct >= 2.0 and bullish_context:
+        strength = "HIGH" if reaction_pct >= 5.0 and tone == "BULLISH" else "MEDIUM"
+        return {
+            "active": True,
+            "direction": "BULLISH",
+            "signal": "PEAD_BULLISH_CONFIRMED",
+            "strength": strength,
+            "reaction_pct": reaction_pct,
+            "tone": tone,
+            "reason": "post-print reaction confirmed bullish earnings drift",
+            "source": "earnings_engine",
+        }
+    if reaction_pct <= -2.0 and bearish_context:
+        strength = "HIGH" if reaction_pct <= -5.0 and tone == "BEARISH" else "MEDIUM"
+        return {
+            "active": True,
+            "direction": "BEARISH",
+            "signal": "PEAD_BEARISH_CONFIRMED",
+            "strength": strength,
+            "reaction_pct": reaction_pct,
+            "tone": tone,
+            "reason": "post-print reaction confirmed bearish earnings drift",
+            "source": "earnings_engine",
+        }
+    return {
+        "active": False,
+        "direction": "NONE",
+        "reaction_pct": reaction_pct,
+        "tone": tone,
+        "reason": "post-print reaction did not confirm a clean PEAD setup",
+        "source": "earnings_engine",
+    }
+
+
 def _battle_card(row: dict[str, Any], hist: list[dict[str, Any]], moves: dict[str, Any],
                  options: dict[str, Any], setup: dict[str, Any], synopsis: dict[str, Any]) -> dict[str, Any]:
     latest = hist[-1] if hist else {}
@@ -1116,6 +1174,7 @@ async def current_week_with_probability(scan_tickers: set[str] | None = None,
             row["earnings_setup_rating"] = setup["rating"]
             row["options_pricing_signal"] = setup["pricing_signal"]
             row["avoid_flags"] = setup["avoid_flags"]
+            row["pead"] = pead_signal(row)
             row["option_strategy"] = _option_strategy(setup, beat, option_snap)
             row["battle_card"] = _battle_card(row, hist, moves, option_snap, setup, synopsis)
             return _json_safe(row)

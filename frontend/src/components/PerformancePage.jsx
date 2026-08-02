@@ -62,6 +62,7 @@ export default function PerformancePage() {
 
   const signals = perf?.signals || [];
   const options = perf?.options || {};
+  const proof = perf?.proof || null;
   const fwd = backtest?.forward || [];
   const syn = backtest?.synthetic || [];
 
@@ -99,6 +100,7 @@ export default function PerformancePage() {
 
       {/* ACTIVE vs CLOSED — v5.0 split */}
       <EdgeProofCard edge={edge} />
+      <ForwardProofCard proof={proof} />
 
       {(() => {
         const rows = tracker?.rows || [];
@@ -471,6 +473,56 @@ function EdgeProofCard({ edge }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ForwardProofCard({ proof }) {
+  const f30 = proof?.forward?.["30d"] || {};
+  const terminal = f30.terminal || {};
+  const alpha = f30.alpha_vs_spy || {};
+  const regime = proof?.latest_regime || {};
+  const tags = proof?.latest_scan_tags || {};
+  const regimeColor = regime.status === "green" ? "#4ade80"
+    : regime.status === "downtrend" ? "#fbbf24"
+    : regime.status === "red" || regime.status === "doomsday" ? "#f87171"
+    : muted;
+  return (
+    <Card title="FORWARD METRICS ENGINE / SPY PROOF LAYER" accentColor={regimeColor}>
+      {!proof ? (
+        <div style={{ color: muted, fontSize: 12, padding: 10 }}>Loading forward metrics...</div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
+            <MiniEdge label="REGIME" value={(regime.status || "UNKNOWN").toUpperCase()} color={regimeColor} />
+            <MiniEdge label="PLAYBOOK" value={regime.playbook || "--"} color={regimeColor} />
+            <MiniEdge label="30D N" value={terminal.n ?? 0} color={(terminal.n || 0) >= 50 ? "#4ade80" : "#fbbf24"} />
+            <MiniEdge label="30D EXPECT" value={`${fmt(terminal.expectancy_pct)}%`} color={pctColor(terminal.expectancy_pct)} />
+            <MiniEdge label="ALPHA/SPY" value={`${fmt(alpha.expectancy_pct)}%`} color={pctColor(alpha.expectancy_pct)} />
+            <MiniEdge label="PEAD" value={tags.pead_confirmed ?? 0} color={accent} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 10 }}>
+            <div style={edgePanel}>
+              <div style={edgeLabel}>TOP 30D SIGNAL PROOF</div>
+              {(proof.signals_30d || []).slice(0, 6).map((r, i) => (
+                <div key={`${r.signal}-${i}`} style={{ display: "grid", gridTemplateColumns: "1fr 54px 70px 70px", gap: 8, borderTop: i ? hairline : "none", padding: "7px 0", fontSize: 11 }}>
+                  <span style={{ color: labelLight, overflowWrap: "anywhere" }}>{r.signal}</span>
+                  <span style={{ color: muted, textAlign: "right" }}>n={r.n}</span>
+                  <span style={{ color: pctColor(r.win_rate_pct - 50), textAlign: "right" }}>{Number(r.win_rate_pct || 0).toFixed(1)}%</span>
+                  <span style={{ color: pctColor(r.expectancy_pct), textAlign: "right" }}>{fmt(r.expectancy_pct)}%</span>
+                </div>
+              ))}
+              {!(proof.signals_30d || []).length && <div style={edgeSub}>Waiting on 30D forward rows.</div>}
+            </div>
+            <div style={edgePanel}>
+              <div style={edgeLabel}>ENGINE NOTES</div>
+              {(proof.notes || []).map((n, i) => (
+                <div key={i} style={{ color: muted, fontSize: 10, lineHeight: 1.45, marginBottom: 6 }}>{n}</div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
     </Card>

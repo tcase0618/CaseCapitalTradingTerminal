@@ -583,7 +583,7 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="EQUITY BASIS" value={`$${Math.round(summary.equity_basis || 0)}`} sub={(summary.equity_source || "fallback").toUpperCase()} color={accent} accentBar />
-        <Stat label="PM MODE" value={summary.mode || plan?.mode || "—"} sub={`REGIME ${(regime.status || "UNKNOWN").toUpperCase()}`} color={regime.status === "red" ? "#f87171" : regime.status === "yellow" ? "#fbbf24" : accent2} />
+        <Stat label="PM MODE" value={summary.mode || plan?.mode || "—"} sub={`REGIME ${(regime.status || "UNKNOWN").toUpperCase()}`} color={regime.status === "red" || regime.status === "doomsday" ? "#f87171" : regime.status === "yellow" || regime.status === "downtrend" ? "#fbbf24" : accent2} />
         <Stat label="RULESET" value={plan?.ruleset?.name || "DEFAULT"} sub={plan?.ruleset?.ruleset_id || "PM"} color={accent} />
         <Stat label="ACCUMULATE" value={summary.accumulate || 0} sub="FULL RULE PASS" color="#4ade80" />
         <Stat label="STARTERS" value={summary.starter || 0} sub="PARTIAL SIZE" color={accent2} />

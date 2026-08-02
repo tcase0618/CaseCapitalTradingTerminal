@@ -38,8 +38,8 @@ class TestTradeFloor:
         r = client.get(f"{BASE_URL}/api/trade_floor/regime", timeout=TIMEOUT)
         assert r.status_code == 200, r.text
         d = r.json()
-        assert d.get("status") in ("green", "yellow", "red"), d
-        for k in ("vix", "spy_last", "spy_ema200", "halt_new_entries"):
+        assert d.get("status") in ("green", "yellow", "downtrend", "red", "doomsday", "unknown"), d
+        for k in ("vix", "spy_last", "spy_ema200", "halt_new_entries", "playbook"):
             assert k in d, f"missing {k}"
 
     def test_engine_status(self, client):

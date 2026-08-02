@@ -359,8 +359,17 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
 
     # ─────────── AXIOM v3.2 — Post-scan intelligence pipeline ───────────
     v32 = await _run_v32_pipeline(final)
+    try:
+        from . import trade_floor as _tf_regime
+        regime_snapshot = await asyncio.wait_for(_tf_regime.regime_status(), timeout=8.0)
+    except Exception:
+        regime_snapshot = {"status": "unknown", "reason": "regime_unavailable"}
+    for r in final:
+        r["regime"] = regime_snapshot.get("status")
+        r["regime_playbook"] = regime_snapshot.get("playbook")
     scan_doc.update({
         "v32": v32,
+        "regime": regime_snapshot,
         "max_conviction": v32.get("max_conviction") or {},
         "narrative_locks": v32.get("narrative_locks") or [],
         "dark_horse_alerts": v32.get("dark_horse") or [],
@@ -590,9 +599,11 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
     # Stitch alerts back into the scan result objects so the dashboard
     # can render badges inline
     earnings_tickers = set()
+    earnings_by_ticker: dict[str, dict[str, Any]] = {}
     for day_rows in (earnings_week.get("by_day") or {}).values():
         for r in day_rows:
             earnings_tickers.add(r["ticker"])
+            earnings_by_ticker[r["ticker"]] = r
     for r in final:
         t = r["ticker"]
         if t in dh_by_ticker:
@@ -601,6 +612,21 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
             r["x_factor"] = xf_by_ticker[t]
         if t in earnings_tickers:
             r["earnings_this_week"] = True
+            er = earnings_by_ticker.get(t) or {}
+            r["earnings_row"] = {
+                "earnings_date": er.get("earnings_date"),
+                "am_pm": er.get("am_pm"),
+                "beat_probability_pct": er.get("beat_probability_pct"),
+                "earnings_setup_rating": er.get("earnings_setup_rating"),
+                "post_earnings_reaction": er.get("post_earnings_reaction"),
+                "earnings_call_tone": er.get("earnings_call_tone"),
+            }
+            pead = er.get("pead") or {}
+            if pead.get("active"):
+                r["pead"] = pead
+                signal_name = pead.get("signal") or f"PEAD_{str(pead.get('direction') or 'CONFIRMED').upper()}"
+                if signal_name not in (r.get("signals") or []):
+                    r.setdefault("signals", []).append(signal_name)
 
     # 3) Lottery scoring (now that dark_horse is on results)
     lottery_picks = await lottery.evaluate_for_scan(final)
@@ -643,6 +669,12 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
             "total": earnings_week.get("total", 0),
             "week_of": earnings_week.get("week_of"),
             "by_day_counts": {d: len(rows) for d, rows in (earnings_week.get("by_day") or {}).items()},
+            "pead_confirmed": sum(
+                1
+                for day_rows in (earnings_week.get("by_day") or {}).values()
+                for row in day_rows
+                if (row.get("pead") or {}).get("active")
+            ),
         },
         "narrative_locks": conv["narrative_locks"],
         "max_conviction": {"top3": conv["top3"]},

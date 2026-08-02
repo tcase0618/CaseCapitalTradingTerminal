@@ -17,6 +17,7 @@ MODE_PROFILES = {
         "max_position_pct": 0.025,
         "max_single_name_risk_pct": 0.004,
         "max_gross_deployment_pct": 0.10,
+        "max_sector_deployment_pct": 0.18,
         "accumulate_score": 82,
         "accumulate_rr": 2.4,
         "starter_score": 72,
@@ -27,6 +28,7 @@ MODE_PROFILES = {
         "max_position_pct": 0.05,
         "max_single_name_risk_pct": 0.008,
         "max_gross_deployment_pct": 0.22,
+        "max_sector_deployment_pct": 0.22,
         "accumulate_score": 76,
         "accumulate_rr": 2.1,
         "starter_score": 64,
@@ -37,6 +39,7 @@ MODE_PROFILES = {
         "max_position_pct": 0.08,
         "max_single_name_risk_pct": 0.0125,
         "max_gross_deployment_pct": 0.35,
+        "max_sector_deployment_pct": 0.25,
         "accumulate_score": 70,
         "accumulate_rr": 1.8,
         "starter_score": 58,
@@ -47,6 +50,7 @@ MODE_PROFILES = {
         "max_position_pct": 0.12,
         "max_single_name_risk_pct": 0.018,
         "max_gross_deployment_pct": 0.55,
+        "max_sector_deployment_pct": 0.30,
         "accumulate_score": 64,
         "accumulate_rr": 1.5,
         "starter_score": 52,
@@ -192,6 +196,36 @@ def _option_view(row: dict[str, Any], rr: float) -> str:
     return "STOCK_PREFERRED"
 
 
+def _has_anchor_signal(signals: list[str], row: dict[str, Any]) -> bool:
+    sig_text = " ".join(str(s).lower() for s in signals)
+    if any(k in sig_text for k in ["insider", "contract", "gov", "pead", "post_earnings"]):
+        return True
+    if row.get("insider_summary") or row.get("gov_summary") or row.get("contracts"):
+        return True
+    pead = row.get("pead") or {}
+    return bool(pead.get("active"))
+
+
+def _regime_adjusted_action(action: str, score: float, rr: float, signals: list[str],
+                            row: dict[str, Any], regime: dict[str, Any] | None) -> tuple[str, str | None]:
+    status = str((regime or {}).get("status") or "green").lower()
+    if action not in {"ACCUMULATE", "STARTER"}:
+        return action, None
+    if status in {"unknown", "doomsday"}:
+        return "WATCH", f"regime {status} blocks new sizing"
+    if status == "red":
+        if _has_anchor_signal(signals, row) and score >= 72 and rr >= 1.7:
+            return "STARTER", "red regime: anchor signal allowed at starter posture"
+        return "WATCH", "red regime whitelist: only insider/contract/PEAD anchors can size"
+    if status == "downtrend":
+        if _has_anchor_signal(signals, row):
+            return action, "downtrend: anchored thesis allowed"
+        if score >= 84 and rr >= 2.2:
+            return "STARTER", "downtrend: raised long bar met"
+        return "WATCH", "downtrend whitelist: unanchored longs stay watch-only"
+    return action, None
+
+
 def _ratchet_profile(action: str, upside_pct: float, rr: float, signals: list[str]) -> dict[str, Any]:
     high_vol = "high_short_interest" in signals or "UNUSUAL_FLOW" in signals
     if upside_pct >= 60 or (high_vol and upside_pct >= 35):
@@ -309,6 +343,7 @@ def evaluate_rows(
     equity: float = DEFAULT_EQUITY,
     mode: str = "BALANCED",
     profile_override: dict[str, Any] | None = None,
+    regime: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     mode = (mode or "BALANCED").upper()
     profile = _profile_for(mode, profile_override)
@@ -328,6 +363,9 @@ def evaluate_rows(
         action = _action(score, rr, len(set(_signals(row))), risk_score, profile)
         reasons, cautions = _reasons(row, action, rr, upside, risk_score)
         signals = _signals(row)
+        action, regime_note = _regime_adjusted_action(action, score, rr, signals, row, regime)
+        if regime_note:
+            cautions.append(regime_note)
         sizing = _sizing(action, score, price, stop, equity, profile)
         ratchet = _ratchet_plan(action, price, target, stop, upside, rr, signals)
         out.append({
@@ -354,18 +392,24 @@ def evaluate_rows(
             "signal_score": row.get("signal_score"),
             "learning_score": row.get("learning_score"),
             "sector": row.get("sector"),
+            "regime": (regime or {}).get("status"),
+            "regime_playbook": (regime or {}).get("playbook"),
             "reasons": reasons,
             "cautions": cautions,
         })
     out.sort(key=lambda r: (r["action"] == "ACCUMULATE", r["action"] == "STARTER", r["pm_score"]), reverse=True)
     remaining_deploy = equity * profile["max_gross_deployment_pct"]
+    max_sector_deploy = equity * float(profile.get("max_sector_deployment_pct") or 0.25)
+    sector_used: dict[str, float] = {}
     for row in out:
         if row["action"] not in {"ACCUMULATE", "STARTER"}:
             continue
         desired = float(row["allocation_usd"] or 0)
         if desired <= 0:
             continue
-        approved = min(desired, max(0.0, remaining_deploy))
+        sector = (row.get("sector") or "Unknown").title()
+        sector_room = max(0.0, max_sector_deploy - sector_used.get(sector, 0.0))
+        approved = min(desired, max(0.0, remaining_deploy), sector_room)
         if approved <= 0:
             row["allocation_usd"] = 0.0
             row["shares"] = 0.0
@@ -373,7 +417,8 @@ def evaluate_rows(
             row["position_pct"] = 0.0
             row["action"] = "WATCH"
             row["ratchet_plan"] = {"enabled": False}
-            row["cautions"].append("portfolio gross deployment cap reached")
+            cap_reason = "sector exposure cap reached" if sector_room <= 0 else "portfolio gross deployment cap reached"
+            row["cautions"].append(cap_reason)
             continue
         if approved < desired:
             scale = approved / desired
@@ -381,8 +426,10 @@ def evaluate_rows(
             row["shares"] = round(float(row["shares"] or 0) * scale, 4)
             row["risk_usd"] = round(float(row["risk_usd"] or 0) * scale, 2)
             row["position_pct"] = round((approved / equity) * 100.0, 2) if equity > 0 else 0.0
-            row["cautions"].append("sized down by portfolio gross deployment cap")
+            cap_reason = "sized down by sector exposure cap" if approved == sector_room else "sized down by portfolio gross deployment cap"
+            row["cautions"].append(cap_reason)
         remaining_deploy -= approved
+        sector_used[sector] = sector_used.get(sector, 0.0) + approved
     return out
 
 
@@ -448,9 +495,9 @@ def _summary(rows: list[dict[str, Any]], equity: float, mode: str, equity_source
 
 def _mode_from_regime(regime: dict[str, Any]) -> str:
     status = (regime or {}).get("status")
-    if status == "red" or (regime or {}).get("halt_new_entries"):
+    if status in {"red", "doomsday", "unknown"} or (regime or {}).get("halt_new_entries"):
         return "RISK_OFF"
-    if status == "yellow":
+    if status in {"yellow", "downtrend"}:
         return "CONSERVATIVE"
     return "BALANCED"
 
@@ -511,7 +558,7 @@ async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO",
         ruleset = {"ruleset_id": "pm-default-v1", "name": "PM Default v1", "active": True}
         profile_override = {}
     profile = _profile_for(active_mode, profile_override)
-    recommendations = evaluate_rows(rows, equity=equity_basis, mode=active_mode, profile_override=profile_override)
+    recommendations = evaluate_rows(rows, equity=equity_basis, mode=active_mode, profile_override=profile_override, regime=regime)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "scan_finished_at": (scan or {}).get("finished_at"),
@@ -530,6 +577,12 @@ async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO",
             "max_position_pct": profile["max_position_pct"],
             "max_single_name_risk_pct": profile["max_single_name_risk_pct"],
             "max_gross_deployment_pct": profile["max_gross_deployment_pct"],
+            "max_sector_deployment_pct": profile.get("max_sector_deployment_pct"),
+            "regime_whitelist": {
+                "red": "starter sizing only for insider, contract, or PEAD anchors",
+                "downtrend": "anchored longs allowed; unanchored longs require raised score and RR",
+                "doomsday": "watch-only; no new sizing",
+            },
             "mode_profiles": MODE_PROFILES,
             "actions": {
                 "ACCUMULATE": f"pm_score >= {profile['accumulate_score']}, risk/reward >= {profile['accumulate_rr']}, at least 3 signals, risk_score < 75",
