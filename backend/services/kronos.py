@@ -183,21 +183,63 @@ async def market_forecast() -> dict[str, Any]:
 
 
 def _score(row: dict[str, Any], pm_row: dict[str, Any]) -> float | None:
-    return _num(
+    score = _num(
         row.get("trade_score")
         or row.get("signal_score")
         or row.get("case_score")
         or row.get("learning_score")
+        or pm_row.get("pm_score")
         or pm_row.get("score")
     )
+    if score is not None and score > 10:
+        return round(score / 10.0, 2)
+    return score
 
 
 def _pm_rows(pm: dict[str, Any]) -> list[dict[str, Any]]:
-    for key in ("decisions", "plan", "rows", "candidates"):
+    for key in ("recommendations", "decisions", "plan", "rows", "candidates"):
         if isinstance(pm.get(key), list):
             return pm[key]
     summary = pm.get("summary") or {}
     return summary.get("decisions") or []
+
+
+def _snapshot_key(ts: str) -> str:
+    day = str(ts or _now().isoformat())[:10]
+    return f"kronos-latest-{day}"
+
+
+def _age_minutes(ts: Any) -> float | None:
+    try:
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return max(0.0, (_now() - d).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+def _freshness_status(age_minutes: float | None) -> str:
+    if age_minutes is None:
+        return "MISSING"
+    if age_minutes <= 20:
+        return "LIVE"
+    if age_minutes <= 180:
+        return "AGING"
+    return "STALE"
+
+
+def _action_allows_position(action: str, instrument: str) -> bool:
+    action = str(action or "").upper()
+    if action == "BOTH":
+        return True
+    if action == "EQUITY" and instrument == "EQUITY":
+        return True
+    if action == "OPTION" and instrument == "OPTION":
+        return True
+    if action in {"ACCUMULATE", "STARTER", "WATCH"}:
+        return instrument == "EQUITY"
+    return False
 
 
 def _bias(score: float | None, pm_action: str, instrument: str, pnl_pct: float | None, risk: dict[str, Any]) -> dict[str, Any]:
@@ -206,6 +248,12 @@ def _bias(score: float | None, pm_action: str, instrument: str, pnl_pct: float |
         return {"label": "BEARISH", "base": -2.2, "bear": -6.5, "bull": 2.8}
     if theta_watch and instrument == "OPTION":
         return {"label": "HEDGE", "base": 0.8, "bear": -8.0, "bull": 8.5}
+    if pm_action == "ACCUMULATE":
+        return {"label": "BULLISH", "base": 5.5, "bear": -4.5, "bull": 12.0}
+    if pm_action == "STARTER":
+        return {"label": "BULLISH", "base": 3.8, "bear": -3.5, "bull": 8.5}
+    if pm_action == "WATCH":
+        return {"label": "CHOP", "base": 1.2, "bear": -3.8, "bull": 4.5}
     if pm_action == "BOTH" or (score or 0) >= 8.2:
         return {"label": "BULLISH", "base": 24.0 if instrument == "OPTION" else 5.5, "bear": -20.0 if instrument == "OPTION" else -4.5, "bull": 85.0 if instrument == "OPTION" else 12.0}
     if pm_action == "OPTION" or (score or 0) >= 7:
@@ -357,10 +405,12 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
         signal = scan_by_ticker.get(pos["ticker"], {})
         pm_row = pm_by_ticker.get(pos["ticker"], {})
         pm_action = str(pm_row.get("action") or pm_row.get("route") or pm_row.get("decision") or signal.get("pm_action") or signal.get("pm_route") or "UNMAPPED").upper()
+        if not pm_row and not signal and (pos.get("market_value") or pos.get("quantity")):
+            pm_action = "HELD_NOT_IN_LATEST_PM"
         score = _score(signal, pm_row)
         bias = _bias(score, pm_action, pos["instrument"], pos.get("unrealized_pct"), pos.get("risk") or {})
         confidence = int(max(18, min(92, 38 + ((score or 5) * 3) + (12 if pm_row else 0) + (10 if signal else 0) - (5 if pos["instrument"] == "OPTION" else 0))))
-        aligned = _aligned(pm_action, bias["label"])
+        aligned = _aligned(pm_action, bias["label"]) or _action_allows_position(pm_action, pos["instrument"])
         probs = _probabilities(bias["base"], pos["instrument"])
         tripwires = _tripwires(pos, score, pm_action)
         kscore = _kronos_score(confidence, score, aligned, probs, len(tripwires), bias["base"])
@@ -389,10 +439,14 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
         forecasts.append(row)
 
     forecasts.sort(key=lambda r: r.get("kronos_score") or 0, reverse=True)
-    disagreements = [r for r in forecasts if not r.get("aligned_with_pm")]
+    disagreements = [
+        r for r in forecasts
+        if not r.get("aligned_with_pm") and r.get("pm_action") not in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}
+    ]
     payload = {
         "ok": True,
         "generated_at": _now().isoformat(),
+        "snapshot_key": None,
         "model_mode": "proxy_live_advisory",
         "read_only": True,
         "market_forecast": market,
@@ -411,14 +465,35 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
             "chop": sum(1 for r in forecasts if r["forecast_bias"] == "CHOP"),
             "pm_disagreements": len(disagreements),
             "avg_kronos_score": round(sum(r["kronos_score"] for r in forecasts) / len(forecasts), 1) if forecasts else 0,
+            "mapped_pm": sum(1 for r in forecasts if r.get("pm_action") not in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}),
+            "unmapped_pm": sum(1 for r in forecasts if r.get("pm_action") in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}),
+            "stale_position_context": sum(1 for r in forecasts if r.get("pm_action") == "HELD_NOT_IN_LATEST_PM"),
+            "risk_flags": sum(len(r.get("tripwires") or []) for r in forecasts),
         },
     }
+    payload["snapshot_key"] = _snapshot_key(payload["generated_at"])
     if persist:
         try:
             db = get_db()
-            await db.kronos_forecast_snapshots.insert_one(stamped(payload))
-            if disagreements:
-                await db.kronos_pm_disagreements.insert_many([stamped({
+            await db.kronos_forecast_runs.insert_one(stamped(payload))
+            await db.kronos_forecast_snapshots.update_one(
+                {"snapshot_key": payload["snapshot_key"]},
+                {"$set": stamped(payload)},
+                upsert=True,
+            )
+            for r in disagreements:
+                audit_id = "|".join([
+                    str(payload["snapshot_key"]),
+                    str(r.get("ticker")),
+                    str(r.get("instrument")),
+                    str(r.get("contract") or ""),
+                    str(r.get("pm_action")),
+                    str(r.get("forecast_bias")),
+                ])
+                await db.kronos_pm_disagreements.update_one(
+                    {"audit_id": audit_id},
+                    {"$setOnInsert": stamped({
+                    "audit_id": audit_id,
                     "ticker": r["ticker"],
                     "instrument": r["instrument"],
                     "contract": r.get("contract"),
@@ -428,7 +503,9 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
                     "forecast_pct": r["forecast_pct"],
                     "generated_at": payload["generated_at"],
                     "status": "OPEN_AUDIT",
-                }) for r in disagreements])
+                    })},
+                    upsert=True,
+                )
         except Exception as exc:
             logger.debug("kronos persistence skipped: %s", exc)
     return payload
@@ -445,6 +522,8 @@ def _tripwires(pos: dict[str, Any], score: float | None, pm_action: str) -> list
         flags.append("DRAWDOWN")
     if score is None:
         flags.append("NO_CASE_SCORE")
+    if pm_action == "HELD_NOT_IN_LATEST_PM":
+        flags.append("OUTSIDE_LATEST_PM")
     if pm_action == "UNMAPPED":
         flags.append("NO_PM_MAP")
     return flags
@@ -481,6 +560,47 @@ async def disagreement_performance(limit: int = 200) -> dict[str, Any]:
         "summary": list(grouped.values()),
         "note": "Performance resolves as future P/L records mature; open audits are retained for review.",
     }
+
+
+async def status() -> dict[str, Any]:
+    db = get_db()
+    latest = await db.kronos_forecast_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
+    disagreements = await db.kronos_pm_disagreements.count_documents({"status": "OPEN_AUDIT"})
+    age = _age_minutes((latest or {}).get("generated_at"))
+    summary = (latest or {}).get("summary") or {}
+    now = _now()
+    start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    end_day = calendar.monthrange(now.year, now.month)[1]
+    end = datetime(now.year, now.month, end_day, 23, 59, 59, tzinfo=timezone.utc)
+    scored_days = await db.kronos_forecast_snapshots.count_documents(
+        {"generated_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}}
+    )
+    health = _freshness_status(age)
+    if summary.get("unmapped_pm", 0) and summary.get("positions", 0):
+        health = "DEGRADED" if health == "LIVE" else health
+    return {
+        "ok": True,
+        "health": health,
+        "latest_snapshot_at": (latest or {}).get("generated_at"),
+        "snapshot_age_minutes": round(age, 1) if age is not None else None,
+        "positions": summary.get("positions", 0),
+        "mapped_pm": summary.get("mapped_pm", 0),
+        "unmapped_pm": summary.get("unmapped_pm", 0),
+        "stale_position_context": summary.get("stale_position_context", 0),
+        "risk_flags": summary.get("risk_flags", 0),
+        "open_disagreement_audits": disagreements,
+        "calendar": {
+            "direction_win_rate_pct": None,
+            "cone_win_rate_pct": None,
+            "scored_days": scored_days,
+        },
+    }
+
+
+async def refresh_snapshot() -> dict[str, Any]:
+    payload = await forecast(persist=True)
+    stat = await status()
+    return {"ok": True, "forecast": payload, "status": stat}
 
 
 async def calendar_month(year: int, month: int) -> dict[str, Any]:

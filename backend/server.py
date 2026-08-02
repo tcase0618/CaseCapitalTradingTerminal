@@ -1261,6 +1261,18 @@ async def kronos_forecast(persist: bool = True):
     return await kronos.forecast(persist=persist)
 
 
+@api.get("/kronos/status")
+async def kronos_status():
+    from services import kronos
+    return await kronos.status()
+
+
+@api.post("/kronos/refresh")
+async def kronos_refresh():
+    from services import kronos
+    return await kronos.refresh_snapshot()
+
+
 @api.get("/kronos/market_forecast")
 async def kronos_market_forecast():
     from services import kronos

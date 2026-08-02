@@ -35,6 +35,7 @@ export default function KronosPage() {
   const [lseHealth, setLseHealth] = useState(null);
   const [macro, setMacro] = useState(null);
   const [kronos, setKronos] = useState(null);
+  const [kronosStatus, setKronosStatus] = useState(null);
   const [disagreements, setDisagreements] = useState(null);
   const [tab, setTab] = useState("FORECAST");
   const [selectedKey, setSelectedKey] = useState(null);
@@ -53,6 +54,7 @@ export default function KronosPage() {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const refreshInFlight = useRef(false);
 
@@ -63,7 +65,7 @@ export default function KronosPage() {
     const get = (path, fallback, timeout = 10000) =>
       axios.get(`${API}${path}`, { timeout }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
     try {
-      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, disagreementRes] = await Promise.all([
+      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, disagreementRes] = await Promise.all([
         get("/scan/latest", { results: [] }),
         get("/portfolio_manager/latest", { decisions: [] }, 12000),
         get("/trade_floor/positions", { db_positions: [], live_alpaca: [] }),
@@ -74,6 +76,7 @@ export default function KronosPage() {
         get("/data/lse/health", { ok: false }),
         get("/data/lse/macro?limit=80", { economic_calendar: [], bond_yields: [] }),
         get("/kronos/forecast?persist=true", { forecasts: [] }, 12000),
+        get("/kronos/status", { ok: false, health: "DEGRADED" }, 12000),
         get("/kronos/disagreements?limit=250", { rows: [] }),
       ]);
       setScan(scanRes.data);
@@ -86,6 +89,7 @@ export default function KronosPage() {
       setLseHealth(healthRes.data);
       setMacro(macroRes.data);
       setKronos(kronosRes.data);
+      setKronosStatus(statusRes.data);
       setDisagreements(disagreementRes.data);
       setLastSync(new Date().toISOString());
     } finally {
@@ -100,6 +104,21 @@ export default function KronosPage() {
     return () => clearInterval(id);
   }, [refresh]);
 
+  const forceRefresh = useCallback(async () => {
+    if (actionLoading) return;
+    setActionLoading(true);
+    try {
+      const r = await axios.post(`${API}/kronos/refresh`, {}, { timeout: 16000 });
+      setKronos(r.data?.forecast || r.data);
+      setKronosStatus(r.data?.status || null);
+      const d = await axios.get(`${API}/kronos/disagreements?limit=250`, { timeout: 10000 }).catch(() => null);
+      if (d?.data) setDisagreements(d.data);
+      setLastSync(new Date().toISOString());
+    } finally {
+      setActionLoading(false);
+    }
+  }, [actionLoading]);
+
   const forecasts = useMemo(() => buildForecasts({
     scan,
     pm,
@@ -110,12 +129,14 @@ export default function KronosPage() {
     tracker,
     macro,
   }), [scan, pm, equityPositions, optionPositions, optionRisk, optionTrades, tracker, macro]);
+  const backendForecasts = useMemo(() => normalizeBackendForecasts(kronos), [kronos]);
+  const activeForecasts = backendForecasts.length ? backendForecasts : forecasts;
 
   useEffect(() => {
-    if (!selectedKey && forecasts.length) setSelectedKey(forecasts[0].key);
-  }, [forecasts, selectedKey]);
+    if (!selectedKey && activeForecasts.length) setSelectedKey(activeForecasts[0].key);
+  }, [activeForecasts, selectedKey]);
 
-  const selected = forecasts.find(f => f.key === selectedKey) || forecasts[0] || null;
+  const selected = activeForecasts.find(f => f.key === selectedKey) || activeForecasts[0] || null;
   const selectedBackend = useMemo(() => {
     if (!selected) return null;
     return (kronos?.forecasts || []).find(r =>
@@ -126,9 +147,9 @@ export default function KronosPage() {
   const selectedFull = selected ? { ...selected, ...(selectedBackend || {}) } : null;
   const market = useMemo(() => kronos?.market_forecast || {}, [kronos]);
   const cone = useMemo(() => kronos?.portfolio_day_cone || {}, [kronos]);
-  const chartChoices = useMemo(() => buildChartChoices(forecasts), [forecasts]);
+  const chartChoices = useMemo(() => buildChartChoices(activeForecasts), [activeForecasts]);
   const chartChoice = chartChoices.find(c => c.key === chartKey) || chartChoices[0];
-  const chartForecast = useMemo(() => buildChartForecast(chartChoice, forecasts, market), [chartChoice, forecasts, market]);
+  const chartForecast = useMemo(() => buildChartForecast(chartChoice, activeForecasts, market), [chartChoice, activeForecasts, market]);
 
   useEffect(() => {
     if (!chartChoices.find(c => c.key === chartKey)) setChartKey("SPY");
@@ -152,10 +173,10 @@ export default function KronosPage() {
     return () => { cancelled = true; };
   }, [selected?.ticker]);
 
-  const stats = useMemo(() => summarizeForecasts(forecasts, lseHealth, selectedContext), [forecasts, lseHealth, selectedContext]);
+  const stats = useMemo(() => summarizeForecasts(activeForecasts, lseHealth, selectedContext), [activeForecasts, lseHealth, selectedContext]);
   const scenario = selectedFull ? buildScenario(selectedFull) : [];
-  const radarRows = buildRadar(forecasts);
-  const tripwires = forecasts.filter(f => f.tripwires.length > 0);
+  const radarRows = buildRadar(activeForecasts);
+  const tripwires = activeForecasts.filter(f => f.tripwires.length > 0);
   const macroTone = inferMacroTone(macro);
 
   useEffect(() => {
@@ -219,24 +240,25 @@ export default function KronosPage() {
   return (
     <CrtShell
       title="KRONOS FORECAST LAB"
-      headerRight={<button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "SYNCING" : "REFRESH KRONOS"}</button>}
+      headerRight={<div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "SYNCING" : "REFRESH VIEW"}</button>
+        <button onClick={forceRefresh} disabled={actionLoading} style={buttonStyle(accent)}>{actionLoading ? "RUNNING" : "FORCE KRONOS"}</button>
+      </div>}
     >
       <div style={hero}>
         <MarketForecastBand market={market} cone={cone} />
         <div style={bootBox}>
-          <div style={bootRow}><span>MODEL MODE</span><strong>PROXY LIVE</strong></div>
-          <div style={bootRow}><span>LSE DATA</span><strong style={{ color: lseHealth?.ok ? "#4ade80" : "#fbbf24" }}>{lseHealth?.ok ? "ONLINE" : "DEGRADED"}</strong></div>
-          <div style={bootRow}><span>PM LINK</span><strong>{pm?.error ? "DEGRADED" : "READING"}</strong></div>
-          <div style={bootRow}><span>LAST SYNC</span><strong>{fmtTime(lastSync)}</strong></div>
+          <KronosStatusPanel status={kronosStatus} lseHealth={lseHealth} pm={pm} lastSync={lastSync} />
         </div>
       </div>
 
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="OPEN UNDERLYINGS" value={stats.underlyings} sub={`${forecasts.length} instruments`} color={accent} accentBar />
+        <Stat label="MODEL HEALTH" value={kronosStatus?.health || "CHECKING"} sub={`snapshot ${ageText(kronosStatus?.snapshot_age_minutes)}`} color={healthColor(kronosStatus?.health)} accentBar />
+        <Stat label="OPEN UNDERLYINGS" value={stats.underlyings} sub={`${activeForecasts.length} instruments`} color={accent} />
         <Stat label="SPY TODAY" value={`${market.direction || "UNKNOWN"} ${signed(market.forecast_pct)}%`} sub={`cone ${signed(market.cone_low_pct)} to ${signed(market.cone_high_pct)}%`} color={marketColor(market.direction)} />
         <Stat label="P/L DAY CONE" value={fmtMoney(cone.base_usd)} sub={`${fmtMoney(cone.low_usd)} to ${fmtMoney(cone.high_usd)}`} color={Number(cone.base_usd || 0) >= 0 ? "#4ade80" : "#f87171"} />
         <Stat label="NET FORECAST" value={stats.netBias} sub={`${stats.bullish} bull / ${stats.bearish} bear`} color={biasColors[stats.netBias] || accent} />
-        <Stat label="PM ALIGNED" value={`${stats.alignedPct}%`} sub={`${stats.aligned}/${forecasts.length || 0} positions`} color={stats.alignedPct >= 70 ? "#4ade80" : "#fbbf24"} />
+        <Stat label="PM ALIGNED" value={`${stats.alignedPct}%`} sub={`${stats.aligned}/${activeForecasts.length || 0} positions`} color={stats.alignedPct >= 70 ? "#4ade80" : "#fbbf24"} />
         <Stat label="AT RISK" value={stats.atRisk} sub="tripwire flags" color={stats.atRisk ? "#f87171" : "#4ade80"} />
         <Stat label="OPTIONS DECAY" value={stats.thetaWatch} sub="theta watch" color={stats.thetaWatch ? "#fbbf24" : "#4ade80"} />
         <Stat label="MACRO TONE" value={macroTone.label} sub={macroTone.detail} color={macroTone.color} />
@@ -287,9 +309,10 @@ export default function KronosPage() {
       {tab === "FORECAST MEMORY" && (
         <Card title="FORECAST MEMORY / MODEL ACCOUNTABILITY" accentColor={accent2}>
           <div style={memoryGrid}>
-            <MemoryItem label="Snapshots" value="AUTO" detail="Every Kronos forecast endpoint call stores a snapshot." />
+            <MemoryItem label="Latest Snapshot" value={kronosStatus?.health || "CHECKING"} detail={`Age: ${ageText(kronosStatus?.snapshot_age_minutes)}. Latest daily snapshot updates in place; full runs are retained separately.`} />
             <MemoryItem label="Disagreement Audits" value={(disagreements?.rows || []).length} detail="Each PM conflict is saved for future return review." />
-            <MemoryItem label="Resolution Status" value="OPEN" detail={disagreements?.note || "Matures as future P/L data arrives."} />
+            <MemoryItem label="PM Map" value={`${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0}`} detail={`${kronosStatus?.unmapped_pm ?? 0} open instruments still unmapped to PM.`} />
+            <MemoryItem label="Calendar Score" value={kronosStatus?.calendar?.scored_days ?? 0} detail={`Direction win ${kronosStatus?.calendar?.direction_win_rate_pct ?? "-"}% / cone win ${kronosStatus?.calendar?.cone_win_rate_pct ?? "-"}%.`} />
             <MemoryItem label="Morning Report" value="09:30" detail="SPY forecast plus open-position P/L cone dispatches to Telegram Mon-Fri." />
           </div>
         </Card>
@@ -308,7 +331,7 @@ export default function KronosPage() {
 
       {tab === "FORECAST" && <div style={topGrid}>
         <Card title="KRONOS SELECTION MATRIX" accentColor="#a78bfa">
-          <SelectionMatrix rows={forecasts} selectedKey={selected?.key} onSelect={setSelectedKey} />
+          <SelectionMatrix rows={activeForecasts} selectedKey={selected?.key} onSelect={setSelectedKey} />
         </Card>
 
         <Card title={selectedFull ? `SCENARIO FAN / ${selectedFull.ticker}` : "SCENARIO FAN"} accentColor={accent2}>
@@ -345,9 +368,24 @@ export default function KronosPage() {
           optionRisk={optionRisk}
           tracker={tracker}
           lseHealth={lseHealth}
+          kronosStatus={kronosStatus}
         />
       </Card>
     </CrtShell>
+  );
+}
+
+function KronosStatusPanel({ status, lseHealth, pm, lastSync }) {
+  return (
+    <>
+      <div style={bootRow}><span>MODEL HEALTH</span><strong style={{ color: healthColor(status?.health) }}>{status?.health || "CHECKING"}</strong></div>
+      <div style={bootRow}><span>SNAPSHOT AGE</span><strong>{ageText(status?.snapshot_age_minutes)}</strong></div>
+      <div style={bootRow}><span>PM MAP</span><strong style={{ color: (status?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80" }}>{status?.mapped_pm ?? 0}/{status?.positions ?? 0}</strong></div>
+      <div style={bootRow}><span>OPEN AUDITS</span><strong style={{ color: status?.open_disagreement_audits ? "#fbbf24" : "#4ade80" }}>{status?.open_disagreement_audits ?? 0}</strong></div>
+      <div style={bootRow}><span>LSE DATA</span><strong style={{ color: lseHealth?.ok ? "#4ade80" : "#fbbf24" }}>{lseHealth?.ok ? "ONLINE" : "DEGRADED"}</strong></div>
+      <div style={bootRow}><span>PM LINK</span><strong>{pm?.error ? "DEGRADED" : "READING"}</strong></div>
+      <div style={bootRow}><span>LAST SYNC</span><strong>{fmtTime(lastSync)}</strong></div>
+    </>
   );
 }
 
@@ -881,8 +919,10 @@ function OptionsFlow({ context }) {
   );
 }
 
-function AuditGrid({ scan, pm, equityPositions, optionPositions, optionRisk, tracker, lseHealth }) {
+function AuditGrid({ scan, pm, equityPositions, optionPositions, optionRisk, tracker, lseHealth, kronosStatus }) {
   const items = [
+    auditItem("Kronos Snapshot", kronosStatus?.health || "CHECKING", healthColor(kronosStatus?.health)),
+    auditItem("Kronos PM Map", `${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0}`, (kronosStatus?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80"),
     auditItem("Latest Scan", scan?.error ? "DEGRADED" : `${scan?.results?.length || 0} rows`, scan?.error ? "#fbbf24" : "#4ade80"),
     auditItem("Portfolio Manager", pm?.error ? "DEGRADED" : "CONNECTED", pm?.error ? "#fbbf24" : "#4ade80"),
     auditItem("Equity Positions", equityPositions?.error ? "DEGRADED" : `${normalizeEquityPositions(equityPositions).length} rows`, equityPositions?.error ? "#fbbf24" : accent2),
@@ -901,6 +941,43 @@ function AuditGrid({ scan, pm, equityPositions, optionPositions, optionRisk, tra
       ))}
     </div>
   );
+}
+
+function normalizeBackendForecasts(kronos) {
+  return (kronos?.forecasts || []).map((r) => {
+    const ticker = normalizeTicker(r.ticker || r.symbol);
+    const instrument = String(r.instrument || "EQUITY").toUpperCase();
+    const bias = String(r.forecast_bias || r.bias || "CHOP").toUpperCase();
+    const color = biasColors[bias] || accent;
+    const baseMove = numberish(r.forecast_pct) ?? 0;
+    const bearMove = numberish(r.bear_pct) ?? baseMove - 3;
+    const bullMove = numberish(r.bull_pct) ?? baseMove + 5;
+    const key = `${instrument}:${r.contract || ticker}`;
+    return {
+      ...r,
+      key,
+      ticker,
+      instrument,
+      contract: r.contract || null,
+      score: numberish(r.case_score),
+      pmAction: String(r.pm_action || "UNMAPPED").toUpperCase(),
+      bias,
+      color,
+      confidence: numberish(r.confidence) ?? 0,
+      aligned: Boolean(r.aligned_with_pm),
+      horizon: instrument === "OPTION" ? "1-10 trading days" : "5-20 trading days",
+      catalysts: r.catalysts || [],
+      tripwires: r.tripwires || [],
+      marketValue: numberish(r.market_value),
+      unrealizedPct: normalizePct(r.unrealized_pct),
+      baseMove,
+      bearMove,
+      bullMove,
+      edgeScore: numberish(r.kronos_score) ?? 0,
+      note: `Backend Kronos forecast from ${r.pm_action || "unmapped PM"} route, current exposure, scan evidence, and risk state.`,
+      path: buildPath(baseMove),
+    };
+  }).filter(r => r.ticker).sort((a, b) => (b.edgeScore || 0) - (a.edgeScore || 0));
 }
 
 function buildForecasts({ scan, pm, equityPositions, optionPositions, optionRisk, optionTrades, tracker, macro }) {
@@ -942,7 +1019,8 @@ function buildForecasts({ scan, pm, equityPositions, optionPositions, optionRisk
     const signal = scanByTicker.get(p.ticker) || {};
     const decision = pmByTicker.get(p.ticker) || {};
     const perf = perfByTicker.get(p.ticker) || {};
-    const score = numberish(signal.trade_score ?? signal.signal_score ?? signal.case_score ?? signal.score ?? decision.score);
+    const rawScore = numberish(signal.trade_score ?? signal.signal_score ?? signal.case_score ?? signal.score ?? decision.pm_score ?? decision.score);
+    const score = rawScore != null && rawScore > 10 ? rawScore / 10 : rawScore;
     const pmAction = String(decision.action || decision.route || decision.decision || signal.pm_action || signal.pm_route || "").toUpperCase() || "UNMAPPED";
     const catalysts = catalystTags(signal, perf, macro);
     const bias = forecastBias(score, pmAction, p.unrealizedPct, p.instrument, p.risk);
@@ -1198,6 +1276,9 @@ function forecastBias(score, pmAction, unrealizedPct, instrument, risk = {}) {
   const thetaWatch = String(risk.theta_status || "").toUpperCase() === "WATCH";
   if (pmAction === "PASS") return { label: "BEARISH", color: "#f87171", baseMove: -2.2, bearMove: -6.5, bullMove: 2.8 };
   if (thetaWatch && instrument === "OPTION") return { label: "HEDGE", color: "#a78bfa", baseMove: 0.8, bearMove: -8.0, bullMove: 8.5 };
+  if (pmAction === "ACCUMULATE") return { label: "BULLISH", color: "#4ade80", baseMove: 5.5, bearMove: -4.5, bullMove: 12 };
+  if (pmAction === "STARTER") return { label: "BULLISH", color: "#86efac", baseMove: 3.8, bearMove: -3.5, bullMove: 8.5 };
+  if (pmAction === "WATCH") return { label: "CHOP", color: "#fbbf24", baseMove: 1.2, bearMove: -3.8, bullMove: 4.5 };
   if (pmAction === "BOTH" || score >= 8.2) return { label: "BULLISH", color: "#4ade80", baseMove: instrument === "OPTION" ? 24 : 5.5, bearMove: instrument === "OPTION" ? -20 : -4.5, bullMove: instrument === "OPTION" ? 85 : 12 };
   if (pmAction === "OPTION" || score >= 7) return { label: "BULLISH", color: "#86efac", baseMove: instrument === "OPTION" ? 16 : 3.8, bearMove: instrument === "OPTION" ? -20 : -3.5, bullMove: instrument === "OPTION" ? 55 : 8.5 };
   if (score <= 4.5 || pnl <= -8) return { label: "BEARISH", color: "#f87171", baseMove: -3.2, bearMove: instrument === "OPTION" ? -20 : -7.5, bullMove: 3.2 };
@@ -1276,7 +1357,7 @@ function normalizeEquityPositions(data) {
 }
 
 function normalizePmRows(data) {
-  return data?.decisions || data?.plan || data?.rows || data?.candidates || data?.summary?.decisions || [];
+  return data?.recommendations || data?.decisions || data?.plan || data?.rows || data?.candidates || data?.summary?.decisions || [];
 }
 
 function normalizeTicker(v) {
@@ -1344,6 +1425,22 @@ function rateColor(v) {
   return "#f87171";
 }
 
+function healthColor(v) {
+  const h = String(v || "").toUpperCase();
+  if (h === "LIVE") return "#4ade80";
+  if (h === "AGING" || h === "DEGRADED") return "#fbbf24";
+  if (h === "STALE" || h === "MISSING") return "#f87171";
+  return muted;
+}
+
+function ageText(minutes) {
+  if (minutes == null || !Number.isFinite(Number(minutes))) return "--";
+  const n = Number(minutes);
+  if (n < 1) return "<1M";
+  if (n < 60) return `${Math.round(n)}M`;
+  return `${(n / 60).toFixed(1)}H`;
+}
+
 function marketColor(direction) {
   if (direction === "UP") return "#4ade80";
   if (direction === "DOWN") return "#f87171";
@@ -1355,6 +1452,7 @@ function routeColor(v) {
   if (v === "BOTH") return "#4ade80";
   if (v === "OPTION") return "#c8a84b";
   if (v === "EQUITY") return accent2;
+  if (v === "HELD_NOT_IN_LATEST_PM") return "#fbbf24";
   if (v === "PASS") return "#f87171";
   return muted;
 }
