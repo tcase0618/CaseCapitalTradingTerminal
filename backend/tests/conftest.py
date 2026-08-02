@@ -26,6 +26,16 @@ def base_url():
 def api_client():
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
+    code = os.environ.get("API_TEST_ACCESS_CODE") or os.environ.get("TERMINAL_ACCESS_CODE")
+    if BASE_URL and code:
+        try:
+            r = s.post(f"{BASE_URL}/api/auth/login", json={"code": code}, timeout=10)
+            if r.ok:
+                token = (r.json() or {}).get("token")
+                if token:
+                    s.headers.update({"Authorization": f"Bearer {token}"})
+        except requests.RequestException:
+            pass
     return s
 
 

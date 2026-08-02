@@ -254,6 +254,18 @@ async def execution_gate_check(scope: str = "system", ticker: str | None = None,
     return await execution_gate.check(scope=scope, ticker=ticker, sector=sector)
 
 
+@api.get("/readiness/overview")
+async def readiness_overview(force_refresh: bool = False):
+    from services import readiness
+    return await readiness.run(force_refresh=force_refresh, persist=False)
+
+
+@api.post("/readiness/run")
+async def readiness_run(force_refresh: bool = False):
+    from services import readiness
+    return await readiness.run(force_refresh=force_refresh, persist=True)
+
+
 @api.get("/edge/overview")
 async def edge_overview():
     from services import edge_dashboard
@@ -2005,6 +2017,18 @@ async def options_desk_risk():
 async def options_desk_risk_check():
     from services import options_desk
     return await options_desk.monitor_open_positions(enforce_hard_stop=True)
+
+
+@api.get("/options_desk/marks/audit")
+async def options_desk_marks_audit_latest():
+    from services import options_desk
+    return await options_desk.latest_mark_audit()
+
+
+@api.post("/options_desk/marks/audit")
+async def options_desk_marks_audit():
+    from services import options_desk
+    return await options_desk.mark_accuracy_audit(persist=True)
 
 
 @api.get("/portfolio_manager/rulesets")

@@ -1948,6 +1948,125 @@ async def latest_risk_check() -> dict[str, Any]:
     }
 
 
+async def mark_accuracy_audit(persist: bool = True) -> dict[str, Any]:
+    """Compare stored option trade marks against live Alpaca position marks.
+
+    This is read-only against Alpaca. It exists because options snapshots can
+    show stale last trades while Alpaca positions carry the execution account's
+    live mark, which is the safer source for open-position risk.
+    """
+    db = get_db()
+    live_positions = await positions()
+    position_by_symbol = {
+        str(p.get("symbol") or "").upper(): p
+        for p in live_positions.get("positions") or []
+        if _parse_occ_symbol(str(p.get("symbol") or "").upper()) and _safe_int(p.get("qty")) > 0
+    }
+    trades = await db.options_desk_trades.find(
+        {"status": {"$in": ["active", "pending_protective_close_market_closed", "hard_stop_close_submitted", "ratchet_close_submitted"]}},
+        {"_id": 0},
+    ).sort("last_synced_at", -1).to_list(200)
+
+    rows: list[dict[str, Any]] = []
+    for trade in trades:
+        symbol = str(trade.get("symbol") or "").upper()
+        position = position_by_symbol.get(symbol)
+        issues: list[dict[str, Any]] = []
+        snap = await _option_snapshot(symbol) if symbol else {"ok": False, "reason": "missing_symbol"}
+        context: dict[str, Any] = {}
+        if position:
+            context = _option_position_context(position, snap)
+        else:
+            issues.append({"severity": "CRITICAL", "code": "missing_live_position"})
+
+        entry = _safe_float(trade.get("entry_premium"))
+        stored_current = _safe_float(trade.get("current_premium"))
+        live_current = _safe_float(context.get("current")) if context else 0.0
+        stored_pct = trade.get("unrealized_pct")
+        live_pct = context.get("pnl_pct") if context else None
+        if not snap.get("ok"):
+            issues.append({"severity": "WARN", "code": "snapshot_unavailable", "detail": snap.get("reason")})
+        if context.get("data_conflict"):
+            issues.append({"severity": "CRITICAL", "code": "position_snapshot_conflict"})
+        if entry <= 0:
+            issues.append({"severity": "CRITICAL", "code": "missing_entry_premium"})
+        if position and live_current <= 0:
+            issues.append({"severity": "CRITICAL", "code": "missing_live_mark"})
+        if stored_current > 0 and live_current > 0:
+            drift_pct = abs(stored_current - live_current) / max(0.01, live_current) * 100.0
+            if drift_pct >= 10.0:
+                issues.append({"severity": "WARN", "code": "stored_mark_drift_gt_10pct", "drift_pct": round(drift_pct, 2)})
+        if stored_pct is not None and live_pct is not None and abs(_safe_float(stored_pct) - _safe_float(live_pct)) >= 15.0:
+            issues.append({
+                "severity": "WARN",
+                "code": "stored_pnl_drift_gt_15pct",
+                "stored_pct": round(_safe_float(stored_pct), 2),
+                "live_pct": round(_safe_float(live_pct), 2),
+            })
+
+        prior_exit = trade.get("exit_policy") or {}
+        prior_peak = _safe_float(prior_exit.get("peak_premium")) or entry
+        ratchet = options_ratchet_state(
+            entry_premium=entry,
+            current_bid=live_current if position else None,
+            peak_premium=max(entry, prior_peak, live_current),
+        )
+        if position and ratchet.get("exit_triggered") and str(trade.get("status") or "") == "active":
+            issues.append({
+                "severity": "CRITICAL",
+                "code": "ratchet_or_stop_exit_due",
+                "floor_premium": ratchet.get("floor_premium"),
+                "live_current": round(live_current, 2),
+            })
+
+        severity = "CRITICAL" if any(i.get("severity") == "CRITICAL" for i in issues) else "WARN" if issues else "PASS"
+        rows.append({
+            "symbol": symbol,
+            "ticker": trade.get("ticker") or ((_parse_occ_symbol(symbol) or {}).get("root")),
+            "status": trade.get("status"),
+            "entry_premium": round(entry, 2),
+            "stored_current_premium": round(stored_current, 2) if stored_current else None,
+            "live_current_premium": round(live_current, 2) if live_current else None,
+            "stored_unrealized_pct": round(_safe_float(stored_pct), 2) if stored_pct is not None else None,
+            "live_unrealized_pct": round(_safe_float(live_pct), 2) if live_pct is not None else None,
+            "price_source": context.get("price_source"),
+            "snapshot": snap,
+            "ratchet": ratchet,
+            "issues": issues,
+            "severity": severity,
+        })
+
+    payload = {
+        "ok": not any(r.get("severity") == "CRITICAL" for r in rows),
+        "checked_at": _now(),
+        "positions_seen": len(position_by_symbol),
+        "trades_checked": len(rows),
+        "critical": sum(1 for r in rows if r.get("severity") == "CRITICAL"),
+        "warnings": sum(1 for r in rows if r.get("severity") == "WARN"),
+        "rows": rows,
+    }
+    if persist:
+        await db.options_mark_audits.insert_one(stamped(payload))
+        await db.bot_state.update_one({"_id": "options_mark_audit_latest"}, {"$set": payload}, upsert=True)
+    return payload
+
+
+async def latest_mark_audit() -> dict[str, Any]:
+    db = get_db()
+    row = await db.options_mark_audits.find_one({}, {"_id": 0}, sort=[("checked_at", -1)])
+    if row:
+        return {"ok": True, **row}
+    return {
+        "ok": True,
+        "checked_at": None,
+        "positions_seen": 0,
+        "trades_checked": 0,
+        "critical": 0,
+        "warnings": 0,
+        "rows": [],
+    }
+
+
 async def learning_status(limit: int = 200) -> dict[str, Any]:
     db = get_db()
     rows = await db.options_desk_orders.find({}, {"_id": 0}).sort("submitted_at", -1).to_list(limit)
