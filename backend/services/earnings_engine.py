@@ -838,9 +838,30 @@ async def _alpha_vantage_earnings_for_week(start: date, end: date) -> list[dict[
 async def _earnings_calendar_for_week(start: date, end: date) -> list[dict[str, Any]]:
     """Returns reporting tickers for a Monday-Friday window."""
     source_counts = {"Yahoo earnings calendar": 0, "Nasdaq earnings calendar": 0, "Alpha Vantage earnings calendar": 0}
-    raw = await scrapers.fetch_yahoo_upcoming_earnings(days_ahead=14)
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    try:
+        yahoo_rows, nasdaq_rows, alpha_rows = await asyncio.gather(
+            asyncio.wait_for(scrapers.fetch_yahoo_upcoming_earnings(days_ahead=14), timeout=float(os.getenv("EARNINGS_YAHOO_TIMEOUT_SEC", "4"))),
+            asyncio.wait_for(_nasdaq_earnings_for_week(start, end), timeout=float(os.getenv("EARNINGS_NASDAQ_TIMEOUT_SEC", "18"))),
+            asyncio.wait_for(_alpha_vantage_earnings_for_week(start, end), timeout=float(os.getenv("EARNINGS_ALPHA_TIMEOUT_SEC", "6"))),
+            return_exceptions=True,
+        )
+    except Exception as e:
+        logger.warning("earnings calendar source fanout failed: %s", e)
+        yahoo_rows, nasdaq_rows, alpha_rows = [], [], []
+
+    if isinstance(yahoo_rows, Exception):
+        logger.warning("Yahoo earnings calendar failed: %s", yahoo_rows)
+        yahoo_rows = []
+    if isinstance(nasdaq_rows, Exception):
+        logger.warning("Nasdaq earnings calendar timed out/failed: %s", nasdaq_rows)
+        nasdaq_rows = []
+    if isinstance(alpha_rows, Exception):
+        logger.warning("Alpha Vantage earnings calendar timed out/failed: %s", alpha_rows)
+        alpha_rows = []
+
+    raw = yahoo_rows or []
     for r in raw or []:
         try:
             d = datetime.fromisoformat(r["earnings_date"]).date()
@@ -857,10 +878,7 @@ async def _earnings_calendar_for_week(start: date, end: date) -> list[dict[str, 
             "source": "Yahoo earnings calendar",
             "sources": ["Yahoo earnings calendar"],
         })
-    for source_rows in await asyncio.gather(
-        _nasdaq_earnings_for_week(start, end),
-        _alpha_vantage_earnings_for_week(start, end),
-    ):
+    for source_rows in (nasdaq_rows or [], alpha_rows or []):
         for r in source_rows:
             source = r.get("source") or "Unknown earnings calendar"
             key = (r["ticker"], r["earnings_date"])
@@ -883,6 +901,99 @@ async def _earnings_calendar_for_week(start: date, end: date) -> list[dict[str, 
                     break
     setattr(_earnings_calendar_for_week, "last_source_counts", source_counts)
     return out
+
+
+def _calendar_only_row(item: dict[str, Any], scan_tickers: set[str] | None = None) -> dict[str, Any]:
+    ticker = str(item.get("ticker") or "").upper()
+    return {
+        "ticker": ticker,
+        "earnings_date": item.get("earnings_date"),
+        "am_pm": None,
+        "calendar_source": item.get("source"),
+        "calendar_sources": item.get("sources") or [item.get("source")],
+        "company_name": item.get("company_name"),
+        "report_time": item.get("report_time"),
+        "eps_forecast": item.get("eps_forecast"),
+        "estimates_count": item.get("estimates_count"),
+        "last_year_eps": item.get("last_year_eps"),
+        "market_cap_calendar": item.get("market_cap_calendar"),
+        "beat_probability_pct": None,
+        "beat_components": {},
+        "strategy": "CALENDAR ONLY",
+        "iv_cheap": False,
+        "axiom_match": ticker in (scan_tickers or set()),
+        "options": {},
+        "historical_moves": {},
+        "beat_miss_history": {},
+        "eps_history": [],
+        "post_earnings_reaction": {"status": "pending_enrichment"},
+        "earnings_call_tone": {"tone": "PENDING", "bull": 0, "bear": 0, "source": "calendar_only"},
+        "earnings_divergence": {"active": False, "label": "Pending enrichment", "severity": "LOW"},
+        "setup": {"score": 0, "rating": "PENDING", "pricing_signal": "PENDING", "avoid_flags": []},
+        "earnings_setup_score": 0,
+        "earnings_setup_rating": "PENDING",
+        "options_pricing_signal": "PENDING",
+        "avoid_flags": [],
+        "option_strategy": {"name": "PENDING ENRICHMENT", "reason": "Calendar row loaded; fundamentals/options enrichment is still refreshing."},
+        "battle_card": {
+            "rating": "PENDING",
+            "bull_case": [],
+            "bear_case": [],
+            "earnings_call_synopsis": {
+                "source": "calendar_only",
+                "text": "Earnings date is confirmed from the calendar feed. Full battle card enrichment is still refreshing.",
+            },
+        },
+        "data_quality": "calendar_only",
+    }
+
+
+async def calendar_only_week(scan_tickers: set[str] | None = None,
+                             week_offset: int = 0,
+                             status: str = "CALENDAR_ONLY") -> dict[str, Any]:
+    base_monday, _ = _target_week_window()
+    monday = base_monday + timedelta(days=7 * int(week_offset or 0))
+    friday = monday + timedelta(days=4)
+    calendar = await _earnings_calendar_for_week(monday, friday)
+    if not calendar and int(week_offset or 0) == 0:
+        monday = monday + timedelta(days=7)
+        friday = monday + timedelta(days=4)
+        calendar = await _earnings_calendar_for_week(monday, friday)
+
+    raw_calendar_total = len(calendar)
+    source_counts = getattr(_earnings_calendar_for_week, "last_source_counts", {})
+    balanced_calendar: list[dict[str, Any]] = []
+    per_date_items: dict[str, list[dict[str, Any]]] = {}
+    for item in calendar:
+        per_date_items.setdefault(item.get("earnings_date") or "", []).append(item)
+    for ds in sorted(per_date_items):
+        balanced_calendar.extend(per_date_items[ds][:7])
+    rows = [_json_safe(_calendar_only_row(item, scan_tickers)) for item in balanced_calendar[:35]]
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        try:
+            d = datetime.fromisoformat(str(r["earnings_date"])).date()
+        except Exception:
+            continue
+        by_day.setdefault(d.strftime("%A").upper(), []).append(r)
+
+    return _json_safe({
+        "week_of": monday.isoformat(),
+        "week_end": friday.isoformat(),
+        "week_offset": int(week_offset or 0),
+        "by_day": by_day,
+        "total": len(rows),
+        "raw_calendar_total": raw_calendar_total,
+        "enriched_total": 0,
+        "calendar_limited": raw_calendar_total > len(rows),
+        "calendar_source_counts": source_counts,
+        "calendar_sources": [k for k, v in source_counts.items() if v],
+        "earnings_divergences": [],
+        "earnings_divergence_count": 0,
+        "feature_version": EARNINGS_FEATURE_VERSION,
+        "cache_status": status,
+        "cache_age_minutes": None,
+    })
 
 
 async def current_week_with_probability(scan_tickers: set[str] | None = None,
@@ -1116,6 +1227,28 @@ async def current_week_cached(scan_tickers: set[str] | None = None,
             latest["cache_status"] = "STALE"
             latest["refresh_error"] = f"Live earnings refresh timed out or failed: {type(e).__name__}"
             return _json_safe(latest)
+
+        refresh_key = f"{target_week}:{int(week_offset or 0)}"
+        if refresh_key not in _BACKGROUND_REFRESH_KEYS:
+            _BACKGROUND_REFRESH_KEYS.add(refresh_key)
+            asyncio.create_task(_refresh_week_snapshot_background(scan_tickers, week_offset, refresh_key))
+        try:
+            fallback = await asyncio.wait_for(
+                calendar_only_week(
+                    scan_tickers=scan_tickers,
+                    week_offset=week_offset,
+                    status="CALENDAR_ONLY_REFRESHING",
+                ),
+                timeout=float(os.getenv("EARNINGS_CALENDAR_ONLY_TIMEOUT_SEC", "24")),
+            )
+            fallback["refresh_error"] = f"Full earnings enrichment timed out or failed: {type(e).__name__}"
+            try:
+                await store_week_snapshot(fallback)
+            except Exception as store_exc:
+                logger.warning("earnings calendar-only snapshot store failed: %s", store_exc)
+            return _json_safe(fallback)
+        except Exception as fallback_exc:
+            logger.warning("earnings calendar-only fallback failed: %s", fallback_exc)
 
         monday = target_monday + timedelta(days=7 * int(week_offset or 0))
         empty = {
