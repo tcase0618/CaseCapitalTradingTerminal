@@ -426,11 +426,14 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     try:
         from . import options_desk as _od
         if _od.options_execution_enabled():
-            asyncio.create_task(_od.refresh_and_auto_execute_latest())
+            await log_activity(
+                "Options Desk auto-execute is handled by the dedicated scheduler sweep; scan did not fire a duplicate options run.",
+                "info",
+            )
         else:
             await log_activity("Options Desk auto-execute skipped; ENABLE_OPTIONS_EXECUTION is off", "info")
     except Exception as e:
-        logger.warning("Options Desk auto-execute dispatch failed: %s", e)
+        logger.warning("Options Desk auto-execute status log failed: %s", e)
     await db.bot_state.update_one(
         {"_id": "state"},
         {"$set": {

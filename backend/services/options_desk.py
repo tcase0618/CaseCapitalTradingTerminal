@@ -40,6 +40,9 @@ MIN_VOLUME_WHEN_LOW_OI = 10
 MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "100") or 100)
 MAX_SPREAD_ABS = 0.75
 MAX_SPREAD_PCT = 0.35
+MAX_INDICATIVE_SPREAD_PCT = 0.20
+MIN_INDICATIVE_OPTION_VOLUME = 250
+MIN_OPTION_PREMIUM = 0.20
 MIN_ABS_DELTA = 0.05
 AUTO_MAX_ORDERS_PER_SCAN = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_SCAN", "5") or 5)
 OPTIONS_ALPACA_REFRESH_LIMIT = int(os.environ.get("OPTIONS_ALPACA_REFRESH_LIMIT", "18") or 18)
@@ -637,6 +640,8 @@ def _normalize_candidate_execution_state(ticket: dict[str, Any]) -> dict[str, An
         if instrument.get("kind") == "single_leg":
             if _spread_is_too_wide(instrument):
                 _add_block(blocked, "spread too wide")
+            if _indicative_execution_too_thin(instrument):
+                _add_block(blocked, "indicative option market too thin")
             if _open_interest_is_too_low(instrument):
                 _add_block(blocked, "open interest too low")
             if _delta_is_too_low(instrument, row.get("strategy")):
@@ -791,6 +796,19 @@ def _spread_is_too_wide(instrument: dict[str, Any]) -> bool:
     return spread > MAX_SPREAD_ABS or spread_pct > MAX_SPREAD_PCT
 
 
+def _indicative_execution_too_thin(instrument: dict[str, Any]) -> bool:
+    if str(instrument.get("data_quality") or "").upper() != "INDICATIVE":
+        return False
+    bid = _safe_float(instrument.get("bid"))
+    ask = _safe_float(instrument.get("ask") or instrument.get("premium"))
+    spread = _safe_float(instrument.get("spread"))
+    volume = _safe_int(instrument.get("volume"))
+    if bid <= 0 or ask < MIN_OPTION_PREMIUM:
+        return True
+    spread_pct = spread / ask if ask > 0 else 1.0
+    return spread_pct > MAX_INDICATIVE_SPREAD_PCT or volume < MIN_INDICATIVE_OPTION_VOLUME
+
+
 def _open_interest_is_too_low(instrument: dict[str, Any]) -> bool:
     if instrument.get("open_interest_source") == "unavailable" and instrument.get("data_provider") == "ALPACA_OPTIONS":
         return int(instrument.get("volume") or 0) < MIN_OPTION_VOLUME_IF_OI_UNKNOWN
@@ -886,6 +904,8 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             if instrument.get("kind") == "single_leg":
                 if _spread_is_too_wide(instrument):
                     blocked.append("spread too wide")
+                if _indicative_execution_too_thin(instrument):
+                    blocked.append("indicative option market too thin")
                 if _open_interest_is_too_low(instrument):
                     blocked.append("open interest too low")
                 if _delta_is_too_low(instrument, opts.get("strategy")):
@@ -1012,11 +1032,39 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
     })
     if _spread_is_too_wide(fresh):
         return {"ok": False, "reason": "fresh_spread_too_wide", "instrument": fresh, "snapshot": snap}
+    if _indicative_execution_too_thin(fresh):
+        return {"ok": False, "reason": "fresh_indicative_market_too_thin", "instrument": fresh, "snapshot": snap}
     if _open_interest_is_too_low(fresh):
         return {"ok": False, "reason": "fresh_open_interest_or_volume_too_low", "instrument": fresh, "snapshot": snap}
     if _delta_is_too_low(fresh, ticket.get("strategy")):
         return {"ok": False, "reason": "fresh_delta_too_low", "instrument": fresh, "snapshot": snap}
     return {"ok": True, "symbol": str(symbol).upper(), "instrument": fresh, "snapshot": snap, "quote_age_seconds": quote_age}
+
+
+async def _symbol_already_exposed(symbol: str) -> dict[str, Any]:
+    symbol = str(symbol or "").upper()
+    if not symbol:
+        return {"blocked": False}
+    live_positions = await positions()
+    for position in live_positions.get("positions") or []:
+        if str(position.get("symbol") or "").upper() == symbol and _safe_int(position.get("qty")) > 0:
+            return {"blocked": True, "reason": "contract_already_open_in_alpaca", "position": position}
+    live_orders = await orders(status="open", limit=200)
+    for order in live_orders.get("orders") or []:
+        if (
+            str(order.get("symbol") or "").upper() == symbol
+            and str(order.get("side") or "").lower() == "buy"
+            and str(order.get("status") or "").lower() not in {"canceled", "expired", "rejected", "filled"}
+        ):
+            return {"blocked": True, "reason": "contract_has_open_buy_order", "order": order}
+    db = get_db()
+    local = await db.options_desk_trades.find_one(
+        {"symbol": symbol, "status": {"$in": ["active", "hard_stop_close_submitted", "ratchet_close_submitted", "pending_protective_close_market_closed"]}},
+        {"_id": 0},
+    )
+    if local:
+        return {"blocked": True, "reason": "contract_already_active_in_local_ledger", "trade": local}
+    return {"blocked": False}
 
 
 async def execute(candidate_id: str, qty: int | None = None, limit_price: float | None = None) -> dict[str, Any]:
@@ -1075,6 +1123,9 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     symbol = preflight.get("symbol")
     if not symbol:
         return {"ok": False, "reason": "missing_option_symbol_from_data_provider", "candidate": ticket}
+    exposure = await _symbol_already_exposed(symbol)
+    if exposure.get("blocked"):
+        return {"ok": False, **exposure, "symbol": symbol, "candidate": ticket}
     client_order_id = _candidate_order_id(candidate_id)
     existing_local = await db.options_desk_orders.find_one(
         {
@@ -1132,6 +1183,33 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     return {"ok": True, "order": order, "candidate": ticket, "exit_policy": exit_policy}
 
 
+async def _acquire_auto_execute_lock(ttl_seconds: int = 240) -> dict[str, Any]:
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    lock_until = (now + timedelta(seconds=ttl_seconds)).isoformat()
+    lock_id = "options_auto_execute_lock"
+    existing = await db.bot_state.find_one({"_id": lock_id}, {"_id": 0})
+    if existing and str(existing.get("locked_until") or "") > now_iso:
+        return {"ok": False, "reason": "options_auto_execute_already_running", "lock": existing}
+    await db.bot_state.update_one(
+        {"_id": lock_id},
+        {"$set": {"locked_at": now_iso, "locked_until": lock_until, "owner": "options_desk.auto_execute_latest"}},
+        upsert=True,
+    )
+    return {"ok": True, "lock_id": lock_id, "locked_until": lock_until}
+
+
+async def _release_auto_execute_lock() -> None:
+    try:
+        await get_db().bot_state.update_one(
+            {"_id": "options_auto_execute_lock"},
+            {"$set": {"locked_until": datetime.now(timezone.utc).isoformat(), "released_at": _now()}},
+        )
+    except Exception:
+        pass
+
+
 async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     """PM-controlled automated options execution.
 
@@ -1139,6 +1217,26 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     and enforces only mechanical paper execution constraints already present in
     execute(): risk budget, valid order fields, and Alpaca acceptance.
     """
+    from . import execution_gate, safety
+
+    lock = await _acquire_auto_execute_lock()
+    if not lock.get("ok"):
+        return {
+            "ok": False,
+            "auto": True,
+            "reason": lock.get("reason"),
+            "lock": lock.get("lock"),
+            "submitted": [],
+            "skipped": [],
+            "summary": {},
+        }
+    try:
+        return await _auto_execute_latest_locked(limit=limit)
+    finally:
+        await _release_auto_execute_lock()
+
+
+async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any]:
     from . import execution_gate, safety
 
     enabled, safety_status = await safety.trading_enabled(scope="options_auto")
@@ -1272,7 +1370,39 @@ async def close(symbol: str, qty: int | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
         r = await client.post(f"{TRADE_BASE}/v2/orders", json=payload)
     if r.status_code not in (200, 201):
-        return {"ok": False, "reason": f"alpaca_rejected_{r.status_code}", "detail": r.text[:220]}
+        detail = r.text[:220]
+        if "no available quote" not in detail.lower():
+            return {"ok": False, "reason": f"alpaca_rejected_{r.status_code}", "detail": detail}
+        snap = await _option_snapshot(symbol)
+        bid = _safe_float(snap.get("bid")) if snap.get("ok") else 0.0
+        limit_price = round(max(0.01, bid), 2)
+        limit_payload: dict[str, Any] = {
+            "symbol": symbol,
+            "side": "sell",
+            "type": "limit",
+            "time_in_force": "day",
+            "limit_price": limit_price,
+        }
+        if qty:
+            limit_payload["qty"] = str(int(qty))
+        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
+            retry = await client.post(f"{TRADE_BASE}/v2/orders", json=limit_payload)
+        if retry.status_code not in (200, 201):
+            return {
+                "ok": False,
+                "reason": f"alpaca_rejected_{retry.status_code}",
+                "detail": retry.text[:220],
+                "market_reject_detail": detail,
+                "limit_payload": limit_payload,
+                "snapshot": snap,
+            }
+        return {
+            "ok": True,
+            "order": retry.json(),
+            "fallback": "limit_sell_after_no_quote_market_reject",
+            "market_reject_detail": detail,
+            "snapshot": snap,
+        }
     return {"ok": True, "order": r.json()}
 
 
