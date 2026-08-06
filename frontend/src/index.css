@@ -2572,3 +2572,53 @@ body {
   }
 }
 
+/* On phones, one vertical gesture should move one surface: the terminal page.
+   Desktop panels often set max-height + overflow-y auto; that creates nested
+   scroll traps on mobile. Keep intentional overlays/dropdowns scrollable. */
+@media (max-width: 768px) {
+  .terminal-page-body [style*="overflow-y: auto"],
+  .terminal-page-body [style*="overflowY: auto"],
+  .terminal-page-body [style*="overflow: auto"],
+  .terminal-page-body [style*="overflow:auto"] {
+    max-height: none !important;
+    overflow-y: visible !important;
+    -webkit-overflow-scrolling: auto !important;
+  }
+
+  .terminal-page-body [style*="max-height"],
+  .terminal-page-body [style*="maxHeight"] {
+    max-height: none !important;
+  }
+
+  .terminal-page-body [style*="calc(100vh"],
+  .terminal-page-body [style*="90vh"],
+  .terminal-page-body [style*="42vh"] {
+    max-height: none !important;
+    height: auto !important;
+  }
+
+  .terminal-page-body pre,
+  .terminal-page-body code {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+  }
+
+  .terminal-page-body [style*="overflow-x: auto"],
+  .terminal-page-body [style*="overflowX: auto"],
+  .terminal-page-body .earnings-table-wrap {
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+
+  .terminal-page-body .earnings-battle-overlay,
+  .terminal-page-body [role="dialog"],
+  .terminal-page-body [data-radix-popper-content-wrapper],
+  .terminal-page-body .georisk-drawer,
+  .terminal-page-body .georisk-popover {
+    max-height: min(86dvh, 720px) !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+}
+
