@@ -19,15 +19,18 @@ export default function OptionsDeskPage() {
   const [risk, setRisk] = useState(null);
   const [trades, setTrades] = useState(null);
   const [leaps, setLeaps] = useState(null);
+  const [tail, setTail] = useState(null);
+  const [expectancy, setExpectancy] = useState(null);
   const [activeView, setActiveView] = useState("DESK");
   const [selected, setSelected] = useState(null);
+  const [selectedTail, setSelectedTail] = useState(null);
   const [selectedPosition, setSelectedPosition] = useState(null);
   const [lseContext, setLseContext] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
   const load = useCallback(async () => {
-    const [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet] = await Promise.all([
+    const [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet, tailSet, expectancySet] = await Promise.all([
       axios.get(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
       axios.get(`${API}/options_desk/candidates`).catch(() => ({ data: null })),
       axios.get(`${API}/options_desk/positions`).catch(() => ({ data: { positions: [] } })),
@@ -35,6 +38,8 @@ export default function OptionsDeskPage() {
       axios.get(`${API}/options_desk/risk`).catch(() => ({ data: null })),
       axios.get(`${API}/options_desk/trades?sync_live=false`).catch(() => ({ data: { trades: [] } })),
       axios.get(`${API}/options_desk/leaps`).catch(() => ({ data: null })),
+      axios.get(`${API}/options_desk/tail`).catch(() => ({ data: null })),
+      axios.get(`${API}/options_desk/expectancy`).catch(() => ({ data: null })),
     ]);
     setAccount(acct.data);
     setCandidates(cand.data);
@@ -43,6 +48,8 @@ export default function OptionsDeskPage() {
     setRisk(riskCheck.data);
     setTrades(tradeSet.data);
     setLeaps(leapsSet.data);
+    setTail(tailSet.data);
+    setExpectancy(expectancySet.data);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -61,6 +68,8 @@ export default function OptionsDeskPage() {
   };
   const dataPolicy = candidates?.options_data_policy || {};
   const openPositions = positions?.positions || [];
+  const tailRows = tail?.candidates || [];
+  const tailReady = tailRows.filter(r => r.manual_fire_ready);
   const selectedOpenPosition = selectedPosition || openPositions[0] || null;
   const tradeBySymbol = useMemo(() => {
     const map = {};
@@ -149,6 +158,32 @@ export default function OptionsDeskPage() {
     }
   };
 
+  const refreshTail = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const r = await axios.post(`${API}/options_desk/tail/refresh`);
+      setTail(r.data);
+      setSelectedTail((r.data.candidates || [])[0] || null);
+      setMessage(`TAIL HUNTER REFRESHED: ${r.data.summary?.ready || 0} READY`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const executeTail = async candidate => {
+    if (!candidate) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const r = await axios.post(`${API}/options_desk/tail/execute`, { candidate_id: candidate.candidate_id });
+      setMessage(r.data.ok ? `TAIL ORDER SENT ${r.data.order?.symbol || candidate.ticker}` : `TAIL BLOCKED: ${r.data.reason}`);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <CrtShell title="OPTIONS DESK"
       headerRight={
@@ -163,14 +198,14 @@ export default function OptionsDeskPage() {
       </div>
 
       <div style={tabStrip}>
-        {["DESK", "LEAPS"].map(view => (
+        {["DESK", "TAIL", "LEAPS"].map(view => (
           <button key={view} onClick={() => setActiveView(view)} style={tabButton(activeView === view)}>
-            {view === "DESK" ? "OPTIONS DESK" : "LEAPS SLEEVE"}
+            {view === "DESK" ? "OPTIONS DESK" : view === "TAIL" ? "TAIL HUNTER" : "LEAPS SLEEVE"}
           </button>
         ))}
       </div>
 
-      <div className="options-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(9, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
+      <div className="options-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(10, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
         <Stat label="DESK STATUS" value={account?.ok ? "ARMED" : "DISABLED"} sub={account?.reason || "OPTIONS PAPER"} color={account?.ok ? "#4ade80" : "#f87171"} accentBar />
         <Stat label="EQUITY BASIS" value={`$${Number(candidates?.options_equity_basis || 20000).toLocaleString()}`} sub="OPTIONS PM" color={accent} />
         <Stat label="BUYING POWER" value={acct.buying_power ? `$${Number(acct.buying_power).toFixed(0)}` : "-"} sub={acct.status || "NO ACCOUNT"} color={accent2} />
@@ -178,7 +213,8 @@ export default function OptionsDeskPage() {
         <Stat label="OPTION/BOTH" value={(deskSummary.option || 0) + (deskSummary.both || 0)} sub="PM ROUTED" color="#fbbf24" />
         <Stat label="DAILY PREMIUM" value={`$${Number(account?.daily_premium_used || 0).toFixed(0)}`} sub={`/ $${Number(account?.daily_premium_cap || 4000).toFixed(0)} CAP`} color="#fbbf24" />
         <Stat label="LIVE DATA" value={`${dataPolicy.alpaca_refreshes_used ?? 0}/${dataPolicy.alpaca_refresh_limit ?? 18}`} sub="SCORE-FIRST ALPACA" color={accent2} />
-        <Stat label="HARD STOP" value="-20%" sub={`${risk?.positions_checked || 0} OPEN CHECKED`} color="#f87171" />
+        <Stat label="TAIL READY" value={`${tailReady.length}/${tailRows.length}`} sub={`${tail?.status?.active_tail ?? 0} ACTIVE`} color={tailReady.length ? "#4ade80" : "#fbbf24"} />
+        <Stat label="HARD STOP" value="-25%" sub={`${risk?.positions_checked || 0} OPEN CHECKED`} color="#f87171" />
         <Stat label="THETA WATCH" value={(risk?.checks || []).filter(c => c.theta_status === "WATCH").length} sub="DECAY FLAGS" color="#fbbf24" />
       </div>
 
@@ -193,7 +229,8 @@ export default function OptionsDeskPage() {
           { label: "PM Routes", value: `${deskSummary.option + deskSummary.both}/${deskSummary.total}`, color: deskSummary.option + deskSummary.both ? "#fbbf24" : muted, detail: "option or both" },
           { label: "Manual Ready", value: `${deskSummary.ready}/${deskSummary.total}`, color: deskSummary.ready ? "#4ade80" : "#f87171" },
           { label: "Alpaca Chain Pulls", value: `${dataPolicy.alpaca_refreshes_used ?? 0}/${dataPolicy.alpaca_refresh_limit ?? 18}`, color: accent2 },
-          { label: "Risk Sweep", value: `${risk?.positions_checked || 0} checked`, color: "#f87171", detail: "20% hard stop" },
+          { label: "Risk Sweep", value: `${risk?.positions_checked || 0} checked`, color: "#f87171", detail: "25% mid-basis stop" },
+          { label: "Expectancy", value: fmtExpectancy(expectancy?.grind), color: expectancyColor(expectancy?.grind), detail: `n=${expectancy?.grind?.sample_size ?? 0}` },
         ]}
       />
 
@@ -211,6 +248,15 @@ export default function OptionsDeskPage() {
             setBusy(false);
           }
         }} busy={busy} />
+      ) : activeView === "TAIL" ? (
+        <TailHunterPanel
+          data={tail}
+          busy={busy}
+          selected={selectedTail || tailReady[0] || tailRows[0]}
+          onSelect={setSelectedTail}
+          onRefresh={refreshTail}
+          onExecute={executeTail}
+        />
       ) : (
       <>
 
@@ -218,6 +264,9 @@ export default function OptionsDeskPage() {
         <Card title="PM ROUTING BOARD" accentColor={accent}>
           <RouteBars summary={deskSummary} />
           <CandidateTable rows={deskRows} selected={selectedTicket} onSelect={setSelected} />
+        </Card>
+        <Card title="EXPECTANCY LEDGER" accentColor={expectancyColor(expectancy?.grind)}>
+          <ExpectancyPanel data={expectancy} />
         </Card>
         <Card title="MANUAL EXECUTION TICKET" accentColor="#fbbf24">
           <ExecutionTicket ticket={selectedTicket} account={account} busy={busy} onExecute={execute} lseContext={lseContext} />
@@ -348,6 +397,92 @@ function LeapsSleeve({ data, onRefresh, busy }) {
   );
 }
 
+function TailHunterPanel({ data, busy, selected, onSelect, onRefresh, onExecute }) {
+  const candidates = data?.candidates || [];
+  const ready = candidates.filter(c => c.manual_fire_ready);
+  const status = data?.status || {};
+  const policy = data?.policy || {};
+  const active = selected || ready[0] || candidates[0];
+  return (
+    <div>
+      <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 18, flexWrap: "wrap" }}>
+        <Stat label="TAIL READY" value={`${ready.length}/${candidates.length}`} sub="CAPPED CALL SHOTS" color={ready.length ? "#4ade80" : "#fbbf24"} accentBar />
+        <Stat label="ACTIVE TAIL" value={status.active_tail ?? 0} sub={`${status.concurrent_remaining ?? 0} SLOTS LEFT`} color={Number(status.concurrent_remaining) > 0 ? accent2 : "#f87171"} />
+        <Stat label="WEEKLY SHOTS" value={status.shots_this_week ?? 0} sub={`${status.weekly_remaining ?? 0} LEFT`} color="#fbbf24" />
+        <Stat label="SHOT SIZE" value={money(policy.shot_size_usd)} sub="MAX PREMIUM" color={accent} />
+        <Stat label="EXIT MODEL" value="+100%" sub="SELL HALF / 40% TRAIL" color="#4ade80" />
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <button onClick={onRefresh} disabled={busy} style={buttonStyle(accent2)}>{busy ? "REFRESHING" : "REFRESH TAIL"}</button>
+      </div>
+      <div style={deskGrid}>
+        <Card title="TAIL HUNTER QUEUE" accentColor="#fbbf24">
+          <SimpleTable
+            empty="No Tail Hunter candidates. Run a fresh options sweep after a scan."
+            head={["TICKER", "READY", "PM", "CONTRACT", "DTE", "DELTA", "ASK", "GATE"]}
+            rows={candidates.map(c => [
+              `$${c.ticker}`,
+              c.manual_fire_ready ? "YES" : "NO",
+              num(c.pm_score, 1),
+              c.instrument?.symbol || "-",
+              c.instrument?.days_to_expiration || "-",
+              num(c.instrument?.delta, 2),
+              money(c.instrument?.ask),
+              `${c.tail_gate?.count || 0}/5`,
+            ])}
+            onRowClick={(idx) => onSelect(candidates[idx])}
+          />
+        </Card>
+        <Card title="TAIL EXECUTION CARD" accentColor={active?.manual_fire_ready ? "#4ade80" : "#f87171"}>
+          {!active ? (
+            <div style={{ color: muted, padding: 20 }}>Select a Tail Hunter ticket.</div>
+          ) : (
+            <div>
+              <div style={{ color: accent, fontSize: 30, fontWeight: 900 }}>${active.ticker}</div>
+              <div style={{ color: muted, fontSize: 11, letterSpacing: "0.14em", marginBottom: 12 }}>{active.instrument?.symbol || "-"}</div>
+              <PlanRow k="Status" v={active.manual_fire_ready ? "READY" : "BLOCKED"} color={active.manual_fire_ready ? "#4ade80" : "#f87171"} />
+              <PlanRow k="Shot Budget" v={money(active.risk_budget)} color={accent} />
+              <PlanRow k="Contracts" v={active.contracts || 0} />
+              <PlanRow k="Ask / Spread" v={`${money(active.instrument?.ask)} / ${num(active.instrument?.spread_pct, 1)}%`} color="#fbbf24" />
+              <PlanRow k="Delta / DTE" v={`${num(active.instrument?.delta, 2)} / ${active.instrument?.days_to_expiration || "-"}d`} color={accent2} />
+              <PlanRow k="Exit" v="+100% sells half, then 40% wide trail" color="#4ade80" />
+              <PlanRow k="Hard Stop" v="NONE - premium is capped at birth" color="#f87171" />
+              <div style={{ borderTop: hairline, marginTop: 12, paddingTop: 12 }}>
+                {(active.tail_gate?.reasons || []).map((reason, i) => (
+                  <div key={i} style={{ color: labelLight, fontSize: 11, lineHeight: 1.55 }}>+ {reason}</div>
+                ))}
+                {(active.blocked_reasons || []).map((reason, i) => (
+                  <div key={`b-${i}`} style={{ color: "#f87171", fontSize: 11, lineHeight: 1.55 }}>BLOCK: {reason}</div>
+                ))}
+              </div>
+              <button
+                onClick={() => onExecute(active)}
+                disabled={busy || !active.manual_fire_ready}
+                style={{ ...buttonStyle("#4ade80"), width: "100%", marginTop: 14, opacity: active.manual_fire_ready ? 1 : 0.45 }}
+              >
+                FIRE TAIL PAPER ORDER
+              </button>
+            </div>
+          )}
+        </Card>
+      </div>
+      <Card title="TAIL HUNTER POLICY" accentColor={accent2}>
+        <SimpleTable
+          empty="Policy unavailable."
+          head={["RULE", "VALUE", "WHY"]}
+          rows={[
+            ["Max concurrent", policy.max_concurrent ?? 3, "Keeps tail exposure from eating the book"],
+            ["Max shots/week", policy.max_shots_per_week ?? 4, "Controls churn and bad-catalyst overtrading"],
+            ["Delta window", `${policy.delta_window?.[0] ?? 0.1}-${policy.delta_window?.[1] ?? 0.25}`, "Targets convex OTM calls"],
+            ["DTE window", `${policy.dte_window?.[0] ?? 7}-${policy.dte_window?.[1] ?? 21} days`, "Enough time for catalyst without paying LEAPS premium"],
+            ["Bank to grind", `${num(policy.bank_to_grind_pct * 100, 0)}%`, "Tail wins should fund repeatable grind risk"],
+          ]}
+        />
+      </Card>
+    </div>
+  );
+}
+
 function LeapsCone({ item }) {
   const k = item?.kronos_1y || {};
   const low = Number(k.cone_low_pct || 0);
@@ -389,6 +524,38 @@ function RouteBars({ summary }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function ExpectancyPanel({ data }) {
+  const grind = data?.grind || {};
+  const tail = data?.tail || {};
+  const throttle = data?.throttle?.throttles || {};
+  const throttleRows = Object.entries(throttle).slice(0, 4);
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+        <MiniStat label="GRIND EV" value={fmtExpectancy(grind)} color={expectancyColor(grind)} />
+        <MiniStat label="GRIND WIN" value={`${num(grind.win_rate, 1)}%`} color={Number(grind.win_rate) >= 45 ? "#4ade80" : "#fbbf24"} />
+        <MiniStat label="SAMPLE" value={grind.sample_size ?? 0} color={accent2} />
+        <MiniStat label="SPREAD COST" value={money(grind.avg_spread_cost)} color="#fbbf24" />
+      </div>
+      <PlanRow k="Tail EV" v={fmtExpectancy(tail)} color={expectancyColor(tail)} />
+      <PlanRow k="Sizing Mode" v="Flat grind until expectancy proves lane" color={accent} />
+      <PlanRow k="Headline Basis" v="Actual fill P/L with mid-fill truth recorded" color={accent2} />
+      <PlanRow k="Auto Throttle" v={throttleRows.length ? `${throttleRows.length} lane(s)` : "WAITING FOR CLOSED TRADES"} color={throttleRows.length ? "#4ade80" : muted} />
+      {throttleRows.map(([lane, item]) => (
+        <PlanRow
+          key={lane}
+          k={lane}
+          v={`${num(item?.multiplier, 2)}x / EV ${fmtExpectancy(item?.stats)}`}
+          color={Number(item?.multiplier) <= 0.5 ? "#f87171" : accent2}
+        />
+      ))}
+      <div style={{ color: muted, fontSize: 11, lineHeight: 1.55, marginTop: 12, borderTop: hairline, paddingTop: 10 }}>
+        Closed trades feed this ledger only after real fills sync back from Alpaca. Open marks stay visible, but they do not count as proof.
+      </div>
     </div>
   );
 }
@@ -610,13 +777,21 @@ function MiniStat({ label, value, color = labelLight }) {
   );
 }
 
-function SimpleTable({ head, rows, empty }) {
+function SimpleTable({ head, rows, empty, onRowClick }) {
   if (!rows.length) return <div style={{ color: muted, padding: 20 }}>{empty}</div>;
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
         <thead><tr>{head.map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
-        <tbody>{rows.map((r, i) => <tr key={i} style={{ borderTop: hairline }}>{r.map((v, j) => <td key={j} style={td}>{v}</td>)}</tr>)}</tbody>
+        <tbody>{rows.map((r, i) => (
+          <tr
+            key={i}
+            onClick={onRowClick ? () => onRowClick(i) : undefined}
+            style={{ borderTop: hairline, cursor: onRowClick ? "pointer" : "default" }}
+          >
+            {r.map((v, j) => <td key={j} style={td}>{v}</td>)}
+          </tr>
+        ))}</tbody>
       </table>
     </div>
   );
@@ -659,6 +834,17 @@ function num(v, d = 1) {
 function money(v) {
   const n = Number(v);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "-";
+}
+
+function fmtExpectancy(row) {
+  const n = Number(row?.expectancy_pct);
+  return Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(1)}%` : "-";
+}
+
+function expectancyColor(row) {
+  const n = Number(row?.expectancy_pct);
+  if (!Number.isFinite(n)) return muted;
+  return n > 0 ? "#4ade80" : n < 0 ? "#f87171" : "#fbbf24";
 }
 
 function buttonStyle(color) {

@@ -365,12 +365,18 @@ def start_scheduler():
     # Options open sweep: close/refresh risk first, then submit PM-approved buys.
     async def _options_open_auto_execute_job():
         try:
-            from . import options_desk, telegram_events
+            from . import options_desk, tail_hunter, telegram_events
 
             result = await options_desk.refresh_and_auto_execute_latest()
+            tail = await tail_hunter.build_tail_candidates(persist=True)
+            result["tail_hunter"] = {
+                "candidates": (tail.get("summary") or {}).get("candidates", 0),
+                "ready": (tail.get("summary") or {}).get("ready", 0),
+                "rejected": (tail.get("summary") or {}).get("rejected", 0),
+            }
             await log_activity(
                 f"Options open auto-execute 9:35: {len(result.get('submitted', []))} submitted, "
-                f"{len(result.get('skipped', []))} skipped",
+                f"{len(result.get('skipped', []))} skipped, tail ready={result['tail_hunter']['ready']}",
                 "success" if result.get("submitted") else "info",
                 result,
             )
@@ -507,7 +513,7 @@ def start_scheduler():
 
     async def _position_monitor():
         try:
-            from . import options_desk, pm_ratchet, trade_floor, trade_floor_phases
+            from . import options_desk, pm_ratchet, tail_hunter, trade_floor, trade_floor_phases
             await trade_floor.flush_queued_equity_orders(limit=25)
             await trade_floor.sync_positions_and_close_settled()
             try:
@@ -517,6 +523,7 @@ def start_scheduler():
                 logger.warning("daily loss breaker: %s", breaker_exc)
             await pm_ratchet.process_open_ratchets()
             await options_desk.monitor_open_positions(enforce_hard_stop=True)
+            await tail_hunter.monitor_tail_positions()
             # v5.3 — run the three-phase exit logic on every sync
             await trade_floor_phases.process_phase_exits()
         except Exception as e:

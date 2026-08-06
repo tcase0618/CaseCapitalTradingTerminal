@@ -76,6 +76,44 @@ The bad LDOS order was canceled and replaced:
 
 Any future order-entry changes must preserve this guardrail. Do not submit PM-managed buy limits directly from `get_latest_ask()` without applying the PM entry-band cap.
 
+## Options Desk V2 Guardrails
+
+Options Desk uses a separate Alpaca options account and must never call the equity Trade Floor execution path.
+
+Entry eligibility is intentionally stricter than scanner discovery:
+
+- Only PM routes `OPTION` or `BOTH` can become executable.
+- Equity-only routes must not spend Alpaca option-chain refresh budget.
+- Option entries require Alpaca execution-grade data.
+- Provider-reported delta is required; synthetic/estimated delta is research-only.
+- Single-leg grind candidates must stay inside the execution delta band: `0.45` to `0.70` absolute delta.
+- Minimum ask/premium is `1.00`.
+- Minimum open interest is `500`, unless volume is at least `200`.
+- Maximum spread is the stricter of `0.75` absolute or `8%` of ask.
+- Multi-leg spread execution remains blocked until the desk has a true spread order path.
+
+Open option risk is measured on an honest mark basis:
+
+- Entry truth records actual `fill_price`, `mid_at_fill`, bid/ask spread, and spread cost paid.
+- Open-position stop logic uses snapshot mid when available.
+- Alpaca position `unrealized_plpc` is retained only as broker diagnostic context.
+- Closed trades write to the expectancy ledger only after actual sell fills sync back from Alpaca.
+
+The V2 exit priority is:
+
+1. Hard stop at `-25%` mid-to-mid P/L.
+2. Event stop one day before earnings unless the lane is explicitly event-defined risk.
+3. Time stop when `40%` of entry DTE has elapsed and the trade has not reached `+10%`.
+4. Theta stop when daily theta is worse than `3%` of entry premium and the position is not green.
+5. Ratchet floor using the no-TP ratchet tiers.
+
+Sizing stays in grind mode until the expectancy ledger proves a lane:
+
+- Default option risk budget is flat, based on `85%` grind sleeve equity times `1.5%`.
+- Automatic order count is capped per scan and per day.
+- Lane throttle can reduce sizing after enough closed-trade evidence shows negative expectancy.
+- Tail Hunter and spread execution should remain research-only until the expectancy ledger has real closed-trade samples.
+
 ## Code Owners' Map
 
 Current enforcement points:
@@ -83,5 +121,8 @@ Current enforcement points:
 - PM-managed order entry: `backend/services/trade_floor.py`, inside `evaluate_and_execute()`.
 - One-ticker PM execution endpoint: `backend/server.py`, route `POST /api/trade_floor/execute_pm_ticker`.
 - Pending-order sync protection: `backend/services/trade_floor.py`, inside `sync_positions_and_close_settled()`.
+- Options entry and exit enforcement: `backend/services/options_desk.py`.
+- Options contract recommendation and execution-grade filtering: `backend/services/options_engine.py`.
+- Options closed-trade truth ledger: `backend/services/expectancy_ledger.py`.
 
 Any future route that submits PM-managed buys must call the guarded PM execution path or duplicate this exact cap and audit fields.

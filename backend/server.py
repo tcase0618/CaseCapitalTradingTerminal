@@ -2117,6 +2117,36 @@ async def options_desk_risk():
     return await options_desk.latest_risk_check()
 
 
+@api.get("/options_desk/expectancy")
+async def options_desk_expectancy():
+    from services import expectancy_ledger
+    return await expectancy_ledger.weekly_expectancy_report()
+
+
+@api.get("/options_desk/tail")
+async def options_desk_tail():
+    from services import tail_hunter
+    return await tail_hunter.latest_tail_candidates()
+
+
+@api.post("/options_desk/tail/refresh")
+async def options_desk_tail_refresh(limit: int = 25):
+    from services import tail_hunter
+    return await tail_hunter.build_tail_candidates(limit=limit, persist=True)
+
+
+@api.post("/options_desk/tail/execute")
+async def options_desk_tail_execute(payload: OptionsDeskExecutePayload):
+    from services import tail_hunter
+    return await tail_hunter.execute_tail(payload.candidate_id)
+
+
+@api.post("/options_desk/tail/risk/check")
+async def options_desk_tail_risk_check():
+    from services import tail_hunter
+    return await tail_hunter.monitor_tail_positions()
+
+
 @api.post("/options_desk/risk/check")
 async def options_desk_risk_check():
     from services import options_desk

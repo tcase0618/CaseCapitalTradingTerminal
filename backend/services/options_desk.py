@@ -26,7 +26,14 @@ BOTH_RISK_USD = 1000.0
 STANDARD_RISK_USD = 350.0
 OPTIONS_DAILY_PREMIUM_CAP_USD = 4000.0
 OPTIONS_INITIAL_STOP_PCT = -20.0
-OPTIONS_HARD_STOP_PCT = -20.0
+PRICE_BASIS = "mid"
+OPTIONS_HARD_STOP_PCT = -25.0
+TAKE_PROFIT_TIER1_PCT = 30.0
+TAKE_PROFIT_TIER1_SELL_FRACTION = 0.5
+TIME_STOP_DTE_FRACTION = 0.40
+TIME_STOP_MIN_PNL_PCT = 10.0
+THETA_STOP_PCT_OF_PREMIUM = -3.0
+EVENT_STOP_DAYS_BEFORE_EARNINGS = 1
 OPTIONS_RATCHET_TIERS: list[tuple[float, float]] = [
     (25.0, 5.0),
     (50.0, 25.0),
@@ -35,16 +42,31 @@ OPTIONS_RATCHET_TIERS: list[tuple[float, float]] = [
     (150.0, 120.0),
     (200.0, 150.0),
 ]
-MIN_OPEN_INTEREST = 50
-MIN_VOLUME_WHEN_LOW_OI = 10
-MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "100") or 100)
+OPTION_ACTIVE_STATUSES = {
+    "active",
+    "hard_stop_close_submitted",
+    "ratchet_close_submitted",
+    "theta_stop_close_submitted",
+    "time_stop_close_submitted",
+    "event_stop_close_submitted",
+    "take_profit_tier1_close_submitted",
+    "tail_take_profit_tier1_close_submitted",
+    "tail_ratchet_trail_close_submitted",
+    "tail_dte_exit_close_submitted",
+    "pending_protective_close_market_closed",
+}
+MIN_OPEN_INTEREST = 500
+MIN_VOLUME_WHEN_LOW_OI = 200
+MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "200") or 200)
 MAX_SPREAD_ABS = 0.75
-MAX_SPREAD_PCT = 0.35
+MAX_SPREAD_PCT = 0.08
 MAX_INDICATIVE_SPREAD_PCT = 0.20
 MIN_INDICATIVE_OPTION_VOLUME = 250
-MIN_OPTION_PREMIUM = 0.20
-MIN_ABS_DELTA = 0.05
-AUTO_MAX_ORDERS_PER_SCAN = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_SCAN", "5") or 5)
+MIN_OPTION_PREMIUM = 1.00
+MIN_ABS_DELTA = 0.45
+MAX_ABS_DELTA = 0.70
+AUTO_MAX_ORDERS_PER_SCAN = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_SCAN", "2") or 2)
+AUTO_MAX_ORDERS_PER_DAY = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_DAY", "5") or 5)
 OPTIONS_ALPACA_REFRESH_LIMIT = int(os.environ.get("OPTIONS_ALPACA_REFRESH_LIMIT", "18") or 18)
 OPTIONS_EXECUTION_ENABLED = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
 OPTIONS_ALLOW_INDICATIVE_EXECUTION = os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -380,6 +402,7 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
             "mark": round(mark, 2),
             "theta": _safe_float(greeks.get("theta")),
             "delta": _safe_float(greeks.get("delta")),
+            "provider_delta_present": bool(_safe_float(greeks.get("delta"))),
             "gamma": _safe_float(greeks.get("gamma")),
             "vega": _safe_float(greeks.get("vega")),
             "quote_time": quote.get("t"),
@@ -431,13 +454,39 @@ def _position_raw_present(v: Any) -> bool:
     return v is not None and str(v).strip() != ""
 
 
-def _option_position_context(position: dict[str, Any], snap: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Resolve open option risk from Alpaca's live position first.
+def _snapshot_mid(snap: dict[str, Any] | None) -> float:
+    snap = snap or {}
+    bid = _safe_float(snap.get("bid"))
+    ask = _safe_float(snap.get("ask"))
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2.0
+    return _safe_float(snap.get("mid"))
 
-    Alpaca option snapshots can carry stale last trades on illiquid contracts.
-    For open-position risk, the position endpoint is the authority because it is
-    the same source Alpaca uses for market value and unrealized P/L.
-    """
+
+def _spread_cost_context(fill_price: float, snap: dict[str, Any] | None) -> dict[str, Any]:
+    snap = snap or {}
+    bid = _safe_float(snap.get("bid"))
+    ask = _safe_float(snap.get("ask"))
+    mid = _snapshot_mid(snap)
+    spread = ask - bid if bid > 0 and ask > 0 else _safe_float(snap.get("spread"))
+    spread_pct = spread / ask if ask > 0 and spread > 0 else None
+    spread_cost_paid = fill_price - mid if fill_price > 0 and mid > 0 else None
+    spread_cost_pct = spread_cost_paid / mid * 100.0 if spread_cost_paid is not None and mid > 0 else None
+    return {
+        "price_basis": PRICE_BASIS,
+        "fill_price": round(fill_price, 4) if fill_price > 0 else None,
+        "mid_at_fill": round(mid, 4) if mid > 0 else None,
+        "bid_at_fill": round(bid, 4) if bid > 0 else None,
+        "ask_at_fill": round(ask, 4) if ask > 0 else None,
+        "spread_at_fill": round(spread, 4) if spread and spread > 0 else None,
+        "spread_pct_at_fill": round(spread_pct * 100.0, 2) if spread_pct is not None else None,
+        "spread_cost_paid": round(spread_cost_paid, 4) if spread_cost_paid is not None else None,
+        "spread_cost_pct": round(spread_cost_pct, 2) if spread_cost_pct is not None else None,
+    }
+
+
+def _option_position_context(position: dict[str, Any], snap: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve option risk on a mid-price basis when a live quote exists."""
     snap = snap or {}
     qty = _safe_int(position.get("qty"))
     entry = _safe_float(position.get("avg_entry_price"))
@@ -446,26 +495,24 @@ def _option_position_context(position: dict[str, Any], snap: dict[str, Any] | No
 
     current = 0.0
     price_source = "unavailable"
-    if _position_raw_present(position.get("current_price")):
+    snap_mid = _snapshot_mid(snap) if snap.get("ok") else 0.0
+    if snap_mid > 0:
+        current = max(0.0, snap_mid)
+        price_source = "alpaca_snapshot_mid"
+    elif _position_raw_present(position.get("current_price")):
         current = max(0.0, _safe_float(position.get("current_price")))
-        price_source = "alpaca_position_current_price"
+        price_source = "alpaca_position_current_price_fallback"
     elif _position_raw_present(position.get("market_value")) and qty > 0:
         current = max(0.0, _safe_float(position.get("market_value")) / max(1, qty * 100))
-        price_source = "alpaca_position_market_value"
+        price_source = "alpaca_position_market_value_fallback"
     elif snap.get("ok"):
         bid = _safe_float(snap.get("bid"))
-        mid = _safe_float(snap.get("mid"))
         if bid > 0:
             current = bid
             price_source = "alpaca_snapshot_bid"
-        elif mid > 0:
-            current = mid
-            price_source = "alpaca_snapshot_mid"
 
     pnl_pct: float | None
-    if _position_raw_present(position.get("unrealized_plpc")):
-        pnl_pct = _safe_float(position.get("unrealized_plpc")) * 100.0
-    elif entry > 0:
+    if entry > 0 and current > 0:
         pnl_pct = (current - entry) / entry * 100.0
     else:
         pnl_pct = None
@@ -500,6 +547,8 @@ def _option_position_context(position: dict[str, Any], snap: dict[str, Any] | No
         "snapshot_last": snap_last,
         "snapshot_mark": _safe_float(snap.get("mark")) if snap.get("ok") else 0.0,
         "data_conflict": data_conflict,
+        "price_basis": PRICE_BASIS,
+        "broker_reported_pnl_pct": _safe_float(position.get("unrealized_plpc")) * 100.0 if _position_raw_present(position.get("unrealized_plpc")) else None,
     }
 
 
@@ -644,8 +693,10 @@ def _normalize_candidate_execution_state(ticket: dict[str, Any]) -> dict[str, An
                 _add_block(blocked, "indicative option market too thin")
             if _open_interest_is_too_low(instrument):
                 _add_block(blocked, "open interest too low")
-            if _delta_is_too_low(instrument, row.get("strategy")):
-                _add_block(blocked, "delta too low")
+            if _provider_delta_missing(instrument):
+                _add_block(blocked, "no provider-reported delta - execution requires real greeks")
+            elif _delta_out_of_band(instrument, row.get("strategy")):
+                _add_block(blocked, "delta out of execution band")
     elif route == "PASS":
         _add_block(blocked, "PM route is PASS")
     else:
@@ -712,18 +763,61 @@ def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -
 def _risk_budget(route: str, action: str, score: float) -> float:
     if route not in {"OPTION", "BOTH"}:
         return 0.0
+    grind_lane_equity_pct = 0.85
+    grind_risk_pct_flat = 0.015
     cap = min(OPTIONS_EQUITY * MAX_RISK_PCT, MAX_RISK_USD)
-    if route == "BOTH":
-        return min(BOTH_RISK_USD, cap)
-    if action == "ACCUMULATE":
-        return min(ACCUMULATE_RISK_USD, cap)
-    if action == "WATCH":
-        return min(WATCH_RISK_USD, cap)
-    if action == "STARTER":
-        return min(STARTER_RISK_USD, cap)
-    if score >= 78:
-        return cap
-    return min(STANDARD_RISK_USD, cap)
+    flat_budget = OPTIONS_EQUITY * grind_lane_equity_pct * grind_risk_pct_flat
+    return round(min(flat_budget, cap), 2)
+
+
+async def _auto_orders_submitted_today() -> int:
+    db = get_db()
+    now_et = datetime.now(ET)
+    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_et.astimezone(timezone.utc).isoformat()
+    return await db.options_desk_orders.count_documents({
+        "auto": True,
+        "auto_submitted_at": {"$gte": start_utc},
+        "status": {"$in": ["auto_submitted", "submitted", "filled"]},
+    })
+
+
+def _days_held(entry_time: Any) -> float:
+    try:
+        if not entry_time:
+            return 0.0
+        dt = datetime.fromisoformat(str(entry_time).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 86400.0)
+    except Exception:
+        return 0.0
+
+
+async def _days_to_next_earnings(ticker: str) -> int | None:
+    try:
+        db = get_db()
+        today = datetime.now(timezone.utc).date()
+        rows = []
+        snap = await db.earnings_snapshots.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+        if snap:
+            for bucket in (snap.get("by_day") or {}).values():
+                if isinstance(bucket, list):
+                    rows.extend(bucket)
+            rows.extend(snap.get("rows") or [])
+        for row in rows:
+            if str(row.get("ticker") or "").upper() != str(ticker or "").upper():
+                continue
+            ds = row.get("earnings_date")
+            if not ds:
+                continue
+            d = datetime.fromisoformat(str(ds)).date()
+            delta = (d - today).days
+            if delta >= 0:
+                return delta
+    except Exception:
+        return None
+    return None
 
 
 def _strategy_lane(pm_row: dict[str, Any], scan_row: dict[str, Any], opts: dict[str, Any], instrument: dict[str, Any], route: str) -> dict[str, Any]:
@@ -790,7 +884,11 @@ def _spread_is_too_wide(instrument: dict[str, Any]) -> bool:
     ask = float(instrument.get("ask") or instrument.get("premium") or 0)
     if bid <= 0 or ask <= 0:
         return True
+    if ask < MIN_OPTION_PREMIUM:
+        return True
     spread = float(instrument.get("spread") or 0)
+    if spread <= 0 and ask > bid:
+        spread = ask - bid
     premium = ask
     spread_pct = spread / premium if premium > 0 else 1.0
     return spread > MAX_SPREAD_ABS or spread_pct > MAX_SPREAD_PCT
@@ -817,11 +915,17 @@ def _open_interest_is_too_low(instrument: dict[str, Any]) -> bool:
     return oi < MIN_OPEN_INTEREST and volume < MIN_VOLUME_WHEN_LOW_OI
 
 
-def _delta_is_too_low(instrument: dict[str, Any], strategy: str | None) -> bool:
-    if strategy == "LOTTERY_CALL":
-        return False
+def _delta_out_of_band(instrument: dict[str, Any], strategy: str | None) -> bool:
     delta = abs(float(instrument.get("delta") or 0))
-    return delta > 0 and delta < MIN_ABS_DELTA
+    return delta < MIN_ABS_DELTA or delta > MAX_ABS_DELTA
+
+
+def _provider_delta_missing(instrument: dict[str, Any]) -> bool:
+    if instrument.get("provider_delta_present") is True:
+        return False
+    if instrument.get("provider_delta_present") is False:
+        return True
+    return _safe_float(instrument.get("delta")) <= 0
 
 
 def _selected_instrument(opts: dict[str, Any]) -> dict[str, Any]:
@@ -855,6 +959,8 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
     )
     out: list[dict[str, Any]] = []
     alpaca_refreshes = 0
+    throttle_doc = await db.options_lane_throttle.find_one({"_id": "latest"}, {"_id": 0}) or {}
+    lane_throttles = throttle_doc.get("throttles") or {}
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
         pm_row = by_ticker.get(ticker)
@@ -878,6 +984,10 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
         score = float(pm_row.get("pm_score") or 0)
         strategy_lane = _strategy_lane(pm_row, row, opts, instrument, route)
         risk_budget = _risk_budget(route, pm_row.get("action"), score)
+        throttle = lane_throttles.get(str(strategy_lane.get("lane") or ""))
+        throttle_multiplier = _safe_float((throttle or {}).get("multiplier"), 1.0)
+        if throttle_multiplier < 1.0:
+            risk_budget = risk_budget * max(0.0, throttle_multiplier)
         contract_risk = _contract_risk(instrument)
         entry_premium = float(instrument.get("ask") or instrument.get("premium") or instrument.get("net_debit") or 0)
         exit_policy = options_ratchet_state(entry_premium=entry_premium)
@@ -908,8 +1018,10 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
                     blocked.append("indicative option market too thin")
                 if _open_interest_is_too_low(instrument):
                     blocked.append("open interest too low")
-                if _delta_is_too_low(instrument, opts.get("strategy")):
-                    blocked.append("delta too low")
+                if _provider_delta_missing(instrument):
+                    blocked.append("no provider-reported delta - execution requires real greeks")
+                elif _delta_out_of_band(instrument, opts.get("strategy")):
+                    blocked.append("delta out of execution band")
         elif route == "PASS":
             blocked.append("PM route is PASS")
         else:
@@ -935,21 +1047,31 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             "instrument": instrument,
             "risk_budget": round(risk_budget, 2),
             "risk_policy": {
+                "mode": "grind_flat_until_expectancy_proven",
                 "max_risk_pct": MAX_RISK_PCT,
                 "max_risk_usd": MAX_RISK_USD,
-                "watch_risk_usd": WATCH_RISK_USD,
-                "starter_risk_usd": STARTER_RISK_USD,
-                "accumulate_risk_usd": ACCUMULATE_RISK_USD,
-                "both_risk_usd": BOTH_RISK_USD,
-                "standard_risk_usd": STANDARD_RISK_USD,
+                "flat_grind_budget_usd": _risk_budget("OPTION", pm_row.get("action"), score),
+                "lane_throttle_multiplier": round(throttle_multiplier, 2),
+                "lane_throttle_sample_size": ((throttle or {}).get("stats") or {}).get("sample_size"),
+                "lane_throttle_expectancy_pct": ((throttle or {}).get("stats") or {}).get("expectancy_pct"),
                 "daily_premium_cap_usd": OPTIONS_DAILY_PREMIUM_CAP_USD,
+                "auto_max_orders_per_scan": AUTO_MAX_ORDERS_PER_SCAN,
+                "auto_max_orders_per_day": AUTO_MAX_ORDERS_PER_DAY,
                 "min_open_interest": MIN_OPEN_INTEREST,
                 "min_volume_when_low_oi": MIN_VOLUME_WHEN_LOW_OI,
                 "max_spread_abs": MAX_SPREAD_ABS,
                 "max_spread_pct": MAX_SPREAD_PCT,
                 "min_abs_delta": MIN_ABS_DELTA,
+                "max_abs_delta": MAX_ABS_DELTA,
+                "min_option_premium": MIN_OPTION_PREMIUM,
+                "price_basis": PRICE_BASIS,
                 "alpaca_refresh_limit": OPTIONS_ALPACA_REFRESH_LIMIT,
                 "initial_stop_pct": OPTIONS_INITIAL_STOP_PCT,
+                "hard_stop_pct": OPTIONS_HARD_STOP_PCT,
+                "take_profit_tier1_pct": TAKE_PROFIT_TIER1_PCT,
+                "take_profit_tier1_sell_fraction": TAKE_PROFIT_TIER1_SELL_FRACTION,
+                "time_stop_dte_fraction": TIME_STOP_DTE_FRACTION,
+                "theta_stop_pct_of_premium": THETA_STOP_PCT_OF_PREMIUM,
                 "ratchet_tiers": [{"trigger_gain_pct": t, "locked_gain_pct": l} for t, l in OPTIONS_RATCHET_TIERS],
             },
             "exit_policy": exit_policy,
@@ -1022,6 +1144,7 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
         "premium": snap.get("ask") or snap.get("mid") or snap.get("last"),
         "spread": round(_safe_float(snap.get("ask")) - _safe_float(snap.get("bid")), 2),
         "delta": snap.get("delta") or instrument.get("delta"),
+        "provider_delta_present": bool(_safe_float(snap.get("delta"))),
         "volume": snap.get("volume") or instrument.get("volume"),
         "open_interest": snap.get("open_interest") or instrument.get("open_interest"),
         "open_interest_source": snap.get("open_interest_source") or instrument.get("open_interest_source"),
@@ -1036,8 +1159,10 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "reason": "fresh_indicative_market_too_thin", "instrument": fresh, "snapshot": snap}
     if _open_interest_is_too_low(fresh):
         return {"ok": False, "reason": "fresh_open_interest_or_volume_too_low", "instrument": fresh, "snapshot": snap}
-    if _delta_is_too_low(fresh, ticket.get("strategy")):
-        return {"ok": False, "reason": "fresh_delta_too_low", "instrument": fresh, "snapshot": snap}
+    if _provider_delta_missing(fresh):
+        return {"ok": False, "reason": "fresh_provider_delta_missing", "instrument": fresh, "snapshot": snap}
+    if _delta_out_of_band(fresh, ticket.get("strategy")):
+        return {"ok": False, "reason": "fresh_delta_out_of_band", "instrument": fresh, "snapshot": snap}
     return {"ok": True, "symbol": str(symbol).upper(), "instrument": fresh, "snapshot": snap, "quote_age_seconds": quote_age}
 
 
@@ -1059,7 +1184,7 @@ async def _symbol_already_exposed(symbol: str) -> dict[str, Any]:
             return {"blocked": True, "reason": "contract_has_open_buy_order", "order": order}
     db = get_db()
     local = await db.options_desk_trades.find_one(
-        {"symbol": symbol, "status": {"$in": ["active", "hard_stop_close_submitted", "ratchet_close_submitted", "pending_protective_close_market_closed"]}},
+        {"symbol": symbol, "status": {"$in": sorted(OPTION_ACTIVE_STATUSES)}},
         {"_id": 0},
     )
     if local:
@@ -1169,6 +1294,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     if r.status_code not in (200, 201):
         return {"ok": False, "reason": f"alpaca_rejected_{r.status_code}", "detail": r.text[:220], "candidate": ticket}
     order = r.json()
+    pricing_truth = _spread_cost_context(_safe_float(order.get("filled_avg_price")) or order_limit, preflight.get("snapshot"))
     exit_policy = options_ratchet_state(entry_premium=order_limit, peak_premium=order_limit)
     record = stamped({
         "candidate": ticket,
@@ -1178,6 +1304,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         "status": "submitted",
         "exit_policy": exit_policy,
         "fresh_preflight": preflight,
+        "pricing_truth": pricing_truth,
     })
     await db.options_desk_orders.insert_one(record)
     return {"ok": True, "order": order, "candidate": ticket, "exit_policy": exit_policy}
@@ -1287,8 +1414,14 @@ async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any
         candidate_set = await build_candidates(limit=100, persist=True)
     ready = [c for c in candidate_set.get("candidates", []) if c.get("manual_fire_ready")]
     max_orders = int(limit or AUTO_MAX_ORDERS_PER_SCAN)
+    submitted_today = await _auto_orders_submitted_today()
+    remaining_today = max(0, AUTO_MAX_ORDERS_PER_DAY - submitted_today)
+    max_orders = min(max_orders, remaining_today)
     submitted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    if remaining_today <= 0:
+        skipped.extend({"ticker": c.get("ticker"), "reason": "auto_daily_order_limit_reached"} for c in ready)
+        ready = []
     for ticket in ready:
         if len(submitted) >= max_orders:
             skipped.append({"ticker": ticket.get("ticker"), "reason": "auto_order_limit_reached"})
@@ -1336,6 +1469,8 @@ async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any
         "ok": True,
         "auto": True,
         "ready": len(ready),
+        "auto_orders_submitted_today_before_run": submitted_today,
+        "auto_max_orders_per_day": AUTO_MAX_ORDERS_PER_DAY,
         "submitted": submitted,
         "skipped": skipped,
         "summary": candidate_set.get("summary", {}),
@@ -1449,29 +1584,43 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
         if side == "buy":
             local_order = await db.options_desk_orders.find_one({"order.id": order.get("id")}, {"_id": 0})
             existing = await db.options_desk_trades.find_one({"entry_order_id": order.get("id")}, {"_id": 0})
-            prior_peak = _safe_float(((existing or {}).get("exit_policy") or {}).get("peak_premium")) or fill_price
+            fill_snap = (((local_order or {}).get("fresh_preflight") or {}).get("snapshot") or {})
+            if not fill_snap.get("ok"):
+                fill_snap = await _option_snapshot(symbol) if symbol in position_symbols else {"ok": False}
+            pricing_truth = _spread_cost_context(fill_price, fill_snap)
+            mid_at_fill = _safe_float(pricing_truth.get("mid_at_fill")) or fill_price
+            prior_peak = _safe_float(((existing or {}).get("exit_policy") or {}).get("peak_premium")) or mid_at_fill
             current = 0.0
             snap = await _option_snapshot(symbol) if symbol in position_symbols else {"ok": False}
             price_context = {}
             if symbol in position_by_symbol:
                 price_context = _option_position_context(position_by_symbol[symbol], snap)
+                if mid_at_fill > 0 and _safe_float(price_context.get("current")) > 0:
+                    price_context["entry"] = mid_at_fill
+                    price_context["pnl_pct"] = (_safe_float(price_context.get("current")) - mid_at_fill) / mid_at_fill * 100.0
+                    price_context["unrealized"] = (_safe_float(price_context.get("current")) - fill_price) * filled_qty * 100
+                    price_context["price_basis"] = PRICE_BASIS
                 current = _safe_float(price_context.get("current"))
             elif snap.get("ok"):
-                current = _safe_float(snap.get("bid")) or _safe_float(snap.get("mid"))
+                current = _snapshot_mid(snap) or _safe_float(snap.get("bid"))
                 price_context = {
-                    "price_source": "alpaca_snapshot_bid" if _safe_float(snap.get("bid")) > 0 else "alpaca_snapshot_mid",
+                    "price_source": "alpaca_snapshot_mid" if _snapshot_mid(snap) > 0 else "alpaca_snapshot_bid",
                     "snapshot_bid": _safe_float(snap.get("bid")),
                     "snapshot_mid": _safe_float(snap.get("mid")),
                     "snapshot_last": _safe_float(snap.get("last")),
                     "snapshot_mark": _safe_float(snap.get("mark")),
+                    "entry": mid_at_fill,
+                    "current": current,
+                    "pnl_pct": ((current - mid_at_fill) / mid_at_fill * 100.0) if mid_at_fill > 0 and current > 0 else None,
+                    "price_basis": PRICE_BASIS,
                     "data_conflict": False,
                 }
             pnl_pct = price_context.get("pnl_pct") if price_context else None
-            peak_basis = max(fill_price, current)
+            peak_basis = max(mid_at_fill, current)
             if pnl_pct is None or _safe_float(pnl_pct) > 0:
-                peak_basis = max(prior_peak, current, fill_price)
+                peak_basis = max(prior_peak, current, mid_at_fill)
             exit_policy = options_ratchet_state(
-                entry_premium=fill_price,
+                entry_premium=mid_at_fill,
                 current_bid=current,
                 peak_premium=peak_basis,
             )
@@ -1484,10 +1633,17 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
                 "strike": parsed["strike"],
                 "expiration": parsed["expiration"],
                 "qty": filled_qty,
-                "entry_premium": round(fill_price, 2),
+                "entry_premium": round(mid_at_fill, 2),
+                "fill_price": round(fill_price, 2),
+                "mid_at_fill": round(mid_at_fill, 2),
+                "spread_at_fill": pricing_truth.get("spread_at_fill"),
+                "spread_cost_paid": pricing_truth.get("spread_cost_paid"),
+                "pricing_truth": pricing_truth,
                 "entry_notional": round(fill_price * filled_qty * 100, 2),
+                "entry_mid_notional": round(mid_at_fill * filled_qty * 100, 2),
                 "entry_filled_at": order.get("filled_at") or order.get("updated_at"),
                 "entry_order": order,
+                "dte_at_entry": _safe_int((((local_order or {}).get("candidate") or {}).get("instrument") or {}).get("days_to_expiration")),
                 "candidate": (local_order or {}).get("candidate"),
                 "pm": {
                     "route": ((local_order or {}).get("candidate") or {}).get("route"),
@@ -1520,28 +1676,71 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
             upserted += 1
         elif side == "sell":
             open_trades = await db.options_desk_trades.find(
-                {"symbol": symbol, "status": {"$in": ["active", "hard_stop_close_submitted", "ratchet_close_submitted", "flat_no_position"]}},
-                {"_id": 1, "entry_premium": 1, "qty": 1},
+                {"symbol": symbol, "status": {"$in": sorted(OPTION_ACTIVE_STATUSES | {"flat_no_position"})}},
+                {"_id": 1, "trade_id": 1, "entry_premium": 1, "fill_price": 1, "mid_at_fill": 1, "qty": 1, "entry_filled_at": 1, "candidate": 1, "close_reason": 1, "strategy_lane": 1, "spread_cost_paid": 1, "dte_at_entry": 1, "ticker": 1, "symbol": 1},
             ).to_list(20)
+            remaining_fill_qty = filled_qty
             for trade in open_trades:
-                entry = _safe_float(trade.get("entry_premium"))
-                qty_for_pnl = min(filled_qty, _safe_int(trade.get("qty")) or filled_qty)
-                realized = round((fill_price - entry) * qty_for_pnl * 100, 2) if entry > 0 else None
-                realized_pct = round((fill_price - entry) / entry * 100.0, 2) if entry > 0 else None
-                await db.options_desk_trades.update_one(
-                    {"_id": trade["_id"]},
-                    {"$set": {
-                    "status": "closed",
+                if remaining_fill_qty <= 0:
+                    break
+                entry_mid = _safe_float(trade.get("mid_at_fill") or trade.get("entry_premium"))
+                entry_fill = _safe_float(trade.get("fill_price") or trade.get("entry_premium"))
+                trade_qty = _safe_int(trade.get("qty")) or filled_qty
+                qty_for_pnl = min(remaining_fill_qty, trade_qty)
+                remaining_fill_qty -= qty_for_pnl
+                snap = await _option_snapshot(symbol)
+                exit_mid = _snapshot_mid(snap) or fill_price
+                realized = round((fill_price - entry_fill) * qty_for_pnl * 100, 2) if entry_fill > 0 else None
+                realized_pct = round((fill_price - entry_fill) / entry_fill * 100.0, 2) if entry_fill > 0 else None
+                realized_pct_mid = round((exit_mid - entry_mid) / entry_mid * 100.0, 2) if entry_mid > 0 else None
+                remaining_qty = max(0, trade_qty - qty_for_pnl)
+                partial = {
                     "exit_order_id": order.get("id"),
+                    "qty": qty_for_pnl,
                     "exit_premium": round(fill_price, 2),
+                    "exit_mid": round(exit_mid, 2),
                     "exit_filled_at": order.get("filled_at") or order.get("updated_at"),
-                    "exit_order": order,
-                    "closed_at": _now(),
                     "realized_pnl": realized,
                     "realized_pct": realized_pct,
-                }},
-                )
-                closed += 1
+                    "realized_pct_mid_basis": realized_pct_mid,
+                    "reason": trade.get("close_reason") or "sell_fill",
+                    "synced_at": _now(),
+                }
+                if remaining_qty > 0:
+                    await db.options_desk_trades.update_one(
+                        {"_id": trade["_id"]},
+                        {"$set": {
+                            "qty": remaining_qty,
+                            "tier1_taken": True,
+                            "last_partial_exit": partial,
+                            "last_synced_at": _now(),
+                        }, "$push": {"partial_exits": partial}},
+                    )
+                else:
+                    closed_doc = {
+                        **trade,
+                        "status": "closed",
+                        "exit_order_id": order.get("id"),
+                        "exit_premium": round(fill_price, 2),
+                        "exit_mid": round(exit_mid, 2),
+                        "exit_filled_at": order.get("filled_at") or order.get("updated_at"),
+                        "exit_order": order,
+                        "closed_at": _now(),
+                        "realized_pnl": realized,
+                        "realized_pct": realized_pct,
+                        "realized_pct_mid_basis": realized_pct_mid,
+                        "close_reason": trade.get("close_reason") or "sell_fill",
+                    }
+                    await db.options_desk_trades.update_one(
+                        {"_id": trade["_id"]},
+                        {"$set": {k: v for k, v in closed_doc.items() if k != "_id"}},
+                    )
+                    try:
+                        from . import expectancy_ledger
+                        await expectancy_ledger.record_closed_trade(closed_doc)
+                    except Exception:
+                        pass
+                    closed += 1
     fill_message_sent = False
     if fill_notifications:
         fill_message_sent = await _send_grouped_fill_message(fill_notifications)
@@ -1775,7 +1974,7 @@ async def options_daily_report_payload() -> dict[str, Any]:
     db = get_db()
     rows = await db.options_desk_trades.find({}, {"_id": 0}).sort("last_synced_at", -1).to_list(500)
     today = _today_et_key()
-    active = [r for r in rows if r.get("status") in {"active", "hard_stop_close_submitted", "ratchet_close_submitted"}]
+    active = [r for r in rows if r.get("status") in OPTION_ACTIVE_STATUSES]
     closed_today = [r for r in rows if r.get("status") == "closed" and _date_key_et(r.get("closed_at") or r.get("exit_filled_at")) == today]
     unrealized = sum(_safe_float(r.get("unrealized_pnl")) for r in active)
     realized = sum(_safe_float(r.get("realized_pnl")) for r in closed_today)
@@ -1804,10 +2003,15 @@ async def options_daily_report_payload() -> dict[str, Any]:
 async def options_weekly_report_payload() -> dict[str, Any]:
     fill = await sync_fills()
     risk = await monitor_open_positions(enforce_hard_stop=True)
+    try:
+        from . import expectancy_ledger
+        expectancy = await expectancy_ledger.weekly_expectancy_report()
+    except Exception as exc:
+        expectancy = {"ok": False, "reason": exc.__class__.__name__}
     db = get_db()
     rows = await db.options_desk_trades.find({}, {"_id": 0}).sort("last_synced_at", -1).to_list(1000)
     week_start, week_end = _week_window_et()
-    active = [r for r in rows if r.get("status") in {"active", "hard_stop_close_submitted", "ratchet_close_submitted"}]
+    active = [r for r in rows if r.get("status") in OPTION_ACTIVE_STATUSES]
     closed_week = [
         r for r in rows
         if r.get("status") == "closed"
@@ -1835,6 +2039,7 @@ async def options_weekly_report_payload() -> dict[str, Any]:
         "theta_watch": theta_watch,
         "biggest_gain": biggest_gain,
         "biggest_loser": biggest_loser,
+        "expectancy": expectancy,
     }
 
 
@@ -1866,6 +2071,8 @@ async def dispatch_options_daily_report(force: bool = False) -> dict[str, Any]:
         f"Realized gains: <b>{_fmt_money(payload['realized_gain'])}</b>",
         f"Risk deployed: <b>{_fmt_money(payload['risk_deployed'])}</b> / {_fmt_money(payload['daily_premium_cap'])}",
         f"Theta watch: <b>{payload['theta_watch']}</b>",
+        f"Grind expectancy: <b>{_fmt_pct(((payload.get('expectancy') or {}).get('grind') or {}).get('expectancy_pct'))}</b> "
+        f"n={(((payload.get('expectancy') or {}).get('grind') or {}).get('sample_size') or 0)}",
         "",
         _gain_line("Biggest gain", payload.get("biggest_gain")),
         _gain_line("Biggest loser", payload.get("biggest_loser")),
@@ -1912,11 +2119,7 @@ async def dispatch_options_weekly_report(force: bool = False) -> dict[str, Any]:
 
 
 async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, Any]:
-    """Check open option positions for theta and hard-stop exits.
-
-    Theta is recorded for PM learning. The only forced exit in V1 is the hard
-    premium stop: current option premium <= entry premium * 0.80.
-    """
+    """Check open option positions using Options Desk V2 mid-price risk math."""
     db = get_db()
     pos = await positions()
     checks: list[dict[str, Any]] = []
@@ -1942,9 +2145,17 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         )
         trade_doc = await db.options_desk_trades.find_one(
             {"symbol": symbol, "status": {"$in": ["active", "flat_no_position", "pending_protective_close_market_closed"]}},
-            {"_id": 1, "ticker": 1, "entry_premium": 1, "exit_policy": 1, "telegram": 1},
+            {"_id": 1, "ticker": 1, "entry_premium": 1, "fill_price": 1, "mid_at_fill": 1, "entry_filled_at": 1, "dte_at_entry": 1, "exit_policy": 1, "telegram": 1, "tier1_taken": 1, "candidate": 1},
             sort=[("last_synced_at", -1)],
         )
+        if trade_doc and _safe_float(trade_doc.get("mid_at_fill")) > 0 and current > 0:
+            mid_entry = _safe_float(trade_doc.get("mid_at_fill"))
+            price_context["entry"] = mid_entry
+            price_context["pnl_pct"] = (current - mid_entry) / mid_entry * 100.0
+            price_context["unrealized"] = (current - _safe_float(trade_doc.get("fill_price") or mid_entry)) * qty * 100
+            entry = mid_entry
+            pnl_pct = price_context.get("pnl_pct")
+        ticker = (trade_doc or {}).get("ticker") or (_parse_occ_symbol(symbol) or {}).get("root") or symbol
         prior_exit = (existing or {}).get("exit_policy") or {}
         if trade_doc and trade_doc.get("exit_policy"):
             prior_exit = trade_doc.get("exit_policy") or prior_exit
@@ -1955,7 +2166,33 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         ratchet = options_ratchet_state(entry_premium=entry, current_bid=current, peak_premium=peak_basis)
         theta = snap.get("theta") if snap.get("ok") else None
         theta_pct = (float(theta) / current * 100.0) if theta is not None and current > 0 else None
+        days_held = _days_held((trade_doc or {}).get("entry_filled_at"))
+        dte_at_entry = _safe_int((trade_doc or {}).get("dte_at_entry"))
+        dte_elapsed_frac = days_held / max(1, dte_at_entry) if dte_at_entry > 0 else 0.0
+        days_to_earnings = await _days_to_next_earnings(ticker) if trade_doc else None
         hard_stop = bool(pnl_pct is not None and _safe_float(pnl_pct) <= OPTIONS_HARD_STOP_PCT)
+        take_profit_tier1 = bool(
+            pnl_pct is not None
+            and _safe_float(pnl_pct) >= TAKE_PROFIT_TIER1_PCT
+            and not (trade_doc or {}).get("tier1_taken")
+            and qty > 1
+        )
+        time_stop = bool(
+            dte_at_entry > 0
+            and dte_elapsed_frac >= TIME_STOP_DTE_FRACTION
+            and (pnl_pct is None or _safe_float(pnl_pct) < TIME_STOP_MIN_PNL_PCT)
+        )
+        theta_stop = bool(
+            theta_pct is not None
+            and theta_pct <= THETA_STOP_PCT_OF_PREMIUM
+            and (pnl_pct is None or _safe_float(pnl_pct) <= 0)
+        )
+        strategy_lane_name = str((((trade_doc or {}).get("candidate") or {}).get("strategy_lane") or {}).get("lane") or "")
+        event_stop = bool(
+            days_to_earnings is not None
+            and days_to_earnings <= EVENT_STOP_DAYS_BEFORE_EARNINGS
+            and strategy_lane_name != "EVENT_DEFINED_RISK"
+        )
         check = {
             "symbol": symbol,
             "qty": qty,
@@ -1965,8 +2202,18 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
             "theta": round(float(theta), 4) if theta is not None else None,
             "theta_pct_of_premium": round(theta_pct, 2) if theta_pct is not None else None,
             "theta_status": "WATCH" if theta_pct is not None and theta_pct <= -8.0 else "OK",
+            "days_held": round(days_held, 2),
+            "dte_at_entry": dte_at_entry or None,
+            "dte_elapsed_frac": round(dte_elapsed_frac, 3) if dte_at_entry else None,
+            "days_to_next_earnings": days_to_earnings,
+            "spread_cost_paid": (trade_doc or {}).get("spread_cost_paid"),
+            "price_basis": PRICE_BASIS,
             "hard_stop_pct": OPTIONS_HARD_STOP_PCT,
             "hard_stop_triggered": hard_stop,
+            "take_profit_tier1_triggered": take_profit_tier1,
+            "time_stop_triggered": time_stop,
+            "theta_stop_triggered": theta_stop,
+            "event_stop_triggered": event_stop,
             "ratchet": ratchet,
             "snapshot": snap,
             "price_source": price_context.get("price_source"),
@@ -1980,7 +2227,6 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
             "checked_at": _now(),
         }
         unrealized = round(_safe_float(price_context.get("unrealized")), 2) if price_context.get("unrealized") is not None else None
-        ticker = (trade_doc or {}).get("ticker") or (_parse_occ_symbol(symbol) or {}).get("root") or symbol
         previous_notified_floor = _safe_float((((trade_doc or {}).get("telegram") or {}).get("last_ratchet_floor_pct")), OPTIONS_INITIAL_STOP_PCT)
         current_floor = _safe_float(ratchet.get("locked_floor_pct"), OPTIONS_INITIAL_STOP_PCT)
         ratchet_notification_allowed = bool(pnl_pct is not None and _safe_float(pnl_pct) > 0 and current > entry)
@@ -2023,12 +2269,52 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
                 "last_synced_at": _now(),
             }},
         )
-        ratchet_exit = bool(not hard_stop and ratchet.get("exit_triggered") and current_floor > OPTIONS_INITIAL_STOP_PCT)
-        exit_reason = "hard_stop" if hard_stop else "ratchet" if ratchet_exit else None
+        ratchet_exit = bool(
+            not any([hard_stop, event_stop, time_stop, theta_stop])
+            and ratchet.get("exit_triggered")
+            and current_floor > OPTIONS_INITIAL_STOP_PCT
+        )
+        exit_reason = (
+            "hard_stop" if hard_stop
+            else "event_stop" if event_stop
+            else "time_stop" if time_stop
+            else "theta_stop" if theta_stop
+            else "ratchet" if ratchet_exit
+            else None
+        )
+        if take_profit_tier1 and enforce_hard_stop:
+            tier_qty = max(1, int(qty * TAKE_PROFIT_TIER1_SELL_FRACTION))
+            market_status = await _options_market_status()
+            if market_status.get("is_open"):
+                result = await close(symbol=symbol, qty=tier_qty)
+                check["take_profit_tier1_close_result"] = result
+                if result.get("ok"):
+                    await db.options_desk_trades.update_many(
+                        {"symbol": symbol, "status": "active"},
+                        {"$set": {
+                            "tier1_taken": True,
+                            "tier1_taken_at": _now(),
+                            "last_take_profit_order": result.get("order"),
+                            "close_reason": "options_take_profit_tier1",
+                        }},
+                    )
+                    closed.append({"symbol": symbol, "qty": tier_qty, "reason": "options_take_profit_tier1", "order_id": result.get("order", {}).get("id")})
+                else:
+                    errors.append({"symbol": symbol, "reason": result.get("reason"), "detail": result.get("detail"), "exit": "take_profit_tier1"})
+            else:
+                pending = {"symbol": symbol, "qty": tier_qty, "reason": "options_take_profit_tier1", "market_status": market_status}
+                pending_closes.append(pending)
+                check["pending_take_profit_tier1"] = pending
         if exit_reason and enforce_hard_stop:
             market_status = await _options_market_status()
             if not market_status.get("is_open"):
-                close_reason = "options_hard_stop_20pct" if exit_reason == "hard_stop" else "options_ratchet_floor"
+                close_reason = {
+                    "hard_stop": "options_hard_stop_mid_basis",
+                    "event_stop": "options_event_stop",
+                    "time_stop": "options_time_stop",
+                    "theta_stop": "options_theta_stop",
+                    "ratchet": "options_ratchet_floor",
+                }.get(exit_reason, exit_reason)
                 pending = {
                     "symbol": symbol,
                     "qty": qty,
@@ -2060,7 +2346,13 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
             result = await close(symbol=symbol, qty=qty)
             check["close_result"] = result
             if result.get("ok"):
-                close_reason = "options_hard_stop_20pct" if exit_reason == "hard_stop" else "options_ratchet_floor"
+                close_reason = {
+                    "hard_stop": "options_hard_stop_mid_basis",
+                    "event_stop": "options_event_stop",
+                    "time_stop": "options_time_stop",
+                    "theta_stop": "options_theta_stop",
+                    "ratchet": "options_ratchet_floor",
+                }.get(exit_reason, exit_reason)
                 closed.append({"symbol": symbol, "qty": qty, "reason": close_reason, "order_id": result.get("order", {}).get("id")})
                 await db.options_desk_orders.update_many(
                     {"$or": [{"order.symbol": symbol}, {"candidate.instrument.symbol": symbol}, {"candidate.instrument.contractSymbol": symbol}]},
@@ -2143,7 +2435,7 @@ async def mark_accuracy_audit(persist: bool = True) -> dict[str, Any]:
         if _parse_occ_symbol(str(p.get("symbol") or "").upper()) and _safe_int(p.get("qty")) > 0
     }
     trades = await db.options_desk_trades.find(
-        {"status": {"$in": ["active", "pending_protective_close_market_closed", "hard_stop_close_submitted", "ratchet_close_submitted"]}},
+        {"status": {"$in": sorted(OPTION_ACTIVE_STATUSES)}},
         {"_id": 0},
     ).sort("last_synced_at", -1).to_list(200)
 

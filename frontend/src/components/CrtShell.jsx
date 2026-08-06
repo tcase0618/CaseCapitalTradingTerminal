@@ -811,6 +811,8 @@ export function CrtShell({ title, children, headerRight = null }) {
             </div>
           </div>
 
+          <TabMotionStrip pathname={loc.pathname} title={title} />
+
           {/* Page body */}
           <div className="terminal-page-body fade-in fade-in-2" style={{ padding: isMobile ? "14px 12px" : "24px 32px 32px", flex: 1 }}>
             {children}
@@ -819,6 +821,235 @@ export function CrtShell({ title, children, headerRight = null }) {
       </div>
     </>
   );
+}
+
+function TabMotionStrip({ pathname, title }) {
+  const cfg = motionConfig(pathname, title);
+  if (!cfg) return null;
+  const nodes = cfg.nodes || [];
+  const metrics = cfg.metrics || [];
+  return (
+    <div className={`tab-motion-strip tab-motion-${cfg.variant || "flow"}`} style={{ "--motion-accent": cfg.color || accent }}>
+      <div className="tab-motion-meta">
+        <span className="tab-motion-kicker">{cfg.kicker}</span>
+        <strong>{cfg.label}</strong>
+      </div>
+      <div className="tab-motion-canvas" aria-hidden="true">
+        <div className="tab-motion-rail" />
+        {nodes.map((node, idx) => (
+          <span
+            key={`${node}-${idx}`}
+            className={`tab-motion-node tab-motion-node-${idx + 1}`}
+            style={{ "--node-delay": `${idx * 0.44}s` }}
+          >
+            {node}
+          </span>
+        ))}
+        <span className="tab-motion-packet tab-motion-packet-a" />
+        <span className="tab-motion-packet tab-motion-packet-b" />
+        <span className="tab-motion-pulse tab-motion-pulse-a" />
+        <span className="tab-motion-pulse tab-motion-pulse-b" />
+      </div>
+      <div className="tab-motion-metrics">
+        {metrics.map((metric, idx) => (
+          <span key={`${metric}-${idx}`}>{metric}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function motionConfig(pathname, title) {
+  const path = pathname === "/" ? "/" : pathname.replace(/\/$/, "");
+  const configs = {
+    "/": {
+      kicker: "MISSION FLOW",
+      label: "SCAN -> PM -> GATE -> EXECUTE",
+      color: "#ef4444",
+      variant: "flow",
+      nodes: ["SCAN", "PM", "QC", "ORDER"],
+      metrics: ["live funnel", "gate pressure", "dispatch tape"],
+    },
+    "/scanner": {
+      kicker: "RADAR SWEEP",
+      label: "CANDIDATES ENTER SIGNAL FIELD",
+      color: "#5eead4",
+      variant: "radar",
+      nodes: ["SIG", "RR", "PM", "CARD"],
+      metrics: ["signal pulse", "score heat", "battle card"],
+    },
+    "/contracts": {
+      kicker: "MONEY FLOW",
+      label: "AGENCY -> PRIME -> SUBS",
+      color: "#f59e0b",
+      variant: "sankey",
+      nodes: ["AGENCY", "PRIME", "SUB", "TICKER"],
+      metrics: ["award stream", "sub flow", "institutional read"],
+    },
+    "/sec": {
+      kicker: "EDGAR INTAKE",
+      label: "FILING QUEUE -> REACTION MAP",
+      color: "#a78bfa",
+      variant: "filing",
+      nodes: ["8-K", "FORM 4", "S-1", "REACT"],
+      metrics: ["freshness", "insider cluster", "1M reaction"],
+    },
+    "/earnings": {
+      kicker: "EVENT PULSE",
+      label: "CALENDAR -> CALL TONE -> PRICE REACTION",
+      color: "#4ade80",
+      variant: "pulse",
+      nodes: ["PRE", "CALL", "MOVE", "TRACK"],
+      metrics: ["week board", "bull/bear tone", "post reaction"],
+    },
+    "/lottery": {
+      kicker: "TICKET LADDER",
+      label: "BORN DEAD -> VERIFIED FILL -> GRADED EDGE",
+      color: "#facc15",
+      variant: "slot",
+      nodes: ["TRIG", "TICKET", "MFE", "GRADE"],
+      metrics: ["tail risk", "haircut EV", "league score"],
+    },
+    "/georisk": {
+      kicker: "GLOBAL EVENT MAP",
+      label: "PINPOINTED NEWS RINGS BY SEVERITY",
+      color: "#fb7185",
+      variant: "map",
+      nodes: ["LOW", "WATCH", "HIGH", "CRIT"],
+      metrics: ["cluster rings", "held exposure", "source sync"],
+    },
+    "/macro": {
+      kicker: "CAPITAL CURRENT",
+      label: "GROWTH -> INFLATION -> RATES -> RISK",
+      color: "#38bdf8",
+      variant: "macro",
+      nodes: ["GDP", "CPI", "RATE", "YIELD"],
+      metrics: ["country tabs", "trend arrows", "market tone"],
+    },
+    "/pharma": {
+      kicker: "TRIAL PIPELINE",
+      label: "CATALYSTS MOVE THROUGH FDA GATES",
+      color: "#f472b6",
+      variant: "pipeline",
+      nodes: ["P1", "P2", "P3", "FDA"],
+      metrics: ["trial phase", "PDUFA", "openFDA"],
+    },
+    "/portfolio-manager": {
+      kicker: "PM ROUTER",
+      label: "CANDIDATE -> EQUITY / OPTION / BOTH / PASS",
+      color: "#c8a84b",
+      variant: "judge",
+      nodes: ["CASE", "RISK", "ALLOC", "RULE"],
+      metrics: ["fund totals", "allocation", "learning"],
+    },
+    "/trade-floor": {
+      kicker: "ORDER LANE",
+      label: "APPROVED -> SENT -> FILLED -> MANAGED",
+      color: "#4ade80",
+      variant: "orders",
+      nodes: ["PM", "SEND", "FILL", "STOP"],
+      metrics: ["equity orders", "ratchet", "24h queue"],
+    },
+    "/options-desk": {
+      kicker: "VOL CURVE",
+      label: "GRIND CENTER / TAIL WINGS",
+      color: "#d7bd68",
+      variant: "curve",
+      nodes: ["CHAIN", "DELTA", "MID", "EXIT"],
+      metrics: ["spread truth", "tail hunter", "expectancy"],
+    },
+    "/kronos": {
+      kicker: "FORECAST CONE",
+      label: "PRICE PATH BREATHES AGAINST PROBABILITY",
+      color: "#a78bfa",
+      variant: "cone",
+      nodes: ["SPY", "CONE", "PM", "DRIFT"],
+      metrics: ["forecast", "calendar", "alignment"],
+    },
+    "/case-court": {
+      kicker: "CASE WEIGHT",
+      label: "DEFENSE AND PROSECUTOR BALANCE EVIDENCE",
+      color: "#fbbf24",
+      variant: "scales",
+      nodes: ["DOCS", "DEF", "PROS", "JUDGE"],
+      metrics: ["applicable exhibits", "neutralized", "ruling"],
+    },
+    "/performance": {
+      kicker: "EQUITY RACE",
+      label: "FUND CURVE RUNS AGAINST SPY",
+      color: "#22c55e",
+      variant: "race",
+      nodes: ["FUND", "SPY", "ALPHA", "EDGE"],
+      metrics: ["return spread", "drawdown", "truth score"],
+    },
+    "/learning": {
+      kicker: "MODEL LOOP",
+      label: "DECISION -> OUTCOME -> LESSON -> WEIGHT",
+      color: "#5eead4",
+      variant: "loop",
+      nodes: ["DATA", "TEST", "LEARN", "ADJUST"],
+      metrics: ["sample", "win rate", "rubric"],
+    },
+    "/tf-engine": {
+      kicker: "ENGINE CYCLE",
+      label: "SIGNAL COMPRESSION THROUGH TRADE PHASES",
+      color: "#f97316",
+      variant: "engine",
+      nodes: ["SPARK", "PH1", "PH2", "PH3"],
+      metrics: ["ratchet", "phase exits", "risk"],
+    },
+    "/audit-logs": {
+      kicker: "EVENT TAPE",
+      label: "EVERY SYSTEM ACTION GETS STAMPED",
+      color: "#e879f9",
+      variant: "tape",
+      nodes: ["API", "BOT", "ORDER", "LOG"],
+      metrics: ["append only", "operator", "verified"],
+    },
+    "/quality": {
+      kicker: "DATA HEARTBEAT",
+      label: "SOURCES PULSE GREEN / AMBER / RED",
+      color: "#5eead4",
+      variant: "heartbeat",
+      nodes: ["MKT", "FILL", "SEC", "API"],
+      metrics: ["repull", "gate", "remediate"],
+    },
+    "/truth-review": {
+      kicker: "TRUTH TABLE",
+      label: "CLAIMS ARE SCORED AGAINST EVIDENCE",
+      color: "#7df7de",
+      variant: "truth",
+      nodes: ["CLAIM", "DATA", "EDGE", "GAP"],
+      metrics: ["sample size", "holes", "constraints"],
+    },
+    "/settings": {
+      kicker: "CONNECTION BUS",
+      label: "KEYS AND ENDPOINTS LIGHT UP BY SERVICE",
+      color: "#9ca3af",
+      variant: "bus",
+      nodes: ["DB", "API", "BOT", "BROKER"],
+      metrics: ["config", "backend", "auth"],
+    },
+  };
+  if (path === "/intel") return null;
+  if (path.startsWith("/ticker/")) {
+    return {
+      kicker: "TICKER PROFILE",
+      label: "PRICE / FUNDAMENTALS / KRONOS CONE",
+      color: "#d7bd68",
+      variant: "profile",
+      nodes: ["QUOTE", "RATIO", "CHART", "CONE"],
+      metrics: ["live chart", "key ratios", "company brief"],
+    };
+  }
+  return configs[path] || {
+    kicker: "LIVE VIEW",
+    label: `${title || "TERMINAL"} STATE STREAM`,
+    color: accent2,
+    variant: "flow",
+    nodes: ["LOAD", "SYNC", "SCORE", "VIEW"],
+    metrics: ["active", "fresh", "monitored"],
+  };
 }
 
 function NavLogo({ item, active }) {
