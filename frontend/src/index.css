@@ -2572,29 +2572,25 @@ body {
   }
 }
 
-/* On phones, one vertical gesture should move one surface: the terminal page.
-   Desktop panels often set max-height + overflow-y auto; that creates nested
-   scroll traps on mobile. Keep intentional overlays/dropdowns scrollable. */
+/* On phones, the shell owns the scroll. Avoid broad overflow overrides here:
+   many tab views keep their actual data inside inline overflow containers. */
 @media (max-width: 768px) {
-  .terminal-page-body [style*="overflow-y: auto"],
-  .terminal-page-body [style*="overflowY: auto"],
-  .terminal-page-body [style*="overflow: auto"],
-  .terminal-page-body [style*="overflow:auto"] {
-    max-height: none !important;
-    overflow-y: visible !important;
-    -webkit-overflow-scrolling: auto !important;
+  .terminal-main {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    display: block !important;
+    -webkit-overflow-scrolling: touch !important;
   }
 
-  .terminal-page-body [style*="max-height"],
-  .terminal-page-body [style*="maxHeight"] {
-    max-height: none !important;
-  }
-
-  .terminal-page-body [style*="calc(100vh"],
-  .terminal-page-body [style*="90vh"],
-  .terminal-page-body [style*="42vh"] {
-    max-height: none !important;
+  .terminal-page-body {
+    display: block !important;
+    flex: none !important;
+    min-height: auto !important;
     height: auto !important;
+    overflow: visible !important;
+    padding-bottom: 118px !important;
   }
 
   .terminal-page-body pre,
@@ -2607,8 +2603,17 @@ body {
   .terminal-page-body [style*="overflowX: auto"],
   .terminal-page-body .earnings-table-wrap {
     overflow-x: auto !important;
-    overflow-y: hidden !important;
+    overflow-y: visible !important;
     -webkit-overflow-scrolling: touch !important;
+  }
+
+  .terminal-page-body .case-court-layout [style*="overflowY: auto"],
+  .terminal-page-body .case-court-layout [style*="overflow-y: auto"],
+  .terminal-page-body .case-court-layout [style*="calc(100vh"],
+  .terminal-page-body [style*="maxHeight: 535"],
+  .terminal-page-body [style*="max-height: 535"] {
+    max-height: none !important;
+    overflow-y: visible !important;
   }
 
   .terminal-page-body .earnings-battle-overlay,
