@@ -2627,3 +2627,118 @@ body {
   }
 }
 
+/* Mobile numeric anti-crowding. Keep institutional density, but prevent
+   money/ratio strings from colliding in narrow metric tiles. */
+@media (max-width: 768px) {
+  .terminal-page-body .num,
+  .terminal-page-body strong,
+  .terminal-execution-metric strong,
+  .mobile-status-pill strong,
+  .command-metric-value,
+  .acropolis-metric strong,
+  .terminal-stat .num,
+  .options-stat-grid .terminal-stat .num,
+  .kronos-stat-grid .terminal-stat .num,
+  .case-court-ruling-metrics strong,
+  .case-court-stats strong,
+  .inst-confidence-value,
+  .inst-mini-value {
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+    text-overflow: clip !important;
+    letter-spacing: 0.015em !important;
+    line-height: 1.08 !important;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .terminal-stat,
+  .options-stat-grid .terminal-stat,
+  .kronos-stat-grid .terminal-stat,
+  .terminal-page-body [data-testid^="metric-"],
+  .terminal-page-body [data-testid^="stat-"],
+  .terminal-page-body [data-testid^="kpi-"],
+  .acropolis-metric,
+  .command-mini-metric,
+  .mobile-status-pill {
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .terminal-stat,
+  .options-stat-grid .terminal-stat,
+  .kronos-stat-grid .terminal-stat {
+    min-height: 92px !important;
+    padding: 12px 11px !important;
+    display: grid !important;
+    align-content: start !important;
+    gap: 7px !important;
+  }
+
+  .terminal-stat > div:first-child,
+  .options-stat-grid .terminal-stat > div:first-child,
+  .kronos-stat-grid .terminal-stat > div:first-child,
+  .terminal-page-body [data-testid^="metric-"] > div:first-child,
+  .terminal-page-body [data-testid^="stat-"] > div:first-child,
+  .terminal-page-body [data-testid^="kpi-"] > div:first-child {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    font-size: 8px !important;
+    letter-spacing: 0.12em !important;
+  }
+
+  .terminal-stat .num,
+  .options-stat-grid .terminal-stat .num,
+  .kronos-stat-grid .terminal-stat .num,
+  .acropolis-metric strong {
+    font-size: clamp(17px, 6.1vw, 24px) !important;
+  }
+
+  .command-metric-value,
+  .terminal-page-body [data-testid^="metric-"] strong,
+  .terminal-page-body [data-testid^="stat-"] strong,
+  .terminal-page-body [data-testid^="kpi-"] strong {
+    font-size: clamp(16px, 5.6vw, 22px) !important;
+  }
+
+  .terminal-page-body [data-testid^="metric-"] span,
+  .terminal-page-body [data-testid^="stat-"] span,
+  .terminal-page-body [data-testid^="kpi-"] span,
+  .terminal-stat span,
+  .terminal-stat em,
+  .acropolis-metric em {
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    line-height: 1.25 !important;
+  }
+
+  .options-stat-grid,
+  .kronos-stat-grid,
+  .acropolis-metrics,
+  .case-court-stats,
+  .case-court-ruling-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 390px) {
+  .terminal-stat .num,
+  .options-stat-grid .terminal-stat .num,
+  .kronos-stat-grid .terminal-stat .num,
+  .acropolis-metric strong,
+  .command-metric-value {
+    font-size: clamp(15px, 5.3vw, 20px) !important;
+  }
+
+  .terminal-stat,
+  .options-stat-grid .terminal-stat,
+  .kronos-stat-grid .terminal-stat {
+    padding: 11px 9px !important;
+  }
+}
+
