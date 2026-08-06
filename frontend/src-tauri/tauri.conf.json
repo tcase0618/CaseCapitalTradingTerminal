@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "set \"REACT_APP_BACKEND_URL=http://127.0.0.1:8001\" && npm start",
     "devUrl": "http://localhost:3000",
-    "beforeBuildCommand": "set \"REACT_APP_BACKEND_URL=http://127.0.0.1:8001\" && npm run build",
+    "beforeBuildCommand": "set \"REACT_APP_BACKEND_URL=http://129.121.101.96\" && npm run build",
     "frontendDist": "../build"
   },
   "app": {
@@ -32,7 +32,7 @@
     "publisher": "Case Capital",
     "category": "Finance",
     "shortDescription": "Case Capital trading terminal",
-    "longDescription": "CaseCapitalTradingTerminal desktop shell for the Case Capital local trading platform.",
+    "longDescription": "CaseCapitalTradingTerminal desktop shell for the Case Capital VPS trading platform.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
