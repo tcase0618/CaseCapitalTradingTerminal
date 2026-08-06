@@ -515,6 +515,8 @@ export function CrtShell({ title, children, headerRight = null }) {
   const safety = useSafetyFrame();
   const [isMobile, setIsMobile] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const activeNav = NAV.find(n => loc.pathname === n.to || (n.to !== "/" && loc.pathname.startsWith(n.to))) || NAV.find(n => n.to === "/");
+  const market = getMarketStatus();
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth <= 768);
     check();
@@ -543,7 +545,7 @@ export function CrtShell({ title, children, headerRight = null }) {
             style={{
               position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
               zIndex: 90, backdropFilter: "blur(2px)",
-            }} />
+              }} />
         )}
         {/* ── Sidebar ── */}
         <aside className="terminal-sidebar" style={{
@@ -757,7 +759,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                   fontSize: 14, letterSpacing: "0.14em", fontFamily: "inherit",
                   lineHeight: 1,
                 }}>
-                ☰
+                MENU
               </button>
             )}
             <div className="terminal-page-title fade-in" style={{ flex: 1, minWidth: 0 }}>
@@ -811,6 +813,14 @@ export function CrtShell({ title, children, headerRight = null }) {
             </div>
           </div>
 
+          <MobileCommandDeck
+            title={title}
+            activeNav={activeNav}
+            market={market}
+            safety={safety}
+            alerts={alerts}
+          />
+
           <TabMotionStrip pathname={loc.pathname} title={title} />
 
           {/* Page body */}
@@ -818,8 +828,81 @@ export function CrtShell({ title, children, headerRight = null }) {
             {children}
           </div>
         </main>
+
+        {isMobile && (
+          <MobileBottomDock
+            pathname={loc.pathname}
+            openMenu={() => setDrawerOpen(true)}
+          />
+        )}
       </div>
     </>
+  );
+}
+
+function MobileCommandDeck({ title, activeNav, market, safety, alerts }) {
+  const gate = String(safety.gate?.decision || (safety.loading ? "SYNC" : "UNKNOWN")).toUpperCase();
+  const trading = safety.trading?.trading_enabled === true ? "LIVE" : safety.trading?.trading_enabled === false ? "HALT" : "SYNC";
+  const qcColor = gate === "PASS" || gate === "ALLOW" ? "#4ade80" : gate === "WATCH" ? "#fbbf24" : "#f87171";
+  const ActiveIcon = activeNav?.Icon || Activity;
+  return (
+    <section className="mobile-command-deck" aria-label="Mobile command status">
+      <div className="mobile-command-hero">
+        <div className="mobile-command-emblem" style={{ "--mobile-accent": activeNav?.color || accent }}>
+          <ActiveIcon size={21} strokeWidth={1.8} />
+        </div>
+        <div className="mobile-command-title">
+          <span>{activeNav?.label || "TERMINAL"}</span>
+          <strong>{title}</strong>
+        </div>
+        <div className="mobile-command-live">
+          <span className={`dot ${market.state === "LIVE" ? "dot-green" : "dot-amber"} pulse-dot`} />
+          {market.state}
+        </div>
+      </div>
+      <div className="mobile-command-grid">
+        <MobileStatusPill label="Gate" value={gate} color={qcColor} />
+        <MobileStatusPill label="Trading" value={trading} color={trading === "LIVE" ? "#4ade80" : trading === "HALT" ? "#f87171" : muted} />
+        <MobileStatusPill label="X-Factors" value={alerts.xf ?? 0} color={accent2} />
+        <MobileStatusPill label="Lottery" value={alerts.lottery_hot ?? 0} color={accent} />
+      </div>
+    </section>
+  );
+}
+
+function MobileStatusPill({ label, value, color }) {
+  return (
+    <div className="mobile-status-pill">
+      <span>{label}</span>
+      <strong style={{ color }}>{value}</strong>
+    </div>
+  );
+}
+
+function MobileBottomDock({ pathname, openMenu }) {
+  const items = [
+    { to: "/", label: "Command", Icon: CommandCapIcon, match: p => p === "/" },
+    { to: "/scanner", label: "Scan", Icon: Radar },
+    { to: "/portfolio-manager", label: "PM", Icon: BriefcaseBusiness },
+    { to: "/options-desk", label: "Options", Icon: LampDesk },
+  ];
+  return (
+    <nav className="mobile-bottom-dock" aria-label="Mobile primary navigation">
+      {items.map(item => {
+        const active = item.match ? item.match(pathname) : pathname.startsWith(item.to);
+        const Icon = item.Icon;
+        return (
+          <Link key={item.to} to={item.to} className={`mobile-dock-item ${active ? "active" : ""}`}>
+            <Icon size={18} strokeWidth={1.9} />
+            <span>{item.label}</span>
+          </Link>
+        );
+      })}
+      <button type="button" className="mobile-dock-item mobile-dock-menu" onClick={openMenu}>
+        <Cog size={18} strokeWidth={1.9} />
+        <span>More</span>
+      </button>
+    </nav>
   );
 }
 
@@ -1272,3 +1355,4 @@ export function Stat({ label, value, color = "#e5e7eb", sub = null,
     </div>
   );
 }
+
