@@ -271,6 +271,24 @@ async def data_quality_events(limit: int = 100):
     return await data_quality.events(limit=limit)
 
 
+@api.get("/scheduler/overview")
+async def scheduler_overview():
+    from services import schedule_control
+    return await schedule_control.overview()
+
+
+@api.post("/scheduler/watchdog")
+async def scheduler_watchdog(auto_fix: bool = True, max_repairs: int = 6, critical_only: bool = False):
+    from services import schedule_control
+    return await schedule_control.watchdog(auto_fix=auto_fix, max_repairs=max_repairs, critical_only=critical_only)
+
+
+@api.post("/scheduler/repair/{job_key}")
+async def scheduler_repair(job_key: str):
+    from services import schedule_control
+    return await schedule_control.repair(job_key)
+
+
 @api.get("/data_truth/overview")
 async def data_truth_overview(force_refresh: bool = False):
     from services import data_truth

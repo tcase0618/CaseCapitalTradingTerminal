@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { RefreshCw, ShieldCheck, ShieldAlert, Zap, Wrench } from "lucide-react";
+import { CalendarClock, RefreshCw, ShieldCheck, ShieldAlert, Zap, Wrench } from "lucide-react";
 import { API } from "../config";
 import { CrtShell } from "./CrtShell";
 import { DataConfidenceStrip, InstitutionalEmpty } from "./Institutional";
@@ -30,19 +30,25 @@ function fmtAge(v) {
 
 export default function QualityPage() {
   const [data, setData] = useState(null);
+  const [scheduler, setScheduler] = useState(null);
   const [events, setEvents] = useState([]);
+  const [tab, setTab] = useState("QC");
   const [loading, setLoading] = useState(true);
   const [repulling, setRepulling] = useState(false);
   const [remediating, setRemediating] = useState(false);
+  const [watchdogRunning, setWatchdogRunning] = useState(false);
+  const [repairing, setRepairing] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [overview, eventRows] = await Promise.all([
+      const [overview, schedulerRows, eventRows] = await Promise.all([
         axios.get(`${API}/data_quality/overview`).then(r => r.data),
+        axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
         axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
       ]);
       setData(overview);
+      setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
     } finally {
       setLoading(false);
@@ -61,7 +67,11 @@ export default function QualityPage() {
     try {
       const { data: fresh } = await axios.post(`${API}/data_quality/refresh`);
       setData(fresh);
-      const eventRows = await axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] }));
+      const [schedulerRows, eventRows] = await Promise.all([
+        axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
+        axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
+      ]);
+      setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
     } finally {
       setRepulling(false);
@@ -74,10 +84,38 @@ export default function QualityPage() {
     try {
       const { data: result } = await axios.post(`${API}/data_quality/remediate`, null, { params: { limit: 18 } });
       setData(result.overview || result);
-      const eventRows = await axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] }));
+      const [schedulerRows, eventRows] = await Promise.all([
+        axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
+        axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
+      ]);
+      setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
     } finally {
       setRemediating(false);
+    }
+  };
+
+  const runWatchdog = async () => {
+    if (watchdogRunning) return;
+    setWatchdogRunning(true);
+    try {
+      await axios.post(`${API}/scheduler/watchdog`, null, { params: { auto_fix: true, max_repairs: 8, critical_only: false } });
+      const { data: schedulerRows } = await axios.get(`${API}/scheduler/overview`);
+      setScheduler(schedulerRows);
+    } finally {
+      setWatchdogRunning(false);
+    }
+  };
+
+  const repairSource = async (key) => {
+    if (!key || repairing) return;
+    setRepairing(key);
+    try {
+      await axios.post(`${API}/scheduler/repair/${encodeURIComponent(key)}`);
+      const { data: schedulerRows } = await axios.get(`${API}/scheduler/overview`);
+      setScheduler(schedulerRows);
+    } finally {
+      setRepairing("");
     }
   };
 
@@ -112,6 +150,24 @@ export default function QualityPage() {
         </div>
       }
     >
+      <div style={tabs}>
+        {["QC", "SCHEDULER"].map(k => (
+          <button key={k} onClick={() => setTab(k)} style={{ ...tabBtn, ...(tab === k ? tabActive : {}) }}>
+            {k === "SCHEDULER" && <CalendarClock size={14} />}
+            {k}
+          </button>
+        ))}
+      </div>
+      {tab === "SCHEDULER" ? (
+        <SchedulerPanel
+          scheduler={scheduler}
+          loading={loading}
+          watchdogRunning={watchdogRunning}
+          runWatchdog={runWatchdog}
+          repairing={repairing}
+          repairSource={repairSource}
+        />
+      ) : (
       <div style={{ display: "grid", gap: 18 }}>
         <DataConfidenceStrip
           items={[
@@ -246,6 +302,7 @@ export default function QualityPage() {
           </div>
         </Card>
       </div>
+      )}
     </CrtShell>
   );
 }
@@ -333,6 +390,126 @@ function Empty({ text }) {
   return <div style={{ color: muted, padding: 16, border: hairline }}>{text}</div>;
 }
 
+function SchedulerPanel({ scheduler, loading, watchdogRunning, runWatchdog, repairing, repairSource }) {
+  const rows = scheduler?.rows || [];
+  const jobs = scheduler?.jobs || [];
+  const summary = scheduler?.summary || {};
+  const last = scheduler?.last_watchdog || {};
+  const staleRows = rows.filter(r => r.stale);
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <DataConfidenceStrip
+        items={[
+          { label: "Sources", value: loading ? "--" : summary.sources ?? rows.length },
+          { label: "Live", value: summary.live ?? 0, color: "#4ade80" },
+          { label: "Standby", value: summary.standby ?? 0, color: accent },
+          { label: "Stale", value: summary.stale ?? 0, color: (summary.stale || 0) ? "#fbbf24" : "#4ade80" },
+          { label: "Critical Stale", value: summary.critical_stale ?? 0, color: (summary.critical_stale || 0) ? "#ef4444" : "#4ade80" },
+          { label: "Runtime Jobs", value: summary.scheduled_jobs ?? jobs.length },
+        ]}
+      />
+
+      <section style={hero}>
+        <div>
+          <div style={eyebrow}>SCHEDULER CONTROL</div>
+          <h1 style={h1}>No source gets to rot silently.</h1>
+          <p style={sub}>{scheduler?.policy || "Loading scheduler policy..."}</p>
+        </div>
+        <div style={gateCard}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center" }}>
+            <div>
+              <div style={gateLabel}>WATCHDOG</div>
+              <div style={{ ...gateValue, color: (summary.critical_stale || 0) ? "#ef4444" : accent2 }}>
+                {(summary.critical_stale || 0) ? "REPAIR" : "ARMED"}
+              </div>
+            </div>
+            <button onClick={runWatchdog} disabled={watchdogRunning} style={secondaryButton}>
+              <Wrench size={15} className={watchdogRunning ? "spin" : ""} />
+              {watchdogRunning ? "RUNNING" : "RUN WATCHDOG"}
+            </button>
+          </div>
+          <div style={gatePolicy}>
+            Last pass: {shortStamp(last.created_at || last.generated_at)} / repairs {last.summary?.repairs_attempted ?? 0} / stale after {last.summary?.stale_after ?? "-"}.
+          </div>
+          <div style={miniLine}><Zap size={13} /> Repairs run out-of-band; display feeds do not slow execution gates.</div>
+        </div>
+      </section>
+
+      <Card title="STALE / REPAIR QUEUE">
+        <div style={rowStack}>
+          {staleRows.map(row => (
+            <SchedulerRow key={row.key} row={row} repairing={repairing === row.key} repairSource={repairSource} />
+          ))}
+          {!staleRows.length && <InstitutionalEmpty title="No stale scheduler sources." detail="Every declared source is fresh or correctly standing by." />}
+        </div>
+      </Card>
+
+      <Card title="SOURCE SLA REGISTRY">
+        <div style={{ overflowX: "auto" }}>
+          <table style={table}>
+            <thead>
+              <tr>
+                <Th>SOURCE</Th><Th>DOMAIN</Th><Th>STATUS</Th><Th>AGE</Th><Th>SLA</Th><Th>TRADING</Th><Th>REPAIR</Th><Th>CADENCE</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={row.key} style={{ borderTop: hairline }}>
+                  <Td strong>{row.label}</Td>
+                  <Td muted>{row.domain}</Td>
+                  <Td><Badge status={row.status} /></Td>
+                  <Td>{fmtAge(row.age_minutes)}</Td>
+                  <Td>{fmtAge(row.max_age_minutes)}</Td>
+                  <Td color={row.critical ? (row.stale ? "#ef4444" : "#4ade80") : muted}>{row.critical ? (row.stale ? "IMPACT" : "CLEAR") : "DISPLAY"}</Td>
+                  <Td color={accent}>{String(row.repair || "-").replaceAll("_", " ").toUpperCase()}</Td>
+                  <Td muted>{row.cadence}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card title="LIVE APSCHEDULER JOBS">
+        <div style={{ overflowX: "auto" }}>
+          <table style={table}>
+            <thead>
+              <tr><Th>JOB</Th><Th>NEXT RUN</Th><Th>TRIGGER</Th></tr>
+            </thead>
+            <tbody>
+              {jobs.map(job => (
+                <tr key={job.id} style={{ borderTop: hairline }}>
+                  <Td strong>{job.id}</Td>
+                  <Td color={accent2}>{shortStamp(job.next_run_time)}</Td>
+                  <Td muted>{job.trigger}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function SchedulerRow({ row, repairing, repairSource }) {
+  return (
+    <div style={scheduleRepairRow}>
+      <div>
+        <div style={qTitle}>{row.label}</div>
+        <div style={qDetail}>{row.domain} / age {fmtAge(row.age_minutes)} / max {fmtAge(row.max_age_minutes)}</div>
+      </div>
+      <Badge status={row.status} />
+      <div style={{ color: row.critical ? "#ef4444" : "#fbbf24", fontSize: 11, fontWeight: 900 }}>
+        {row.critical ? "EXECUTION SOURCE" : "DISPLAY SOURCE"}
+      </div>
+      <button onClick={() => repairSource(row.key)} disabled={repairing} style={miniButton}>
+        {repairing ? "FIXING" : "REPAIR NOW"}
+      </button>
+    </div>
+  );
+}
+
 function Th({ children }) { return <th style={th}>{children}</th>; }
 function Td({ children, color, muted: isMuted, strong }) {
   return <td style={{ ...td, color: color || (isMuted ? muted : "#cbd5e1"), fontWeight: strong ? 800 : 500 }}>{children}</td>;
@@ -350,6 +527,9 @@ const secondaryButton = {
   color: accent,
 };
 const hero = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 440px)", gap: 18, alignItems: "stretch" };
+const tabs = { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 };
+const tabBtn = { minHeight: 34, display: "inline-flex", alignItems: "center", gap: 8, padding: "0 13px", border: hairline, background: "rgba(255,255,255,0.02)", color: muted, fontSize: 11, fontWeight: 900, letterSpacing: "0.14em", cursor: "pointer" };
+const tabActive = { color: accent2, borderColor: "rgba(94,234,212,0.55)", background: "rgba(94,234,212,0.08)" };
 const eyebrow = { color: accent2, fontSize: 11, fontWeight: 900, letterSpacing: "0.18em", marginBottom: 12 };
 const h1 = { margin: 0, color: accent, fontSize: 36, letterSpacing: "0.08em", lineHeight: 1.08 };
 const sub = { color: muted, maxWidth: 760, lineHeight: 1.55, fontSize: 13 };
@@ -378,6 +558,8 @@ const posValue = { fontSize: 22, fontWeight: 900, marginTop: 8 };
 const table = { width: "100%", borderCollapse: "collapse", minWidth: 920 };
 const remediationHeader = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 14 };
 const fixRow = { display: "grid", gridTemplateColumns: "minmax(180px, 0.9fr) 170px minmax(260px, 1.4fr) 150px", gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 };
+const scheduleRepairRow = { display: "grid", gridTemplateColumns: "minmax(220px, 1fr) 110px 150px 130px", gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 };
+const miniButton = { minHeight: 34, border: `1px solid ${accent2}`, background: "rgba(94,234,212,0.06)", color: accent2, fontWeight: 900, letterSpacing: "0.12em", fontSize: 10, cursor: "pointer" };
 const th = { textAlign: "left", color: "#586174", fontSize: 10, letterSpacing: "0.16em", padding: "0 12px 12px", fontWeight: 900 };
 const td = { padding: "13px 12px", fontSize: 12, verticalAlign: "top" };
 const eventRow = { display: "grid", gridTemplateColumns: "110px 90px 110px 100px minmax(0, 1fr)", gap: 10, border: hairline, padding: 10, color: "#cbd5e1", fontSize: 11 };

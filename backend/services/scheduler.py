@@ -57,6 +57,11 @@ async def _stock_scan_market_day_now() -> tuple[bool, str]:
         return True, f"weekday fallback after calendar check failed ({date_str})"
 
 
+async def stock_scan_market_day_now() -> tuple[bool, str]:
+    """Public wrapper for QC/Scheduler control without exposing private names."""
+    return await _stock_scan_market_day_now()
+
+
 async def _daily_scan_job():
     try:
         market_day, reason = await _stock_scan_market_day_now()
@@ -613,6 +618,37 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    async def _schedule_watchdog_job():
+        try:
+            from . import schedule_control
+            result = await schedule_control.watchdog(auto_fix=True, max_repairs=4, critical_only=False)
+            summary = (result.get("event") or {}).get("summary") or {}
+            if summary.get("critical_stale_after", 0):
+                try:
+                    from . import telegram_events
+                    await telegram_events.emit_event(
+                        "scheduler_watchdog_stale_sources",
+                        severity="warning",
+                        scope="quality",
+                        title="Scheduler watchdog found stale sources",
+                        summary=(
+                            f"{summary.get('critical_stale_after', 0)} critical source(s) still stale "
+                            f"after {summary.get('repairs_attempted', 0)} repair attempt(s)."
+                        ),
+                        details=summary,
+                        priority="summary",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("schedule watchdog: %s", e)
+    _scheduler.add_job(
+        _schedule_watchdog_job,
+        IntervalTrigger(minutes=10),
+        id="schedule_watchdog_10m",
+        replace_existing=True,
+    )
+
     # v5.2 — stale-order sweep every hour: cancel any TF buy still unfilled > 24h
     async def _stale_order_sweep():
         try:
@@ -732,3 +768,20 @@ def shutdown_scheduler():
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+
+
+def jobs_status() -> list[dict]:
+    """Runtime APScheduler jobs for the QC Scheduler tab."""
+    if not _scheduler:
+        return []
+    rows = []
+    for job in _scheduler.get_jobs():
+        rows.append({
+            "id": job.id,
+            "name": getattr(job.func, "__name__", str(job.func)),
+            "trigger": str(job.trigger),
+            "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+            "pending": bool(getattr(job, "pending", False)),
+        })
+    rows.sort(key=lambda r: (r.get("next_run_time") or "9999", r.get("id") or ""))
+    return rows
