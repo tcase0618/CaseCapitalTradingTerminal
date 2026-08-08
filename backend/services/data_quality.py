@@ -14,8 +14,8 @@ from .db import get_db, log_activity, stamped
 
 
 CRITICAL_MAX_AGE_MINUTES = {
-    "live_positions": 15,
-    "options_risk": 15,
+    "live_positions": 8,
+    "options_risk": 8,
     "latest_scan": 480,
     "system_health": 5,
 }
@@ -568,8 +568,39 @@ async def overview(force_refresh: bool = False, record_event: bool = True) -> di
 
     rows: list[dict[str, Any]] = []
     live_row, latest_positions = await _live_positions_row()
+    options_row = await _options_risk_row()
+
+    # Execution authority must self-heal. A deploy/restart can leave the cached
+    # position or options-risk evidence just past the SLA before the next
+    # scheduled tick. In that case, do a bounded repull here so the gate does
+    # not sit at SCOPED_BLOCK/low execution score when Alpaca is reachable.
+    stale_execution_rows = [
+        r for r in (live_row, options_row)
+        if r.get("blocks_trading") and r.get("auto_fix") == "instant_repull"
+    ]
+    if stale_execution_rows and not force_refresh:
+        try:
+            from . import options_desk, scheduler
+
+            tasks = []
+            if any(r.get("key") == "live_positions" for r in stale_execution_rows):
+                tasks.append(asyncio.wait_for(
+                    scheduler.persist_live_position_snapshot(triggered_by="quality_inline_stale_repull"),
+                    timeout=ATTEMPT_TIMEOUT_SECONDS,
+                ))
+            if any(r.get("key") == "options_risk" for r in stale_execution_rows):
+                tasks.append(asyncio.wait_for(
+                    options_desk.monitor_open_positions(enforce_hard_stop=False),
+                    timeout=ATTEMPT_TIMEOUT_SECONDS,
+                ))
+            await asyncio.gather(*tasks, return_exceptions=True)
+            live_row, latest_positions = await _live_positions_row()
+            options_row = await _options_risk_row()
+        except Exception as exc:
+            await log_activity("QC inline execution repull failed", "warn", {"error": str(exc)[:240]})
+
     rows.append(live_row)
-    rows.append(await _options_risk_row())
+    rows.append(options_row)
     rows.append(await _latest_scan_row())
     rows.extend(await _integration_rows(force_probe=force_refresh))
 

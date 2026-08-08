@@ -82,6 +82,14 @@ function missionState(loading, ok, readyLabel, blockedLabel) {
 
 function riskLevel(pos) {
   if (pos?.below_stop) return { label: "STOP", color: "#f87171" };
+  if (pos?.instrument === "OPTION") {
+    const plpc = normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct);
+    if (plpc != null) {
+      if (plpc <= -15) return { label: "HIGH", color: "#f87171" };
+      if (plpc <= -5) return { label: "MED", color: "#fbbf24" };
+      return { label: "LOW", color: "#8cc665" };
+    }
+  }
   const dist = Number(pos?.dist_to_stop_pct);
   if (Number.isFinite(dist)) {
     if (dist <= 1) return { label: "HIGH", color: "#f87171" };
@@ -95,6 +103,10 @@ function riskLevel(pos) {
 }
 
 function stopDistanceLabel(pos) {
+  if (pos?.instrument === "OPTION") {
+    const plpc = normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct);
+    return plpc == null ? "OPT MARK" : `${plpc >= 0 ? "+" : ""}${plpc.toFixed(2)}% P/L`;
+  }
   if (pos?.below_stop) return "BREACHED";
   const dist = Number(pos?.dist_to_stop_pct);
   if (Number.isFinite(dist)) return `${dist >= 0 ? "+" : ""}${dist.toFixed(2)}%`;
@@ -103,11 +115,64 @@ function stopDistanceLabel(pos) {
 
 function stopDistanceColor(pos) {
   if (pos?.below_stop) return "#f87171";
+  if (pos?.instrument === "OPTION") {
+    const plpc = normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct);
+    if (plpc == null) return muted;
+    if (plpc <= -15) return "#f87171";
+    if (plpc <= -5) return "#fbbf24";
+    return "#4ade80";
+  }
   const dist = Number(pos?.dist_to_stop_pct);
   if (!Number.isFinite(dist)) return muted;
   if (dist <= 1) return "#f87171";
   if (dist <= 3) return "#fbbf24";
   return "#4ade80";
+}
+
+function normalizedPctNumber(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.abs(n) <= 1 ? n * 100 : n;
+}
+
+function optionRoot(symbol) {
+  const m = String(symbol || "").toUpperCase().match(/^([A-Z]{1,6})\d{6}[CP]\d+/);
+  return m ? m[1] : String(symbol || "").toUpperCase();
+}
+
+function buildCommandPositions(tradeFloor, monitor) {
+  const equityStops = new Map(
+    (tradeFloor?.live_alpaca || []).map(p => [String(p.symbol || p.ticker || "").toUpperCase(), p]),
+  );
+  const equities = ((monitor?.equities?.positions?.length ? monitor.equities.positions : tradeFloor?.live_alpaca) || [])
+    .map(p => {
+      const symbol = String(p.symbol || p.ticker || "").toUpperCase();
+      const stopRow = equityStops.get(symbol) || {};
+      return {
+        ...stopRow,
+        ...p,
+        symbol,
+        display_symbol: symbol,
+        route_symbol: symbol,
+        instrument: "EQUITY",
+        position_kind: "EQ",
+      };
+    });
+  const options = (monitor?.options?.positions || []).map(p => {
+    const symbol = String(p.symbol || "").toUpperCase();
+    const root = optionRoot(symbol);
+    return {
+      ...p,
+      symbol,
+      display_symbol: root,
+      contract_symbol: symbol,
+      route_symbol: root,
+      instrument: "OPTION",
+      position_kind: "OPT",
+    };
+  });
+  return [...equities, ...options];
 }
 
 function normalizeEvent(row) {
@@ -125,6 +190,7 @@ export default function CommandCenterPage() {
   const [health, setHealth] = useState(null);
   const [executionGate, setExecutionGate] = useState(null);
   const [tradeFloor, setTradeFloor] = useState(null);
+  const [positionMonitor, setPositionMonitor] = useState(null);
   const [pm, setPm] = useState(null);
   const [priceSource, setPriceSource] = useState(null);
   const [activity, setActivity] = useState([]);
@@ -145,6 +211,7 @@ export default function CommandCenterPage() {
       axios.get(`${API}/system/health`).then(r => setHealth(r.data)).catch(() => {}),
       axios.get(`${API}/execution_gate/overview`).then(r => setExecutionGate(r.data)).catch(() => setExecutionGate({ ok: false, decision: "UNKNOWN" })),
       axios.get(`${API}/trade_floor/positions`).then(r => setTradeFloor(r.data)).catch(() => {}),
+      axios.get(`${API}/position_monitor/latest`).then(r => setPositionMonitor(r.data)).catch(() => {}),
       axios.get(`${API}/portfolio_manager/latest`).then(r => setPm(r.data)).catch(() => {}),
       axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {}),
       axios.get(`${API}/activity?limit=12`).then(r => setActivity(r.data || [])).catch(() => {}),
@@ -161,7 +228,10 @@ export default function CommandCenterPage() {
     return () => clearInterval(id);
   }, [refresh]);
 
-  const livePositions = tradeFloor?.live_alpaca || [];
+  const livePositions = useMemo(
+    () => buildCommandPositions(tradeFloor, positionMonitor),
+    [tradeFloor, positionMonitor],
+  );
   const integrations = admin?.integrations || [];
   const pmSummary = pm?.summary || {};
   const account = health?.alpaca?.account || {};
@@ -390,21 +460,46 @@ function BarRow({ label, value, pct, color = "#f87171" }) {
 }
 
 function PositionHeat({ positions }) {
-  const rows = (positions || []).slice(0, 8);
+  const [sort, setSort] = useState({ key: "risk", dir: "desc" });
+  const sortedRows = useMemo(() => {
+    const rows = [...(positions || [])];
+    rows.sort((a, b) => comparePosition(a, b, sort.key, sort.dir));
+    return rows;
+  }, [positions, sort]);
+  const rows = sortedRows.slice(0, 12);
   const totalMv = rows.reduce((s, p) => s + Number(p.market_value || 0), 0);
   const totalPl = rows.reduce((s, p) => s + Number(p.unrealized_pl || 0), 0);
+  const setSortKey = (key) => {
+    setSort(prev => ({ key, dir: prev.key === key && prev.dir === "desc" ? "asc" : "desc" }));
+  };
+  const SortHead = ({ id, children }) => (
+    <button onClick={() => setSortKey(id)} style={heatSortButton}>
+      {children}
+      <span style={{ color: sort.key === id ? accent2 : muted }}>{sort.key === id ? (sort.dir === "desc" ? "▼" : "▲") : ""}</span>
+    </button>
+  );
   return (
     <div style={tableWrap}>
       <div style={heatHeader}>
-        <span>SYMBOL</span><span>POS</span><span>MKT VALUE</span><span>UNREAL P/L</span><span>DIST TO STOP</span><span>RISK LEVEL</span>
+        <SortHead id="symbol">SYMBOL</SortHead>
+        <SortHead id="qty">POS</SortHead>
+        <SortHead id="market_value">MKT VALUE</SortHead>
+        <SortHead id="unrealized_pl">UNREAL P/L</SortHead>
+        <SortHead id="distance">DIST / MARK</SortHead>
+        <SortHead id="risk">RISK</SortHead>
       </div>
       {rows.map(p => {
         const risk = riskLevel(p);
         const pl = Number(p.unrealized_pl || 0);
+        const symbol = p.display_symbol || p.symbol || p.ticker;
+        const routeSymbol = p.route_symbol || symbol;
         return (
-          <Link key={p.symbol || p.ticker} to={`/ticker/${p.symbol || p.ticker}`} style={heatRow}>
-            <span style={{ color: labelLight, fontWeight: 900 }}>{p.symbol || p.ticker}</span>
-            <span>{p.qty || p.quantity || "--"}</span>
+          <Link key={`${p.instrument || "EQUITY"}-${p.contract_symbol || p.symbol || p.ticker}`} to={`/ticker/${routeSymbol}`} style={heatRow} title={p.contract_symbol || p.symbol || p.ticker}>
+            <span style={{ color: labelLight, fontWeight: 900, minWidth: 0 }}>
+              {symbol}
+              <em style={heatKind}>{p.position_kind || "EQ"}</em>
+            </span>
+            <span>{fmtQty(p.qty || p.quantity)}</span>
             <span>{fmtMoney2(p.market_value).replace("+", "")}</span>
             <span style={{ color: pl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(pl)}</span>
             <span title={p.current_stop ? `Stop $${Number(p.current_stop).toFixed(2)}` : "No stop ledger record"} style={{ color: stopDistanceColor(p) }}>{stopDistanceLabel(p)}</span>
@@ -414,10 +509,50 @@ function PositionHeat({ positions }) {
       })}
       {!rows.length && <Empty text="No live positions." />}
       <div style={heatFooter}>
-        <span>TOTALS</span><span>{rows.reduce((s, p) => s + Number(p.qty || 0), 0)}</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span /> <span>PORTFOLIO</span>
+        <span>TOTALS</span><span>{fmtQty(rows.reduce((s, p) => s + Number(p.qty || 0), 0))}</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span>{rows.filter(p => p.instrument === "OPTION").length} OPT</span><span>PORTFOLIO</span>
       </div>
     </div>
   );
+}
+
+function fmtQty(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "--";
+  if (Math.abs(n) >= 100) return n.toFixed(0);
+  if (Math.abs(n) >= 10) return n.toFixed(2).replace(/\.00$/, "");
+  return n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function positionRiskRank(pos) {
+  const label = riskLevel(pos).label;
+  if (label === "STOP" || label === "HIGH") return 3;
+  if (label === "MED") return 2;
+  if (label === "LOW") return 1;
+  return 0;
+}
+
+function positionDistanceValue(pos) {
+  if (pos?.instrument === "OPTION") return normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct) ?? -999;
+  if (pos?.below_stop) return -999;
+  const dist = Number(pos?.dist_to_stop_pct);
+  return Number.isFinite(dist) ? dist : -998;
+}
+
+function comparePosition(a, b, key, dir) {
+  const mult = dir === "asc" ? 1 : -1;
+  const value = (row) => {
+    if (key === "symbol") return `${row.display_symbol || row.symbol || row.ticker || ""}-${row.position_kind || ""}`;
+    if (key === "qty") return Number(row.qty || row.quantity || 0);
+    if (key === "market_value") return Number(row.market_value || 0);
+    if (key === "unrealized_pl") return Number(row.unrealized_pl || 0);
+    if (key === "distance") return positionDistanceValue(row);
+    if (key === "risk") return positionRiskRank(row);
+    return 0;
+  };
+  const av = value(a);
+  const bv = value(b);
+  if (typeof av === "string" || typeof bv === "string") return String(av).localeCompare(String(bv)) * mult;
+  return ((av || 0) - (bv || 0)) * mult;
 }
 
 function QualityMatrix({ integrations, qualityOverview, priceSource }) {
@@ -671,9 +806,12 @@ const barTrack = { height: 7, background: "rgba(255,255,255,0.06)", overflow: "h
 const barFill = { display: "block", height: "100%", background: "linear-gradient(90deg, #f87171, rgba(248,113,113,0.45))" };
 const totalRejected = { borderTop: hairline, marginTop: 10, paddingTop: 10, color: "#f87171", fontSize: 10, fontWeight: 900, display: "flex", justifyContent: "space-between", letterSpacing: "0.08em" };
 const tableWrap = { minWidth: 0, overflowX: "auto", overflowY: "hidden" };
-const heatHeader = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const heatRow = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
-const heatFooter = { display: "grid", gridTemplateColumns: "64px 52px 96px 98px 96px 78px", gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8 };
+const heatColumns = "minmax(70px, 0.9fr) minmax(48px, 0.55fr) minmax(78px, 0.85fr) minmax(82px, 0.85fr) minmax(86px, 0.95fr) minmax(62px, 0.7fr)";
+const heatHeader = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline, minWidth: 560 };
+const heatRow = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline, minWidth: 560 };
+const heatFooter = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8, minWidth: 560 };
+const heatSortButton = { border: 0, background: "transparent", color: muted, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "flex-start", gap: 4, minWidth: 0, fontFamily: "JetBrains Mono", fontSize: 8, letterSpacing: "0.10em", fontWeight: 900, cursor: "pointer", textAlign: "left" };
+const heatKind = { display: "inline-flex", marginLeft: 5, color: accent2, fontStyle: "normal", fontSize: 7, letterSpacing: "0.08em", verticalAlign: "middle" };
 const riskBadge = { display: "inline-flex", justifyContent: "center", padding: "3px 8px", fontSize: 9, fontWeight: 900, letterSpacing: "0.08em" };
 const qualityColumns = "minmax(54px, 0.7fr) minmax(95px, 1.45fr) minmax(54px, 0.72fr) minmax(54px, 0.72fr) minmax(62px, 0.85fr)";
 const qualityHeader = { display: "grid", gridTemplateColumns: qualityColumns, gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };

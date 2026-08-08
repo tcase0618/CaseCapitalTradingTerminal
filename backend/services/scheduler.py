@@ -620,15 +620,29 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    async def _live_position_snapshot_job():
+    async def _execution_authority_refresh_job():
         try:
-            await persist_live_position_snapshot(triggered_by="scheduler_live_snapshot_15m")
+            from . import options_desk
+
+            snapshot = await persist_live_position_snapshot(triggered_by="scheduler_execution_authority_5m")
+            risk = await options_desk.monitor_open_positions(enforce_hard_stop=False)
+            await log_activity(
+                f"Execution authority refresh: {snapshot['totals']['positions']} positions, "
+                f"{risk.get('positions_checked', 0)} option risk marks",
+                "warn" if risk.get("errors") else "info",
+                {
+                    "snapshot_at": snapshot.get("snapshot_at"),
+                    "positions": snapshot.get("totals", {}).get("positions"),
+                    "options_checked": risk.get("positions_checked", 0),
+                    "errors": risk.get("errors", []),
+                },
+            )
         except Exception as e:
-            logger.warning("live position snapshot: %s", e)
+            logger.warning("execution authority refresh: %s", e)
     _scheduler.add_job(
-        _live_position_snapshot_job,
-        IntervalTrigger(minutes=15),
-        id="live_position_snapshot_15m",
+        _execution_authority_refresh_job,
+        IntervalTrigger(minutes=5),
+        id="execution_authority_refresh_5m",
         replace_existing=True,
     )
 
