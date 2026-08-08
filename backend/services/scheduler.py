@@ -360,6 +360,34 @@ def start_scheduler():
         id="kronos_morning_forecast_930",
         replace_existing=True,
     )
+    async def _kronos_forecast_snapshot_job():
+        try:
+            from . import kronos
+            payload = await kronos.refresh_snapshot()
+            status = payload.get("status") or {}
+            forecast = payload.get("forecast") or {}
+            summary = forecast.get("summary") or {}
+            await log_activity(
+                f"Kronos 5m forecast refresh: {summary.get('positions', 0)} positions, "
+                f"health={status.get('health')}, pm_map={summary.get('mapped_pm', 0)}/{summary.get('positions', 0)}",
+                "warn" if status.get("health") in {"STALE", "MISSING"} else "info",
+                {
+                    "health": status.get("health"),
+                    "latest_snapshot_at": status.get("latest_snapshot_at"),
+                    "positions": summary.get("positions", 0),
+                    "mapped_pm": summary.get("mapped_pm", 0),
+                    "unmapped_pm": summary.get("unmapped_pm", 0),
+                    "risk_flags": summary.get("risk_flags", 0),
+                },
+            )
+        except Exception as e:
+            logger.warning("kronos 5m forecast refresh: %s", e)
+    _scheduler.add_job(
+        _kronos_forecast_snapshot_job,
+        IntervalTrigger(minutes=5),
+        id="kronos_forecast_refresh_5m",
+        replace_existing=True,
+    )
     # 15-min options flow refresh - Mon-Fri 9:30 to 16:00 ET
     _scheduler.add_job(
         _flow_refresh_job,
