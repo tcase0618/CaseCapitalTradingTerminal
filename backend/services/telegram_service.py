@@ -18,6 +18,43 @@ logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
 
 
+OUTBOUND_TEXT_REPLACEMENTS = {
+    "AXIOM INTELLIGENCE": "CASE CAPITAL COMMANDS",
+    "AXIOM TRACKER": "CASE CAPITAL SIGNAL TRACKER",
+    "AXIOM CURVE": "CASE CAPITAL PERFORMANCE CURVE",
+    "AXIOM INTEL": "CASE CAPITAL INTEL",
+    "AXIOM v3.2": "Case Capital v3.2",
+    "STOCK INTEL": "CASE CAPITAL | STOCK INTEL",
+    "OPTIONS FILLS": "CASE CAPITAL | OPTIONS FILLS",
+    "OPTIONS RATCHET UPDATE": "CASE CAPITAL | OPTIONS RISK UPDATE",
+    "OPTIONS HARD STOP": "CASE CAPITAL | OPTIONS EXIT",
+    "REGIME HALT": "CASE CAPITAL | REGIME GATE",
+    "CASE CAPITAL KRONOS MORNING FORECAST": "CASE CAPITAL | KRONOS MORNING BRIEF",
+    "CASE CAPITAL OPTIONS FUND REPORT": "CASE CAPITAL | OPTIONS DAILY REPORT",
+    "CASE CAPITAL OPTIONS WEEKLY REPORT": "CASE CAPITAL | OPTIONS WEEKLY REPORT",
+    "CASE CAPITAL DAILY OPS REPORT": "CASE CAPITAL | DAILY OPS",
+    "CASE CAPITAL WEEKLY OPS REPORT": "CASE CAPITAL | WEEKLY TRUTH REPORT",
+    "CASE CAPITAL QUALITY CONTROL": "CASE CAPITAL | QC GATE",
+    "CASE CAPITAL QUALITY": "CASE CAPITAL | QUALITY REPORT",
+    "CASE CAPITAL SCAN REPORT": "CASE CAPITAL | SCAN REPORT",
+    "GOV CONTRACT SCAN": "CASE CAPITAL | GOV CONTRACT SCAN",
+    "Running full scan...": "CASE CAPITAL | SCAN STARTED\nFull signal scan is running.",
+    "Running fresh scan...": "CASE CAPITAL | SCAN STARTED\nFresh signal scan is running.",
+    "Running gov contracts scan...": "CASE CAPITAL | GOV CONTRACT SCAN STARTED\nGovernment contract scan is running.",
+    "AXIOM answers": "Case Capital answers",
+}
+
+
+def _normalize_outbound_text(text: str) -> str:
+    cleaned = text
+    for old, new in OUTBOUND_TEXT_REPLACEMENTS.items():
+        cleaned = cleaned.replace(old, new)
+    while "CASE CAPITAL | CASE CAPITAL | " in cleaned:
+        cleaned = cleaned.replace("CASE CAPITAL | CASE CAPITAL | ", "CASE CAPITAL | ")
+    cleaned = re.sub(r"\n{4,}", "\n\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _api_url(method: str) -> str:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     return f"https://api.telegram.org/bot{token}/{method}"
@@ -34,6 +71,7 @@ def _default_chat_id() -> str:
 async def send_message(text: str, chat_id: str | None = None, parse_mode: str = "HTML") -> bool:
     if not _has_token():
         return False
+    text = _normalize_outbound_text(str(text or ""))
     chat_id = chat_id or _default_chat_id()
     if not chat_id:
         return False
@@ -412,7 +450,7 @@ def _format_footer(results: list[dict[str, Any]], scan: dict[str, Any] | None = 
     return "\n".join(lines)
 
 
-def _format_header(scan: dict[str, Any], title: str = "AXIOM INTEL") -> str:
+def _format_header(scan: dict[str, Any], title: str = "CASE CAPITAL INTEL") -> str:
     """v3.2 header — adds Macro line."""
     rc = scan.get("raw_counts") or {}
     universe = scan.get("universe_size")
@@ -442,7 +480,7 @@ def _format_header(scan: dict[str, Any], title: str = "AXIOM INTEL") -> str:
 TG_LIMIT = 4000  # leave buffer below 4096
 
 
-def build_consolidated_messages(scan: dict[str, Any], title: str = "AXIOM INTEL") -> list[str]:
+def build_consolidated_messages(scan: dict[str, Any], title: str = "CASE CAPITAL INTEL") -> list[str]:
     """Greedy chunking: fits as many cards as possible per message, opens a new
     message when the next card would overflow. Header on first, footer on last.
     Never truncates mid-card (which would break HTML parsing)."""
@@ -563,7 +601,7 @@ async def dispatch_quality_after_scan(scan: dict[str, Any], chat_id: str | None 
 
 
 async def dispatch_consolidated(scan: dict[str, Any], chat_id: str | None = None,
-                                title: str = "AXIOM INTEL") -> dict[str, Any]:
+                                title: str = "CASE CAPITAL INTEL") -> dict[str, Any]:
     """Build + send consolidated msgs. Returns delivery summary."""
     msgs = build_consolidated_messages(scan, title=title)
     sent = 0

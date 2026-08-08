@@ -12,6 +12,7 @@ import logging
 import math
 import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from .db import get_db, stamped
@@ -814,7 +815,8 @@ def build_morning_message(payload: dict[str, Any]) -> str:
     pct = market.get("forecast_pct", 0)
     sign = "+" if _num(pct, 0) >= 0 else ""
     lines = [
-        "<b>CASE CAPITAL KRONOS MORNING FORECAST</b>",
+        "<b>CASE CAPITAL | KRONOS MORNING BRIEF</b>",
+        f"<code>{datetime.now(ZoneInfo('America/New_York')).strftime('%b %d %H:%M ET')}</code>",
         "",
         f"<b>SPY today:</b> {direction} {sign}{pct}% "
         f"(cone {market.get('cone_low_pct')}% to {market.get('cone_high_pct')}%)",

@@ -142,7 +142,7 @@ async def _held_underlyings() -> set[str]:
 def build_halt_message(events: list[dict[str, Any]], *, held: set[str] | None = None) -> str:
     held = held or set()
     impacted = [e for e in events if e.get("symbol") in held]
-    title = "CASE CAPITAL TRADING HALT"
+    title = "CASE CAPITAL | MARKET HALT"
     if impacted:
         title += " - HELD POSITION IMPACT"
     lines = [

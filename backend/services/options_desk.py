@@ -93,6 +93,10 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _now_et() -> str:
+    return datetime.now(ET).strftime("%b %d %H:%M ET")
+
+
 def configured() -> bool:
     return bool(KEY and SECRET)
 
@@ -236,7 +240,8 @@ async def _send_grouped_fill_message(fills: list[dict[str, Any]]) -> bool:
     if not fills:
         return False
     lines = [
-        "<b>OPTIONS FILLS</b>",
+        "<b>CASE CAPITAL | OPTIONS FILLS</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"Filled contracts: <b>{len(fills)}</b>",
     ]
@@ -254,7 +259,8 @@ async def _send_grouped_fill_message(fills: list[dict[str, Any]]) -> bool:
 async def _send_ratchet_message(symbol: str, ticker: str, entry: float, current: float, ratchet: dict[str, Any], next_tier: dict[str, Any] | None) -> bool:
     next_text = "MAX LOCK" if not next_tier else f"+{next_tier.get('trigger_gain_pct'):g}% -> lock +{next_tier.get('locked_gain_pct'):g}%"
     msg = "\n".join([
-        "<b>OPTIONS RATCHET UPDATE</b>",
+        "<b>CASE CAPITAL | OPTIONS RISK UPDATE</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"<b>${_esc(ticker)}</b> {_esc(symbol)}",
         f"Entry: <b>{_fmt_money(entry)}</b>",
@@ -269,10 +275,11 @@ async def _send_ratchet_message(symbol: str, ticker: str, entry: float, current:
 async def _send_exit_message(symbol: str, ticker: str, reason: str, entry: float, exit_price: float, qty: int) -> bool:
     pnl = (exit_price - entry) * qty * 100 if entry > 0 and exit_price >= 0 else None
     pct = ((exit_price - entry) / entry * 100.0) if entry > 0 and exit_price >= 0 else None
-    title = "OPTIONS HARD STOP" if reason == "hard_stop" else "OPTIONS EXIT"
+    title = "CASE CAPITAL | OPTIONS EXIT"
     reason_label = "Premium hard stop" if reason == "hard_stop" else "Ratchet floor hit"
     msg = "\n".join([
         f"<b>{title}</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"<b>${_esc(ticker)}</b> {_esc(symbol)}",
         f"Reason: <b>{reason_label}</b>",
@@ -2062,7 +2069,8 @@ async def dispatch_options_daily_report(force: bool = False) -> dict[str, Any]:
             return {"ok": True, "sent": False, "reason": "already_sent", "date": today}
     payload = await options_daily_report_payload()
     lines = [
-        "<b>CASE CAPITAL OPTIONS FUND REPORT</b>",
+        "<b>CASE CAPITAL | OPTIONS DAILY REPORT</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"Date: <b>{today}</b>",
         f"Open contracts: <b>{payload['active_count']}</b>",
@@ -2096,7 +2104,8 @@ async def dispatch_options_weekly_report(force: bool = False) -> dict[str, Any]:
             return {"ok": True, "sent": False, "reason": "already_sent", "week_start": week_start, "week_end": week_end}
     payload = await options_weekly_report_payload()
     lines = [
-        "<b>CASE CAPITAL OPTIONS WEEKLY REPORT</b>",
+        "<b>CASE CAPITAL | OPTIONS WEEKLY REPORT</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"Week: <b>{payload['week_start']} -> {payload['week_end']}</b>",
         f"Open contracts: <b>{payload['active_count']}</b>",

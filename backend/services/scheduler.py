@@ -96,7 +96,7 @@ async def _alerts_job():
 
 
 async def _flow_refresh_job():
-    """Every 15min during US market hours — refresh unusual flow on tickers
+    """Every 15min during US market hours - refresh unusual flow on tickers
     from today's scan. Stores into flow_snapshots collection for the dashboard."""
     try:
         now_et = datetime.now(ET)
@@ -339,7 +339,7 @@ def start_scheduler():
             id=tag,
             replace_existing=True,
         )
-    # v5.1 — auto-digest goes out 5 min after each scheduled scan
+    # v5.1 - auto-digest goes out 5 min after each scheduled scan
     # Grouped Telegram scan reports are dispatched by _daily_scan_job. There
     # is intentionally no separate 5-minute digest job so scans do not double-text.
     _scheduler.add_job(
@@ -360,7 +360,7 @@ def start_scheduler():
         id="kronos_morning_forecast_930",
         replace_existing=True,
     )
-    # 15-min options flow refresh — Mon-Fri 9:30 to 16:00 ET
+    # 15-min options flow refresh - Mon-Fri 9:30 to 16:00 ET
     _scheduler.add_job(
         _flow_refresh_job,
         CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15", timezone=ET),
@@ -407,14 +407,14 @@ def start_scheduler():
         id="options_open_auto_execute_935",
         replace_existing=True,
     )
-    # Nightly P&L refresh — 23:00 ET (also runs at 02:00 ET below)
+    # Nightly P&L refresh - 23:00 ET (also runs at 02:00 ET below)
     _scheduler.add_job(
         _pnl_refresh_job,
         CronTrigger(hour=23, minute=0, timezone=ET),
         id="pnl_refresh_nightly",
         replace_existing=True,
     )
-    # 02:00 ET P&L refresh — second pass after market settle
+    # 02:00 ET P&L refresh - second pass after market settle
     _scheduler.add_job(
         _pnl_refresh_job,
         CronTrigger(hour=2, minute=0, timezone=ET),
@@ -469,29 +469,34 @@ def start_scheduler():
         id="terminal_weekly_report_friday_902pm",
         replace_existing=True,
     )
-    # Mid-day scan — 12:01 ET Mon-Fri
+    # Mid-day scan - 12:01 ET Mon-Fri
     _scheduler.add_job(
         _daily_scan_job,
         CronTrigger(day_of_week="mon-fri", hour=12, minute=1, timezone=ET),
         id="midday_scan_legacy",
         replace_existing=True,
     )
-    # Pre-close scan — 15:30 ET Mon-Fri
+    # Pre-close scan - 15:30 ET Mon-Fri
     _scheduler.add_job(
         _daily_scan_job,
         CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=ET),
         id="preclose_scan",
         replace_existing=True,
     )
-    # v5.0 — regime gate every 30 min during market hours
+    # v5.0 - regime gate every 30 min during market hours
     async def _regime_job():
         try:
             from . import trade_floor
             r = await trade_floor.regime_status()
             if r.get("halt_new_entries") and os.environ.get("TELEGRAM_CHAT_ID"):
                 await telegram_service.send_message(
-                    f"⛔ <b>REGIME HALT</b>\nVIX={r['vix']} · SPY={r['spy_last']} "
-                    f"vs EMA200={r['spy_ema200']}", chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+                    f"<b>CASE CAPITAL | REGIME GATE</b>\n"
+                    f"<code>{datetime.now(ET).strftime('%b %d %H:%M ET')}</code>\n\n"
+                    f"Status: <b>HALT NEW ENTRIES</b>\n"
+                    f"VIX: <b>{r['vix']}</b>\n"
+                    f"SPY: <b>{r['spy_last']}</b> vs EMA200 <b>{r['spy_ema200']}</b>\n"
+                    f"Action: PM blocks new risk until regime clears.",
+                    chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
                 )
         except Exception as e:
             logger.warning("regime job: %s", e)
@@ -501,7 +506,7 @@ def start_scheduler():
         id="regime_gate", replace_existing=True,
     )
 
-    # v5.0 — position monitor every 15 min during market hours
+    # v5.0 - position monitor every 15 min during market hours
     async def _day_start_equity_snapshot_job():
         try:
             from . import safety
@@ -529,7 +534,7 @@ def start_scheduler():
             await pm_ratchet.process_open_ratchets()
             await options_desk.monitor_open_positions(enforce_hard_stop=True)
             await tail_hunter.monitor_tail_positions()
-            # v5.3 — run the three-phase exit logic on every sync
+            # v5.3 - run the three-phase exit logic on every sync
             await trade_floor_phases.process_phase_exits()
         except Exception as e:
             logger.warning("position monitor: %s", e)
@@ -649,7 +654,7 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # v5.2 — stale-order sweep every hour: cancel any TF buy still unfilled > 24h
+    # v5.2 - stale-order sweep every hour: cancel any TF buy still unfilled > 24h
     async def _stale_order_sweep():
         try:
             from . import trade_floor
@@ -662,7 +667,7 @@ def start_scheduler():
         id="stale_order_sweep", replace_existing=True,
     )
 
-    # v5.0 — daily database backup at 2am ET
+    # v5.0 - daily database backup at 2am ET
     async def _db_backup():
         try:
             from .db import get_db
@@ -684,7 +689,7 @@ def start_scheduler():
         id="db_backup", replace_existing=True,
     )
 
-    # v5.0 — Trade Floor weekly recalibration — Sunday 03:00 ET
+    # v5.0 - Trade Floor weekly recalibration - Sunday 03:00 ET
     async def _tf_recal():
         try:
             from . import trade_floor_learning
@@ -696,17 +701,18 @@ def start_scheduler():
         CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=ET),
         id="tf_engine_recal", replace_existing=True,
     )
-    # Learning cycle — Sunday 02:00 ET weekly
+    # Learning cycle - Sunday 02:00 ET weekly
     async def _learning_job():
         try:
             res = await learning_engine.run_learning_cycle()
             if res.get("insights") and os.environ.get("TELEGRAM_CHAT_ID"):
                 msg = (
-                    "🧠 <b>AXIOM Learning Cycle Complete</b>\n\n"
-                    f"Trades analyzed: {res.get('trades', 0)}\n"
-                    f"Overall win rate: {res.get('win_rate', 0):.1%}\n"
-                    f"Weights adjusted: {res.get('changes', 0)}\n\n"
-                    "<b>Insights:</b>\n" + "\n".join(f"• {i}" for i in res["insights"][:5])
+                    "<b>CASE CAPITAL | LEARNING CYCLE</b>\n"
+                    f"<code>{datetime.now(ET).strftime('%b %d %H:%M ET')}</code>\n\n"
+                    f"Trades analyzed: <b>{res.get('trades', 0)}</b>\n"
+                    f"Overall win rate: <b>{res.get('win_rate', 0):.1%}</b>\n"
+                    f"Weights adjusted: <b>{res.get('changes', 0)}</b>\n\n"
+                    "<b>Insights:</b>\n" + "\n".join(f"- {i}" for i in res["insights"][:5])
                 )
                 await telegram_service.send_message(msg)
         except Exception as e:

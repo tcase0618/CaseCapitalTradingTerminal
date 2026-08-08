@@ -12,6 +12,7 @@ import html
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .db import get_db, log_activity, stamped
 
@@ -28,6 +29,10 @@ def _now() -> datetime:
 
 def _now_iso() -> str:
     return _now().isoformat()
+
+
+def _now_et() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%b %d %H:%M ET")
 
 
 def _esc(value: Any) -> str:
@@ -140,9 +145,10 @@ async def send_event_immediate(event: dict[str, Any]) -> dict[str, Any]:
     if await _recently_sent(event.get("fingerprint", ""), event.get("severity", "info")):
         return {"ok": True, "sent": False, "deduped": True}
     text = "\n".join([
-        f"<b>CASE CAPITAL {str(event.get('severity') or 'INFO').upper()}</b>",
+        f"<b>CASE CAPITAL | {str(event.get('severity') or 'INFO').upper()}</b>",
+        f"<code>{_now_et()}</code>",
         "",
-        f"<b>{_esc(event.get('title'))}</b>",
+        f"Event: <b>{_esc(event.get('title'))}</b>",
         _esc(event.get("summary") or ""),
         "",
         f"Scope: <b>{_esc(event.get('scope'))}</b>",
@@ -225,7 +231,8 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
     }
     text = "\n".join([
-        "<b>CASE CAPITAL SCAN REPORT</b>",
+        "<b>CASE CAPITAL | SCAN REPORT</b>",
+        f"<code>{_now_et()}</code>",
         "",
         "<b>SCAN</b>",
         f"Trigger: <b>{_esc(scan.get('triggered_by') or 'unknown')}</b>",
@@ -301,7 +308,8 @@ async def dispatch_options_execution_report(result: dict[str, Any]) -> dict[str,
         return {"ok": True, "sent": False, "reason": "no_execution_changes"}
     severity = "watch" if skipped and not submitted else "info"
     lines = [
-        "<b>CASE CAPITAL OPTIONS EXECUTION</b>",
+        "<b>CASE CAPITAL | OPTIONS ORDERS</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"Ready: <b>{result.get('ready', 0)}</b>",
         f"Submitted: <b>{len(submitted)}</b>",
@@ -348,7 +356,8 @@ async def dispatch_qc_report(force_refresh: bool = False, send_if_clean: bool = 
         return {"ok": True, "sent": False, "reason": "qc_clean"}
     severity = "critical" if decision == "BLOCK" else "watch"
     lines = [
-        "<b>CASE CAPITAL QUALITY CONTROL</b>",
+        "<b>CASE CAPITAL | QC GATE</b>",
+        f"<code>{_now_et()}</code>",
         "",
         f"Decision: <b>{_esc(decision)}</b>",
         f"Score: <b>{qc.get('score', '--')}</b> | Critical: <b>{qc.get('critical_score', '--')}</b>",
@@ -394,7 +403,8 @@ async def dispatch_daily_report() -> dict[str, Any]:
     best = max(rows, key=lambda r: _num(r.get("gain_pct")), default={})
     worst = min(rows, key=lambda r: _num(r.get("gain_pct")), default={})
     text = "\n".join([
-        "<b>CASE CAPITAL DAILY OPS REPORT</b>",
+        "<b>CASE CAPITAL | DAILY OPS</b>",
+        f"<code>{_now_et()}</code>",
         "",
         "<b>FUNDS</b>",
         f"Positions: <b>{snapshot.get('totals', {}).get('positions', 0)}</b>",
@@ -441,9 +451,10 @@ async def dispatch_weekly_report() -> dict[str, Any]:
     losses = sum(1 for r in rows if _num(r.get("gain_pct")) < 0)
     avg = sum(_num(r.get("gain_pct")) for r in rows) / max(1, len(rows))
     text = "\n".join([
-        "<b>CASE CAPITAL WEEKLY OPS REPORT</b>",
+        "<b>CASE CAPITAL | WEEKLY TRUTH REPORT</b>",
+        f"<code>{_now_et()}</code>",
         "",
-        f"Tracked rows: <b>{len(rows)}</b>",
+        f"Tracked signal rows: <b>{len(rows)}</b>",
         f"Win/loss: <b>{wins}W / {losses}L</b>",
         f"Average since alert: <b>{_fmt_pct(avg)}</b>",
         f"Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b> | Alpha: <b>{_esc((edge.get('edge') or {}).get('alpha_grade') or 'UNPROVEN')}</b>",
