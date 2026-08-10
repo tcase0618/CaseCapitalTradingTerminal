@@ -1,0 +1,33 @@
+version: 1
+targets:
+  agents_files:
+    - AGENTS.md
+    - "**/AGENTS.md"
+    - "**/AGENTS.override.md"
+  skills_globs:
+    - ".codex/skills/**/SKILL.md"
+    - "**/.codex/skills/**/SKILL.md"
+    - ".agents/skills/**/SKILL.md"
+    - "**/.agents/skills/**/SKILL.md"
+  exclude_globs:
+    - ".git/**"
+    - ".codexopt/**"
+    - ".venv/**"
+    - "backend/.venv/**"
+    - "frontend/node_modules/**"
+    - "node_modules/**"
+    - "frontend/build/**"
+    - "frontend/src-tauri/target/**"
+    - "logs/**"
+    - "test_reports/**"
+output:
+  root_dir: ".codexopt"
+evidence:
+  task_files:
+    - docs/codexopt-terminal-tasks.md
+  issue_files: []
+optimization:
+  engine: "heuristic"
+  min_apply_delta: 0.01
+  max_metric_calls: 60
+  reflection_model: null
