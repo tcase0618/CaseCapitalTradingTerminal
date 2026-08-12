@@ -362,9 +362,11 @@ async def _macro_calendar_async(days: int, persist: bool) -> dict[str, Any]:
     from services import macro_pulse
 
     rows = await macro_pulse.upcoming_events(days_ahead=days, force=True)
+    status = await macro_pulse.source_status()
     payload = {
         "ok": True,
-        "source": "FRED releases + official FOMC decision-date override",
+        "source": "ForexFactory/FairEconomy USD macro calendar",
+        "source_status": status,
         "fetched_at": _now_iso(),
         "days_ahead": days,
         "rows": rows,
@@ -372,8 +374,8 @@ async def _macro_calendar_async(days: int, persist: bool) -> dict[str, Any]:
     }
     if persist:
         payload["snapshot"] = await _persist_snapshot(
-            source_key="fred_macro_calendar",
-            provider="FRED",
+            source_key="forex_factory_macro_calendar",
+            provider="ForexFactory/FairEconomy XML",
             dataset="macro_calendar",
             ok=True,
             request={"days_ahead": days},

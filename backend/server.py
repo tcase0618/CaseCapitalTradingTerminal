@@ -1183,11 +1183,15 @@ async def v32_sentiment(ticker: str):
 async def v32_macro(days_ahead: int = 14):
     from services import macro_pulse
     events = await macro_pulse.upcoming_events(days_ahead=days_ahead)
+    source = await macro_pulse.source_status()
     return {
         "events": events,
+        "next_event": next((e for e in events if e.get("hours_until", -1) >= 0), None),
         "imminent_warnings": [
             e for e in events if e.get("is_imminent") and e.get("warns_sectors")
         ],
+        "source": source,
+        "macro_source": source.get("source"),
         "fred_available": macro_pulse.has_fred(),
     }
 

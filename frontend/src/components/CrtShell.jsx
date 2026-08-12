@@ -135,8 +135,8 @@ function useNextMacroEvent() {
     let cancelled = false;
     const load = async () => {
       try {
-                const { data: d } = await axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 } });
-        const ev = (d.events || []).find(e => e.days_until >= 0);
+        const { data: d } = await axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 } });
+        const ev = d.next_event || (d.events || []).find(e => e.days_until >= 0);
         if (!cancelled) setNext(ev || null);
       } catch {}
     };
