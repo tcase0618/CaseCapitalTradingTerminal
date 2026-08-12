@@ -8,14 +8,19 @@ const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 export default function MacroPage() {
   const [active, setActive] = useState("WORLD");
   const [data, setData] = useState(null);
+  const [eventsData, setEventsData] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await axios.get(`${API}/macro/overview`, { timeout: 45000 });
-      setData(res.data);
-      setActive(prev => res.data?.regions?.some(r => r.key === prev) ? prev : "WORLD");
+      const [overviewRes, eventsRes] = await Promise.all([
+        axios.get(`${API}/macro/overview`, { timeout: 45000 }),
+        axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 }, timeout: 25000 }),
+      ]);
+      setData(overviewRes.data);
+      setEventsData(eventsRes.data);
+      setActive(prev => prev === "EVENTS" || overviewRes.data?.regions?.some(r => r.key === prev) ? prev : "WORLD");
     } finally {
       setLoading(false);
     }
@@ -25,6 +30,8 @@ export default function MacroPage() {
 
   const regions = useMemo(() => data?.regions || [], [data]);
   const current = regions.find(r => r.key === active) || regions[0] || null;
+  const eventRows = useMemo(() => eventsData?.events || [], [eventsData]);
+  const nextEvent = eventsData?.next_event || eventRows.find(e => Number(e.hours_until) >= 0);
   const totals = useMemo(() => {
     const rows = regions.flatMap(r => r.categories || []).flatMap(c => c.indicators || []);
     return {
@@ -43,6 +50,7 @@ export default function MacroPage() {
     >
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
         <Stat label="DATA MODEL" value={data?.ok ? "LIVE" : "LOADING"} sub="FRED + WORLD BANK + LSE" color={data?.ok ? "#4ade80" : muted} accentBar />
+        <Stat label="EVENTS" value={eventRows.length} sub={(eventsData?.macro_source || "FOREX FACTORY").toUpperCase()} color={eventsData?.source?.fresh ? "#4ade80" : "#fbbf24"} />
         <Stat label="FRESH" value={totals.fresh} sub={`/ ${totals.total} INDICATORS`} color="#4ade80" />
         <Stat label="WATCH" value={totals.watch} sub="2-3Y OLD" color="#fbbf24" />
         <Stat label="STALE" value={totals.stale} sub="NOT USED AS BULLISH" color="#f87171" />
@@ -54,6 +62,9 @@ export default function MacroPage() {
       </div>
 
       <div style={tabsWrap}>
+        <button onClick={() => setActive("EVENTS")} style={tabStyle(active === "EVENTS", accent2)}>
+          EVENTS
+        </button>
         {regions.map(region => (
           <button key={region.key} onClick={() => setActive(region.key)} style={tabStyle(active === region.key, region.signal?.color)}>
             {region.label.toUpperCase()}
@@ -61,7 +72,15 @@ export default function MacroPage() {
         ))}
       </div>
 
-      {current ? (
+      {active === "EVENTS" ? (
+        <MacroEventsView
+          data={eventsData}
+          rows={eventRows}
+          nextEvent={nextEvent}
+          loading={loading}
+          refresh={load}
+        />
+      ) : current ? (
         <>
           <div style={heroGrid}>
             <Card title={`${current.label.toUpperCase()} MARKET REGIME`} accentColor={current.signal.color}>
@@ -183,6 +202,147 @@ function MacroTable({ rows }) {
   );
 }
 
+function MacroEventsView({ data, rows, nextEvent, loading, refresh }) {
+  const counts = useMemo(() => ({
+    high: rows.filter(r => String(r.impact).toLowerCase() === "high").length,
+    medium: rows.filter(r => String(r.impact).toLowerCase() === "medium").length,
+    low: rows.filter(r => String(r.impact).toLowerCase() === "low").length,
+    imminent: rows.filter(r => r.is_imminent).length,
+  }), [rows]);
+  const grouped = useMemo(() => {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.date || "undated";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(row);
+    });
+    return Array.from(map.entries()).map(([date, items]) => ({ date, items }));
+  }, [rows]);
+
+  return (
+    <>
+      <div style={heroGrid}>
+        <Card title="FOREXFACTORY EVENT CLOCK" accentColor={nextEvent ? impactColor(nextEvent.impact) : accent2}>
+          {nextEvent ? (
+            <>
+              <div style={eventHero(impactColor(nextEvent.impact))}>
+                <div>
+                  <div style={{ color: dim, fontSize: 10, letterSpacing: "0.18em" }}>NEXT U.S. MACRO PRINT</div>
+                  <div style={{ color: impactColor(nextEvent.impact), fontSize: 34, fontWeight: 900, marginTop: 8 }}>
+                    {nextEvent.tag} / {timeUntilEvent(nextEvent)}
+                  </div>
+                  <div style={{ color: labelLight, fontSize: 15, marginTop: 10, lineHeight: 1.55 }}>
+                    {nextEvent.name}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ color: dim, fontSize: 10, letterSpacing: "0.18em" }}>IMPACT</div>
+                  <div style={{ color: impactColor(nextEvent.impact), fontSize: 28, fontWeight: 900 }}>{(nextEvent.impact || "UNKNOWN").toUpperCase()}</div>
+                  <div style={{ color: muted, fontSize: 11, marginTop: 8 }}>{formatEventDate(nextEvent)}</div>
+                </div>
+              </div>
+              <div style={proxyStrip}>
+                <MiniBox label="FORECAST" value={nextEvent.forecast || "-"} color={accent} />
+                <MiniBox label="PREVIOUS" value={nextEvent.previous || "-"} color={labelLight} />
+                <MiniBox label="ACTUAL" value={nextEvent.actual || "PENDING"} color={nextEvent.actual ? "#4ade80" : "#fbbf24"} />
+              </div>
+            </>
+          ) : (
+            <div style={{ color: muted, padding: 24 }}>{loading ? "Loading ForexFactory events..." : "No U.S. ForexFactory events in the selected window."}</div>
+          )}
+        </Card>
+
+        <Card title="EVENT SOURCE QUALITY" accentColor={data?.source?.fresh ? "#4ade80" : "#fbbf24"}>
+          <div style={{ display: "grid", gap: 10 }}>
+            <MiniBox label="SOURCE" value={(data?.source?.meta?.source || "ForexFactory/FairEconomy XML").toUpperCase()} color={accent2} />
+            <MiniBox label="STATUS" value={data?.source?.fresh ? "FRESH" : "WATCH"} color={data?.source?.fresh ? "#4ade80" : "#fbbf24"} />
+            <MiniBox label="AGE" value={data?.source?.age_minutes != null ? `${data.source.age_minutes}M` : "-"} color={labelLight} />
+            <button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "SYNCING" : "REFRESH EVENTS"}</button>
+          </div>
+        </Card>
+      </div>
+
+      <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 18, flexWrap: "wrap" }}>
+        <Stat label="HIGH IMPACT" value={counts.high} sub="RED FOLDER" color="#f87171" accentBar />
+        <Stat label="MEDIUM" value={counts.medium} sub="ORANGE FOLDER" color="#fb923c" />
+        <Stat label="LOW" value={counts.low} sub="LOWER PRIORITY" color="#fbbf24" />
+        <Stat label="IMMINENT" value={counts.imminent} sub="WITHIN 48H" color={counts.imminent ? "#f87171" : "#4ade80"} />
+      </div>
+
+      <div style={{ display: "grid", gap: 18 }}>
+        {grouped.map(group => (
+          <Card key={group.date} title={`EVENT DOCKET / ${group.date}`} accentColor={group.items.some(i => String(i.impact).toLowerCase() === "high") ? "#f87171" : accent}>
+            <MacroEventsTable rows={group.items} />
+          </Card>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function MacroEventsTable({ rows }) {
+  if (!rows.length) return <div style={{ color: muted, padding: 20 }}>No events.</div>;
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 920 }}>
+        <thead>
+          <tr>{["TIME", "EVENT", "TAG", "IMPACT", "FORECAST", "PREVIOUS", "ACTUAL", "COUNTDOWN"].map(h => <th key={h} style={th}>{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, idx) => (
+            <tr key={`${row.datetime_et || row.date}-${row.name}-${idx}`} style={{ borderTop: hairline }}>
+              <td style={{ ...td, color: labelLight, fontWeight: 900 }}>{row.time_et || "-"}</td>
+              <td style={{ ...td, color: labelLight, fontWeight: 900 }}>{row.name || "U.S. macro event"}</td>
+              <td style={{ ...td, color: accent2, fontWeight: 900 }}>{row.tag || "USD"}</td>
+              <td style={{ ...td, color: impactColor(row.impact), fontWeight: 900 }}>{(row.impact || "-").toUpperCase()}</td>
+              <td style={td}>{row.forecast || "-"}</td>
+              <td style={td}>{row.previous || "-"}</td>
+              <td style={{ ...td, color: row.actual ? "#4ade80" : "#fbbf24", fontWeight: 900 }}>{row.actual || "PENDING"}</td>
+              <td style={{ ...td, color: row.is_imminent ? "#f87171" : accent }}>{timeUntilEvent(row) || "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function timeUntilEvent(event) {
+  if (!event?.datetime_et) return null;
+  const target = new Date(event.datetime_et);
+  const diffMs = target.getTime() - Date.now();
+  if (!Number.isFinite(diffMs) || diffMs < 0) return "DUE";
+  const days = Math.floor(diffMs / 86400000);
+  const hours = Math.floor((diffMs % 86400000) / 3600000);
+  const mins = Math.floor((diffMs % 3600000) / 60000);
+  if (days >= 1) return `${days}D ${hours}H`;
+  if (hours >= 1) return `${hours}H ${mins}M`;
+  return `${mins}M`;
+}
+
+function formatEventDate(event) {
+  if (!event?.datetime_et) return event?.date || "-";
+  try {
+    return new Date(event.datetime_et).toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return event.date || "-";
+  }
+}
+
+function impactColor(impact) {
+  const key = String(impact || "").toLowerCase();
+  if (key === "high") return "#f87171";
+  if (key === "medium") return "#fb923c";
+  if (key === "low") return "#fbbf24";
+  return muted;
+}
+
 function TrendArrow({ row }) {
   const color = trendColor(row.trend);
   return (
@@ -301,6 +461,15 @@ const signalPanel = color => ({
   padding: 16,
   border: `0.5px solid ${color}66`,
   background: `${color}10`,
+});
+const eventHero = color => ({
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 20,
+  padding: 16,
+  border: `0.5px solid ${color}66`,
+  background: `${color}10`,
+  alignItems: "flex-start",
 });
 const proxyStrip = { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginTop: 14 };
 const watchRow = (active, color) => ({
