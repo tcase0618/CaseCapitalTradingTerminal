@@ -18,6 +18,7 @@ export default function SettingsPage() {
   const [research, setResearch] = useState(null);
   const [telegramOps, setTelegramOps] = useState(null);
   const [truth, setTruth] = useState(null);
+  const [ibkr, setIbkr] = useState(null);
 
   const loadSystem = async () => {
     await Promise.allSettled([
@@ -29,6 +30,7 @@ export default function SettingsPage() {
       axios.get(`${API}/research/dashboard?limit_scans=180`).then(r => setResearch(r.data)).catch(() => setResearch({ ok: false })),
       axios.get(`${API}/telegram/events?limit=20`).then(r => setTelegramOps(r.data)).catch(() => setTelegramOps({ ok: false })),
       axios.get(`${API}/data_truth/overview`).then(r => setTruth(r.data)).catch(() => setTruth({ ok: false })),
+      axios.get(`${API}/ibkr/status`).then(r => setIbkr(r.data)).catch(e => setIbkr({ ok: false, reason: e?.message || "request failed" })),
     ]);
   };
 
@@ -237,6 +239,25 @@ export default function SettingsPage() {
         <div style={{ color: muted, fontSize: 10, lineHeight: 1.55, marginTop: 10 }}>
           Telegram is grouped by scan, execution, QC, and scheduled reports. Routine refreshes stay silent unless status changes or severity rises.
         </div>
+      </Card>
+      <Card title="IBKR MARKET DATA LINK" accentColor={ibkr?.ok ? "#4ade80" : ibkr?.config?.enabled ? "#fbbf24" : dim}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+          <MiniStatus label="LINK" value={ibkr?.ok ? "LIVE" : ibkr?.config?.enabled ? "CHECK" : "OFF"} color={ibkr?.ok ? "#4ade80" : ibkr?.config?.enabled ? "#fbbf24" : dim} />
+          <MiniStatus label="MODE" value={(ibkr?.config?.mode || "LIVE").toUpperCase()} color={accent} />
+          <MiniStatus label="DATA ONLY" value={ibkr?.config?.data_only ? "TRUE" : "FALSE"} color={ibkr?.config?.data_only ? accent2 : "#f87171"} />
+          <MiniStatus label="TRADING" value={ibkr?.config?.allow_trading ? "ENABLED" : "BLOCKED"} color={ibkr?.config?.allow_trading ? "#f87171" : "#4ade80"} />
+          <MiniStatus label="HOST" value={`${ibkr?.config?.host || "127.0.0.1"}`} color={labelLight} />
+          <MiniStatus label="PORT" value={ibkr?.config?.port || 7496} color={labelLight} />
+        </div>
+        <Row k="SOCKET PURPOSE" v="EQUITIES / OPTIONS MARKET DATA ONLY" c={accent2} />
+        <Row k="ACCOUNT AUTHORITY" v="ALPACA ONLY" c="#4ade80" />
+        <Row k="ORDER POLICY" v={ibkr?.config?.order_mutation_policy || "blocked_before_gateway"} c="#4ade80" />
+        <Row k="ACCOUNT DATA POLICY" v={ibkr?.config?.account_data_policy || "blocked_use_alpaca_for_account_truth"} c="#4ade80" />
+        <Row k="CREDENTIALS" v={ibkr?.config?.credentials_policy || "no_username_password_or_2fa_stored"} c="#4ade80" />
+        <Row k="LAST CHECK" v={ibkr?.checked_at || "--"} />
+        {!ibkr?.ok && <div style={{ color: ibkr?.config?.enabled ? "#fbbf24" : muted, fontSize: 11, lineHeight: 1.55, marginTop: 10 }}>
+          {ibkr?.reason || "IBKR is disabled. Enable it only where IB Gateway is running on localhost."}
+        </div>}
       </Card>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 18 }}>
         <Card title={`INTEGRATION STATUS · ${(admin?.integrations || []).length}`} accentColor={accent}>

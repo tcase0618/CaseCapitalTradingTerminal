@@ -5,6 +5,7 @@ OPTIONS_* credentials and executes only PM-approved options tickets.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import html
@@ -366,6 +367,43 @@ def _parse_occ_symbol(symbol: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return {"root": root, "expiration": exp, "type": cp, "strike": strike}
+
+
+def _ibkr_params_from_occ_symbol(symbol: str) -> dict[str, Any] | None:
+    parsed = _parse_occ_symbol(symbol)
+    if not parsed:
+        return None
+    return {
+        "symbol": parsed["root"],
+        "expiry": str(parsed["expiration"]).replace("-", ""),
+        "strike": parsed["strike"],
+        "right": parsed["type"],
+        "exchange": "SMART",
+        "trading_class": parsed["root"],
+    }
+
+
+def _alpaca_order_preview_from_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
+    instrument = ticket.get("instrument") or {}
+    symbol = str(instrument.get("symbol") or instrument.get("contractSymbol") or "").upper()
+    ask = _safe_float(instrument.get("ask") or instrument.get("premium") or instrument.get("net_debit"))
+    qty = _safe_int(ticket.get("contracts"))
+    return {
+        "broker": "ALPACA_OPTIONS",
+        "submit_endpoint": "/api/options_desk/execute",
+        "candidate_id": ticket.get("candidate_id"),
+        "payload": {
+            "symbol": symbol,
+            "qty": str(qty),
+            "side": "buy",
+            "type": "limit",
+            "time_in_force": "day",
+            "limit_price": round(ask, 2) if ask > 0 else None,
+            "client_order_id": _candidate_order_id(str(ticket.get("candidate_id") or "")),
+        },
+        "not_submitted": True,
+        "execution_authority": "alpaca_options_only",
+    }
 
 
 async def _option_snapshot(symbol: str) -> dict[str, Any]:
@@ -1123,6 +1161,124 @@ async def candidates() -> dict[str, Any]:
         "summary": _summary(rows),
         "candidates": rows,
     }
+
+
+async def _ibkr_validate_option_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
+    instrument = ticket.get("instrument") or {}
+    symbol = str(instrument.get("symbol") or instrument.get("contractSymbol") or "").upper()
+    params = _ibkr_params_from_occ_symbol(symbol)
+    if not params:
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "role": "read_only_validation",
+            "reason": "unparseable_occ_symbol",
+        }
+    try:
+        from . import ibkr_research
+
+        contract = await asyncio.to_thread(ibkr_research.option_contract_info, **params)
+        quote = await asyncio.to_thread(ibkr_research.option_quote, **params, delayed_allowed=True)
+        return {
+            "ok": bool(contract.get("ok") and (contract.get("contracts") or quote.get("ok"))),
+            "role": "read_only_validation",
+            "data_only": True,
+            "allow_trading": False,
+            "params": params,
+            "contract_quality": contract.get("data_quality"),
+            "contract_count": len(contract.get("contracts") or []),
+            "first_contract": (contract.get("contracts") or [{}])[0].get("contract"),
+            "quote_quality": quote.get("data_quality"),
+            "quote": quote.get("quote"),
+            "reason": quote.get("reason") if not quote.get("ok") else None,
+            "permission_errors": quote.get("permission_errors"),
+            "errors": (contract.get("errors") or [])[-3:] + (quote.get("errors") or [])[-3:],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "role": "read_only_validation",
+            "reason": exc.__class__.__name__,
+            "detail": str(exc)[:240],
+        }
+
+
+async def alpaca_workflow(limit: int = 25, persist: bool = True, validate_ibkr: bool = True) -> dict[str, Any]:
+    """Build the PM-to-Alpaca options workflow without submitting orders.
+
+    IBKR is used only as a read-only validation/data layer. Alpaca remains the
+    only broker named in the executable order preview and the only path used by
+    execute()/auto_execute_latest().
+    """
+    candidate_set = await build_candidates(limit=max(1, min(int(limit or 25), 100)), persist=True)
+    rows = candidate_set.get("candidates") or []
+    workflows: list[dict[str, Any]] = []
+    for ticket in rows:
+        route = str(ticket.get("route") or "").upper()
+        if route not in {"OPTION", "BOTH"}:
+            continue
+        instrument = ticket.get("instrument") or {}
+        symbol = str(instrument.get("symbol") or instrument.get("contractSymbol") or "").upper()
+        ibkr_validation = {"ok": None, "role": "disabled_for_this_request"}
+        if validate_ibkr:
+            ibkr_validation = await _ibkr_validate_option_ticket(ticket)
+        preview = _alpaca_order_preview_from_ticket(ticket)
+        alpaca_preflight = {
+            "configured": configured(),
+            "paper_only": paper_only(),
+            "options_execution_enabled": OPTIONS_EXECUTION_ENABLED,
+            "candidate_ready": bool(ticket.get("manual_fire_ready")),
+            "blocked_reasons": ticket.get("blocked_reasons") or [],
+            "data_provider": ticket.get("data_provider") or instrument.get("data_provider"),
+            "data_quality": ticket.get("data_quality") or instrument.get("data_quality"),
+            "risk_budget": ticket.get("risk_budget"),
+            "contracts": ticket.get("contracts"),
+            "premium_estimate": preview.get("payload", {}).get("limit_price"),
+        }
+        workflows.append({
+            "ticker": ticket.get("ticker"),
+            "candidate_id": ticket.get("candidate_id"),
+            "route": route,
+            "pm_action": ticket.get("pm_action"),
+            "pm_score": ticket.get("pm_score"),
+            "risk_reward": ticket.get("risk_reward"),
+            "strategy": ticket.get("strategy"),
+            "strategy_lane": ticket.get("strategy_lane"),
+            "instrument": instrument,
+            "ibkr_validation": ibkr_validation,
+            "alpaca_preflight": alpaca_preflight,
+            "alpaca_order_preview": preview,
+            "ready_for_alpaca_execute": bool(ticket.get("manual_fire_ready")),
+            "execution_method": "POST /api/options_desk/execute with candidate_id",
+        })
+    summary = {
+        "scan_finished_at": candidate_set.get("scan_finished_at"),
+        "workflow_count": len(workflows),
+        "ready_for_alpaca": sum(1 for x in workflows if x.get("ready_for_alpaca_execute")),
+        "ibkr_validated": sum(1 for x in workflows if (x.get("ibkr_validation") or {}).get("ok") is True),
+        "ibkr_unavailable_or_partial": sum(1 for x in workflows if (x.get("ibkr_validation") or {}).get("ok") is not True),
+        "alpaca_execution_authority": "ONLY",
+        "ibkr_execution_authority": "NONE_DATA_ONLY",
+    }
+    payload = {
+        "ok": True,
+        "generated_at": _now(),
+        "summary": summary,
+        "candidate_summary": candidate_set.get("summary"),
+        "policy": {
+            "scanner_pm_source": "latest scan plus Portfolio Manager routing",
+            "research_validation_source": "IBKR read-only option contract/model data when enabled",
+            "execution_source": "Alpaca Options Desk only",
+            "ibkr_orders_enabled": False,
+            "alpaca_orders_submitted_by_this_endpoint": False,
+        },
+        "workflows": workflows,
+    }
+    if persist:
+        db = get_db()
+        await db.options_desk_alpaca_workflows.insert_one(stamped(payload))
+    return payload
 
 
 async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
