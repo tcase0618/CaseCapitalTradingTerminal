@@ -21,6 +21,8 @@ SEND_ENABLED = os.environ.get("TELEGRAM_EVENTS_ENABLED", "true").strip().lower()
 MAX_EVENTS_PER_BATCH = int(os.environ.get("TELEGRAM_EVENTS_MAX_BATCH", "18") or 18)
 INFO_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_INFO_COOLDOWN_MINUTES", "60") or 60)
 WATCH_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_WATCH_COOLDOWN_MINUTES", "30") or 30)
+SCAN_REPORT_THROTTLE_MINUTES = int(os.environ.get("TELEGRAM_SCAN_REPORT_THROTTLE_MINUTES", "10") or 10)
+PHARMA_ALERT_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_PHARMA_ALERT_COOLDOWN_MINUTES", "360") or 360)
 
 
 def _now() -> datetime:
@@ -148,6 +150,49 @@ async def _recently_sent(fingerprint: str, severity: str) -> bool:
     return bool(recent)
 
 
+def _scan_report_throttle_enabled(triggered_by: Any) -> bool:
+    trigger = str(triggered_by or "").strip().lower()
+    if not trigger:
+        return True
+    if trigger in {"scheduler", "main_scan", "quality_auto_remediation", "schedule_watchdog"}:
+        return True
+    if trigger.startswith("scheduler") or trigger.endswith("_scan"):
+        return True
+    return False
+
+
+async def _scan_report_dedupe_reason(scan_id: str, triggered_by: Any) -> str | None:
+    db = get_db()
+    if scan_id:
+        exact = await db.telegram_deliveries.find_one(
+            {
+                "batch_type": "scan_report",
+                "sent": True,
+                "metadata.scan_id": scan_id,
+            },
+            {"_id": 1},
+        )
+        if exact:
+            return "same_scan_already_sent"
+
+    if not _scan_report_throttle_enabled(triggered_by):
+        return None
+
+    cutoff = _now() - timedelta(minutes=max(1, SCAN_REPORT_THROTTLE_MINUTES))
+    recent = await db.telegram_deliveries.find_one(
+        {
+            "batch_type": "scan_report",
+            "sent": True,
+            "created_at": {"$gte": cutoff.isoformat()},
+        },
+        {"_id": 1, "metadata": 1, "created_at": 1},
+        sort=[("created_at", -1)],
+    )
+    if recent:
+        return f"scheduled_scan_report_window_{SCAN_REPORT_THROTTLE_MINUTES}m"
+    return None
+
+
 async def _send(text: str) -> bool:
     if not SEND_ENABLED:
         return False
@@ -180,7 +225,14 @@ async def send_event_immediate(event: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "sent": sent, "deduped": False}
 
 
-async def _record_delivery(batch_type: str, title: str, text: str, events: list[dict[str, Any]], sent: bool) -> None:
+async def _record_delivery(
+    batch_type: str,
+    title: str,
+    text: str,
+    events: list[dict[str, Any]],
+    sent: bool,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     db = get_db()
     await db.telegram_deliveries.insert_one(stamped({
         "batch_type": batch_type,
@@ -188,6 +240,7 @@ async def _record_delivery(batch_type: str, title: str, text: str, events: list[
         "event_count": len(events),
         "fingerprints": [e.get("fingerprint") for e in events if e.get("fingerprint")],
         "sent": bool(sent),
+        "metadata": metadata or {},
         "message_preview": text[:900],
         "created_at": _now_iso(),
     }))
@@ -360,6 +413,13 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
 
 async def dispatch_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     report = await build_scan_report(scan)
+    dedupe_reason = await _scan_report_dedupe_reason(report["scan_id"], scan.get("triggered_by"))
+    if dedupe_reason:
+        await log_activity(f"Telegram scan report deduped: {dedupe_reason}", "info", {
+            "scan_id": report["scan_id"],
+            "triggered_by": scan.get("triggered_by"),
+        })
+        return {"ok": True, "sent": False, "deduped": True, "dedupe_reason": dedupe_reason, **report}
     event = await emit_event(
         "scan_complete",
         severity=report["severity"],
@@ -374,8 +434,92 @@ async def dispatch_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     if await _recently_sent(event.get("fingerprint", ""), event.get("severity", "info")):
         return {"ok": True, "sent": False, "deduped": True, **report}
     sent = await _send(report["text"])
-    await _record_delivery("scan_report", "Case Capital Scan Report", report["text"], [event], sent)
+    await _record_delivery(
+        "scan_report",
+        "Case Capital Scan Report",
+        report["text"],
+        [event],
+        sent,
+        metadata={
+            "scan_id": report["scan_id"],
+            "triggered_by": scan.get("triggered_by"),
+            "throttle_minutes": SCAN_REPORT_THROTTLE_MINUTES,
+        },
+    )
     return {"ok": True, "sent": sent, "deduped": False, **report}
+
+
+async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
+    hot = [r for r in rows if _num(r.get("binary_event_score")) >= 70]
+    if not hot:
+        return {"ok": True, "sent": False, "count": 0, "reason": "no_hot_pharma"}
+
+    db = get_db()
+    sent_rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    cutoff = _now() - timedelta(minutes=max(1, PHARMA_ALERT_COOLDOWN_MINUTES))
+
+    from . import pharma
+
+    for row in hot[:5]:
+        ticker = str(row.get("ticker") or "").upper()
+        pdufa_date = str(row.get("pdufa_date") or "")
+        dedupe_key = f"pharma:{ticker}:{pdufa_date}"
+        recent = await db.telegram_deliveries.find_one(
+            {
+                "batch_type": "pharma_alert",
+                "sent": True,
+                "metadata.dedupe_key": dedupe_key,
+                "created_at": {"$gte": cutoff.isoformat()},
+            },
+            {"_id": 1},
+        )
+        if recent:
+            skipped.append({"ticker": ticker, "reason": "cooldown", "dedupe_key": dedupe_key})
+            continue
+        event = await emit_event(
+            "pharma_binary_alert",
+            severity="watch",
+            scope="pharma",
+            ticker=ticker,
+            batch_id=dedupe_key,
+            title="Pharma binary setup",
+            summary=f"{ticker} score {_num(row.get('binary_event_score')):.0f}; PDUFA {pdufa_date or 'n/a'}",
+            details={
+                "ticker": ticker,
+                "score": row.get("binary_event_score"),
+                "pdufa_date": pdufa_date,
+                "drug": row.get("drug"),
+                "triggered_by": triggered_by,
+                "trading_impact": "watch_only",
+            },
+            priority="summary",
+        )
+        text = pharma.format_pharma_alert(row)
+        sent = await _send(text)
+        await _record_delivery(
+            "pharma_alert",
+            "Case Capital Pharma Alert",
+            text,
+            [event],
+            sent,
+            metadata={
+                "dedupe_key": dedupe_key,
+                "ticker": ticker,
+                "pdufa_date": pdufa_date,
+                "triggered_by": triggered_by,
+                "cooldown_minutes": PHARMA_ALERT_COOLDOWN_MINUTES,
+            },
+        )
+        sent_rows.append({"ticker": ticker, "sent": sent, "dedupe_key": dedupe_key})
+
+    return {
+        "ok": True,
+        "sent": any(r.get("sent") for r in sent_rows),
+        "count": len(sent_rows),
+        "sent_rows": sent_rows,
+        "skipped": skipped,
+    }
 
 
 async def dispatch_options_execution_report(result: dict[str, Any]) -> dict[str, Any]:

@@ -600,15 +600,10 @@ async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
 
     # Fire telegram alerts for score ≥ 70
     try:
-        from . import telegram_service
+        from . import telegram_events
         hot = [r for r in enriched if r["binary_event_score"] >= TELEGRAM_THRESHOLD]
         if hot:
-            import os
-            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-            if chat_id:
-                for r in hot[:5]:
-                    msg = format_pharma_alert(r)
-                    await telegram_service.send_message(msg, chat_id=chat_id)
+            await telegram_events.dispatch_pharma_alerts(hot, triggered_by=triggered_by)
     except Exception as e:
         logger.warning("Pharma telegram dispatch failed: %s", e)
 

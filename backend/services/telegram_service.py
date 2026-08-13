@@ -1,10 +1,11 @@
 """Telegram bot: send messages, register webhook, parse commands."""
 from __future__ import annotations
 import html
+import hashlib
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -55,6 +56,61 @@ def _normalize_outbound_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _outbound_kind(text: str) -> str:
+    upper = str(text or "").upper()
+    if "CASE CAPITAL | SCAN REPORT" in upper:
+        return "scan_report"
+    if "CASE SCORE" in upper and ("PHARMA" in upper or "PDUFA" in upper or "BINARY FDA" in upper):
+        return "pharma_alert"
+    return "generic"
+
+
+def _outbound_cooldown(kind: str) -> timedelta:
+    if kind == "scan_report":
+        return timedelta(minutes=int(os.environ.get("TELEGRAM_SCAN_REPORT_THROTTLE_MINUTES", "10") or 10))
+    if kind == "pharma_alert":
+        return timedelta(minutes=int(os.environ.get("TELEGRAM_PHARMA_ALERT_COOLDOWN_MINUTES", "360") or 360))
+    return timedelta(seconds=int(os.environ.get("TELEGRAM_EXACT_DUPLICATE_SECONDS", "45") or 45))
+
+
+async def _should_skip_outbound(text: str) -> tuple[bool, str]:
+    kind = _outbound_kind(text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+    cutoff = datetime.now(timezone.utc) - _outbound_cooldown(kind)
+    db = get_db()
+    query: dict[str, Any] = {
+        "sent": True,
+        "created_at": {"$gte": cutoff.isoformat()},
+    }
+    if kind == "scan_report":
+        query["kind"] = "scan_report"
+    else:
+        query["digest"] = digest
+    recent = await db.telegram_outbound_guard.find_one(query, {"_id": 1, "kind": 1, "created_at": 1})
+    if recent:
+        return True, f"{kind}_cooldown"
+    await db.telegram_outbound_guard.insert_one({
+        "kind": kind,
+        "digest": digest,
+        "sent": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "preview": text[:220],
+    })
+    return False, digest
+
+
+async def _mark_outbound_sent(digest: str | None, text: str, sent: bool) -> None:
+    if not digest or digest.endswith("_cooldown"):
+        return
+    try:
+        await get_db().telegram_outbound_guard.update_one(
+            {"digest": digest},
+            {"$set": {"sent": bool(sent), "sent_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    except Exception as exc:
+        logger.warning("Telegram outbound guard update failed: %s", exc)
+
+
 def _api_url(method: str) -> str:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     return f"https://api.telegram.org/bot{token}/{method}"
@@ -75,6 +131,10 @@ async def send_message(text: str, chat_id: str | None = None, parse_mode: str = 
     chat_id = chat_id or _default_chat_id()
     if not chat_id:
         return False
+    skip, guard_token = await _should_skip_outbound(text)
+    if skip:
+        await log_activity(f"Telegram outbound deduped: {guard_token}", "info")
+        return False
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode,
                 "disable_web_page_preview": True}
     try:
@@ -93,12 +153,14 @@ async def send_message(text: str, chat_id: str | None = None, parse_mode: str = 
                         r2 = await client.post(_api_url("sendMessage"), json=payload2)
                     if r2.status_code == 200:
                         logger.info("Telegram plain-text fallback succeeded")
+                        await _mark_outbound_sent(guard_token, text, True)
                         return True
                     logger.warning("Telegram plain-text fallback failed (%s): %s",
                                     r2.status_code, r2.text[:200])
                 except Exception as e:
                     logger.warning("Telegram plain-text fallback exception: %s", e)
             return False
+        await _mark_outbound_sent(guard_token, text, True)
         return True
     except Exception as e:
         logger.warning("Telegram send exception: %s", e)
