@@ -233,11 +233,25 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
     from . import integration_status as integration_svc
 
     db = get_db()
+
+    def _demote_support_feed_blocks(row: dict[str, Any]) -> dict[str, Any]:
+        if row.get("key") == "integration:edgar" or row.get("source") == "edgar":
+            row = {**row}
+            row["critical"] = False
+            row["blocks_trading"] = False
+            row["execution_scopes"] = []
+            warnings = list(row.get("warnings") or [])
+            note = "SEC EDGAR is display/catalyst support; outage does not block execution"
+            if note not in warnings:
+                warnings.append(note)
+            row["warnings"] = warnings
+        return row
+
     if not force_probe:
         cached = await db.bot_state.find_one({"_id": "data_quality_integrations_cache"}, {"_id": 0}) or {}
         cache_age = _age_minutes(cached.get("generated_at"))
         if cached.get("rows") and cache_age is not None and cache_age * 60.0 <= INTEGRATION_CACHE_TTL_SECONDS:
-            return cached.get("rows") or []
+            return [_demote_support_feed_blocks(row) for row in (cached.get("rows") or [])]
 
     rows = []
     try:
@@ -249,7 +263,7 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
             for row in cached_rows:
                 row.setdefault("warnings", [])
                 row["warnings"] = list(row.get("warnings") or []) + [f"integration probe timed out; using cached QC rows: {str(exc)[:120]}"]
-            return cached_rows
+            return [_demote_support_feed_blocks(row) for row in cached_rows]
         return [_qc_row(
             "integrations",
             "Integration Probe",
@@ -299,7 +313,7 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
         {"$set": stamped({"generated_at": _now_iso(), "rows": rows})},
         upsert=True,
     )
-    return rows
+    return [_demote_support_feed_blocks(row) for row in rows]
 
 
 async def _latest_remediation() -> dict[str, Any] | None:
