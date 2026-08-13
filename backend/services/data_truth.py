@@ -99,7 +99,7 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
     system_blockers = len(scoped_blockers.get("system") or [])
     warnings = int(qc_summary.get("warnings") or 0) + int(qc_summary.get("fallbacks") or 0) + (1 if single_letter else 0)
     truth_grade = _grade(qc_score, system_blockers, warnings)
-    pm_rows = pm.get("decisions") or pm.get("rows") or []
+    pm_rows = pm.get("recommendations") or pm.get("decisions") or pm.get("rows") or []
     opt_rows = options.get("candidates") or []
     court_rows = court.get("trials") or []
     option_ready = [r for r in opt_rows if r.get("manual_fire_ready")]
