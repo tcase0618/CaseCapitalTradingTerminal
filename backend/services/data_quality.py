@@ -271,7 +271,10 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
             status = "WARN"
         else:
             status = "DOWN"
-        critical = item.get("key") in {"alpaca", "price_path", "edgar"}
+        # Execution should fail closed on broker/price authority problems, not
+        # on support feeds like EDGAR. SEC outages still degrade QC and trigger
+        # remediation, but they must not stop validated PM trades.
+        critical = item.get("key") in {"alpaca", "price_path"}
         blocks = critical and status == "DOWN"
         scopes = []
         if blocks and item.get("key") in {"alpaca", "price_path"}:

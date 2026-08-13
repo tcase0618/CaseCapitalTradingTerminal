@@ -1,4 +1,4 @@
-from services import data_truth, execution_gate, scanner, telegram_events
+from services import data_quality, data_truth, execution_gate, scanner, telegram_events
 
 
 def test_scan_signature_changes_when_price_changes():
@@ -51,3 +51,21 @@ def test_execution_gate_blocks_all_scopes_on_truth_block():
     assert options["decision"] == "BLOCK"
     assert "data_truth_block:F" in equity["blockers"]
     assert "data_truth_block:F" in options["blockers"]
+
+
+def test_edgar_outage_is_warning_not_execution_blocker():
+    row = data_quality._qc_row(
+        "integration:edgar",
+        "SEC EDGAR RSS",
+        "DOWN",
+        critical=False,
+        source="edgar",
+        detail="SEC Atom probe failed",
+        warnings=["SEC Atom probe failed"],
+        blocks_trading=False,
+        execution_scopes=[],
+    )
+
+    assert row["status"] == "DOWN"
+    assert row["blocks_trading"] is False
+    assert row["execution_scopes"] == []
