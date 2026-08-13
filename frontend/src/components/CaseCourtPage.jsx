@@ -15,6 +15,8 @@ const postureColors = {
   PM_REJECTED: "#fb7185",
   REQUIRES_CLEANER_DATA: "#ef4444",
   EQUITY_ONLY_UNTIL_OPTIONS_CLEAN: "#38bdf8",
+  MISTRIAL: "#ef4444",
+  DIRECTED_VERDICT_PROSECUTION: "#fb7185",
   NOT_APPLICABLE: "#8b949e",
 };
 
@@ -121,6 +123,7 @@ export default function CaseCourtPage() {
           { label: "Authority", value: "READ ONLY", color: accent2 },
           { label: "Trials", value: summary.trials ?? trials.length, color: accent },
           { label: "Decision Grade", value: summary.decision_grade ?? 0, color: (summary.decision_grade || 0) ? "#4ade80" : "#fbbf24" },
+          { label: "Contested Exhibits", value: summary.contested_exhibits ?? 0, color: "#a78bfa" },
           { label: "Neutralized Exhibits", value: summary.neutralized_exhibits ?? 0, color: muted },
           { label: "Data Holds", value: summary.requires_cleaner_data ?? 0, color: summary.requires_cleaner_data ? "#f87171" : "#4ade80" },
           { label: "Session", value: data?.session_id ? shortId(data.session_id) : "SYNCING", color: data?.stale ? "#fbbf24" : accent2 },
@@ -134,8 +137,8 @@ export default function CaseCourtPage() {
         </div>
         <div style={commandMeta}>
           <Mini label="Authority" value="READ ONLY" color={accent2} />
-          <Mini label="Rubric" value={summary.rubric_version ? "V2.1 UI" : "SYNCING"} color={accent} />
-          <Mini label="Evidence Rule" value="N/A IS NEUTRAL" color="#a78bfa" />
+          <Mini label="Rubric" value={summary.rubric_version ? "V3 COURT" : "SYNCING"} color={accent} />
+          <Mini label="Evidence Rule" value="FACTS CONTESTED" color="#a78bfa" />
         </div>
       </div>
 
@@ -170,6 +173,7 @@ export default function CaseCourtPage() {
         <Stat label="SUPPORTS PM" value={summary.supports_pm ?? 0} sub="ADVISORY ONLY" color="#4ade80" />
         <Stat label="WATCH ONLY" value={summary.bullish_watch ?? 0} sub="NO PM AUTHORITY" color="#fbbf24" />
         <Stat label="ALIGNED" value={summary.advisory_alignment_ok ?? 0} sub="ADVISORY ONLY" color="#38bdf8" />
+        <Stat label="CONTESTED" value={summary.contested_exhibits ?? 0} sub="TWO-SIDED FACTS" color="#a78bfa" />
         <Stat label="PM REJECT" value={summary.pm_rejected ?? 0} sub="NO AUTHORITY" color="#fb7185" />
         <Stat label="DATA HOLDS" value={summary.requires_cleaner_data ?? 0} sub="CLEAN DATA FIRST" color={summary.requires_cleaner_data ? "#ef4444" : "#4ade80"} />
       </div>
@@ -262,9 +266,21 @@ function Ruling({ trial }) {
       <div className="case-court-ruling-metrics" style={rulingMetrics}>
         <Mini label="Defense" value={trial.defense?.score ?? "-"} color="#4ade80" />
         <Mini label="Prosecutor" value={trial.prosecution?.score ?? "-"} color="#fb7185" />
+        <Mini label="Proof" value={trial.judge?.standard_of_proof?.standard || "-"} color={accent2} />
+        <Mini label="Ratio" value={trial.judge?.defense_to_prosecutor_ratio ? `${trial.judge.defense_to_prosecutor_ratio}x` : "-"} color="#a78bfa" />
         <Mini label="Scan Age" value={trial.scan_age_hours == null ? "-" : `${trial.scan_age_hours}H`} color={trial.scan_age_hours > 26 ? "#f87171" : accent} />
         <Mini label="Decision Grade" value={trial.evidence_coverage?.decision_grade ? "YES" : "NO"} color={trial.evidence_coverage?.decision_grade ? "#4ade80" : "#fb7185"} />
       </div>
+      {!!(trial.judge?.affirmative_defense_classes || []).length && (
+        <div style={{ gridColumn: "1 / -1", ...noteBox }}>
+          Defense classes: {trial.judge.affirmative_defense_classes.join(" / ")}
+        </div>
+      )}
+      {!!(trial.judge?.dispositive_flags || []).length && (
+        <div style={{ gridColumn: "1 / -1", ...noteBox, borderColor: "rgba(251,113,133,.35)", color: "#fca5a5" }}>
+          Directed flags: {trial.judge.dispositive_flags.map(f => f.reason || f.label).join(" / ")}
+        </div>
+      )}
     </div>
   );
 }
@@ -300,7 +316,7 @@ function WitnessGrid({ rows }) {
   return (
     <div style={witnessGrid}>
       {rows.map(w => {
-        const color = w.stance === "BULL" ? "#4ade80" : w.stance === "BEAR" ? "#fb7185" : "#fbbf24";
+        const color = w.stance === "BULL" ? "#4ade80" : w.stance === "BEAR" ? "#fb7185" : w.stance === "CONTESTED" ? "#a78bfa" : "#fbbf24";
         return (
           <div key={w.name} style={witnessCard}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -308,6 +324,7 @@ function WitnessGrid({ rows }) {
               <span style={{ color: labelLight, fontWeight: 900, letterSpacing: "0.12em", fontSize: 11 }}>{w.name}</span>
             </div>
             <div style={{ color, fontSize: 18, fontWeight: 900, marginTop: 10 }}>{w.stance}</div>
+            {w.contested && <div style={{ color: muted, fontSize: 11, marginTop: 5 }}>D {w.defense_weight} / P {w.prosecution_weight}</div>}
             <div style={{ color: muted, fontSize: 12, marginTop: 8, lineHeight: 1.45 }}>{w.testimony}</div>
           </div>
         );
@@ -334,10 +351,12 @@ function CourtDocs({ trial, loading }) {
           </div>
         </div>
         <div style={noteBox}>{docs.clerk_notes}</div>
+        <div style={{ ...noteBox, color: accent2 }}>{docs.evidence_standard}</div>
         <div style={coverageGrid}>
           <Mini label="Applicable" value={`${coverage.scored ?? coverage.scored_exhibits ?? 0}/${coverage.applicable ?? coverage.applicable_exhibits ?? 0}`} color={accent2} />
           <Mini label="Required Missing" value={coverage.missing_required ?? 0} color={coverage.missing_required ? "#fb7185" : "#4ade80"} />
           <Mini label="Decision Grade" value={coverage.decision_grade ? "YES" : "NO"} color={coverage.decision_grade ? "#4ade80" : "#fb7185"} />
+          <Mini label="Contested" value={coverage.contested ?? 0} color="#a78bfa" />
           <Mini label="Coverage" value={coverage.coverage_label || "-"} color={accent} />
         </div>
       </Card>
@@ -360,13 +379,24 @@ function CourtDocs({ trial, loading }) {
           {exhibits.map(ex => {
             const color = ex.side === "DEFENSE" ? "#4ade80" : ex.side === "PROSECUTOR" ? "#fb7185" : muted;
             return (
-              <div key={ex.key} style={exhibitCard(color)}>
+              <div key={ex.key} style={exhibitCard(ex.contested ? "#a78bfa" : color)}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                   <div style={{ color: labelLight, fontWeight: 900, letterSpacing: "0.08em" }}>{ex.label}</div>
-                  <div style={{ color, fontWeight: 900 }}>{ex.side === "NEUTRAL" ? "0" : `+${ex.score}`}</div>
+                  <div style={{ color: ex.contested ? "#a78bfa" : color, fontWeight: 900 }}>{ex.contested ? "CONTESTED" : ex.side === "NEUTRAL" ? "0" : `+${ex.score}`}</div>
                 </div>
                 <div style={{ color, marginTop: 8, fontSize: 12, letterSpacing: "0.12em", fontWeight: 900 }}>{ex.status}</div>
                 <div style={{ color: muted, lineHeight: 1.45, marginTop: 8, fontSize: 12 }}>{ex.detail}</div>
+                {!!(ex.claims || []).length && (
+                  <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+                    {(ex.claims || []).filter(c => c.admissible !== false && Number(c.weight || 0) > 0).map((c, i) => (
+                      <div key={`${c.rule}-${i}`} style={claimRow(c.side)}>
+                        <span>{c.side}</span>
+                        <b>{c.weight}</b>
+                        <em>{c.argument}</em>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div style={metaLine}>{ex.source || "terminal"} {ex.freshness ? `/ ${ex.freshness}` : ""}</div>
               </div>
             );
@@ -587,7 +617,7 @@ const evidenceRow = {
 };
 const rulingGrid = { display: "grid", gridTemplateColumns: "1fr", gap: 10, alignItems: "stretch" };
 const rulingMain = { border: hairline, background: cardBgHi, padding: 16, display: "flex", gap: 14, alignItems: "flex-start", minWidth: 0 };
-const rulingMetrics = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 };
+const rulingMetrics = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 };
 const expressionBadge = {
   display: "inline-flex",
   maxWidth: "100%",
@@ -662,5 +692,21 @@ function exhibitCard(color) {
     background: "rgba(255,255,255,0.02)",
     padding: 12,
     minHeight: 138,
+  };
+}
+
+function claimRow(side) {
+  const color = side === "DEFENSE" ? "#4ade80" : "#fb7185";
+  return {
+    display: "grid",
+    gridTemplateColumns: "84px 38px minmax(0, 1fr)",
+    gap: 8,
+    alignItems: "start",
+    border: `1px solid ${color}30`,
+    background: `${color}0b`,
+    color,
+    padding: "7px 8px",
+    fontSize: 11,
+    lineHeight: 1.35,
   };
 }

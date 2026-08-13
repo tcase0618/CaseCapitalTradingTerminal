@@ -1,9 +1,10 @@
 """Case Court: read-only adversarial review for scanner candidates.
 
-V2 uses scoped evidence exhibits. Non-applicable, missing optional, or stale
-optional evidence is neutral and does not award points to either side. Missing
-required evidence only helps the Prosecutor when that evidence is required for
-the specific mini-trial being judged.
+V3 turns exhibits into facts with contested doctrine claims. The Defense and
+Prosecutor read the same evidence board, argue from admissible claims, and the
+PM-mode standard of proof decides whether the record supports, objects, or
+requires a mistrial. Case Court remains advisory and never grants execution
+authority.
 """
 from __future__ import annotations
 
@@ -18,13 +19,43 @@ from .db import get_db, stamped
 
 
 MAX_TRIALS = 30
-RUBRIC_VERSION = "case-court-v2.2-auditable-sessions"
+RUBRIC_VERSION = "case-court-v3-contested-exhibits"
 DEFENSE = "DEFENSE"
 PROSECUTOR = "PROSECUTOR"
 NEUTRAL = "NEUTRAL"
 NOT_APPLICABLE = "NOT_APPLICABLE"
 MISSING_REQUIRED = "MISSING_REQUIRED"
 STALE_REQUIRED = "STALE_REQUIRED"
+
+STANDARD_OF_PROOF = {
+    "RISK_OFF": {
+        "standard": "BEYOND_REASONABLE_DOUBT",
+        "defense_must_exceed": 3.0,
+        "min_affirmative_defense_classes": 3,
+        "contested_exhibit_goes_to": PROSECUTOR,
+    },
+    "CONSERVATIVE": {
+        "standard": "CLEAR_AND_CONVINCING",
+        "defense_must_exceed": 2.0,
+        "min_affirmative_defense_classes": 2,
+        "contested_exhibit_goes_to": PROSECUTOR,
+    },
+    "BALANCED": {
+        "standard": "PREPONDERANCE",
+        "defense_must_exceed": 1.35,
+        "min_affirmative_defense_classes": 2,
+        "contested_exhibit_goes_to": "SPLIT",
+    },
+    "AGGRESSIVE": {
+        "standard": "PROBABLE_CAUSE",
+        "defense_must_exceed": 1.0,
+        "min_affirmative_defense_classes": 1,
+        "contested_exhibit_goes_to": DEFENSE,
+    },
+}
+
+DISPOSITIVE_PROSECUTION = "DIRECTED_VERDICT_PROSECUTION"
+MISTRIAL = "MISTRIAL"
 
 SIGNAL_QUALITY = {
     "CONTRACT_SURGE": 15,
@@ -181,53 +212,154 @@ def _exhibit(
     required: bool = False,
     freshness: str = "",
     data: dict[str, Any] | None = None,
+    fact: dict[str, Any] | str | None = None,
+    doctrine_class: str | None = None,
+    rule: str | None = None,
 ) -> dict[str, Any]:
     score = max(0.0, min(25.0, float(score or 0.0)))
+    data = data or {}
     if not applicable:
         status, side, score = NOT_APPLICABLE, NEUTRAL, 0.0
     elif status in {NOT_APPLICABLE, "MISSING_OPTIONAL", "STALE_OPTIONAL"}:
         side, score = NEUTRAL, 0.0
     elif status in {MISSING_REQUIRED, STALE_REQUIRED}:
-        side = PROSECUTOR
-        score = max(score, 10.0)
+        side = NEUTRAL
+        score = 0.0
     elif side not in {DEFENSE, PROSECUTOR}:
         side, score = NEUTRAL, 0.0
-    return {
+    claims: list[dict[str, Any]] = []
+    if side in {DEFENSE, PROSECUTOR} and score > 0:
+        claims.append(_claim(side, score, detail, rule or f"{key}:{status}", doctrine_class or key.split(":")[0]))
+    exhibit = {
         "key": key,
         "label": label,
         "status": status,
-        "side": side,
-        "score": round(score, 1),
-        "detail": detail,
-        "source": source,
+        "fact": fact if fact is not None else data,
         "applicable": applicable,
         "required": required,
         "freshness": freshness,
-        "data": data or {},
+        "source": source,
+        "data": data,
+        "claims": claims,
+        "contested": False,
+        # Legacy display fields: keep existing frontend/Telegram consumers alive.
+        "side": side,
+        "score": round(score, 1),
+        "detail": detail,
     }
+    _refresh_legacy_from_claims(exhibit)
+    return exhibit
+
+
+def _claim(side: str, weight: float, argument: str, doctrine_rule: str, doctrine_class: str, admissible: bool = True) -> dict[str, Any]:
+    return {
+        "side": side,
+        "weight": round(max(0.0, min(30.0, float(weight or 0.0))), 1),
+        "argument": argument,
+        "rule": doctrine_rule,
+        "class": doctrine_class,
+        "admissible": admissible,
+    }
+
+
+def _add_claim(exhibit: dict[str, Any], side: str, weight: float, argument: str, doctrine_rule: str, doctrine_class: str, admissible: bool = True) -> dict[str, Any]:
+    if not exhibit.get("applicable") or exhibit.get("status") in {NOT_APPLICABLE, "MISSING_OPTIONAL", "STALE_OPTIONAL"}:
+        admissible = False
+        weight = 0.0
+    exhibit.setdefault("claims", []).append(_claim(side, weight, argument, doctrine_rule, doctrine_class, admissible))
+    _refresh_legacy_from_claims(exhibit)
+    return exhibit
+
+
+def _admissible_claims(exhibit: dict[str, Any], side: str | None = None) -> list[dict[str, Any]]:
+    claims = [c for c in exhibit.get("claims") or [] if c.get("admissible", True) and _num(c.get("weight")) > 0]
+    if side:
+        claims = [c for c in claims if c.get("side") == side]
+    return claims
+
+
+def _refresh_legacy_from_claims(exhibit: dict[str, Any]) -> None:
+    d = sum(_num(c.get("weight")) for c in _admissible_claims(exhibit, DEFENSE))
+    p = sum(_num(c.get("weight")) for c in _admissible_claims(exhibit, PROSECUTOR))
+    exhibit["defense_weight"] = round(d, 1)
+    exhibit["prosecution_weight"] = round(p, 1)
+    exhibit["contested"] = d > 0 and p > 0
+    if d > p:
+        exhibit["side"] = DEFENSE
+        exhibit["score"] = round(d, 1)
+        exhibit["detail"] = next((c.get("argument") for c in _admissible_claims(exhibit, DEFENSE)), exhibit.get("detail") or "")
+        exhibit["status"] = "CONTESTED" if p > 0 else "BULLISH"
+    elif p > d:
+        exhibit["side"] = PROSECUTOR
+        exhibit["score"] = round(p, 1)
+        exhibit["detail"] = next((c.get("argument") for c in _admissible_claims(exhibit, PROSECUTOR)), exhibit.get("detail") or "")
+        exhibit["status"] = "CONTESTED" if d > 0 else "BEARISH"
+    else:
+        if exhibit.get("status") not in {MISSING_REQUIRED, STALE_REQUIRED, NOT_APPLICABLE, "MISSING_OPTIONAL", "STALE_OPTIONAL"}:
+            exhibit["status"] = "NEUTRAL"
+        exhibit["side"] = NEUTRAL
+        exhibit["score"] = 0.0
+    exhibit["claim_count"] = len(_admissible_claims(exhibit))
+
+
+def _claim_score(exhibits: list[dict[str, Any]], side: str) -> float:
+    return round(sum(_num(c.get("weight")) for e in exhibits for c in _admissible_claims(e, side)), 1)
+
+
+def _defense_classes(exhibits: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(c.get("class") or "")
+        for e in exhibits
+        for c in _admissible_claims(e, DEFENSE)
+        if c.get("class")
+    }
+
+
+def _dispositive_flags(exhibits: list[dict[str, Any]], expression: str) -> list[dict[str, Any]]:
+    flags: list[dict[str, Any]] = []
+    for e in exhibits:
+        data = e.get("data") or {}
+        text = " ".join(str(x or "") for x in [e.get("label"), e.get("detail"), data.get("form"), data.get("title"), data.get("description")]).upper()
+        if any(tok in text for tok in ["424B5", "ATM AGREEMENT", "AT THE MARKET", "GOING CONCERN", "ITEM 4.02", "NON-RELIANCE", "RESTATEMENT"]):
+            flags.append({"verdict": DISPOSITIVE_PROSECUTION, "label": e.get("label"), "reason": "Fresh capital-structure or accounting red flag is dispositive."})
+        if data.get("reg_sho_threshold_days") and _num(data.get("reg_sho_threshold_days")) >= 5:
+            flags.append({"verdict": DISPOSITIVE_PROSECUTION, "label": e.get("label"), "reason": "Reg SHO threshold persistence is dispositive."})
+        if data.get("intended_size_adv_pct") and _num(data.get("intended_size_adv_pct")) > 8:
+            flags.append({"verdict": DISPOSITIVE_PROSECUTION, "label": e.get("label"), "reason": "Intended size exceeds exit-liquidity mandate."})
+    required_missing = [e.get("label") for e in exhibits if e.get("required") and e.get("status") in {MISSING_REQUIRED, STALE_REQUIRED}]
+    if required_missing:
+        flags.append({"verdict": MISTRIAL, "label": "Required Evidence", "reason": "Required exhibit missing or stale: " + ", ".join(required_missing[:4])})
+    return flags
 
 
 def _scanner_exhibit(row: dict[str, Any], scan_age: float | None) -> dict[str, Any]:
     if row.get("synthetic_from_pm"):
         return _exhibit("scanner", "Scanner Evidence", MISSING_REQUIRED, score=14, detail="Ticker was not present in the latest stock scan; PM-only row cannot borrow scanner freshness.", source="scan_results", required=True)
     sigs = _signals(row)
-    score = min(25, sum(SIGNAL_QUALITY.get(s, 4) for s in sigs))
     if not sigs:
         return _exhibit("scanner", "Scanner Evidence", MISSING_REQUIRED, score=14, detail="No scanner signal stack was found.", source="scan_results", required=True)
     if scan_age is None or scan_age > 26:
         return _exhibit("scanner", "Scanner Evidence", STALE_REQUIRED, score=14, detail=f"Latest stock scan age is {scan_age}h.", source="scan_results", required=True)
-    return _exhibit(
+    score = min(22, sum(SIGNAL_QUALITY.get(s, 4) for s in sigs))
+    ex = _exhibit(
         "scanner",
         "Scanner Evidence",
-        "BULLISH",
-        DEFENSE,
-        score,
+        "NEUTRAL",
+        NEUTRAL,
+        0,
         f"{len(sigs)} signals: {', '.join(sigs[:5])}.",
         "scan_results",
         required=True,
         freshness=f"{scan_age:.1f}h old" if scan_age is not None else "unknown",
+        fact={"signals": sigs, "scan_age_hours": scan_age, "trade_score": row.get("trade_score"), "signal_score": row.get("signal_score")},
         data={"signals": sigs, "trade_score": row.get("trade_score"), "signal_score": row.get("signal_score")},
     )
+    _add_claim(ex, DEFENSE, score, f"Signal stack is actionable: {', '.join(sigs[:5])}.", "defense.signal_stack.rarity", "signal_stack")
+    if "high_short_interest" in sigs:
+        _add_claim(ex, PROSECUTOR, 9, "High short interest can be informed capital positioned against the setup.", "prosecutor.short_conviction.priced", "short_conviction")
+    if "upcoming_earnings" in sigs:
+        _add_claim(ex, PROSECUTOR, 7, "Upcoming earnings can gap through stops or crush option premium.", "prosecutor.catalyst.binary_risk", "structural_decay")
+    return ex
 
 
 def _pm_exhibit(pm_row: dict[str, Any]) -> dict[str, Any]:
@@ -235,12 +367,12 @@ def _pm_exhibit(pm_row: dict[str, Any]) -> dict[str, Any]:
     score = _num(pm_row.get("pm_score"))
     rr = _num(pm_row.get("risk_reward"))
     if action in {"ACCUMULATE", "STARTER"}:
-        return _exhibit("pm", "Portfolio Manager", "BULLISH", DEFENSE, min(25, score * 0.28), f"PM says {action}; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
+        return _exhibit("pm", "Portfolio Manager", "NEUTRAL", NEUTRAL, 0, f"PM says {action}; score {score:.1f}, RR {rr:.2f}. PM is the judge, not evidence.", "portfolio_manager", required=True, fact={"action": action, "pm_score": score, "risk_reward": rr}, data={"action": action, "pm_score": score, "risk_reward": rr})
     if action == "REJECT":
         pm_gap = max(0.0, 60.0 - score)
         rr_penalty = 10.0 if rr < 1.0 else 6.0 if rr < 1.3 else 0.0
-        return _exhibit("pm", "Portfolio Manager", "BEARISH", PROSECUTOR, min(25, max(18, pm_gap * 0.55 + rr_penalty)), f"PM rejects sizing; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
-    return _exhibit("pm", "Portfolio Manager", "NEUTRAL", NEUTRAL, 0, f"PM is watching; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, data={"action": action, "pm_score": score, "risk_reward": rr})
+        return _exhibit("pm", "Portfolio Manager", "BEARISH", PROSECUTOR, min(22, max(14, pm_gap * 0.45 + rr_penalty)), f"PM rejected sizing; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, doctrine_class="pm_rejection", rule="prosecutor.pm_reject.capital_allocator", fact={"action": action, "pm_score": score, "risk_reward": rr}, data={"action": action, "pm_score": score, "risk_reward": rr})
+    return _exhibit("pm", "Portfolio Manager", "NEUTRAL", NEUTRAL, 0, f"PM is watching; score {score:.1f}, RR {rr:.2f}.", "portfolio_manager", required=True, fact={"action": action, "pm_score": score, "risk_reward": rr}, data={"action": action, "pm_score": score, "risk_reward": rr})
 
 
 def _entry_exhibit(scan_row: dict[str, Any], pm_row: dict[str, Any]) -> dict[str, Any]:
@@ -252,9 +384,12 @@ def _entry_exhibit(scan_row: dict[str, Any], pm_row: dict[str, Any]) -> dict[str
     if entry == "IN_BAND":
         if action == "REJECT":
             return _exhibit("entry", "Entry Band", "NEUTRAL", NEUTRAL, 0, f"Price {price:.2f} is inside {low:.2f}-{high:.2f}, but PM rejected the trade.", "portfolio_manager")
-        return _exhibit("entry", "Entry Band", "BULLISH", DEFENSE, 10, f"Price {price:.2f} is inside {low:.2f}-{high:.2f}.", "portfolio_manager")
+        return _exhibit("entry", "Entry Band", "BULLISH", DEFENSE, 10, f"Price {price:.2f} is inside {low:.2f}-{high:.2f}.", "portfolio_manager", doctrine_class="bounded_downside", rule="defense.entry.in_band", fact={"entry_position": entry, "price": price, "entry_low": low, "entry_high": high})
     if entry == "ABOVE_BAND":
-        return _exhibit("entry", "Entry Band", "BEARISH", PROSECUTOR, 16, f"Price {price:.2f} is above entry band {low:.2f}-{high:.2f}.", "portfolio_manager")
+        ex = _exhibit("entry", "Entry Band", "NEUTRAL", NEUTRAL, 0, f"Price {price:.2f} is above entry band {low:.2f}-{high:.2f}.", "portfolio_manager", fact={"entry_position": entry, "price": price, "entry_low": low, "entry_high": high})
+        _add_claim(ex, PROSECUTOR, 16, f"Price {price:.2f} is above entry band {low:.2f}-{high:.2f}; this is chase risk.", "prosecutor.liquidity.chasing", "crowding_exit_liquidity")
+        _add_claim(ex, DEFENSE, 6, "Above-band price can be momentum confirmation if the band is stale.", "defense.relative_strength.above_band", "relative_strength")
+        return ex
     return _exhibit("entry", "Entry Band", "NEUTRAL", NEUTRAL, 0, f"Entry band status is {entry}.", "portfolio_manager")
 
 
@@ -268,7 +403,7 @@ def _risk_exhibit(scan_row: dict[str, Any], pm_row: dict[str, Any]) -> dict[str,
         return _exhibit("risk", "Risk Engine", "NEUTRAL", NEUTRAL, 0, f"Risk score is watch-level at {risk_score:.1f}.", "risk_target")
     if action == "REJECT":
         return _exhibit("risk", "Risk Engine", "NEUTRAL", NEUTRAL, 0, f"Risk score is contained at {risk_score:.1f}, but PM rejected sizing; risk containment alone cannot support the Defense.", "risk_target")
-    return _exhibit("risk", "Risk Engine", "BULLISH", DEFENSE, 8, f"Risk score is contained at {risk_score:.1f}; downside to stop {downside:.1f}%.", "risk_target")
+    return _exhibit("risk", "Risk Engine", "NEUTRAL", NEUTRAL, 0, f"Risk score is contained at {risk_score:.1f}; downside to stop {downside:.1f}%. Risk containment supports sizing discipline but is not a buy thesis.", "risk_target", fact={"risk_score": risk_score, "downside_pct": downside})
 
 
 def _qc_exhibits(qc: dict[str, Any], expression: str) -> list[dict[str, Any]]:
@@ -338,8 +473,11 @@ def _options_exhibit(row: dict[str, Any] | None, expression: str) -> dict[str, A
     blocks = row.get("blocked_reasons") or []
     quality = row.get("quality_state") or row.get("data_quality") or "UNKNOWN"
     if row.get("manual_fire_ready"):
-        return _exhibit("options", "Options Contract", "BULLISH", DEFENSE, 16, f"Options ticket ready; route {row.get('route')}, risk budget ${row.get('risk_budget')}.", "options_desk", required=True, data={"route": row.get("route"), "strategy": row.get("strategy"), "quality": quality, "contracts": row.get("contracts")})
-    return _exhibit("options", "Options Contract", "BEARISH", PROSECUTOR, min(20, 8 + len(blocks) * 4), "; ".join(str(b) for b in blocks[:4]) or f"Options ticket is not ready; quality {quality}.", "options_desk", required=True, data={"route": row.get("route"), "strategy": row.get("strategy"), "quality": quality, "blocks": blocks})
+        ex = _exhibit("options", "Options Contract", "BULLISH", DEFENSE, 16, f"Options ticket ready; route {row.get('route')}, risk budget ${row.get('risk_budget')}.", "options_desk", required=True, doctrine_class="structural_mispricing", rule="defense.options.defined_risk_ready", data={"route": row.get("route"), "strategy": row.get("strategy"), "quality": quality, "contracts": row.get("contracts")})
+        if row.get("spread_cost_paid") or row.get("spread_pct"):
+            _add_claim(ex, PROSECUTOR, 5, "Option spread/market structure still taxes the expected payoff.", "prosecutor.options.spread_drag", "structural_decay")
+        return ex
+    return _exhibit("options", "Options Contract", "BEARISH", PROSECUTOR, min(20, 8 + len(blocks) * 4), "; ".join(str(b) for b in blocks[:4]) or f"Options ticket is not ready; quality {quality}.", "options_desk", required=True, doctrine_class="structural_decay", rule="prosecutor.options.not_decision_grade", data={"route": row.get("route"), "strategy": row.get("strategy"), "quality": quality, "blocks": blocks})
 
 
 def _fundamentals_exhibit(row: dict[str, Any]) -> dict[str, Any]:
@@ -370,13 +508,22 @@ def _sec_exhibit(sec_rows: list[dict[str, Any]]) -> dict[str, Any]:
     side = PROSECUTOR if max_sig >= 80 else NEUTRAL
     score = 10 if side == PROSECUTOR else 0
     status = "BEARISH" if side == PROSECUTOR else "NEUTRAL"
-    return _exhibit("sec", "SEC Filings", status, side, score, f"{len(sec_rows)} recent filing(s): {forms}. Max significance {max_sig:.0f}.", "sec_filings", data={"recent": sec_rows[:5]})
+    text = " ".join(str((r or {}).get("form") or "") + " " + str((r or {}).get("title") or "") + " " + str((r or {}).get("description") or "") for r in sec_rows).upper()
+    dilution = any(tok in text for tok in ["S-3", "S-3ASR", "424B5", "ATM", "WARRANT", "CONVERTIBLE"])
+    if dilution:
+        side, score, status = PROSECUTOR, max(score, 18), "BEARISH"
+    return _exhibit("sec", "SEC Filings", status, side, score, f"{len(sec_rows)} recent filing(s): {forms}. Max significance {max_sig:.0f}.", "sec_filings", doctrine_class="dilution_capital_structure" if side == PROSECUTOR else "sec_context", rule="prosecutor.sec.dilution_or_material_filing" if side == PROSECUTOR else "sec.neutral.context", data={"recent": sec_rows[:5], "forms": forms, "dilution_watch": dilution})
 
 
 def _precedent_exhibit(count: int, row: dict[str, Any]) -> dict[str, Any]:
     if count <= 0:
         return _exhibit("precedent", "Historical Precedent", "MISSING_OPTIONAL", detail="No historical signal record for this ticker yet.", source="signal_performance")
-    return _exhibit("precedent", "Historical Precedent", "NEUTRAL", NEUTRAL, 0, f"{count} stored signal-performance record(s) exist, but precedent is neutral until win-rate/return evidence is attached.", "signal_performance", data={"records": count})
+    score = min(14, 5 + count * 0.6)
+    ex = _exhibit("precedent", "Historical Precedent", "NEUTRAL", NEUTRAL, 0, f"{count} stored signal-performance record(s) exist for precedent review.", "signal_performance", data={"records": count})
+    if count >= 5:
+        _add_claim(ex, DEFENSE, score, "Stored precedent exists for this ticker/signal family; prior record deserves a defense reading until outcome data disproves it.", "defense.precedent.exists", "precedent")
+        _add_claim(ex, PROSECUTOR, min(10, count * 0.4), "Precedent count without attached win-rate/return remains base-rate risk, not proof.", "prosecutor.precedent.unproven_base_rate", "base_rate_failure")
+    return ex
 
 
 def _intel_exhibit(ticker: str, news_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -395,14 +542,15 @@ def _clean_blocker(blocker: dict[str, Any]) -> str:
 
 
 def _score_side(exhibits: list[dict[str, Any]], side: str) -> float:
-    return round(sum(float(e.get("score") or 0) for e in exhibits if e.get("side") == side), 1)
+    return _claim_score(exhibits, side)
 
 
 def _coverage(exhibits: list[dict[str, Any]]) -> dict[str, Any]:
     applicable = [e for e in exhibits if e.get("applicable")]
     required = [e for e in exhibits if e.get("required")]
     missing_required = [e for e in exhibits if e.get("status") in {MISSING_REQUIRED, STALE_REQUIRED}]
-    scored = [e for e in applicable if e.get("side") in {DEFENSE, PROSECUTOR}]
+    scored = [e for e in applicable if _admissible_claims(e)]
+    contested = [e for e in applicable if e.get("contested")]
     coverage_pct = round(len(scored) / max(1, len(applicable)) * 100, 1)
     required_pct = round((len(required) - len(missing_required)) / max(1, len(required)) * 100, 1)
     certified = not missing_required and coverage_pct >= 45 and required_pct >= 100
@@ -414,6 +562,9 @@ def _coverage(exhibits: list[dict[str, Any]]) -> dict[str, Any]:
         "decision_grade": certified,
         "coverage_pct": coverage_pct,
         "required_pct": required_pct,
+        "contested": len(contested),
+        "affirmative_defense_classes": len(_defense_classes(exhibits)),
+        "defense_classes": sorted(_defense_classes(exhibits)),
         "coverage_label": f"{len(scored)}/{len(applicable)} scored",
         "missing_required_labels": [e.get("label") for e in missing_required],
         "certification": "CERTIFIED" if certified else "ADVISORY_ONLY",
@@ -421,30 +572,38 @@ def _coverage(exhibits: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _brief(side: str, exhibits: list[dict[str, Any]]) -> dict[str, Any]:
-    points = sorted([e for e in exhibits if e.get("side") == side], key=lambda e: e.get("score") or 0, reverse=True)
+    points = []
+    for e in exhibits:
+        for c in _admissible_claims(e, side):
+            points.append({**c, "label": e.get("label"), "source": e.get("source"), "status": e.get("status"), "contested": e.get("contested")})
+    points = sorted(points, key=lambda c: _num(c.get("weight")), reverse=True)
     if side == DEFENSE:
-        opening = "The Defense argues only from applicable bullish evidence and receives no benefit from missing optional exhibits."
+        opening = "The Defense must prove asymmetric payoff with non-consensus evidence; PM approval itself earns no points."
         name = "Defense"
         stance = "BULLISH"
     else:
-        opening = "The Prosecutor argues only from applicable bearish evidence, missing required exhibits, and execution blockers."
+        opening = "The Prosecutor argues capital is guilty until the Defense proves the risk budget can absorb residual uncertainty."
         name = "Prosecutor"
         stance = "BEARISH"
     return {
         "name": name,
         "stance": stance,
         "score": _score_side(exhibits, side),
+        "classes": sorted({str(p.get("class") or "") for p in points if p.get("class")}),
         "opening_argument": opening if side == DEFENSE else None,
         "opening_objection": opening if side == PROSECUTOR else None,
         "points": [
             {
-                "label": e["label"],
-                "weight": e["score"],
-                "detail": e["detail"],
-                "source": e["source"],
-                "status": e["status"],
+                "label": p["label"],
+                "weight": p["weight"],
+                "detail": p["argument"],
+                "source": p["source"],
+                "status": p["status"],
+                "rule": p.get("rule"),
+                "class": p.get("class"),
+                "contested": p.get("contested"),
             }
-            for e in points[:10]
+            for p in points[:10]
         ],
     }
 
@@ -508,31 +667,48 @@ def _mini_trial(name: str, expression: str, exhibits: list[dict[str, Any]], pm_a
     }
 
 
-def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecution: dict[str, Any], pm_row: dict[str, Any], expression: str) -> dict[str, Any]:
+def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecution: dict[str, Any], pm_row: dict[str, Any], expression: str, exhibits: list[dict[str, Any]] | None = None, mode: str = "BALANCED") -> dict[str, Any]:
+    exhibits = exhibits or []
     d = _num(defense.get("score"))
     p = _num(prosecution.get("score"))
     spread = round(d - p, 1)
+    ratio = round(d / max(1.0, p), 2)
     pm_action = str(pm_row.get("action") or "UNKNOWN").upper()
     not_grade = [t for t in mini_trials if not t.get("decision_grade")]
     option_trial = next((t for t in mini_trials if t["name"] == "options_contract"), None)
     equity_ok = all(t.get("decision_grade") for t in mini_trials if t["name"] in {"ticker_quality", "trade_quality"})
+    standard = STANDARD_OF_PROOF.get(str(mode or "BALANCED").upper(), STANDARD_OF_PROOF["BALANCED"])
+    defense_classes = _defense_classes(exhibits)
+    flags = _dispositive_flags(exhibits, expression)
+    directed = next((f for f in flags if f.get("verdict") == DISPOSITIVE_PROSECUTION), None)
+    mistrial = next((f for f in flags if f.get("verdict") == MISTRIAL), None)
+    meets_standard = (
+        ratio >= _num(standard.get("defense_must_exceed"), 1.35)
+        and len(defense_classes) >= int(standard.get("min_affirmative_defense_classes") or 1)
+    )
 
-    if pm_action == "REJECT" or expression == "PASS":
+    if directed:
+        posture = "COURT_OBJECTS"
+        detail = directed.get("reason") or "Dispositive prosecution exhibit controls the record."
+    elif mistrial and not equity_ok:
+        posture = "REQUIRES_CLEANER_DATA"
+        detail = mistrial.get("reason") or "Required evidence is missing; the trial is a mistrial, not a prosecution win."
+    elif pm_action == "REJECT" or expression == "PASS":
         posture = "PM_REJECTED"
         detail = "PM rejected or passed on the setup; Case Court cannot elevate scanner evidence into authority."
     elif not_grade and not equity_ok:
         posture = "REQUIRES_CLEANER_DATA"
-        detail = "Required evidence is missing for the ticker or equity trade trial."
+        detail = "Required evidence is missing for the ticker or equity trade trial; this is a mistrial, not conviction."
     elif expression in {"OPTION", "BOTH", "OPTION_OR_BOTH_ADVISORY"} and option_trial and not option_trial.get("decision_grade"):
         posture = "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"
         detail = "Equity evidence can stand, but options evidence is not decision-grade."
-    elif spread >= 25 and pm_action in {"ACCUMULATE", "STARTER"}:
+    elif meets_standard and pm_action in {"ACCUMULATE", "STARTER"}:
         posture = "COURT_SUPPORTS_PM"
-        detail = "Defense materially outweighs prosecution and PM is already constructive."
-    elif spread >= 10:
+        detail = f"Defense meets {standard['standard']} with {ratio}x prosecution and {len(defense_classes)} affirmative class(es)."
+    elif ratio >= 1.0 and d > p:
         posture = "BULLISH_WATCH"
-        detail = "Defense leads, but PM has not approved capital; this stays watch-only."
-    elif spread <= -12:
+        detail = f"Defense leads, but proof standard is not met: {ratio}x vs required {standard['defense_must_exceed']}x and {len(defense_classes)}/{standard['min_affirmative_defense_classes']} classes."
+    elif p > d:
         posture = "COURT_OBJECTS"
         detail = "Prosecution has enough applicable evidence to challenge capital allocation."
     else:
@@ -551,6 +727,10 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
         "advisory_posture": posture,
         "expression_hint": expression_hint,
         "defense_minus_prosecutor": spread,
+        "defense_to_prosecutor_ratio": ratio,
+        "standard_of_proof": standard,
+        "affirmative_defense_classes": sorted(defense_classes),
+        "dispositive_flags": flags,
         "detail": detail,
         "authority": "READ_ONLY_NO_EXECUTION_NO_PM_OVERRIDE",
         "advisory_alignment_ok": posture in {"COURT_SUPPORTS_PM", "EQUITY_ONLY_UNTIL_OPTIONS_CLEAN"} and pm_action in {"ACCUMULATE", "STARTER"} and equity_ok,
@@ -558,18 +738,26 @@ def _judge(mini_trials: list[dict[str, Any]], defense: dict[str, Any], prosecuti
 
 
 def _witnesses(exhibits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    stance_map = {DEFENSE: "BULL", PROSECUTOR: "BEAR", NEUTRAL: "NEUTRAL"}
-    return [
-        {
+    rows = []
+    for e in exhibits:
+        d = _num(e.get("defense_weight"))
+        p = _num(e.get("prosecution_weight"))
+        stance = "CONTESTED" if e.get("contested") else "BULL" if d > p else "BEAR" if p > d else "NEUTRAL"
+        testimony = e.get("detail")
+        if e.get("contested"):
+            testimony = " | ".join(f"{c.get('side')}: {c.get('argument')}" for c in _admissible_claims(e)[:2])
+        rows.append({
             "name": e["label"],
-            "stance": stance_map.get(e.get("side"), "NEUTRAL"),
-            "score": e.get("score"),
+            "stance": stance,
+            "score": max(d, p),
+            "defense_weight": d,
+            "prosecution_weight": p,
+            "contested": bool(e.get("contested")),
             "status": e.get("status"),
-            "testimony": e.get("detail"),
+            "testimony": testimony,
             "source": e.get("source"),
-        }
-        for e in exhibits
-    ]
+        })
+    return sorted(rows, key=lambda r: (r.get("contested"), _num(r.get("score"))), reverse=True)
 
 
 def _appeal_triggers(scan_row: dict[str, Any], pm_row: dict[str, Any], options_row: dict[str, Any] | None, judge: dict[str, Any], coverage: dict[str, Any]) -> list[str]:
@@ -628,6 +816,7 @@ async def _trial(
     scan_finished_at: str | None,
     news_rows: list[dict[str, Any]],
     session_id: str,
+    mode: str = "BALANCED",
 ) -> dict[str, Any]:
     ticker = _ticker(scan_row.get("ticker") or pm_row.get("ticker"))
     scan_age = _age_hours(scan_finished_at)
@@ -661,7 +850,7 @@ async def _trial(
     if expression in {"EQUITY", "OPTION", "BOTH"}:
         mini_trials.append(_mini_trial("leaps", expression, exhibits, pm_action))
     coverage = _coverage(exhibits)
-    judge = _judge(mini_trials, defense, prosecution, pm_row, expression)
+    judge = _judge(mini_trials, defense, prosecution, pm_row, expression, exhibits=exhibits, mode=mode)
     if coverage.get("certification") != "CERTIFIED" and judge.get("advisory_alignment_ok"):
         judge = {
             **judge,
@@ -696,8 +885,8 @@ async def _trial(
         "court_docs": {
             "caption": f"Case Capital Court v. {ticker}",
             "docket_entry": f"{ticker} reviewed from scan {scan_finished_at or 'unknown'} as {expression}.",
-            "clerk_notes": "Read-only advisory record. Neutral exhibits do not score either side.",
-            "evidence_standard": "Applicable evidence only. Missing optional and not-applicable exhibits are neutral.",
+            "clerk_notes": "Read-only advisory record. Facts are argued by both sides; contested exhibits are surfaced first. Missing required evidence is a mistrial, not a prosecution win.",
+            "evidence_standard": f"{judge.get('standard_of_proof', {}).get('standard', 'PREPONDERANCE')} under {mode or 'BALANCED'} mode.",
         },
         "generated_at": _now().isoformat(),
     }
@@ -707,10 +896,17 @@ def _summary(trials: list[dict[str, Any]], context: dict[str, Any]) -> dict[str,
     postures = [((t.get("judge") or {}).get("advisory_posture") or "UNKNOWN") for t in trials]
     coverage_counts = Counter()
     neutralized = 0
+    contested = 0
+    standards = Counter()
     for t in trials:
+        standard = (((t.get("judge") or {}).get("standard_of_proof") or {}).get("standard"))
+        if standard:
+            standards[standard] += 1
         for e in t.get("exhibits") or []:
-            if e.get("side") in {DEFENSE, PROSECUTOR}:
+            if _admissible_claims(e):
                 coverage_counts[e.get("key", "").split(":")[0]] += 1
+            if e.get("contested"):
+                contested += 1
             if e.get("status") in {NOT_APPLICABLE, "MISSING_OPTIONAL", "STALE_OPTIONAL"}:
                 neutralized += 1
     return {
@@ -727,6 +923,8 @@ def _summary(trials: list[dict[str, Any]], context: dict[str, Any]) -> dict[str,
         "advisory_alignment_ok": sum(1 for t in trials if (t.get("judge") or {}).get("advisory_alignment_ok")),
         "decision_grade": sum(1 for t in trials if (t.get("evidence_coverage") or {}).get("decision_grade")),
         "neutralized_exhibits": neutralized,
+        "contested_exhibits": contested,
+        "standards": dict(standards),
         "scan_finished_at": context.get("scan_finished_at"),
         "qc_decision": (((context.get("qc") or {}).get("trading_gate") or {}).get("decision")),
         "scored_exhibit_counts": dict(coverage_counts),
@@ -748,6 +946,7 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
 
     scan_rows = _by_ticker(scan if isinstance(scan, dict) else {}, "results")
     pm_rows = _rows(pm, "recommendations")
+    mode = str((pm if isinstance(pm, dict) else {}).get("mode") or "BALANCED").upper()
     options_rows = _by_ticker(options if isinstance(options, dict) else {}, "candidates")
     kronos_rows = _by_ticker(kronos_payload if isinstance(kronos_payload, dict) else {}, "forecasts")
     scan_finished_at = (scan if isinstance(scan, dict) else {}).get("finished_at")
@@ -759,7 +958,7 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
     for pm_row in pm_rows[:limit]:
         ticker = _ticker(pm_row.get("ticker"))
         scan_row = scan_rows.get(ticker, {"ticker": ticker, "signals": pm_row.get("signals") or [], "synthetic_from_pm": True})
-        trials.append(await _trial(scan_row, pm_row, options_rows.get(ticker), kronos_rows.get(ticker), qc if isinstance(qc, dict) else {}, scan_finished_at, news_list, session_id))
+        trials.append(await _trial(scan_row, pm_row, options_rows.get(ticker), kronos_rows.get(ticker), qc if isinstance(qc, dict) else {}, scan_finished_at, news_list, session_id, mode=mode))
 
     context = {
         "scan_finished_at": scan_finished_at,
@@ -768,6 +967,7 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
         "options_error": options.get("error") if isinstance(options, dict) else None,
         "kronos_error": kronos_payload.get("error") if isinstance(kronos_payload, dict) else None,
         "qc": qc if isinstance(qc, dict) else {},
+        "pm_mode": mode,
     }
     payload = {
         "ok": True,

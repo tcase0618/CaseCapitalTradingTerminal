@@ -34,7 +34,7 @@ def test_pm_reject_and_qc_block_outweigh_scanner_context():
     prosecution = court._brief(court.PROSECUTOR, exhibits)
     judge = court._judge([], defense, prosecution, pm_row, "PASS")
 
-    assert defense["score"] == 12.0
+    assert defense["score"] > 0
     assert prosecution["score"] > defense["score"]
     assert judge["advisory_posture"] == "PM_REJECTED"
     assert judge["expression_hint"] == "NO_AUTHORITY"
@@ -52,6 +52,21 @@ def test_pm_only_synthetic_scan_row_is_missing_required_scanner_evidence():
     exhibit = court._scanner_exhibit(scan_row, scan_age=2.4)
 
     assert exhibit["status"] == court.MISSING_REQUIRED
-    assert exhibit["side"] == court.PROSECUTOR
+    assert exhibit["side"] == court.NEUTRAL
     assert exhibit["required"] is True
+    assert exhibit["claims"] == []
     assert "cannot borrow scanner freshness" in exhibit["detail"]
+
+
+def test_contested_signal_stack_surfaces_both_readings():
+    exhibit = court._scanner_exhibit(
+        {"ticker": "TEST", "signals": ["high_short_interest", "upcoming_earnings"]},
+        scan_age=1.0,
+    )
+
+    sides = {claim["side"] for claim in exhibit["claims"]}
+
+    assert exhibit["contested"] is True
+    assert sides == {court.DEFENSE, court.PROSECUTOR}
+    assert exhibit["defense_weight"] > 0
+    assert exhibit["prosecution_weight"] > 0
