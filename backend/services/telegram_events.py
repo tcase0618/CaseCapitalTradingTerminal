@@ -61,6 +61,12 @@ def _fmt_pct(value: Any) -> str:
         return "--"
 
 
+def _same_scan(left: Any, right: Any) -> bool:
+    if not left or not right:
+        return False
+    return str(left).replace("Z", "+00:00") == str(right).replace("Z", "+00:00")
+
+
 def _event_fingerprint(event: dict[str, Any]) -> str:
     base = "|".join(
         str(event.get(k) or "")
@@ -231,11 +237,25 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
 
     results = scan.get("results") or []
     scan_id = str(scan.get("finished_at") or scan.get("created_at") or _now_iso())
+    pm = await portfolio_manager.latest_portfolio_plan()
+    court = await case_court.latest()
+    court_summary = court.get("summary") or {}
+    alignment_notes: list[str] = []
+    if not _same_scan(court_summary.get("scan_finished_at"), scan.get("finished_at")):
+        try:
+            refreshed = await case_court.run_trials(limit=30, persist=True)
+            if refreshed.get("ok"):
+                court = refreshed
+                court_summary = refreshed.get("summary") or {}
+        except Exception as exc:
+            alignment_notes.append(f"case_court_refresh_failed:{str(exc)[:120]}")
+    if not _same_scan((court.get("summary") or {}).get("scan_finished_at"), scan.get("finished_at")):
+        alignment_notes.append("case_court_scan_mismatch")
+    if not _same_scan(pm.get("scan_finished_at"), scan.get("finished_at")):
+        alignment_notes.append("pm_scan_mismatch")
     qc = await data_quality.overview(force_refresh=False, record_event=False)
     gate = await execution_gate.overview(force_refresh=False)
     edge = await edge_dashboard.overview()
-    pm = await portfolio_manager.latest_portfolio_plan()
-    court = await case_court.latest()
     options = await options_desk.candidates()
     pm_rows = _pm_rows(pm)
     court_rows = court.get("trials") or []
@@ -253,7 +273,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     pm_actions = _pm_action_counts(pm_rows)
     blockers = (qc.get("summary") or {}).get("blockers", 0)
     qc_decision = (qc.get("trading_gate") or {}).get("decision") or "UNKNOWN"
-    severity = "critical" if qc_decision == "BLOCK" else "watch" if blockers else "info"
+    severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers else "info"
 
     top = _top_rows(pm_rows or results, 6)
     top_lines = [
@@ -289,6 +309,8 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
         f"Execution gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> | Truth: <b>{_esc(gate.get('truth_grade') or '--')}</b>",
         f"Ticker rejects: <b>{(scan.get('ticker_hygiene') or {}).get('rejected_count', 0)}</b>",
+        *([f"Freshness: <b>CHECK</b> | {'; '.join(_esc(n) for n in alignment_notes)}"] if alignment_notes else []),
+        *([f"Scan fingerprint: <b>{_esc((scan.get('freshness') or {}).get('status'))}</b>"] if scan.get("freshness") else []),
         "",
         "<b>EDGE PROOF</b>",
         f"Sample: <b>{(edge.get('edge') or {}).get('sample', 0)}</b> | Win rate: <b>{_fmt_pct((edge.get('edge') or {}).get('win_rate'))}</b> | Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b>",
@@ -312,6 +334,13 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
             "qc_decision": qc_decision,
             "qc_blockers": blockers,
             "execution_gate": {"decision": gate.get("decision"), "truth_grade": gate.get("truth_grade"), "blockers": gate.get("blockers")},
+            "freshness": {
+                "scan": scan.get("freshness") or {},
+                "alignment_notes": alignment_notes,
+                "scan_finished_at": scan.get("finished_at"),
+                "pm_scan_finished_at": pm.get("scan_finished_at"),
+                "case_court_scan_finished_at": (court.get("summary") or {}).get("scan_finished_at"),
+            },
             "edge": edge.get("edge") or {},
             "strategy_lanes": lane_counts,
             "options": opt_summary,

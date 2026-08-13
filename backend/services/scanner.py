@@ -3,6 +3,8 @@ pre-filter (2+) -> compute risk + targets + squeeze + time_target in Python ->
 single batched Claude call (only thesis/conviction/horizon/stop_loss). 24h cache."""
 from __future__ import annotations
 import asyncio
+import hashlib
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -19,6 +21,26 @@ logger = logging.getLogger(__name__)
 
 def _execution_enabled() -> bool:
     return os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _scan_signature(rows: list[dict[str, Any]]) -> str:
+    """Stable fingerprint for detecting repeated scan evidence."""
+    compact = []
+    for row in rows:
+        compact.append({
+            "ticker": row.get("ticker"),
+            "signals": sorted(str(s) for s in (row.get("signals") or [])),
+            "signal_score": row.get("signal_score"),
+            "trade_score": row.get("trade_score"),
+            "price": row.get("price"),
+            "entry_low": row.get("entry_low"),
+            "entry_high": row.get("entry_high"),
+            "stop_loss": row.get("stop_loss"),
+            "target_blended": row.get("target_blended") or (row.get("targets") or {}).get("target_blended"),
+            "sector": row.get("sector"),
+        })
+    payload = json.dumps(sorted(compact, key=lambda r: str(r.get("ticker") or "")), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _aggregate_market_signals(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -389,6 +411,27 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     except Exception as e:
         logger.warning("trade_score attach failed: %s", e)
 
+    signature = _scan_signature(final)
+    previous = await db.scan_results.find_one(
+        {},
+        {"_id": 0, "finished_at": 1, "triggered_by": 1, "scan_signature": 1, "freshness": 1},
+        sort=[("finished_at", -1)],
+    )
+    previous_signature = (previous or {}).get("scan_signature") or ((previous or {}).get("freshness") or {}).get("signature")
+    duplicate = bool(previous_signature and previous_signature == signature)
+    scan_doc["scan_signature"] = signature
+    scan_doc["freshness"] = {
+        "status": "DUPLICATE_SIGNATURE" if duplicate else "FRESH_SIGNATURE",
+        "signature": signature,
+        "duplicate_of": (previous or {}).get("finished_at") if duplicate else None,
+        "previous_triggered_by": (previous or {}).get("triggered_by") if duplicate else None,
+        "blocks_trading": False,
+        "detail": (
+            "Fresh scan completed but evidence fingerprint matched the previous scan; treat as unchanged source evidence, not an old scan record."
+            if duplicate else
+            "Fresh scan completed with a new evidence fingerprint."
+        ),
+    }
     await db.scan_results.insert_one(dict(scan_doc))
     # Record P&L tracking rows (one per ticker, signal & options)
     try:

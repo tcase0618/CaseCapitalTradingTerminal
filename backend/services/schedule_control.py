@@ -96,6 +96,12 @@ async def _latest_doc(src: ScheduleSource) -> dict[str, Any]:
     return await db[src.collection].find_one(query, projection) or {}
 
 
+async def _latest_scan_finished_at() -> Any:
+    db = get_db()
+    row = await db.scan_results.find_one({}, {"_id": 0, "finished_at": 1}, sort=[("finished_at", -1)])
+    return (row or {}).get("finished_at")
+
+
 def _timestamp_from_doc(doc: dict[str, Any], fields: tuple[str, ...]) -> Any:
     for field in fields:
         if doc.get(field):
@@ -113,6 +119,12 @@ def _status(age: float | None, max_age: int, *, market_paused: bool = False) -> 
     if age <= max_age * 2:
         return "STALE"
     return "DOWN"
+
+
+def _same_scan(left: Any, right: Any) -> bool:
+    if not left or not right:
+        return False
+    return str(left).replace("Z", "+00:00") == str(right).replace("Z", "+00:00")
 
 
 async def _repair_latest_scan() -> dict[str, Any]:
@@ -251,6 +263,7 @@ def _repair_registry() -> dict[str, RepairFn]:
 
 async def rows() -> list[dict[str, Any]]:
     market_day, market_reason = await _market_day_now()
+    latest_scan_at = await _latest_scan_finished_at()
     out: list[dict[str, Any]] = []
     for src in SOURCES:
         doc = await _latest_doc(src)
@@ -258,6 +271,12 @@ async def rows() -> list[dict[str, Any]]:
         age = _age_minutes(ts)
         paused = bool(src.market_session_only and not market_day)
         status = _status(age, src.max_age_minutes, market_paused=paused)
+        notes: list[str] = []
+        if src.key == "case_court" and latest_scan_at:
+            court_scan_at = ((doc.get("summary") or {}).get("scan_finished_at") or doc.get("scan_finished_at"))
+            if not _same_scan(court_scan_at, latest_scan_at):
+                status = "STALE"
+                notes.append(f"scan_mismatch: court={court_scan_at or 'unknown'} latest={latest_scan_at}")
         stale = status in {"STALE", "MISSING", "DOWN"}
         out.append({
             "key": src.key,
@@ -274,6 +293,8 @@ async def rows() -> list[dict[str, Any]]:
             "repair": src.repair,
             "market_session_only": src.market_session_only,
             "market_state": market_reason if src.market_session_only else "runs independent of stock market session",
+            "latest_scan_finished_at": latest_scan_at if src.key == "case_court" else None,
+            "notes": notes,
         })
     return out
 

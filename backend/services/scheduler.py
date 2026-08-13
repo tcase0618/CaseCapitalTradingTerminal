@@ -81,8 +81,13 @@ async def _daily_scan_job():
             except Exception:
                 pass
             return
-        scan = await scanner.run_scan(triggered_by="scheduler")
         from . import telegram_events
+        scan = await scanner.run_scan(triggered_by="scheduler")
+        try:
+            from . import case_court
+            await asyncio.wait_for(case_court.run_trials(limit=30, persist=True), timeout=30.0)
+        except Exception as exc:
+            logger.warning("case court post-scan refresh failed: %s", exc)
         await telegram_events.dispatch_scan_report(scan)
     except Exception as e:
         logger.exception("daily scan job failed: %s", e)

@@ -55,6 +55,24 @@ def _scoped_qc_blockers(checks: list[dict[str, Any]]) -> dict[str, list[dict[str
     return scoped
 
 
+def _same_scan(left: Any, right: Any) -> bool:
+    if not left or not right:
+        return False
+    return str(left).replace("Z", "+00:00") == str(right).replace("Z", "+00:00")
+
+
+def _freshness_blocker(key: str, label: str, detail: str) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "status": "BLOCK",
+        "critical": True,
+        "blocks_trading": True,
+        "execution_scopes": ["system", "equity", "options"],
+        "detail": detail,
+    }
+
+
 def _execution_flags() -> dict[str, Any]:
     equity_enabled = os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
     options_enabled = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -96,17 +114,43 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
     scoped_blockers = _scoped_qc_blockers(qc_checks)
     qc_score = _num(qc.get("critical_score") or qc.get("score"))
     blockers = int(qc_summary.get("blockers") or 0)
-    system_blockers = len(scoped_blockers.get("system") or [])
     warnings = int(qc_summary.get("warnings") or 0) + int(qc_summary.get("fallbacks") or 0) + (1 if single_letter else 0)
-    truth_grade = _grade(qc_score, system_blockers, warnings)
     pm_rows = pm.get("recommendations") or pm.get("decisions") or pm.get("rows") or []
     opt_rows = options.get("candidates") or []
     court_rows = court.get("trials") or []
     option_ready = [r for r in opt_rows if r.get("manual_fire_ready")]
     option_research = [r for r in opt_rows if r.get("route") in {"OPTION", "BOTH"} and not r.get("manual_fire_ready")]
     court_ready = [r for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok")]
+    latest_scan_at = (latest_scan or {}).get("finished_at")
+    pm_scan_at = pm.get("scan_finished_at")
+    court_scan_at = (court.get("summary") or {}).get("scan_finished_at")
+    options_scan_at = options.get("scan_finished_at") or (options.get("summary") or {}).get("scan_finished_at")
+    critical_freshness: list[dict[str, Any]] = []
+    if latest_scan_at and not _same_scan(pm_scan_at, latest_scan_at):
+        critical_freshness.append(_freshness_blocker(
+            "pm_scan_mismatch",
+            "PM Plan Scan Mismatch",
+            f"PM plan is tied to {pm_scan_at or 'unknown'}, latest scan is {latest_scan_at}.",
+        ))
+    if latest_scan_at and not _same_scan(court_scan_at, latest_scan_at):
+        critical_freshness.append(_freshness_blocker(
+            "case_court_scan_mismatch",
+            "Case Court Scan Mismatch",
+            f"Case Court docket is tied to {court_scan_at or 'unknown'}, latest scan is {latest_scan_at}.",
+        ))
+    if latest_scan_at and options_scan_at and not _same_scan(options_scan_at, latest_scan_at):
+        critical_freshness.append(_freshness_blocker(
+            "options_scan_mismatch",
+            "Options Desk Scan Mismatch",
+            f"Options candidates are tied to {options_scan_at}, latest scan is {latest_scan_at}.",
+        ))
+    for row in critical_freshness:
+        for scope in row["execution_scopes"]:
+            scoped_blockers.setdefault(scope, []).append(row)
+    system_blockers = len(scoped_blockers.get("system") or [])
+    truth_grade = _grade(qc_score, system_blockers, warnings)
     qc_decision = (qc.get("trading_gate") or {}).get("decision")
-    data_blocked = qc_decision == "BLOCK" and bool(scoped_blockers.get("system"))
+    data_blocked = bool(scoped_blockers.get("system")) or (qc_decision == "BLOCK" and bool(scoped_blockers.get("system")))
     truth_decision = "BLOCK" if data_blocked else "WATCH" if truth_grade in {"C", "D", "F"} else "PASS"
 
     payload = {
@@ -130,6 +174,7 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
             "finished_at": (latest_scan or {}).get("finished_at"),
             "results": len(scan_results),
             "duration_sec": (latest_scan or {}).get("duration_sec"),
+            "freshness": (latest_scan or {}).get("freshness") or {},
             "single_letter_tickers": single_letter,
             "ticker_hygiene": "WATCH" if single_letter or hygiene.get("rejected_count") else "PASS",
             "ticker_hygiene_rejected_count": hygiene.get("rejected_count") or 0,
@@ -152,6 +197,14 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
             "trials": len(court_rows),
             "advisory_alignment": len(court_ready),
             "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
+        },
+        "freshness": {
+            "latest_scan_finished_at": latest_scan_at,
+            "pm_scan_finished_at": pm_scan_at,
+            "case_court_scan_finished_at": court_scan_at,
+            "options_scan_finished_at": options_scan_at,
+            "critical": critical_freshness,
+            "alignment_ok": not critical_freshness,
         },
     }
     if persist:

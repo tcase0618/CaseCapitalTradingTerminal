@@ -103,7 +103,7 @@ async def check(
         key = row.get("key") or row.get("label") or "quality"
         blockers.append(f"qc:{key}")
 
-    if truth_decision == "BLOCK" and scope == "system":
+    if truth_decision == "BLOCK":
         blockers.append(f"data_truth_block:{truth_grade or truth_decision}")
     elif _env_bool("BLOCK_ON_LOW_TRUTH_GRADE") and truth_grade in {"D", "F"}:
         blockers.append(f"low_truth_grade_strict_block:{truth_grade}")
