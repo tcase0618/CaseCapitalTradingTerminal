@@ -454,18 +454,6 @@ def start_scheduler():
         id="pnl_refresh",
         replace_existing=True,
     )
-    async def _options_daily_report_job():
-        try:
-            from . import options_desk
-            await options_desk.dispatch_options_daily_report()
-        except Exception as e:
-            logger.warning("options daily report: %s", e)
-    _scheduler.add_job(
-        _options_daily_report_job,
-        CronTrigger(day_of_week="mon-thu", hour=17, minute=0, timezone=ET),
-        id="options_daily_report_5pm",
-        replace_existing=True,
-    )
     async def _terminal_daily_report_job():
         try:
             from . import telegram_events
@@ -476,18 +464,6 @@ def start_scheduler():
         _terminal_daily_report_job,
         CronTrigger(day_of_week="mon-thu", hour=17, minute=2, timezone=ET),
         id="terminal_daily_report_502pm",
-        replace_existing=True,
-    )
-    async def _options_weekly_report_job():
-        try:
-            from . import options_desk
-            await options_desk.dispatch_options_weekly_report()
-        except Exception as e:
-            logger.warning("options weekly report: %s", e)
-    _scheduler.add_job(
-        _options_weekly_report_job,
-        CronTrigger(day_of_week="fri", hour=21, minute=0, timezone=ET),
-        id="options_weekly_report_friday_9pm",
         replace_existing=True,
     )
     async def _terminal_weekly_report_job():

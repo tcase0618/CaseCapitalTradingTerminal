@@ -61,6 +61,15 @@ def _fmt_pct(value: Any) -> str:
         return "--"
 
 
+def _gain_line(label: str, row: dict[str, Any] | None) -> str:
+    if not row:
+        return f"{label}: <b>-</b>"
+    return (
+        f"{label}: <b>${_esc(row.get('ticker'))}</b> "
+        f"{_fmt_pct(row.get('pct'))} / {_fmt_money(row.get('dollars'))}"
+    )
+
+
 def _same_scan(left: Any, right: Any) -> bool:
     if not left or not right:
         return False
@@ -464,6 +473,10 @@ async def dispatch_daily_report() -> dict[str, Any]:
     gate = await execution_gate.overview(force_refresh=False)
     edge = await edge_dashboard.overview()
     opt_risk = await options_desk.latest_risk_check()
+    try:
+        opt_report = await options_desk.options_daily_report_payload()
+    except Exception as exc:
+        opt_report = {"ok": False, "reason": exc.__class__.__name__}
     tracker_rows = await pnl_tracker.signals_tracker_summary(limit=300)
     tracker = {"rows": tracker_rows, "tracked": len(tracker_rows)}
     snapshot = await scheduler.persist_live_position_snapshot(triggered_by="telegram_daily_report")
@@ -491,6 +504,13 @@ async def dispatch_daily_report() -> dict[str, Any]:
         "<b>EDGE / OPTIONS RISK</b>",
         f"Edge sample: <b>{(edge.get('edge') or {}).get('sample', 0)}</b> | Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b>",
         f"Options checked: <b>{opt_risk.get('positions_checked', 0)}</b> | Hard stops: <b>{len(opt_risk.get('closed') or [])}</b>",
+        "",
+        "<b>OPTIONS DESK</b>",
+        f"Open contracts: <b>{opt_report.get('active_count', 0)}</b> | Closed today: <b>{opt_report.get('closed_today_count', 0)}</b>",
+        f"Unrealized gains: <b>{_fmt_money(opt_report.get('unrealized_gain'))}</b> | Realized gains: <b>{_fmt_money(opt_report.get('realized_gain'))}</b>",
+        f"Risk deployed: <b>{_fmt_money(opt_report.get('risk_deployed'))}</b> / {_fmt_money(opt_report.get('daily_premium_cap'))}",
+        _gain_line("Biggest option gain", opt_report.get("biggest_gain")),
+        _gain_line("Biggest option loser", opt_report.get("biggest_loser")),
     ])
     event = await emit_event(
         "daily_ops_report",
@@ -498,7 +518,7 @@ async def dispatch_daily_report() -> dict[str, Any]:
         scope="system",
         title="Daily ops report",
         summary=f"{snapshot.get('totals', {}).get('positions', 0)} positions; QC {(qc.get('trading_gate') or {}).get('decision')}",
-        details={"snapshot": snapshot, "qc_summary": qc.get("summary") or {}, "gate": gate, "edge": edge.get("edge") or {}, "tracker": {"tracked": tracker.get("tracked")}},
+        details={"snapshot": snapshot, "qc_summary": qc.get("summary") or {}, "gate": gate, "edge": edge.get("edge") or {}, "tracker": {"tracked": tracker.get("tracked")}, "options_report": opt_report},
         priority="summary",
     )
     sent = await _send(text)
@@ -507,10 +527,14 @@ async def dispatch_daily_report() -> dict[str, Any]:
 
 
 async def dispatch_weekly_report() -> dict[str, Any]:
-    from . import case_court, data_quality, edge_dashboard, pnl_tracker
+    from . import case_court, data_quality, edge_dashboard, options_desk, pnl_tracker
 
     qc = await data_quality.overview(force_refresh=False, record_event=False)
     edge = await edge_dashboard.overview()
+    try:
+        opt_report = await options_desk.options_weekly_report_payload()
+    except Exception as exc:
+        opt_report = {"ok": False, "reason": exc.__class__.__name__}
     tracker_rows = await pnl_tracker.signals_tracker_summary(limit=500)
     tracker = {"rows": tracker_rows, "tracked": len(tracker_rows)}
     court = await case_court.latest()
@@ -535,6 +559,13 @@ async def dispatch_weekly_report() -> dict[str, Any]:
         "<b>QC</b>",
         f"Decision: <b>{_esc((qc.get('trading_gate') or {}).get('decision') or 'UNKNOWN')}</b>",
         f"Blockers: <b>{(qc.get('summary') or {}).get('blockers', 0)}</b>",
+        "",
+        "<b>OPTIONS DESK</b>",
+        f"Open contracts: <b>{opt_report.get('active_count', 0)}</b> | Closed this week: <b>{opt_report.get('closed_week_count', 0)}</b>",
+        f"Unrealized gains: <b>{_fmt_money(opt_report.get('unrealized_gain'))}</b> | Realized gains: <b>{_fmt_money(opt_report.get('realized_gain'))}</b>",
+        f"Risk deployed: <b>{_fmt_money(opt_report.get('risk_deployed'))}</b> / {_fmt_money(opt_report.get('daily_premium_cap'))}",
+        _gain_line("Biggest option gain", opt_report.get("biggest_gain")),
+        _gain_line("Biggest option loser", opt_report.get("biggest_loser")),
     ])
     event = await emit_event(
         "weekly_ops_report",
@@ -542,7 +573,7 @@ async def dispatch_weekly_report() -> dict[str, Any]:
         scope="system",
         title="Weekly ops report",
         summary=f"{wins}W/{losses}L; QC {(qc.get('trading_gate') or {}).get('decision')}",
-        details={"qc_summary": qc.get("summary") or {}, "tracked": len(rows), "wins": wins, "losses": losses},
+        details={"qc_summary": qc.get("summary") or {}, "tracked": len(rows), "wins": wins, "losses": losses, "options_report": opt_report},
         priority="summary",
     )
     sent = await _send(text)
