@@ -304,7 +304,7 @@ function useSafetyFrame() {
   const load = async () => {
     const [trading, gate, regime] = await Promise.all([
       axios.get(`${API}/admin/trading_status`, { timeout: 5000 }).then(res => res.data).catch(() => null),
-      axios.get(`${API}/execution_gate/overview`, { timeout: 7000 }).then(res => res.data).catch(() => null),
+      axios.get(`${API}/execution_gate/overview`, { timeout: 12000 }).then(res => res.data).catch(() => null),
       axios.get(`${API}/trade_floor/regime`, { timeout: 8000 }).then(res => res.data).catch(() => null),
     ]);
     setState({ trading, gate, regime, loading: false });
@@ -330,7 +330,7 @@ function useSafetyFrame() {
 function ExecutionControlStrip({ safety }) {
   const tradingKnown = safety.trading?.trading_enabled != null;
   const tradingEnabled = safety.trading?.trading_enabled === true;
-  const gateDecision = String(safety.gate?.decision || (safety.loading ? "SYNC" : "UNKNOWN")).toUpperCase();
+  const gateDecision = String(safety.gate?.decision || "SYNC").toUpperCase();
   const regime = safety.regime || {};
   const breaker = safety.trading?.daily_loss_breaker?.last_check || safety.trading?.daily_loss_breaker || {};
   const gateColor = gateDecision === "PASS" || gateDecision === "ALLOW" ? "#4ade80" : gateDecision === "WATCH" ? "#fbbf24" : "#f87171";
@@ -841,7 +841,7 @@ export function CrtShell({ title, children, headerRight = null }) {
 }
 
 function MobileCommandDeck({ title, activeNav, market, safety, alerts }) {
-  const gate = String(safety.gate?.decision || (safety.loading ? "SYNC" : "UNKNOWN")).toUpperCase();
+  const gate = String(safety.gate?.decision || "SYNC").toUpperCase();
   const trading = safety.trading?.trading_enabled === true ? "LIVE" : safety.trading?.trading_enabled === false ? "HALT" : "SYNC";
   const qcColor = gate === "PASS" || gate === "ALLOW" ? "#4ade80" : gate === "WATCH" ? "#fbbf24" : "#f87171";
   const ActiveIcon = activeNav?.Icon || Activity;

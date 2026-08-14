@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import get_db, stamped
@@ -55,6 +55,40 @@ async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
             "decision": "BLOCK",
             "error": str(exc)[:220],
         }
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+async def _cached_truth_snapshot(max_age_seconds: int | None = None) -> dict[str, Any] | None:
+    ttl = max_age_seconds
+    if ttl is None:
+        ttl = int(os.environ.get("EXECUTION_GATE_OVERVIEW_CACHE_SECONDS", "300") or 300)
+    if ttl <= 0:
+        return None
+    try:
+        cached = await get_db().bot_state.find_one({"_id": "data_truth_latest"}, {"_id": 0})
+    except Exception:
+        return None
+    if not cached:
+        return None
+    generated = _parse_dt(cached.get("generated_at"))
+    if not generated:
+        return None
+    if datetime.now(timezone.utc) - generated > timedelta(seconds=ttl):
+        return None
+    cached["cache"] = {
+        "source": "bot_state.data_truth_latest",
+        "max_age_seconds": ttl,
+        "age_seconds": round((datetime.now(timezone.utc) - generated).total_seconds(), 2),
+    }
+    return cached
 
 
 async def check(
@@ -147,4 +181,7 @@ async def check(
 
 
 async def overview(force_refresh: bool = False) -> dict[str, Any]:
-    return await check(scope="system", force_refresh=force_refresh, record=False)
+    # UI/header calls should be fast and stable. Order paths call check() directly
+    # and still perform the full fresh validation before execution.
+    truth = None if force_refresh else await _cached_truth_snapshot()
+    return await check(scope="system", force_refresh=force_refresh, truth=truth, record=False)
