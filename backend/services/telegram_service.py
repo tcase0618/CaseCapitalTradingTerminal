@@ -1,5 +1,6 @@
 """Telegram bot: send messages, register webhook, parse commands."""
 from __future__ import annotations
+import asyncio  # noqa: F401
 import html
 import hashlib
 import logging
@@ -10,6 +11,7 @@ from typing import Any
 
 import httpx
 import pytz
+from pymongo.errors import DuplicateKeyError
 
 from . import claude_service, risk_target, scanner, usaspending
 from .db import get_db, log_activity
@@ -76,27 +78,48 @@ def _outbound_cooldown(kind: str) -> timedelta:
 async def _should_skip_outbound(text: str) -> tuple[bool, str]:
     kind = _outbound_kind(text)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
-    cutoff = datetime.now(timezone.utc) - _outbound_cooldown(kind)
+    now = datetime.now(timezone.utc)
+    cooldown = _outbound_cooldown(kind)
+    expires_at = now + cooldown
     db = get_db()
-    query: dict[str, Any] = {
-        "sent": True,
-        "created_at": {"$gte": cutoff.isoformat()},
-    }
-    if kind == "scan_report":
-        query["kind"] = "scan_report"
-    else:
-        query["digest"] = digest
-    recent = await db.telegram_outbound_guard.find_one(query, {"_id": 1, "kind": 1, "created_at": 1})
-    if recent:
+
+    # This is an atomic cooldown lock, not a post-send audit check. The old
+    # implementation checked for a sent row, then inserted a pending row. Two
+    # scan paths starting seconds apart could both pass the check before either
+    # one marked sent=true, causing duplicate Telegram pushes. The lock is owned
+    # before Telegram is called, so concurrent senders fail closed.
+    lock_id = f"telegram_outbound:{kind}:global" if kind == "scan_report" else f"telegram_outbound:{kind}:{digest}"
+    try:
+        result = await db.telegram_outbound_guard.update_one(
+            {
+                "_id": lock_id,
+                "$or": [
+                    {"expires_at": {"$lte": now.isoformat()}},
+                    {"expires_at": {"$exists": False}},
+                ],
+            },
+            {
+                "$set": {
+                    "kind": kind,
+                    "digest": digest,
+                    "sent": False,
+                    "created_at": now.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                    "cooldown_seconds": int(cooldown.total_seconds()),
+                    "preview": text[:220],
+                }
+            },
+            upsert=True,
+        )
+    except DuplicateKeyError:
         return True, f"{kind}_cooldown"
-    await db.telegram_outbound_guard.insert_one({
-        "kind": kind,
-        "digest": digest,
-        "sent": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "preview": text[:220],
-    })
-    return False, digest
+    except Exception as exc:
+        logger.warning("Telegram outbound guard lock failed open for %s: %s", kind, exc)
+        return False, digest
+
+    if not (result.upserted_id or result.modified_count):
+        return True, f"{kind}_cooldown"
+    return False, lock_id
 
 
 async def _mark_outbound_sent(digest: str | None, text: str, sent: bool) -> None:
@@ -104,7 +127,7 @@ async def _mark_outbound_sent(digest: str | None, text: str, sent: bool) -> None
         return
     try:
         await get_db().telegram_outbound_guard.update_one(
-            {"digest": digest},
+            {"_id": digest},
             {"$set": {"sent": bool(sent), "sent_at": datetime.now(timezone.utc).isoformat()}},
         )
     except Exception as exc:
@@ -1611,4 +1634,3 @@ async def check_alerts() -> int:
 
 
 # Need import here to avoid circular at top
-import asyncio  # noqa: E402
