@@ -45,7 +45,7 @@ async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
     try:
         from . import data_truth
         return await asyncio.wait_for(
-            data_truth.overview(force_refresh=force_refresh, persist=False),
+            data_truth.overview(force_refresh=force_refresh, persist=True),
             timeout=12.0,
         )
     except Exception as exc:
@@ -66,7 +66,7 @@ def _parse_dt(value: Any) -> datetime | None:
         return None
 
 
-async def _cached_truth_snapshot(max_age_seconds: int | None = None) -> dict[str, Any] | None:
+async def _cached_truth_snapshot(max_age_seconds: int | None = None, allow_stale: bool = False) -> dict[str, Any] | None:
     ttl = max_age_seconds
     if ttl is None:
         ttl = int(os.environ.get("EXECUTION_GATE_OVERVIEW_CACHE_SECONDS", "300") or 300)
@@ -81,12 +81,14 @@ async def _cached_truth_snapshot(max_age_seconds: int | None = None) -> dict[str
     generated = _parse_dt(cached.get("generated_at"))
     if not generated:
         return None
-    if datetime.now(timezone.utc) - generated > timedelta(seconds=ttl):
+    stale = datetime.now(timezone.utc) - generated > timedelta(seconds=ttl)
+    if stale and not allow_stale:
         return None
     cached["cache"] = {
         "source": "bot_state.data_truth_latest",
         "max_age_seconds": ttl,
         "age_seconds": round((datetime.now(timezone.utc) - generated).total_seconds(), 2),
+        "stale": stale,
     }
     return cached
 
@@ -183,5 +185,5 @@ async def check(
 async def overview(force_refresh: bool = False) -> dict[str, Any]:
     # UI/header calls should be fast and stable. Order paths call check() directly
     # and still perform the full fresh validation before execution.
-    truth = None if force_refresh else await _cached_truth_snapshot()
+    truth = None if force_refresh else await _cached_truth_snapshot(allow_stale=True)
     return await check(scope="system", force_refresh=force_refresh, truth=truth, record=False)
