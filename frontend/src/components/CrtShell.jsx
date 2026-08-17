@@ -96,17 +96,26 @@ const NAV_LOGOS = {
 
 NAV.forEach(item => Object.assign(item, NAV_LOGOS[item.to] || { logo: item.icon, color: accent }));
 
-// US market hours: 9:30 - 16:00 ET (UTC-5 / UTC-4 DST)
+function getEtParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  return Object.fromEntries(parts.map(p => [p.type, p.value]));
+}
+
+// US market hours: 9:30 - 16:00 ET. Uses the IANA timezone so DST cannot drift.
 function getMarketStatus() {
-  const now = new Date();
-  const utcH = now.getUTCHours();
-  const utcM = now.getUTCMinutes();
-  // ET = UTC-4 in DST. 9:30 ET = 13:30 UTC. 16:00 ET = 20:00 UTC.
-  const minutes = utcH * 60 + utcM;
-  const openMin = 13 * 60 + 30;
-  const closeMin = 20 * 60;
-  const day = now.getUTCDay();
-  if (day === 0 || day === 6) return { state: "CLOSED", color: "#6b7280" };
+  const et = getEtParts();
+  const hour = Number(et.hour === "24" ? 0 : et.hour);
+  const minute = Number(et.minute);
+  const minutes = hour * 60 + minute;
+  const openMin = 9 * 60 + 30;
+  const closeMin = 16 * 60;
+  if (et.weekday === "Sun" || et.weekday === "Sat") return { state: "CLOSED", color: "#6b7280" };
   if (minutes < openMin) return { state: "PRE-MARKET", color: "#fb923c" };
   if (minutes < closeMin) return { state: "LIVE", color: "#4ade80" };
   return { state: "POST", color: "#fb923c" };
@@ -615,10 +624,10 @@ export function CrtShell({ title, children, headerRight = null }) {
               {"// LIVE ALERTS"}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              <AlertChip icon="🐴" label="DARK HORSE" count={alerts.dh} color="#fb923c" to="/intel" />
-              <AlertChip icon="⚡" label="X FACTOR" count={alerts.xf} color={accent2} to="/intel" />
-              <AlertChip icon="🔒" label="N. LOCK" count={alerts.locks} color="#a78bfa" to="/intel" />
-              <AlertChip icon="🎰" label="LOTTERY HOT" count={alerts.lottery_hot} color={accent} to="/lottery" />
+              <AlertChip icon="DH" label="DARK HORSE" count={alerts.dh} color="#fb923c" to="/intel" />
+              <AlertChip icon="XF" label="X FACTOR" count={alerts.xf} color={accent2} to="/intel" />
+              <AlertChip icon="NL" label="N. LOCK" count={alerts.locks} color="#a78bfa" to="/intel" />
+              <AlertChip icon="LT" label="LOTTERY HOT" count={alerts.lottery_hot} color={accent} to="/lottery" />
             </div>
           </div>
 
@@ -1243,7 +1252,19 @@ function AlertChip({ icon, label, count, color, to }) {
       textDecoration: "none",
       transition: "all 0.18s",
     }}>
-      <span style={{ fontSize: 11, filter: count > 0 ? "none" : "grayscale(0.6) opacity(0.4)" }}>{icon}</span>
+      <span style={{
+        width: 20,
+        height: 18,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: `0.5px solid ${count > 0 ? color + "66" : "rgba(255,255,255,0.10)"}`,
+        color: count > 0 ? color : muted,
+        background: count > 0 ? `${color}12` : "rgba(255,255,255,0.02)",
+        fontSize: 8,
+        fontWeight: 900,
+        letterSpacing: "0.04em",
+      }}>{icon}</span>
       <span style={{
         flex: 1, fontSize: 9.5, letterSpacing: "0.14em",
         color: count > 0 ? color : muted, fontWeight: 600,

@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, CheckCircle2, DatabaseZap, Gauge, ShieldCheck } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, Clock3, DatabaseZap, Gauge, Layers3, ShieldCheck } from "lucide-react";
 import { tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
@@ -127,6 +127,50 @@ export function HealthFrame({ children, title, right = null }) {
       </div>
       {children}
     </section>
+  );
+}
+
+export function SourceBadge({ source = "CONFIG", status = "LIVE", detail = null }) {
+  const color = toneForStatus(status);
+  return (
+    <span className="inst-source-badge" style={{ color, borderColor: `${color}55`, background: `${color}10` }}>
+      <Layers3 size={12} strokeWidth={1.8} />
+      <span>{String(source || "CONFIG").toUpperCase()}</span>
+      <strong>{String(status || "LIVE").toUpperCase()}</strong>
+      {detail && <em>{detail}</em>}
+    </span>
+  );
+}
+
+export function FreshnessBadge({ label = "LAST SYNC", value = null, stale = false, warn = false }) {
+  const color = stale ? "#f87171" : warn ? "#fbbf24" : "#4ade80";
+  return (
+    <span className="inst-freshness-badge" style={{ color, borderColor: `${color}55`, background: `${color}10` }}>
+      <Clock3 size={12} strokeWidth={1.8} />
+      <span>{label}</span>
+      <strong>{value || "--"}</strong>
+    </span>
+  );
+}
+
+export function EvidenceHeader({ title, subtitle = null, right = null, accentColor = accent2 }) {
+  return (
+    <div className="inst-evidence-header" style={{ borderColor: `${accentColor}35` }}>
+      <div>
+        <span style={{ color: accentColor }}>▸</span>
+        <strong>{title}</strong>
+        {subtitle && <em>{subtitle}</em>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+export function DataTableShell({ children, minWidth = 720 }) {
+  return (
+    <div className="inst-table-shell" style={{ "--table-min-width": `${minWidth}px` }}>
+      <div className="inst-table-inner">{children}</div>
+    </div>
   );
 }
 

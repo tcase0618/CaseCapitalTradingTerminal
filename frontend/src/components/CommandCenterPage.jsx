@@ -4,7 +4,7 @@ import axios from "axios";
 import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, tokens } from "./CrtShell";
-import { DataConfidenceStrip } from "./Institutional";
+import { DataConfidenceStrip, DataTableShell, SourceBadge } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline, pageBg } = tokens;
 
@@ -559,25 +559,30 @@ function QualityMatrix({ integrations, qualityOverview, priceSource }) {
   const rows = integrations || [];
   const score = qualityOverview?.score ?? qualityOverview?.overall_quality_score ?? "--";
   return (
-    <div>
-      <div style={qualityHeader}>
-        <span>DOMAIN</span><span>SOURCE / CHECK</span><span>STATUS</span><span>FRESHNESS</span><span>NOTES</span>
-      </div>
-      {rows.slice(0, 10).map((i, idx) => {
-        const q = qualityForIntegration(i);
-        return (
-          <div key={i.key || i.name} style={qualityRow}>
-            <span style={{ ...qualityCell, color: idx % 3 === 0 ? labelLight : muted }}>{domainFor(i, idx)}</span>
-            <span style={{ ...qualityCell, color: labelLight }}>{i.name || i.key}</span>
-            <span style={{ ...qualityCell, color: q.color, fontWeight: 900 }}>{q.label}</span>
-            <span style={{ ...qualityCell, color: muted }}>{i.freshness || i.latency || fmtTime(i.last)}</span>
-            <span style={{ ...qualityCell, color: q.label === "FALLBACK" ? "#fbbf24" : muted }}>{i.reason || i.note || (i.ok ? "Live" : "Check")}</span>
-          </div>
-        );
-      })}
+    <div className="command-quality-matrix">
+      <DataTableShell minWidth={760}>
+        <div style={qualityHeader}>
+          <span>DOMAIN</span><span>SOURCE / CHECK</span><span>STATUS</span><span>FRESHNESS</span><span>NOTES</span>
+        </div>
+        {rows.map((i, idx) => {
+          const q = qualityForIntegration(i);
+          return (
+            <div key={i.key || i.name} style={qualityRow}>
+              <span style={{ ...qualityCell, color: idx % 3 === 0 ? labelLight : muted }}>{domainFor(i, idx)}</span>
+              <span style={{ ...qualityCell, color: labelLight }}>{i.name || i.key}</span>
+              <span style={{ ...qualityCell, color: q.color, fontWeight: 900 }}>{q.label}</span>
+              <span style={{ ...qualityCell, color: muted }}>{i.freshness || i.latency || fmtTime(i.last)}</span>
+              <span style={{ ...qualityCell, color: q.label === "FALLBACK" ? "#fbbf24" : muted }}>{i.reason || i.note || (i.ok ? "Live" : "Check")}</span>
+            </div>
+          );
+        })}
+      </DataTableShell>
       {!rows.length && <Empty text="No quality integrations loaded." />}
       <div style={qualityScore}>OVERALL QUALITY SCORE <span>{score} / 100</span></div>
-      <div style={{ ...rejectionTitle, marginTop: 7 }}>PRICE SOURCE: <span style={{ color: accent2 }}>{priceSource?.provider || priceSource?.source || "CONFIG"}</span></div>
+      <div style={{ ...rejectionTitle, marginTop: 9, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        PRICE SOURCE:
+        <SourceBadge source={priceSource?.provider || priceSource?.source || "CONFIG"} status={priceSource?.provider ? "LIVE" : "CONFIG"} />
+      </div>
     </div>
   );
 }
@@ -636,7 +641,7 @@ function Tape({ rows, empty }) {
 function GateConsole({ executionGate, gateDecision, gateColor }) {
   return (
     <div>
-      <div className="command-mini-grid command-mini-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
+      <div className="command-mini-grid command-mini-grid-4 command-gate-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
         <MiniMetric k="GATE" v={gateDecision} color={gateColor} />
         <MiniMetric k="TRUTH" v={executionGate?.truth_grade || "--"} color={gateColor} />
         <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
@@ -813,9 +818,9 @@ const heatFooter = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, 
 const heatSortButton = { border: 0, background: "transparent", color: muted, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "flex-start", gap: 4, minWidth: 0, fontFamily: "JetBrains Mono", fontSize: 8, letterSpacing: "0.10em", fontWeight: 900, cursor: "pointer", textAlign: "left" };
 const heatKind = { display: "inline-flex", marginLeft: 5, color: accent2, fontStyle: "normal", fontSize: 7, letterSpacing: "0.08em", verticalAlign: "middle" };
 const riskBadge = { display: "inline-flex", justifyContent: "center", padding: "3px 8px", fontSize: 9, fontWeight: 900, letterSpacing: "0.08em" };
-const qualityColumns = "minmax(54px, 0.7fr) minmax(95px, 1.45fr) minmax(54px, 0.72fr) minmax(54px, 0.72fr) minmax(62px, 0.85fr)";
-const qualityHeader = { display: "grid", gridTemplateColumns: qualityColumns, gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const qualityRow = { display: "grid", gridTemplateColumns: qualityColumns, gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
+const qualityColumns = "minmax(118px, 0.9fr) minmax(190px, 1.5fr) minmax(86px, 0.7fr) minmax(90px, 0.75fr) minmax(190px, 1.25fr)";
+const qualityHeader = { display: "grid", gridTemplateColumns: qualityColumns, gap: 10, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline, minWidth: 760 };
+const qualityRow = { display: "grid", gridTemplateColumns: qualityColumns, gap: 10, alignItems: "center", color: labelLight, fontSize: 10, padding: "7px 0", borderBottom: hairline, minWidth: 760 };
 const qualityCell = { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const qualityScore = { display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(74,222,128,0.28)", marginTop: 8, paddingTop: 8, color: "#8cc665", fontSize: 11, fontWeight: 900, letterSpacing: "0.10em" };
 const eventHeader = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
