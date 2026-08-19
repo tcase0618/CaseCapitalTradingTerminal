@@ -14,6 +14,7 @@ export default function TickerPage() {
   const [flow, setFlow] = useState(null);
   const [freeData, setFreeData] = useState(null);
   const [kronos, setKronos] = useState(null);
+  const [ibkr, setIbkr] = useState(null);
 
   useEffect(() => {
     if (!ticker) return;
@@ -22,6 +23,7 @@ export default function TickerPage() {
     axios.get(`${API}/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
     axios.get(`${API}/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => setFreeData(null));
     axios.get(`${API}/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(e => setKronos({ error: e.message }));
+    axios.get(`${API}/ibkr/enrichment/${ticker}`).then(r => setIbkr(r.data)).catch(e => setIbkr({ ok: false, reason: e?.message || "request failed" }));
   }, [ticker]);
 
   if (!data) return (
@@ -107,6 +109,8 @@ export default function TickerPage() {
           </Card>
 
           <KronosTickerForecastBox data={data} kronos={kronos} />
+
+          <IbkrMarketStructureCard ibkr={ibkr} />
 
           <Card title="THESIS">
             <div style={{ fontSize: 13, color: "#e5e7eb", lineHeight: 1.7, letterSpacing: "0.02em" }}>
@@ -217,6 +221,31 @@ export default function TickerPage() {
         </Link>
       </div>
     </CrtShell>
+  );
+}
+
+function IbkrMarketStructureCard({ ibkr }) {
+  const q = ibkr?.quote || {};
+  const h = ibkr?.history || {};
+  const c = ibkr?.contract || {};
+  const o = ibkr?.options || {};
+  const ok = ibkr?.ok;
+  return (
+    <Card title="IBKR MARKET STRUCTURE">
+      {!ibkr ? (
+        <div style={{ color: muted, fontSize: 13 }}>SYNCING READ-ONLY IBKR DATA...</div>
+      ) : (
+        <>
+          <Row k="Gateway" v={ok ? "READ-ONLY LIVE" : "DEGRADED"} c={ok ? "#4ade80" : "#fbbf24"} />
+          <Row k="Quote" v={`${q.data_quality || "-"} ${q.price != null ? `@ $${Number(q.price).toFixed(2)}` : ""}`} c={q.ok ? accent2 : "#fbbf24"} />
+          <Row k="OHLCV Bars" v={`${h.bar_count ?? 0} / ${h.data_quality || "-"}`} c={h.ok ? accent2 : muted} />
+          <Row k="Contract" v={`${c.contract_count ?? 0} match(es)`} c={c.ok ? "#4ade80" : "#fbbf24"} />
+          <Row k="Optionable" v={o.optionable ? "YES" : "NO / UNKNOWN"} c={o.optionable ? "#4ade80" : muted} />
+          <Row k="Chain" v={o.summary ? `${o.summary.total_unique_expirations || 0} exp / ${o.summary.total_unique_strikes || 0} strikes` : o.reason || "-"} />
+          <Row k="Policy" v="DATA ONLY / ALPACA EXECUTION" c="#4ade80" />
+        </>
+      )}
+    </Card>
   );
 }
 

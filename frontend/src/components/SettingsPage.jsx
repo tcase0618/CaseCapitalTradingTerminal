@@ -19,6 +19,7 @@ export default function SettingsPage() {
   const [telegramOps, setTelegramOps] = useState(null);
   const [truth, setTruth] = useState(null);
   const [ibkr, setIbkr] = useState(null);
+  const [ibkrApps, setIbkrApps] = useState(null);
 
   const loadSystem = async () => {
     await Promise.allSettled([
@@ -31,6 +32,7 @@ export default function SettingsPage() {
       axios.get(`${API}/telegram/events?limit=20`).then(r => setTelegramOps(r.data)).catch(() => setTelegramOps({ ok: false })),
       axios.get(`${API}/data_truth/overview`).then(r => setTruth(r.data)).catch(() => setTruth({ ok: false })),
       axios.get(`${API}/ibkr/status`).then(r => setIbkr(r.data)).catch(e => setIbkr({ ok: false, reason: e?.message || "request failed" })),
+      axios.get(`${API}/ibkr/applications`).then(r => setIbkrApps(r.data)).catch(e => setIbkrApps({ ok: false, reason: e?.message || "request failed", applications: [] })),
     ]);
   };
 
@@ -246,15 +248,28 @@ export default function SettingsPage() {
           <MiniStatus label="MODE" value={(ibkr?.config?.mode || "LIVE").toUpperCase()} color={accent} />
           <MiniStatus label="DATA ONLY" value={ibkr?.config?.data_only ? "TRUE" : "FALSE"} color={ibkr?.config?.data_only ? accent2 : "#f87171"} />
           <MiniStatus label="TRADING" value={ibkr?.config?.allow_trading ? "ENABLED" : "BLOCKED"} color={ibkr?.config?.allow_trading ? "#f87171" : "#4ade80"} />
-          <MiniStatus label="HOST" value={`${ibkr?.config?.host || "127.0.0.1"}`} color={labelLight} />
-          <MiniStatus label="PORT" value={ibkr?.config?.port || 7496} color={labelLight} />
+          <MiniStatus label="APPS" value={`${ibkrApps?.summary?.live_apps ?? "--"}/${ibkrApps?.applications?.length ?? "--"}`} color={ibkrApps?.ok ? "#4ade80" : "#fbbf24"} />
+          <MiniStatus label="PORT" value={ibkr?.config?.port || 4001} color={labelLight} />
         </div>
         <Row k="SOCKET PURPOSE" v="EQUITIES / OPTIONS MARKET DATA ONLY" c={accent2} />
         <Row k="ACCOUNT AUTHORITY" v="ALPACA ONLY" c="#4ade80" />
         <Row k="ORDER POLICY" v={ibkr?.config?.order_mutation_policy || "blocked_before_gateway"} c="#4ade80" />
         <Row k="ACCOUNT DATA POLICY" v={ibkr?.config?.account_data_policy || "blocked_use_alpaca_for_account_truth"} c="#4ade80" />
         <Row k="CREDENTIALS" v={ibkr?.config?.credentials_policy || "no_username_password_or_2fa_stored"} c="#4ade80" />
+        <Row k="COVERAGE IMPACT" v={`${ibkrApps?.summary?.avg_impact ?? "--"} / 100`} c={accent} />
         <Row k="LAST CHECK" v={ibkr?.checked_at || "--"} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 12 }}>
+          {(ibkrApps?.applications || []).map(app => (
+            <div key={app.key} style={{ border: hairline, background: cardBg, padding: 9, minWidth: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ color: labelLight, fontSize: 10, fontWeight: 900, letterSpacing: "0.08em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{app.name}</span>
+                <span style={{ color: app.status === "live" ? "#4ade80" : app.status === "planned" ? "#a78bfa" : "#fbbf24", fontSize: 9, fontWeight: 900 }}>{String(app.status || "CHECK").toUpperCase()}</span>
+              </div>
+              <div style={{ color: dim, fontSize: 9, marginTop: 6 }}>{app.role} / impact {app.impact}%</div>
+              <div style={{ color: muted, fontSize: 9, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(app.uses || []).join(" · ")}</div>
+            </div>
+          ))}
+        </div>
         {!ibkr?.ok && <div style={{ color: ibkr?.config?.enabled ? "#fbbf24" : muted, fontSize: 11, lineHeight: 1.55, marginTop: 10 }}>
           {ibkr?.reason || "IBKR is disabled. Enable it only where IB Gateway is running on localhost."}
         </div>}

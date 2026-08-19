@@ -456,6 +456,27 @@ async def _attempt_remediation(row: dict[str, Any]) -> dict[str, Any]:
                 trading_impact="critical_provider_checked" if label.startswith("alpaca") else "display_or_secondary_fallback",
             )
 
+        if source_key == "ibkr_readonly":
+            attempt["action"] = "probe_ibkr_readonly_market_data"
+            from . import ibkr_terminal
+
+            apps = await _bounded_attempt(ibkr_terminal.applications(), timeout=12.0)
+            enrichment = await _bounded_attempt(ibkr_terminal.ticker_enrichment("SPY", force=True), timeout=18.0)
+            summary = apps.get("summary") or {}
+            quote = enrichment.get("quote") or {}
+            history = enrichment.get("history") or {}
+            ok = bool(apps.get("ok") and (quote.get("ok") or history.get("ok")))
+            return _finish_attempt(
+                attempt,
+                "live" if ok else "still_down",
+                (
+                    f"IBKR apps {summary.get('live_apps', 0)}/{summary.get('live_apps', 0) + summary.get('configured_apps', 0) + summary.get('planned_apps', 0)}; "
+                    f"SPY quote={quote.get('data_quality') or '-'} history_bars={history.get('bar_count') or 0}"
+                ),
+                trading_impact="market_data_provider_checked",
+                payload={"applications": summary, "spy_quote": quote, "spy_history": history},
+            )
+
         if source_key == "london_strategic_edge":
             attempt["action"] = "probe_lse_primary_provider"
             from . import london_strategic_edge as lse_svc

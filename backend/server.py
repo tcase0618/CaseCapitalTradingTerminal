@@ -325,6 +325,24 @@ async def ibkr_status():
     return await asyncio.to_thread(ibkr_research.status)
 
 
+@api.get("/ibkr/applications")
+async def ibkr_applications():
+    from services import ibkr_terminal
+    return await ibkr_terminal.applications()
+
+
+@api.get("/ibkr/enrichment/{symbol}")
+async def ibkr_enrichment(symbol: str, force: bool = False):
+    from services import ibkr_terminal
+    return await ibkr_terminal.ticker_enrichment(symbol, force=force)
+
+
+@api.get("/ibkr/scanner_validation")
+async def ibkr_scanner_validation(limit: int = 8, force: bool = False):
+    from services import ibkr_terminal
+    return await ibkr_terminal.scanner_validation(limit=limit, force=force)
+
+
 @api.get("/ibkr/contract/{symbol}")
 async def ibkr_contract(symbol: str):
     from services import ibkr_research

@@ -32,6 +32,7 @@ export default function QualityPage() {
   const [data, setData] = useState(null);
   const [scheduler, setScheduler] = useState(null);
   const [events, setEvents] = useState([]);
+  const [ibkrApps, setIbkrApps] = useState(null);
   const [tab, setTab] = useState("QC");
   const [loading, setLoading] = useState(true);
   const [repulling, setRepulling] = useState(false);
@@ -42,14 +43,16 @@ export default function QualityPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [overview, schedulerRows, eventRows] = await Promise.all([
+      const [overview, schedulerRows, eventRows, ibkrRows] = await Promise.all([
         axios.get(`${API}/data_quality/overview`).then(r => r.data),
         axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
         axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
+        axios.get(`${API}/ibkr/applications`).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
       ]);
       setData(overview);
       setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
+      setIbkrApps(ibkrRows);
     } finally {
       setLoading(false);
     }
@@ -67,12 +70,14 @@ export default function QualityPage() {
     try {
       const { data: fresh } = await axios.post(`${API}/data_quality/refresh`);
       setData(fresh);
-      const [schedulerRows, eventRows] = await Promise.all([
+      const [schedulerRows, eventRows, ibkrRows] = await Promise.all([
         axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
         axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
+        axios.get(`${API}/ibkr/applications`).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
       ]);
       setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
+      setIbkrApps(ibkrRows);
     } finally {
       setRepulling(false);
     }
@@ -84,12 +89,14 @@ export default function QualityPage() {
     try {
       const { data: result } = await axios.post(`${API}/data_quality/remediate`, null, { params: { limit: 18 } });
       setData(result.overview || result);
-      const [schedulerRows, eventRows] = await Promise.all([
+      const [schedulerRows, eventRows, ibkrRows] = await Promise.all([
         axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
         axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
+        axios.get(`${API}/ibkr/applications`).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
       ]);
       setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
+      setIbkrApps(ibkrRows);
     } finally {
       setRemediating(false);
     }
@@ -240,6 +247,39 @@ export default function QualityPage() {
               </div>
             ))}
             {!attempts.length && <InstitutionalEmpty title="No remediation history yet." detail="Use Auto Fix Degraded to probe warnings, stale sources, and fallbacks." />}
+          </div>
+        </Card>
+
+        <Card title="IBKR READ-ONLY COVERAGE">
+          <div style={remediationHeader}>
+            <div>
+              <div style={metricLabel}>GATEWAY</div>
+              <div style={{ ...posValue, color: ibkrApps?.ok ? "#4ade80" : "#fbbf24" }}>{ibkrApps?.ok ? "LIVE" : "CHECK"}</div>
+            </div>
+            <div>
+              <div style={metricLabel}>ACTIVE APPS</div>
+              <div style={{ ...posValue, color: accent2 }}>{ibkrApps?.summary?.live_apps ?? "--"} / {ibkrApps?.applications?.length ?? "--"}</div>
+            </div>
+            <div>
+              <div style={metricLabel}>AVG IMPACT</div>
+              <div style={{ ...posValue, color: accent }}>{ibkrApps?.summary?.avg_impact ?? "--"}</div>
+            </div>
+          </div>
+          <div style={rowStack}>
+            {(ibkrApps?.applications || []).slice(0, 10).map(app => (
+              <div key={app.key} style={fixRow}>
+                <div>
+                  <div style={qTitle}>{app.name}</div>
+                  <div style={qDetail}>{app.role} / {(app.uses || []).join(", ")}</div>
+                </div>
+                <span style={{ ...badge, color: app.status === "live" ? "#4ade80" : app.status === "planned" ? "#a78bfa" : "#fbbf24", borderColor: "rgba(94,234,212,0.32)" }}>
+                  {String(app.status || "CHECK").toUpperCase()}
+                </span>
+                <div style={{ ...qDetail, textAlign: "right" }}>IMPACT {app.impact}%</div>
+                <div style={{ color: muted, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{app.endpoint}</div>
+              </div>
+            ))}
+            {!ibkrApps?.applications?.length && <InstitutionalEmpty title="IBKR coverage not loaded." detail={ibkrApps?.reason || "Gateway may be offline or disabled."} />}
           </div>
         </Card>
 
