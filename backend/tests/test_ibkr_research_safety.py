@@ -59,6 +59,17 @@ def test_ibkr_live_mode_never_implies_trading_enabled(monkeypatch):
     assert cfg.allow_trading is False
     assert state["order_mutation_policy"] == "blocked_before_gateway"
     assert state["account_data_policy"] == "blocked_use_alpaca_for_account_truth"
+    assert state["client_id_policy"] == "base_plus_unique_read_request"
+
+
+def test_ibkr_read_connections_use_unique_client_ids(monkeypatch):
+    svc = _reload(monkeypatch, IBKR_CLIENT_ID="10", IBKR_DATA_ONLY="true", IBKR_ALLOW_TRADING="false")
+    svc._IB_CLIENT_COUNTER = 0
+    cfg = svc.config()
+
+    assert svc._next_read_client_id(cfg) == 11
+    assert svc._next_read_client_id(cfg) == 12
+    assert svc._next_read_client_id(cfg) == 13
 
 
 @pytest.mark.parametrize("method", ["account", "positions", "open_orders", "executions"])

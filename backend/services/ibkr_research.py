@@ -45,6 +45,7 @@ class IbkrUnavailable(RuntimeError):
 
 
 _IB_LOCK = threading.RLock()
+_IB_CLIENT_COUNTER = 0
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -105,10 +106,18 @@ def safety_state() -> dict[str, Any]:
         "host": cfg.host,
         "port": cfg.port,
         "client_id": cfg.client_id,
+        "client_id_policy": "base_plus_unique_read_request",
         "order_mutation_policy": "blocked_before_gateway",
         "account_data_policy": "blocked_use_alpaca_for_account_truth",
         "credentials_policy": "no_username_password_or_2fa_stored",
     }
+
+
+def _next_read_client_id(cfg: IbkrConfig) -> int:
+    """Return a unique client id for one short-lived read-only Gateway session."""
+    global _IB_CLIENT_COUNTER
+    _IB_CLIENT_COUNTER = (_IB_CLIENT_COUNTER % 9000) + 1
+    return cfg.client_id + _IB_CLIENT_COUNTER
 
 
 def assert_order_blocked(action: str = "order_mutation") -> None:
@@ -509,8 +518,9 @@ def _with_connection(fn: Any) -> dict[str, Any]:
     with _IB_LOCK:
         app = _ReadOnlyIbApp()
         thread = None
+        read_client_id = _next_read_client_id(cfg)
         try:
-            app.connect(cfg.host, cfg.port, cfg.client_id)
+            app.connect(cfg.host, cfg.port, read_client_id)
             thread = threading.Thread(target=app.run, name="ibkr-readonly-client", daemon=True)
             thread.start()
             if not app.ready.wait(cfg.timeout_seconds):
@@ -519,10 +529,18 @@ def _with_connection(fn: Any) -> dict[str, Any]:
             payload.setdefault("ok", True)
             payload.setdefault("checked_at", _now_iso())
             payload.setdefault("config", safety_state())
+            payload.setdefault("client_id_used", read_client_id)
             payload.setdefault("errors", app.errors[-10:])
             return payload
         except Exception as exc:
-            return {"ok": False, "reason": str(exc)[:500], "checked_at": _now_iso(), "config": safety_state(), "errors": app.errors[-10:]}
+            return {
+                "ok": False,
+                "reason": str(exc)[:500],
+                "checked_at": _now_iso(),
+                "config": safety_state(),
+                "client_id_used": read_client_id,
+                "errors": app.errors[-10:],
+            }
         finally:
             try:
                 if app.isConnected():
