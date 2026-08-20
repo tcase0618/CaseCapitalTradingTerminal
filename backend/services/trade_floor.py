@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1134,6 +1134,7 @@ async def sync_positions_and_close_settled():
             continue
         if p:
             cur = float(p.get("current_price") or 0)
+            live_qty = float(p.get("qty") or 0)
             new_low = cur
             existing_low = t.get("lowest_price_reached")
             if existing_low is not None and cur > 0:
@@ -1142,7 +1143,8 @@ async def sync_positions_and_close_settled():
                 {"client_order_id": t["client_order_id"]},
                 {"$set": {
                     "current_mark": cur,
-                    "qty": float(p.get("qty") or 0),
+                    "qty": live_qty,
+                    "qty_remaining": live_qty,
                     "market_value": float(p.get("market_value") or 0),
                     "unrealized_pl": float(p.get("unrealized_pl") or 0),
                     "unrealized_plpc": float(p.get("unrealized_plpc") or 0),
@@ -1154,20 +1156,22 @@ async def sync_positions_and_close_settled():
             # No longer in positions → either never filled (handled by stale-order
             # sweep) OR sold by Alpaca / manual close.
             cur_price = await _last_close_via_pricer(ticker)
-            entry = t.get("entry_price_ref") or t.get("limit_price") or 0
-            realized_pct = ((cur_price - entry) / entry * 100) if (entry and cur_price) else None
+            from . import trade_truth
+            truth = trade_truth.resolve_equity_close_from_alpaca_sells(
+                t,
+                filled_orders,
+                fallback_price=cur_price,
+            )
             await db.tf_trades.update_one(
                 {"client_order_id": t["client_order_id"]},
                 {"$set": {
                     "status": "CLOSED",
-                    "exit_price": cur_price,
-                    "realized_pct": realized_pct,
-                    "closed_at": _now().isoformat(),
+                    "qty_remaining": 0,
+                    **truth,
                 }},
             )
             closed += 1
-            newly_closed.append({**t, "exit_price": cur_price,
-                                  "realized_pct": realized_pct})
+            newly_closed.append({**t, "status": "CLOSED", "qty_remaining": 0, **truth})
     # v5.1 — fire-and-forget journal AI + Trade Floor learning write-back
     if newly_closed:
         asyncio.create_task(_write_journal_entries(newly_closed))
@@ -1176,7 +1180,89 @@ async def sync_positions_and_close_settled():
             asyncio.create_task(tfle.log_trade_outcomes(newly_closed))
         except Exception as e:
             logger.warning("tfle.log_trade_outcomes dispatch: %s", e)
-    return {"updated": len(open_trades) - closed, "closed": closed, "reconciled": reconciled}
+    truth_repair = await repair_recent_closed_trade_truth(orders=filled_orders)
+    return {
+        "updated": len(open_trades) - closed,
+        "closed": closed,
+        "reconciled": reconciled,
+        "truth_repaired": truth_repair,
+    }
+
+
+async def repair_recent_closed_trade_truth(
+    *,
+    days: int = 14,
+    orders: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Repair recent closed equity trades from Alpaca sell-fill truth.
+
+    This is intentionally conservative: records without matched Alpaca sell
+    fills are marked learning-excluded instead of being silently trusted.
+    """
+    if not _alpaca_ready():
+        return {"ok": False, "reason": "alpaca_not_configured", "checked": 0, "updated": 0}
+    db = get_db()
+    from . import trade_truth
+
+    orders = orders if orders is not None else await list_orders(status="all", limit=500)
+    cutoff = _now() - timedelta(days=max(1, int(days)))
+    rows = await db.tf_trades.find({"status": "CLOSED"}, {"_id": 0}).sort("closed_at", -1).to_list(1000)
+    checked = 0
+    updated = 0
+    marked_unverified = 0
+    skipped_old = 0
+    for row in rows:
+        ts_raw = row.get("closed_at") or row.get("filled_at") or row.get("submitted_at")
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00")) if ts_raw else None
+            if ts and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            ts = None
+        if ts and ts < cutoff:
+            skipped_old += 1
+            continue
+        checked += 1
+        truth = trade_truth.resolve_equity_close_from_alpaca_sells(row, orders)
+        client_order_id = row.get("client_order_id")
+        if not client_order_id:
+            continue
+        if truth.get("fill_truth_status") == "verified_alpaca_sell_fill":
+            await db.tf_trades.update_one(
+                {"client_order_id": client_order_id},
+                {
+                    "$set": {
+                        **truth,
+                        "truth_repaired_at": _now().isoformat(),
+                    },
+                    "$unset": {"learning_excluded_reason": ""},
+                },
+            )
+            updated += 1
+        elif not row.get("fill_truth_status"):
+            await db.tf_trades.update_one(
+                {"client_order_id": client_order_id},
+                {"$set": {
+                    "fill_truth_status": truth["fill_truth_status"],
+                    "fill_truth_source": truth["fill_truth_source"],
+                    "learning_excluded": True,
+                    "learning_excluded_reason": truth["learning_excluded_reason"],
+                    "truth_repaired_at": _now().isoformat(),
+                }},
+            )
+            marked_unverified += 1
+    if updated or marked_unverified:
+        await log_activity(
+            f"Trade truth repair checked {checked}, verified {updated}, marked unverified {marked_unverified}",
+            "info",
+        )
+    return {
+        "ok": True,
+        "checked": checked,
+        "updated": updated,
+        "marked_unverified": marked_unverified,
+        "skipped_old": skipped_old,
+    }
 
 
 async def reconcile_live_positions(
@@ -1207,7 +1293,7 @@ async def reconcile_live_positions(
     ).to_list(500)
     existing_symbols = {str(t.get("ticker") or "").upper() for t in existing}
 
-    filled_orders = await list_orders(status="all", limit=200)
+    filled_orders = await list_orders(status="all", limit=500)
     orders_by_symbol: dict[str, dict[str, Any]] = {}
     for order in filled_orders:
         symbol = str(order.get("symbol") or "").upper()

@@ -103,6 +103,10 @@ async def log_trade_outcomes(closed_trades: list[dict[str, Any]]) -> None:
     db = get_db()
     for t in closed_trades:
         try:
+            truth_status = t.get("fill_truth_status")
+            learning_excluded = bool(t.get("learning_excluded")) or (
+                bool(truth_status) and truth_status != "verified_alpaca_sell_fill"
+            )
             await db.tf_trade_decisions.update_one(
                 {"client_order_id": t.get("client_order_id")},
                 {"$set": {
@@ -111,8 +115,12 @@ async def log_trade_outcomes(closed_trades: list[dict[str, Any]]) -> None:
                     "filled_avg_price": t.get("filled_avg_price"),
                     "lowest_price_reached": t.get("lowest_price_reached"),
                     "exit_price": t.get("exit_price"),
-                    "realized_pct": t.get("realized_pct"),
+                    "realized_pct": None if learning_excluded else t.get("realized_pct"),
                     "closed_at": t.get("closed_at"),
+                    "fill_truth_status": truth_status,
+                    "fill_truth_source": t.get("fill_truth_source"),
+                    "learning_excluded": learning_excluded,
+                    "learning_excluded_reason": t.get("learning_excluded_reason"),
                 }},
             )
         except Exception as e:
@@ -131,7 +139,13 @@ def _score_tier(score: float) -> str:
 
 async def closed_trade_count() -> int:
     db = get_db()
-    return await db.tf_trades.count_documents({"status": "CLOSED"})
+    return await db.tf_trades.count_documents({
+        "status": "CLOSED",
+        "$or": [
+            {"learning_excluded": {"$ne": True}},
+            {"fill_truth_status": "verified_alpaca_sell_fill"},
+        ],
+    })
 
 
 async def phase() -> str:
@@ -197,7 +211,13 @@ async def recalibrate() -> dict[str, Any]:
         return {"phase": p, "changes": 0}
 
     # Build combo stats from closed trades
-    trades = await db.tf_trades.find({"status": "CLOSED"}, {"_id": 0}).to_list(1000)
+    trades = await db.tf_trades.find({
+        "status": "CLOSED",
+        "$or": [
+            {"learning_excluded": {"$ne": True}},
+            {"fill_truth_status": "verified_alpaca_sell_fill"},
+        ],
+    }, {"_id": 0}).to_list(1000)
     combos: dict[tuple, dict[str, Any]] = {}
     for t in trades:
         combo = tuple(sorted(t.get("signal_combo") or []))

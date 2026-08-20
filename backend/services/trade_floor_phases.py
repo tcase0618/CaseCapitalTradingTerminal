@@ -113,6 +113,37 @@ async def _alpaca_market_sell(ticker: str, qty: float,
     return None
 
 
+async def _alpaca_available_qty(ticker: str) -> float | None:
+    """Return Alpaca's live sellable quantity for a symbol.
+
+    The terminal's stored qty_remaining can drift after partial fills, manual
+    closes, or broker-side rounding. Phase exits must honor the broker's live
+    available quantity before sending a sell.
+    """
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return None
+    headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=headers) as c:
+            r = await c.get(f"{ALPACA_TRADE_BASE}/v2/positions/{ticker.upper()}")
+            if r.status_code == 404:
+                return 0.0
+            if r.status_code not in (200, 201):
+                logger.warning("alpaca position qty %s: %s %s", ticker, r.status_code, r.text[:200])
+                return None
+            data = r.json()
+    except Exception as e:
+        logger.warning("alpaca position qty exception %s: %s", ticker, e)
+        return None
+    for key in ("qty_available", "available", "qty"):
+        try:
+            if data.get(key) is not None:
+                return max(0.0, float(data.get(key) or 0))
+        except Exception:
+            continue
+    return None
+
+
 async def _current_price(ticker: str) -> float | None:
     """Fresh price for live exit checks; bypass the normal latest-price cache."""
     try:
@@ -141,6 +172,49 @@ def _days_in_trade(t: dict[str, Any]) -> float:
         return max(0.0, (_now() - ts).total_seconds() / 86400.0)
     except Exception:
         return 0.0
+
+
+async def _claim_exit_lock(client_order_id: str | None, reason: str) -> bool:
+    """Claim a per-trade exit lock before sending a sell order.
+
+    This prevents overlapping scheduler/manual sweeps from both reading the
+    same qty_remaining and submitting duplicate phase exits.
+    """
+    if not client_order_id:
+        return False
+    db = get_db()
+    stale_before = (_now().timestamp() - 600)
+    res = await db.tf_trades.update_one(
+        {
+            "client_order_id": client_order_id,
+            "status": "OPEN",
+            "$or": [
+                {"exit_in_progress": {"$exists": False}},
+                {"exit_in_progress": None},
+                {"exit_in_progress_at_epoch": {"$lt": stale_before}},
+            ],
+        },
+        {"$set": {
+            "exit_in_progress": reason,
+            "exit_in_progress_at": _now().isoformat(),
+            "exit_in_progress_at_epoch": _now().timestamp(),
+        }},
+    )
+    return res.modified_count == 1
+
+
+async def _release_exit_lock(client_order_id: str | None) -> None:
+    if not client_order_id:
+        return
+    db = get_db()
+    await db.tf_trades.update_one(
+        {"client_order_id": client_order_id},
+        {"$unset": {
+            "exit_in_progress": "",
+            "exit_in_progress_at": "",
+            "exit_in_progress_at_epoch": "",
+        }},
+    )
 
 
 async def process_phase_exits() -> dict[str, Any]:
@@ -175,6 +249,20 @@ async def process_phase_exits() -> dict[str, Any]:
         phase = int(t.get("phase") or 1)
         qty_total = float(t.get("qty_total") or 0)
         qty_rem = float(t.get("qty_remaining") or 0)
+        live_qty = await _alpaca_available_qty(ticker)
+        if live_qty is not None and live_qty < qty_rem:
+            qty_rem = round(max(0.0, live_qty), 9)
+            t = {**t, "qty_remaining": qty_rem}
+            await db.tf_trades.update_one(
+                {"client_order_id": cli},
+                {"$set": {
+                    "qty_remaining": qty_rem,
+                    "qty_available_source": "alpaca_live",
+                    "qty_available_checked_at": _now().isoformat(),
+                }},
+            )
+        if qty_rem <= 0:
+            continue
         phases_hit = dict(t.get("phases_hit") or {})
         params = _params_for(t.get("signal_combo") or [], all_params)
 
@@ -195,12 +283,16 @@ async def process_phase_exits() -> dict[str, Any]:
         # ── Phase 1 ──
         p1_target = float(t.get("pm_active_target") or t.get("phase1_target") or 0)
         if phase == 1 and p1_target and cur >= p1_target:
+            if not await _claim_exit_lock(cli, "phase1_target_hit"):
+                continue
             qty_sell = round(qty_total * float(params["phase1_close_pct"]), 9)
             qty_sell = min(qty_sell, qty_rem)
             sold_at = await _market_sell_and_record(
                 t, qty_sell, reason="phase1_target_hit",
                 exit_price=cur,
             )
+            if not sold_at:
+                await _release_exit_lock(cli)
             if sold_at:
                 # Move stop to breakeven (entry). Only move favorably.
                 new_stop = max(cur_stop, entry)
@@ -216,12 +308,19 @@ async def process_phase_exits() -> dict[str, Any]:
                 qty_rem = round(qty_rem - qty_sell, 9)
                 await db.tf_trades.update_one(
                     {"client_order_id": cli},
-                    {"$set": {
-                        "phase": 2,
-                        "qty_remaining": qty_rem,
-                        "current_stop": new_stop,
-                        "phases_hit": phases_hit,
-                    }},
+                    {
+                        "$set": {
+                            "phase": 2,
+                            "qty_remaining": qty_rem,
+                            "current_stop": new_stop,
+                            "phases_hit": phases_hit,
+                        },
+                        "$unset": {
+                            "exit_in_progress": "",
+                            "exit_in_progress_at": "",
+                            "exit_in_progress_at_epoch": "",
+                        },
+                    },
                 )
                 await _send_telegram(
                     f"⚡ TF · {ticker} · Phase 1 hit\n"
@@ -238,12 +337,16 @@ async def process_phase_exits() -> dict[str, Any]:
         # ── Phase 2 ──
         p2_target = float(t.get("pm_active_target") or t.get("phase2_target") or 0)
         if phase == 2 and p2_target and cur >= p2_target and qty_rem > 0:
+            if not await _claim_exit_lock(cli, "phase2_target_hit"):
+                continue
             qty_sell = round(qty_total * float(params["phase2_close_pct"]), 9)
             qty_sell = min(qty_sell, qty_rem)
             sold_at = await _market_sell_and_record(
                 t, qty_sell, reason="phase2_target_hit",
                 exit_price=cur,
             )
+            if not sold_at:
+                await _release_exit_lock(cli)
             if sold_at:
                 # Move stop to phase 1 exit price. Only move favorably.
                 p1_exit = float(phases_hit.get("1", {}).get("exit_price") or entry)
@@ -260,12 +363,19 @@ async def process_phase_exits() -> dict[str, Any]:
                 qty_rem = round(qty_rem - qty_sell, 9)
                 await db.tf_trades.update_one(
                     {"client_order_id": cli},
-                    {"$set": {
-                        "phase": 3,
-                        "qty_remaining": qty_rem,
-                        "current_stop": new_stop,
-                        "phases_hit": phases_hit,
-                    }},
+                    {
+                        "$set": {
+                            "phase": 3,
+                            "qty_remaining": qty_rem,
+                            "current_stop": new_stop,
+                            "phases_hit": phases_hit,
+                        },
+                        "$unset": {
+                            "exit_in_progress": "",
+                            "exit_in_progress_at": "",
+                            "exit_in_progress_at_epoch": "",
+                        },
+                    },
                 )
                 await _send_telegram(
                     f"⚡⚡ TF · {ticker} · Phase 2 hit\n"
@@ -335,11 +445,16 @@ async def _close_remaining(t: dict[str, Any], cur: float, *, reason: str) -> dic
     Used by hard stop, hold-window expiry, and phase-3 trailing stop."""
     db = get_db()
     ticker = (t.get("ticker") or "").upper()
+    cli = t.get("client_order_id")
+    if not await _claim_exit_lock(cli, reason):
+        return {"ticker": ticker, "reason": reason, "no_op": True, "locked": True}
     qty_rem = float(t.get("qty_remaining") or 0)
     if qty_rem <= 0:
+        await _release_exit_lock(cli)
         return {"ticker": ticker, "reason": reason, "no_op": True}
     sold_at = await _market_sell_and_record(t, qty_rem, reason=reason, exit_price=cur)
     if not sold_at:
+        await _release_exit_lock(cli)
         return {"ticker": ticker, "reason": reason, "no_op": True}
     entry = float(t.get("filled_avg_price") or t.get("entry_price_ref") or 0)
     phases_hit = dict(t.get("phases_hit") or {})
@@ -365,19 +480,26 @@ async def _close_remaining(t: dict[str, Any], cur: float, *, reason: str) -> dic
     avg_pct = round((total / (entry * total_qty)) * 100, 2) if (entry and total_qty) else None
     await db.tf_trades.update_one(
         {"client_order_id": t.get("client_order_id")},
-        {"$set": {
-            "status": "CLOSED",
-            "phase": 3,
-            "phases_hit": phases_hit,
-            "qty_remaining": 0,
-            "exit_price": sold_at,
-            "closed_at": _now().isoformat(),
-            "close_reason": reason,
-            "realized_pct": avg_pct,
-            "lowest_price_reached": min(
-                float(t.get("lowest_price_reached") or cur), cur,
-            ),
-        }},
+        {
+            "$set": {
+                "status": "CLOSED",
+                "phase": 3,
+                "phases_hit": phases_hit,
+                "qty_remaining": 0,
+                "exit_price": sold_at,
+                "closed_at": _now().isoformat(),
+                "close_reason": reason,
+                "realized_pct": avg_pct,
+                "lowest_price_reached": min(
+                    float(t.get("lowest_price_reached") or cur), cur,
+                ),
+            },
+            "$unset": {
+                "exit_in_progress": "",
+                "exit_in_progress_at": "",
+                "exit_in_progress_at_epoch": "",
+            },
+        },
     )
     # Telegram final close alert
     hold_dur = _days_in_trade(t)
