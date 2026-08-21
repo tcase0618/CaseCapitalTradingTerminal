@@ -877,6 +877,8 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
     iv_rank = float(opts.get("iv_rank") or 50)
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
+    strategy = str(opts.get("strategy") or "").upper()
+    event_scout = strategy in {"LONG_CALL_EVENT_SCOUT"}
     option_ok = bool(contract or spread)
     if not option_ok:
         return "EQUITY", ["No usable option contract or spread candidate."]
@@ -886,10 +888,10 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         reasons.append("PM prefers equity, but paper option scout is allowed if score/RR clear.")
     if score >= 76 and rr >= 1.7 and iv_rank < 75:
         return "BOTH", ["High score and clean option conditions allow both desks."]
-    if score >= 58 and rr >= 1.3 and iv_rank < 80:
+    if score >= 58 and rr >= 1.3 and (iv_rank < 80 or event_scout):
         reasons.append("PM approves options as best expression for this setup.")
         return "OPTION", reasons
-    if action == "WATCH" and score >= 50 and rr >= 1.1 and iv_rank < 75:
+    if action == "WATCH" and score >= 48 and rr >= 1.25 and (iv_rank < 75 or event_scout):
         reasons.append("Paper scout lane: small defined-risk option allowed for PM watchlist learning.")
         return "OPTION", reasons
     return "EQUITY", ["Equity expression preferred under current PM thresholds."]
@@ -909,9 +911,11 @@ def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
     iv_rank = float(opts.get("iv_rank") or 50)
-    if score >= 58 and rr >= 1.3 and iv_rank < 80:
+    strategy = str(opts.get("strategy") or "").upper()
+    event_scout = strategy in {"LONG_CALL_EVENT_SCOUT"}
+    if score >= 58 and rr >= 1.3 and (iv_rank < 80 or event_scout):
         return True
-    return action == "WATCH" and score >= 50 and rr >= 1.1 and iv_rank < 75
+    return action == "WATCH" and score >= 48 and rr >= 1.25 and (iv_rank < 75 or event_scout)
 
 
 def _risk_budget(route: str, action: str, score: float) -> float:
@@ -1142,8 +1146,8 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             pm_action = str(pm_row.get("action") or "").upper()
             should_refresh = (
                 pm_action in {"ACCUMULATE", "STARTER", "WATCH"}
-                and pm_score >= 50
-                and pm_rr >= 1.1
+                and pm_score >= 48
+                and pm_rr >= 1.25
             )
             if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
                 from . import options_engine

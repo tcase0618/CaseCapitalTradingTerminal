@@ -579,6 +579,9 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
 
     # Rule order matters.
     if is_earnings and days < 2 and iv_rank > 80:
+        if has_bullish_anchor and score >= 55 and rr >= 1.5:
+            return {"strategy": "LONG_CALL_EVENT_SCOUT", "direction": "BULL",
+                    "reason": "High-IV near-event setup is allowed only as a capped paper scout after Alpaca liquidity clears"}
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
                 "reason": "Binary event is inside 48h with extreme IV; single-leg premium is not a clean paper scout"}
     if risk_level == "EXTREME" and score < 70:
@@ -605,7 +608,7 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     if has_bullish_anchor and score >= 58 and rr >= 1.3 and iv_rank < 80:
         return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
                 "reason": "PM-grade bullish anchor with acceptable IV; small paper option scout if Alpaca liquidity clears"}
-    if has_bullish_anchor and score >= 52 and rr >= 1.1 and iv_rank < 70:
+    if has_bullish_anchor and score >= 48 and rr >= 1.25 and iv_rank < 70:
         return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
                 "reason": "Watchlist paper scout candidate; requires live contract and risk preflight"}
     if is_contract and score >= 55 and days >= 14 and iv_rank < 75:

@@ -70,6 +70,22 @@ def test_pm_grade_anchor_gets_options_scout_strategy():
     assert strategy["direction"] == "BULL"
 
 
+def test_high_iv_near_event_can_enter_capped_paper_scout():
+    stock = {
+        "signals": ["CALL_SWEEP", "upcoming_earnings"],
+        "score": 63,
+        "risk_reward": 2.4,
+        "risk": {"level": "MEDIUM"},
+        "squeeze": {"score": 58},
+        "time_target": {"days_remaining": 1},
+    }
+
+    strategy = options_engine.select_strategy(stock, {"iv_rank": 85})
+
+    assert strategy["strategy"] == "LONG_CALL_EVENT_SCOUT"
+    assert strategy["direction"] == "BULL"
+
+
 def test_pm_option_view_allows_named_option_strategies():
     row = {"options": {"strategy": "LONG_CALL_SCOUT", "iv_rank": 62}}
 

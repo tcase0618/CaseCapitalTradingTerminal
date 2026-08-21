@@ -190,7 +190,7 @@ def _option_view(row: dict[str, Any], rr: float) -> str:
         return "STOCK_ONLY"
     iv_rank = _num(opts.get("iv_rank"), default=-1)
     strategy = str(opts.get("strategy") or "").upper()
-    if strategy in {"LONG_CALL", "LONG_PUT", "LONG_CALL_SCOUT", "LEAPS_CALL_CANDIDATE"}:
+    if strategy in {"LONG_CALL", "LONG_PUT", "LONG_CALL_SCOUT", "LONG_CALL_EVENT_SCOUT", "LEAPS_CALL_CANDIDATE"}:
         return "CALL_ALLOWED"
     if iv_rank >= 80:
         return "SPREAD_ONLY"
