@@ -578,10 +578,13 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     has_bullish_anchor = any([is_insider, is_contract, is_congress, is_flow, is_squeeze, is_earnings])
 
     # Rule order matters.
-    if is_earnings and days < 2 and iv_rank > 80:
+    if is_earnings and iv_rank > 80:
         if has_bullish_anchor and score >= 55 and rr >= 1.5:
             return {"strategy": "LONG_CALL_EVENT_SCOUT", "direction": "BULL",
                     "reason": "High-IV near-event setup is allowed only as a capped paper scout after Alpaca liquidity clears"}
+        if days >= 2:
+            return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
+                    "reason": "Elevated earnings IV without enough PM evidence for a capped event scout"}
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
                 "reason": "Binary event is inside 48h with extreme IV; single-leg premium is not a clean paper scout"}
     if risk_level == "EXTREME" and score < 70:
