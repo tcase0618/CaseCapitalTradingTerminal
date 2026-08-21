@@ -561,6 +561,125 @@ async def fetch_pdufa_calendar() -> list[dict[str, Any]]:
     return fallback
 
 
+def _pdufa_rows_are_fallback(rows: list[dict[str, Any]]) -> bool:
+    if not rows:
+        return False
+    return all(
+        int(row.get("source_count") or 0) <= 0
+        or "curated_seed" in {str(s) for s in (row.get("source_list") or [])}
+        for row in rows
+    )
+
+
+def _pdufa_source_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    source_counts: dict[str, int] = {}
+    quality_counts: dict[str, int] = {}
+    source_errors: list[dict[str, Any]] = []
+    seen_errors: set[str] = set()
+    for row in rows:
+        quality = str(row.get("data_quality") or "unknown")
+        quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        for source in row.get("source_list") or [row.get("source") or "unknown"]:
+            source = str(source or "unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+        for err in row.get("source_errors") or []:
+            key = f"{err.get('source')}:{err.get('status') or err.get('error')}"
+            if key not in seen_errors:
+                source_errors.append(err)
+                seen_errors.add(key)
+    return {
+        "source_counts": source_counts,
+        "quality_counts": quality_counts,
+        "source_errors": source_errors[:12],
+        "fallback_used": _pdufa_rows_are_fallback(rows),
+    }
+
+
+async def import_fda_calendar(
+    *,
+    persist: bool = True,
+    allow_fallback: bool = False,
+    triggered_by: str = "cli",
+) -> dict[str, Any]:
+    """Fetch, validate, and optionally import public FDA/PDUFA calendar rows.
+
+    This intentionally refuses to write the curated seed fallback unless
+    allow_fallback=True. The calendar UI should know when it is showing live
+    public-calendar data versus backup seed data.
+    """
+    fetched_at = _now().isoformat()
+    rows = await fetch_pdufa_calendar()
+    rows = _dedupe_pdufa_rows(rows) if rows else []
+    summary = _pdufa_source_summary(rows)
+    blocked = bool(rows and summary["fallback_used"] and not allow_fallback)
+    if blocked:
+        await log_activity(
+            "FDA calendar import blocked - live sources unavailable and fallback disabled",
+            "warn",
+            {"rows": len(rows), "triggered_by": triggered_by, "source_errors": summary["source_errors"]},
+        )
+        return {
+            "ok": False,
+            "imported": 0,
+            "rows": rows,
+            "count": len(rows),
+            "fetched_at": fetched_at,
+            "persisted": False,
+            "blocked": True,
+            "reason": "live_sources_unavailable_fallback_not_imported",
+            **summary,
+        }
+
+    imported = 0
+    if persist and rows:
+        db = get_db()
+        await db.pharma_pdufa_cache.update_one(
+            {"_id": "calendar"},
+            {"$set": {
+                "entries": rows,
+                "fetched_at": fetched_at,
+                "imported_at": fetched_at,
+                "imported_by": triggered_by,
+                "source_summary": summary,
+            }},
+            upsert=True,
+        )
+        for row in rows:
+            doc = {
+                **row,
+                "calendar_imported_at": fetched_at,
+                "calendar_imported_by": triggered_by,
+                "calendar_source_summary": summary,
+            }
+            await db.pharma_pdufa.update_one(
+                {
+                    "ticker": doc.get("ticker"),
+                    "pdufa_date": doc.get("pdufa_date"),
+                    "drug": doc.get("drug"),
+                },
+                {"$set": stamped(doc)},
+                upsert=True,
+            )
+            await _mirror_pg("pharma_pdufa", doc)
+            imported += 1
+        await log_activity(
+            f"FDA calendar import complete - {imported} row(s)",
+            "success",
+            {"triggered_by": triggered_by, "quality_counts": summary["quality_counts"]},
+        )
+
+    return {
+        "ok": bool(rows),
+        "imported": imported,
+        "rows": rows,
+        "count": len(rows),
+        "fetched_at": fetched_at,
+        "persisted": bool(persist and rows),
+        "blocked": False,
+        **summary,
+    }
+
+
 async def fetch_clinical_trial(drug: str, ticker: str | None = None) -> dict[str, Any] | None:
     """Fetch latest Phase 3 study for a drug from ClinicalTrials.gov v2 API.
     Strategy:
@@ -1185,7 +1304,11 @@ async def get_fda_calendar_month(year: int | None = None, month: int | None = No
 
     db = get_db()
     if force_refresh:
-        await run_pharma_scan(triggered_by="fda_calendar_refresh", force_calendar_refresh=True)
+        await import_fda_calendar(
+            persist=True,
+            allow_fallback=False,
+            triggered_by="fda_calendar_refresh",
+        )
 
     rows = await db.pharma_pdufa.find(
         {"pdufa_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}},

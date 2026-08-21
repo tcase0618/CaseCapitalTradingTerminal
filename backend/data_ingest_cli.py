@@ -180,6 +180,12 @@ def _compact_row(row: Any) -> Any:
         "forecast",
         "previous",
         "actual",
+        "drug",
+        "indication",
+        "pdufa_date",
+        "type",
+        "data_quality",
+        "source_confidence",
         "status_code",
         "reason",
     ]
@@ -241,6 +247,7 @@ def providers() -> None:
             {"key": "alpaca", "coverage": "broker truth, positions, orders, fills, stock/options market data", "runtime": "existing terminal adapters"},
             {"key": "forex_factory", "coverage": "weekly global economic calendar via Fair Economy XML feed", "runtime": "data_ingest_cli forex-factory"},
             {"key": "fred", "coverage": "macro series and release dates", "runtime": "data_ingest_cli fred-series / macro-calendar"},
+            {"key": "fda_calendar", "coverage": "public FDA/PDUFA calendar rows imported into pharma calendar", "runtime": "data_ingest_cli fda-calendar"},
             {"key": "sec_edgar", "coverage": "company lookup, XBRL company facts, filings context", "runtime": "data_ingest_cli ticker / sec-ticker"},
             {"key": "clinicaltrials", "coverage": "trial records", "runtime": "existing free_data/pharma adapters"},
             {"key": "openfda", "coverage": "drug/device safety and recall summaries", "runtime": "existing free_data/pharma adapters"},
@@ -383,6 +390,57 @@ async def _macro_calendar_async(days: int, persist: bool) -> dict[str, Any]:
             source_timestamp=payload["fetched_at"],
         )
     return payload
+
+
+async def _fda_calendar_async(persist: bool, allow_fallback: bool) -> dict[str, Any]:
+    from services import pharma
+
+    result = await pharma.import_fda_calendar(
+        persist=persist,
+        allow_fallback=allow_fallback,
+        triggered_by="data_ingest_cli",
+    )
+    payload = {
+        "ok": result.get("ok"),
+        "source": "Public FDA/PDUFA calendars",
+        "fetched_at": result.get("fetched_at") or _now_iso(),
+        "count": result.get("count"),
+        "imported": result.get("imported"),
+        "persisted": result.get("persisted"),
+        "blocked": result.get("blocked"),
+        "reason": result.get("reason"),
+        "source_counts": result.get("source_counts"),
+        "quality_counts": result.get("quality_counts"),
+        "fallback_used": result.get("fallback_used"),
+        "source_errors": result.get("source_errors"),
+        "rows": result.get("rows") or [],
+    }
+    if persist:
+        payload["snapshot"] = await _persist_snapshot(
+            source_key="fda_calendar",
+            provider="Public FDA/PDUFA calendar sources",
+            dataset="pharma_pdufa_calendar",
+            ok=bool(payload["ok"]) and not bool(payload.get("blocked")),
+            request={"allow_fallback": allow_fallback},
+            payload=payload,
+            source_timestamp=payload["fetched_at"],
+        )
+    return payload
+
+
+@app.command("fda-calendar")
+def fda_calendar(
+    persist: bool = typer.Option(True, help="Import rows into pharma_pdufa plus cache and store raw snapshot."),
+    allow_fallback: bool = typer.Option(False, help="Allow curated seed fallback rows to be imported if live sources fail."),
+    raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
+) -> None:
+    """Refresh the pharma FDA/PDUFA calendar from public calendar sources.
+
+    Example:
+        python data_ingest_cli.py fda-calendar --no-persist
+        python data_ingest_cli.py fda-calendar
+    """
+    _emit(asyncio.run(_fda_calendar_async(persist, allow_fallback)), raw=raw_output)
 
 
 @app.command("macro-calendar")

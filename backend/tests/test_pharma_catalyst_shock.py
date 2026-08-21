@@ -51,6 +51,62 @@ def test_pdufa_dedupe_marks_cross_checked_source_confidence():
     assert merged[0]["source_confidence"] >= 90
 
 
+@pytest.mark.asyncio
+async def test_fda_calendar_import_blocks_seed_fallback_without_opt_in(monkeypatch):
+    async def fake_fetch():
+        return [{
+            "ticker": "MRNA",
+            "drug": "mRNA-1083",
+            "indication": "Combo flu/COVID vaccine",
+            "pdufa_date": "2026-09-30",
+            "type": "PDUFA",
+            "source": "curated_seed",
+            "source_list": ["curated_seed"],
+            "source_count": 0,
+            "source_confidence": 25,
+            "data_quality": "fallback_calendar",
+        }]
+
+    async def fake_log(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(pharma, "fetch_pdufa_calendar", fake_fetch)
+    monkeypatch.setattr(pharma, "log_activity", fake_log)
+
+    result = await pharma.import_fda_calendar(persist=False, allow_fallback=False)
+
+    assert result["ok"] is False
+    assert result["blocked"] is True
+    assert result["imported"] == 0
+    assert result["reason"] == "live_sources_unavailable_fallback_not_imported"
+
+
+@pytest.mark.asyncio
+async def test_fda_calendar_import_accepts_live_rows_dry_run(monkeypatch):
+    async def fake_fetch():
+        return [{
+            "ticker": "MRNA",
+            "drug": "mRNA-1083",
+            "indication": "Combo flu/COVID vaccine",
+            "pdufa_date": "2026-09-30",
+            "type": "PDUFA",
+            "source": "rttnews",
+            "source_list": ["rttnews"],
+            "source_count": 1,
+            "source_confidence": 80,
+            "data_quality": "live_calendar",
+        }]
+
+    monkeypatch.setattr(pharma, "fetch_pdufa_calendar", fake_fetch)
+
+    result = await pharma.import_fda_calendar(persist=False, allow_fallback=False)
+
+    assert result["ok"] is True
+    assert result["blocked"] is False
+    assert result["count"] == 1
+    assert result["quality_counts"]["live_calendar"] == 1
+
+
 def test_pdufa_parser_reads_marketbeat_company_cell_ticker():
     html = """
     <table>
