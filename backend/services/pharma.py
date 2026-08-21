@@ -6,7 +6,7 @@ collections, own scoring. Triggers:
   • Has its own /api/pharma/scan endpoint for standalone execution
 
 Data sources (all free):
-  • FDA PDUFA calendar — biopharmcatalyst.com (weekly scrape)
+  • FDA PDUFA calendar — merged free public PDUFA calendars with source confidence
   • ClinicalTrials.gov v2 API (https://clinicaltrials.gov/api/v2/studies)
   • OpenInsider — biotech insider buying inside 60d of PDUFA
   • Finviz — short interest
@@ -27,6 +27,7 @@ Telegram alerts fire on score ≥ 70.
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -45,7 +46,7 @@ from .scrapers import (
 logger = logging.getLogger(__name__)
 
 US_POPULATION = 333_000_000  # US Census 2024 rounded
-PDUFA_CACHE_HOURS = 168  # weekly scrape per spec
+PDUFA_CACHE_HOURS = int(os.environ.get("PHARMA_PDUFA_CACHE_HOURS", "24") or 24)
 AUTO_ENTER_SCORE = 80
 TELEGRAM_THRESHOLD = 70
 CATALYST_SHOCK_THRESHOLD = 75
@@ -356,6 +357,210 @@ def _parse_pdufa_html(html_text: str, source: str) -> list[dict[str, Any]]:
 
 
 # ─────── ClinicalTrials.gov ───────
+def _clean_pdufa_cell(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip()
+
+
+def _extract_pdufa_date(text: str) -> str | None:
+    text = _clean_pdufa_cell(text)
+    candidates = [text]
+    candidates.extend(re.findall(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", text))
+    candidates.extend(re.findall(r"\b\d{4}-\d{1,2}-\d{1,2}\b", text))
+    candidates.extend(re.findall(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b", text, re.I))
+    candidates.extend(re.findall(r"\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}\b", text, re.I))
+    for raw in candidates:
+        normalized = raw.replace("Sept", "Sep").replace(".", "").replace(",", "")
+        for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"):
+            try:
+                return datetime.strptime(normalized, fmt).date().isoformat()
+            except Exception:
+                continue
+    return None
+
+
+def _pdufa_cell_by_header(cells: list[str], headers: list[str], *needles: str) -> str:
+    lower_headers = [h.lower() for h in headers]
+    for needle in needles:
+        for i, header in enumerate(lower_headers):
+            if needle in header and i < len(cells):
+                return cells[i]
+    return ""
+
+
+def _extract_pdufa_ticker(cells: list[str], source: str) -> str | None:
+    blocked = {"FDA", "PDUFA", "PMDA", "NDA", "BLA", "SBLA", "SNDA", "IND", "PHASE", "TRIAL"}
+    for cell in cells[:3]:
+        first = _clean_pdufa_cell(cell).replace("$", "").replace(".", "").split(" ")[0].strip()
+        if re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", first) and first not in blocked:
+            return first.upper()
+    joined = " ".join(cells)
+    for pattern in (r"\$([A-Z][A-Z0-9.]{0,5})\b", r"\(([A-Z][A-Z0-9.]{0,5})\)"):
+        match = re.search(pattern, joined)
+        if match:
+            ticker = match.group(1).replace(".", "").upper()
+            if ticker not in blocked:
+                return ticker
+    for cell in cells[:4]:
+        clean = _clean_pdufa_cell(cell).replace("$", "").replace(".", "")
+        if re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", clean) and clean not in blocked:
+            return clean.upper()
+    if source == "drugs_com":
+        return None
+    return None
+
+
+def _best_pdufa_text_cell(cells: list[str], headers: list[str], *needles: str) -> str:
+    value = _pdufa_cell_by_header(cells, headers, *needles)
+    if value:
+        return value
+    ranked = sorted(cells, key=len, reverse=True)
+    return ranked[0] if ranked else ""
+
+
+def _extract_pdufa_event_type(cells: list[str]) -> str:
+    joined = " ".join(cells).lower()
+    if "adcom" in joined or "advisory committee" in joined:
+        return "ADCOM"
+    if "sbla" in joined:
+        return "sBLA"
+    if "snda" in joined:
+        return "sNDA"
+    if "bla" in joined:
+        return "BLA"
+    if "nda" in joined:
+        return "NDA"
+    if "pdufa" in joined or "fda action" in joined:
+        return "PDUFA"
+    return "FDA"
+
+
+def _parse_pdufa_html(html_text: str, source: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+        for table in soup.find_all("table"):
+            headers: list[str] = []
+            first_row = table.find("tr")
+            if first_row:
+                headers = [_clean_pdufa_cell(c.get_text(" ", strip=True)) for c in first_row.find_all(["th", "td"])]
+            for row in table.find_all("tr")[1:]:
+                cells = [_clean_pdufa_cell(c.get_text(" ", strip=True)) for c in row.find_all(["td", "th"])]
+                cells = [c for c in cells if c]
+                if len(cells) < 2:
+                    continue
+                date_iso = None
+                for cell in cells:
+                    date_iso = _extract_pdufa_date(cell)
+                    if date_iso:
+                        break
+                if not date_iso:
+                    continue
+                ticker = _extract_pdufa_ticker(cells, source)
+                company = _pdufa_cell_by_header(cells, headers, "company", "sponsor")
+                drug = _best_pdufa_text_cell(cells, headers, "drug", "product", "therapy", "candidate")
+                indication = _pdufa_cell_by_header(cells, headers, "indication", "disease", "condition")
+                if not indication:
+                    indication = next((c for c in reversed(cells) if not _extract_pdufa_date(c)), "")
+                if not ticker and not company:
+                    continue
+                out.append({
+                    "ticker": ticker or "MANUAL",
+                    "company": company[:100],
+                    "drug": drug[:100],
+                    "indication": indication[:160],
+                    "pdufa_date": date_iso,
+                    "type": _extract_pdufa_event_type(cells),
+                    "source": source,
+                    "source_list": [source],
+                    "source_count": 1,
+                    "source_confidence": 70,
+                    "data_quality": "live_calendar",
+                })
+    except Exception as e:
+        logger.warning("PDUFA parse failed (%s): %s", source, e)
+    return out
+
+
+def _dedupe_pdufa_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "MANUAL").upper().strip()
+        date = str(row.get("pdufa_date") or "")[:10]
+        drug_key = re.sub(r"[^a-z0-9]+", "", str(row.get("drug") or row.get("company") or "").lower())[:28]
+        if not date or not drug_key:
+            continue
+        key = (ticker, date, drug_key)
+        existing = merged.get(key)
+        if not existing:
+            row = dict(row)
+            row["ticker"] = ticker
+            row["source_list"] = sorted(set(row.get("source_list") or [row.get("source") or "unknown"]))
+            row["source_count"] = len(row["source_list"])
+            merged[key] = row
+            continue
+        sources = sorted(set((existing.get("source_list") or []) + (row.get("source_list") or [row.get("source") or "unknown"])))
+        existing["source_list"] = sources
+        existing["source_count"] = len(sources)
+        for field in ("company", "drug", "indication", "type"):
+            if len(str(row.get(field) or "")) > len(str(existing.get(field) or "")):
+                existing[field] = row.get(field)
+    out = list(merged.values())
+    for row in out:
+        count = int(row.get("source_count") or 1)
+        row["source_confidence"] = min(98, 62 + count * 18)
+        row["data_quality"] = "cross_checked_calendar" if count > 1 else "live_calendar"
+        row["source"] = "+".join(row.get("source_list") or [row.get("source") or "unknown"])
+    out.sort(key=lambda r: (str(r.get("pdufa_date") or "9999-99-99"), -int(r.get("source_count") or 0), str(r.get("ticker") or "")))
+    return out
+
+
+async def fetch_pdufa_calendar() -> list[dict[str, Any]]:
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    sources = [
+        ("rttnews", "https://www.rttnews.com/CorpInfo/FDACalendar.aspx"),
+        ("biopharmcatalyst", "https://www.biopharmcatalyst.com/calendars/fda-calendar"),
+        ("benzinga", "https://www.benzinga.com/fda-calendar"),
+        ("marketbeat", "https://www.marketbeat.com/fda-calendar/"),
+        ("streetinsider", "https://www.streetinsider.com/Sect/AllStocks/PDUFA+Dates/0.html"),
+        ("drugs_com", "https://www.drugs.com/newdrugs.html"),
+    ]
+    rows: list[dict[str, Any]] = []
+    source_errors: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+        for name, url in sources:
+            try:
+                response = await client.get(url, headers=headers)
+                if response.status_code != 200:
+                    logger.warning("PDUFA fetch [%s] HTTP %s", name, response.status_code)
+                    source_errors.append({"source": name, "status": response.status_code})
+                    continue
+                parsed = _parse_pdufa_html(response.text, name)
+                logger.info("PDUFA source %s - %d parsed entries", name, len(parsed))
+                rows.extend(parsed)
+            except Exception as e:
+                logger.warning("PDUFA source %s exception: %s", name, e)
+                source_errors.append({"source": name, "error": str(e)[:160]})
+    deduped = _dedupe_pdufa_rows(rows)
+    if deduped:
+        for row in deduped:
+            row["source_errors"] = source_errors[:6]
+        return deduped
+    logger.warning("PDUFA all live sources failed - falling back to seed list")
+    fallback = _seed_pdufa()
+    for row in fallback:
+        row["source_list"] = ["curated_seed"]
+        row["source_count"] = 0
+        row["source_confidence"] = 25
+        row["source_errors"] = source_errors[:6]
+    return fallback
+
+
 async def fetch_clinical_trial(drug: str, ticker: str | None = None) -> dict[str, Any] | None:
     """Fetch latest Phase 3 study for a drug from ClinicalTrials.gov v2 API.
     Strategy:
@@ -971,7 +1176,7 @@ def _hydrate_pharma_row(row: dict[str, Any]) -> dict[str, Any]:
     return hydrated
 
 
-async def get_fda_calendar_month(year: int | None = None, month: int | None = None) -> dict[str, Any]:
+async def get_fda_calendar_month(year: int | None = None, month: int | None = None, force_refresh: bool = False) -> dict[str, Any]:
     now = _now()
     year = int(year or now.year)
     month = max(1, min(12, int(month or now.month)))
@@ -979,6 +1184,9 @@ async def get_fda_calendar_month(year: int | None = None, month: int | None = No
     end = datetime(year, month, monthrange(year, month)[1], tzinfo=timezone.utc).date()
 
     db = get_db()
+    if force_refresh:
+        await run_pharma_scan(triggered_by="fda_calendar_refresh", force_calendar_refresh=True)
+
     rows = await db.pharma_pdufa.find(
         {"pdufa_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}},
         {"_id": 0},
@@ -1010,6 +1218,15 @@ async def get_fda_calendar_month(year: int | None = None, month: int | None = No
         for r in year_rows
         if str(r.get("pdufa_date", ""))[:4].isdigit()
     }, reverse=True)
+    source_counts: dict[str, int] = {}
+    quality_counts: dict[str, int] = {}
+    for row in hydrated:
+        quality = str(row.get("data_quality") or "unknown")
+        quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        for source in row.get("source_list") or [row.get("source") or "unknown"]:
+            source = str(source or "unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+
     return {
         "ok": True,
         "year": year,
@@ -1024,6 +1241,10 @@ async def get_fda_calendar_month(year: int | None = None, month: int | None = No
             "pm_ready": sum(1 for r in hydrated if (r.get("pm_summary") or {}).get("action") not in {None, "NOT_ROUTED"}),
             "option_ready": sum(1 for r in hydrated if (r.get("option_summary") or {}).get("ok")),
             "blocked": sum(1 for r in hydrated if (r.get("data_gate") or {}).get("decision") == "BLOCK"),
+            "cross_checked_calendar": quality_counts.get("cross_checked_calendar", 0),
+            "live_calendar": quality_counts.get("live_calendar", 0),
+            "fallback_calendar": quality_counts.get("fallback_calendar", 0),
+            "source_counts": source_counts,
         },
         "available_years": available_years or [year, year + 1],
         "generated_at": now.isoformat(),
@@ -1031,11 +1252,11 @@ async def get_fda_calendar_month(year: int | None = None, month: int | None = No
 
 
 # ─────── Master pharma scan ───────
-async def _cached_pdufa() -> list[dict[str, Any]]:
-    """Return cached PDUFA list, refreshing weekly per spec."""
+async def _cached_pdufa(force_refresh: bool = False) -> list[dict[str, Any]]:
+    """Return cached PDUFA list, refreshing on the configured cadence."""
     db = get_db()
     cache = await db.pharma_pdufa_cache.find_one({"_id": "calendar"})
-    if cache:
+    if cache and not force_refresh:
         try:
             age = (_now() - datetime.fromisoformat(cache["fetched_at"])).total_seconds() / 3600
         except Exception:
@@ -1052,16 +1273,18 @@ async def _cached_pdufa() -> list[dict[str, Any]]:
     return entries or (cache.get("entries") if cache else [])
 
 
-async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
+async def run_pharma_scan(triggered_by: str = "manual", force_calendar_refresh: bool = False) -> dict[str, Any]:
     """Complete pharma pipeline. Returns enriched PDUFA entries with scores +
     persists to MongoDB."""
     started = _now()
     await log_activity(f"Pharma scan started ({triggered_by})", "info")
 
-    pdufa = await _cached_pdufa()
-    # Filter to within next 90 days
+    pdufa = await _cached_pdufa(force_refresh=force_calendar_refresh)
+    # Normal pharma scans stay focused on the next 90 days. A manual FDA
+    # calendar refresh stores a wider calendar horizon so the calendar tab can
+    # show credible future PDUFA rows without making every row trade-routable.
     today = _now().date()
-    horizon = today + timedelta(days=90)
+    horizon = today + timedelta(days=540 if force_calendar_refresh else 90)
     upcoming = []
     for p in pdufa:
         try:

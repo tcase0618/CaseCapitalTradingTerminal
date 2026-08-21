@@ -37,10 +37,11 @@ export default function PharmaPage() {
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
   const [selectedDate, setSelectedDate] = useState(null);
+  const [activeTab, setActiveTab] = useState("COMMAND");
 
-  const loadCalendar = useCallback((year = calendarYear, month = calendarMonth) => {
+  const loadCalendar = useCallback((year = calendarYear, month = calendarMonth, forceRefresh = false) => {
     setCalendarLoading(true);
-    axios.get(`${API}/pharma/fda_calendar`, { params: { year, month }, timeout: 15000 })
+    axios.get(`${API}/pharma/fda_calendar`, { params: { year, month, force_refresh: forceRefresh }, timeout: forceRefresh ? 60000 : 15000 })
       .then(r => {
         setCalendar(r.data || null);
         const firstEventDay = (r.data?.days || []).find(d => d.event_count > 0);
@@ -93,7 +94,7 @@ export default function PharmaPage() {
         + `${shock.data.hot_count || 0} HOT SHOCKS`
       );
       reload();
-      loadCalendar(calendarYear, calendarMonth);
+      loadCalendar(calendarYear, calendarMonth, true);
     } catch {
       toast("PHARMA SCAN FAILED");
     } finally {
@@ -140,23 +141,47 @@ export default function PharmaPage() {
         <Stat label="UNREALIZED P&L" value={track.avg_unrealized_pct != null ? `${track.avg_unrealized_pct >= 0 ? "+" : ""}${track.avg_unrealized_pct}%` : "-"} sub="AVG OPEN" color={(track.avg_unrealized_pct ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
       </div>
 
-      <FdaCalendar
-        data={calendar}
-        loading={calendarLoading}
-        month={calendarMonth}
-        year={calendarYear}
-        selectedDate={selectedDate}
-        setSelectedDate={setSelectedDate}
-        setMonth={(m) => { setCalendarMonth(Number(m)); loadCalendar(calendarYear, Number(m)); }}
-        setYear={(y) => { setCalendarYear(Number(y)); loadCalendar(Number(y), calendarMonth); }}
-        refresh={() => loadCalendar(calendarYear, calendarMonth)}
-      />
+      <div style={pharmaTabBar}>
+        {[
+          ["COMMAND", "Command"],
+          ["FDA_CALENDAR", "FDA Calendar"],
+          ["TRACK_RECORD", "Track Record"],
+        ].map(([key, label]) => (
+          <button key={key} onClick={() => setActiveTab(key)} style={pharmaTab(activeTab === key)}>
+            {label}
+          </button>
+        ))}
+      </div>
 
-      <Card title="CATALYST SHOCK TAPE - SAME DAY CLINICAL / FDA NEWS" accentColor="#fb7185">
-        <ShockTape rows={shocks} />
-      </Card>
+      {activeTab === "FDA_CALENDAR" ? (
+        <FdaCalendar
+          data={calendar}
+          loading={calendarLoading}
+          month={calendarMonth}
+          year={calendarYear}
+          selectedDate={selectedDate}
+          setSelectedDate={setSelectedDate}
+          setMonth={(m) => { setCalendarMonth(Number(m)); loadCalendar(calendarYear, Number(m)); }}
+          setYear={(y) => { setCalendarYear(Number(y)); loadCalendar(Number(y), calendarMonth); }}
+          refresh={() => loadCalendar(calendarYear, calendarMonth, true)}
+        />
+      ) : activeTab === "TRACK_RECORD" ? (
+        <div style={gridTwo}>
+          <Card title={`ACTIVE PLAYS - ${active.length} OPEN`} accentColor={accent2}>
+            {!active.length ? <div style={{ color: muted, padding: 20 }}>No active plays yet. Plays scoring >= 80 auto-enter; everything else is manual.</div> : <ActiveTable rows={active} />}
+          </Card>
 
-      <div style={commandGrid}>
+          <Card title={`PHARMA TRACK RECORD - ${track.settled || 0} SETTLED - ISOLATED`} accentColor="#4ade80">
+            {!track.history?.length ? <div style={{ color: muted, padding: 20 }}>No closed plays yet. Track record is isolated from main P&L.</div> : <TrackTable rows={track.history} />}
+          </Card>
+        </div>
+      ) : (
+        <>
+          <Card title="CATALYST SHOCK TAPE - SAME DAY CLINICAL / FDA NEWS" accentColor="#fb7185">
+            <ShockTape rows={shocks} />
+          </Card>
+
+          <div style={commandGrid}>
         <Card title="BINARY EVENT COMMAND READ" accentColor={accent}>
           {summary.leader ? (
             <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(220px, 0.45fr)", gap: 18 }}>
@@ -202,18 +227,18 @@ export default function PharmaPage() {
             </div>
           )}
         </Card>
-      </div>
+          </div>
 
-      <Card title="SPECULATIVE DATA DEPTH - FREE SOURCE LEDGER" accentColor="#93c5fd">
+          <Card title="SPECULATIVE DATA DEPTH - FREE SOURCE LEDGER" accentColor="#93c5fd">
         <div style={sourceLedgerGrid}>
           {summary.speculative.slice(0, 4).map(p => (
             <DataDepthCard key={p.ticker} p={p} intel={freeIntel[p.ticker]} />
           ))}
           {!summary.speculative.length && <div style={{ color: muted, padding: 20 }}>No pharma candidates loaded.</div>}
         </div>
-      </Card>
+          </Card>
 
-      <Card title="RISK STACK - WHY THIS IS SPECULATIVE" accentColor="#f87171">
+          <Card title="RISK STACK - WHY THIS IS SPECULATIVE" accentColor="#f87171">
         <div style={riskQueue}>
           {summary.speculative.slice(0, 8).map(p => (
             <div key={`${p.ticker}-${p.pdufa_date}-risk`} style={riskCard(p.riskFlags.length)}>
@@ -228,9 +253,9 @@ export default function PharmaPage() {
             </div>
           ))}
         </div>
-      </Card>
+          </Card>
 
-      <Card title="PDUFA CALENDAR - NEXT 90 DAYS - SORTED BY SCORE">
+          <Card title="PDUFA CALENDAR - NEXT 90 DAYS - SORTED BY SCORE">
         {!pdufa.length ? (
           <div style={{ color: muted, padding: 20 }}>No PDUFA dates loaded. Click PHARMA SCAN to pull from FDA calendar.</div>
         ) : (
@@ -273,17 +298,9 @@ export default function PharmaPage() {
             </tbody>
           </table>
         )}
-      </Card>
-
-      <div style={gridTwo}>
-        <Card title={`ACTIVE PLAYS - ${active.length} OPEN`} accentColor={accent2}>
-          {!active.length ? <div style={{ color: muted, padding: 20 }}>No active plays yet. Plays scoring >= 80 auto-enter; everything else is manual.</div> : <ActiveTable rows={active} />}
-        </Card>
-
-        <Card title={`PHARMA TRACK RECORD - ${track.settled || 0} SETTLED - ISOLATED`} accentColor="#4ade80">
-          {!track.history?.length ? <div style={{ color: muted, padding: 20 }}>No closed plays yet. Track record is isolated from main P&L.</div> : <TrackTable rows={track.history} />}
-        </Card>
-      </div>
+          </Card>
+        </>
+      )}
     </CrtShell>
   );
 }
@@ -312,6 +329,9 @@ function FdaCalendar({ data, loading, month, year, selectedDate, setSelectedDate
           <span>PM <b>{summary.pm_ready || 0}</b></span>
           <span>OPTIONS <b>{summary.option_ready || 0}</b></span>
           <span>BLOCK <b>{summary.blocked || 0}</b></span>
+          <span>CROSS <b>{summary.cross_checked_calendar || 0}</b></span>
+          <span>LIVE <b>{summary.live_calendar || 0}</b></span>
+          <span>FALLBACK <b>{summary.fallback_calendar || 0}</b></span>
         </div>
       </div>
       <div style={calendarHeroStats}>
@@ -320,6 +340,7 @@ function FdaCalendar({ data, loading, month, year, selectedDate, setSelectedDate
         <div style={calendarHeroTile("#4ade80")}><span>PM Routed</span><strong>{summary.pm_ready || 0}</strong><small>judge-ready</small></div>
         <div style={calendarHeroTile(accent2)}><span>Option Ready</span><strong>{summary.option_ready || 0}</strong><small>contract captured</small></div>
         <div style={calendarHeroTile("#f87171")}><span>Data Blocks</span><strong>{summary.blocked || 0}</strong><small>cannot route</small></div>
+        <div style={calendarHeroTile("#93c5fd")}><span>Source Quality</span><strong>{summary.cross_checked_calendar || summary.live_calendar || 0}</strong><small>live/cross rows</small></div>
       </div>
       <div style={calendarBoard}>
         <div style={{ minWidth: 0 }}>
@@ -701,6 +722,12 @@ const commandGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) mi
 const gridTwo = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 0.9fr)", gap: 18 };
 const sourceLedgerGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 };
 const riskQueue = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 };
+const pharmaTabBar = { display: "flex", gap: 8, flexWrap: "wrap", margin: "0 0 18px", borderBottom: hairline, paddingBottom: 10 };
+const pharmaTab = (active) => ({
+  ...buttonStyle(active ? accent2 : muted),
+  background: active ? "rgba(153, 246, 228, 0.08)" : "rgba(255,255,255,0.012)",
+  boxShadow: active ? `0 0 18px ${accent2}18` : "none",
+});
 const eyebrow = { color: dim, fontSize: 9, letterSpacing: "0.18em", fontWeight: 800, marginBottom: 8 };
 const tickerHero = { color: accent, fontSize: 42, fontWeight: 900, letterSpacing: "0.08em", textDecoration: "none" };
 const heroCopy = { color: labelLight, lineHeight: 1.55, margin: "12px 0 0", maxWidth: 760 };

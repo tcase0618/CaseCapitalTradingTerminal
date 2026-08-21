@@ -1744,9 +1744,9 @@ async def pharma_pdufa(days: int = 90):
 
 
 @api.get("/pharma/fda_calendar")
-async def pharma_fda_calendar(year: int | None = None, month: int | None = None):
+async def pharma_fda_calendar(year: int | None = None, month: int | None = None, force_refresh: bool = False):
     from services import pharma
-    return await pharma.get_fda_calendar_month(year=year, month=month)
+    return await pharma.get_fda_calendar_month(year=year, month=month, force_refresh=force_refresh)
 
 
 @api.get("/pharma/options_snapshots")

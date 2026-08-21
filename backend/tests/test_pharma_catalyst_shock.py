@@ -4,6 +4,67 @@ from datetime import timedelta
 from services import pharma, telegram_events
 
 
+def test_pdufa_parser_extracts_embedded_calendar_date():
+    html = """
+    <table>
+      <tr><th>Ticker</th><th>Drug</th><th>Indication</th><th>PDUFA Date</th></tr>
+      <tr><td>$MRNA</td><td>mRNA-1083</td><td>Flu/COVID combo vaccine</td><td>FDA action date Sep 30, 2026</td></tr>
+    </table>
+    """
+
+    rows = pharma._parse_pdufa_html(html, "unit_test")
+
+    assert len(rows) == 1
+    assert rows[0]["ticker"] == "MRNA"
+    assert rows[0]["pdufa_date"] == "2026-09-30"
+    assert rows[0]["data_quality"] == "live_calendar"
+    assert rows[0]["source_count"] == 1
+
+
+def test_pdufa_dedupe_marks_cross_checked_source_confidence():
+    rows = [
+        {
+            "ticker": "MRNA",
+            "drug": "mRNA-1083",
+            "indication": "Flu/COVID combo vaccine",
+            "pdufa_date": "2026-09-30",
+            "type": "BLA",
+            "source": "source_a",
+            "source_list": ["source_a"],
+        },
+        {
+            "ticker": "MRNA",
+            "drug": "mRNA 1083",
+            "indication": "Combo flu/COVID vaccine",
+            "pdufa_date": "2026-09-30",
+            "type": "PDUFA",
+            "source": "source_b",
+            "source_list": ["source_b"],
+        },
+    ]
+
+    merged = pharma._dedupe_pdufa_rows(rows)
+
+    assert len(merged) == 1
+    assert merged[0]["source_count"] == 2
+    assert merged[0]["data_quality"] == "cross_checked_calendar"
+    assert merged[0]["source_confidence"] >= 90
+
+
+def test_pdufa_parser_reads_marketbeat_company_cell_ticker():
+    html = """
+    <table>
+      <tr><th>Company</th><th>Drug</th><th>Stage</th><th>Date</th></tr>
+      <tr><td>BNTX BioNTech</td><td>BNT316 oncology therapy</td><td>Phase 2</td><td>Aug 20, 2026</td></tr>
+      <tr><td>MRK Merck & Co.</td><td>ENFLONSIA RSV</td><td>sBLA</td><td>Aug 21, 2026</td></tr>
+    </table>
+    """
+
+    rows = pharma._parse_pdufa_html(html, "marketbeat")
+
+    assert [row["ticker"] for row in rows] == ["BNTX", "MRK"]
+
+
 @pytest.mark.asyncio
 async def test_pharma_option_snapshot_captures_contract(monkeypatch):
     async def fake_chain(ticker, catalyst_date=None):
