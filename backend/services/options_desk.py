@@ -1160,7 +1160,8 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
                 from . import options_engine
                 attempted_live_refresh = True
-                refreshed = await options_engine.analyze_ticker(row)
+                refresh_budget = _risk_budget("OPTION", pm_action, pm_score) or STANDARD_RISK_USD
+                refreshed = await options_engine.analyze_ticker(row, budget=refresh_budget)
                 if refreshed:
                     opts = refreshed
                     row = {**row, "options": opts}

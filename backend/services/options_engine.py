@@ -647,10 +647,10 @@ async def calculate_iv_rank(ticker: str) -> dict[str, Any]:
 
 
 # ---------------- spread builder (Part 6) ----------------
-def build_spread(chain_data: dict, direction: str, width: float = 5.0) -> dict | None:
+def build_spread(chain_data: dict, direction: str, width: float = 5.0, budget: float = 300.0) -> dict | None:
     if not chain_data:
         return None
-    primary = find_best_contract(chain_data, direction)
+    primary = find_best_contract(chain_data, direction, budget=budget)
     if not primary:
         return None
     df = chain_data["calls"] if direction == "BULL" else chain_data["puts"]
@@ -783,7 +783,7 @@ def assess_iv_crush_risk(stock: dict, chain: dict | None) -> dict:
 
 
 # ---------------- top-level pipeline ----------------
-async def analyze_ticker(stock: dict) -> dict | None:
+async def analyze_ticker(stock: dict, budget: float = 300.0) -> dict | None:
     """Full pipeline for one ticker. Returns the options-intelligence block
     that gets attached to the stock dict and surfaced everywhere.
     NEVER raises — returns None on any failure."""
@@ -797,12 +797,12 @@ async def analyze_ticker(stock: dict) -> dict | None:
             return None
 
         selected = select_strategy(stock, chain)
-        contract = find_best_contract(chain, selected["direction"]) if selected["direction"] != "NONE" else None
+        contract = find_best_contract(chain, selected["direction"], budget=budget) if selected["direction"] != "NONE" else None
         spread = None
         if selected["strategy"] == "BULL_CALL_SPREAD":
-            spread = build_spread(chain, "BULL")
+            spread = build_spread(chain, "BULL", budget=budget)
         elif selected["strategy"] == "BEAR_PUT_SPREAD":
-            spread = build_spread(chain, "BEAR")
+            spread = build_spread(chain, "BEAR", budget=budget)
 
         crush = assess_iv_crush_risk(stock, chain)
         flow = _detect_unusual_flow_from_chain(ticker, chain)
