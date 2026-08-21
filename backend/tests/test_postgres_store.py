@@ -30,6 +30,11 @@ def test_postgres_json_normalization_handles_dates_and_unknown_objects():
     assert payload["odd"] == "odd-object"
 
 
+def test_postgres_json_normalization_nulls_nonfinite_numbers():
+    payload = postgres_store.normalize_json({"bad": float("nan"), "nested": [float("inf"), -float("inf"), 1.5]})
+    assert payload == {"bad": None, "nested": [None, None, 1.5]}
+
+
 @pytest.mark.asyncio
 async def test_postgres_status_disabled(monkeypatch):
     monkeypatch.setenv("POSTGRES_ENABLED", "false")

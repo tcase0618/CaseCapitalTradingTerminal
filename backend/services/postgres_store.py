@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -79,8 +80,19 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _sanitize_json(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _sanitize_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_json(v) for v in value]
+    return value
+
+
 def normalize_json(value: Any) -> Any:
-    return json.loads(json.dumps(value, default=_json_default, ensure_ascii=False))
+    serialized = json.dumps(value, default=_json_default, ensure_ascii=False)
+    return _sanitize_json(json.loads(serialized))
 
 
 def doc_key(collection: str, doc: dict[str, Any]) -> str:
