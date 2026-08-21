@@ -123,6 +123,7 @@ async def _forward_rows(limit: int) -> list[dict[str, Any]]:
     db = get_db()
     rows = await db.signal_performance.find({}, {"_id": 0}).sort("ts", -1).to_list(limit)
     out: list[dict[str, Any]] = []
+    spy_cache: dict[tuple[str, int], float | None] = {}
     for r in rows:
         date = r.get("date")
         if not date:
@@ -142,7 +143,10 @@ async def _forward_rows(limit: int) -> list[dict[str, Any]]:
             item["returns"][f"{days}d"] = ret
             if ret is None:
                 continue
-            spy = await _spy_return(date, days)
+            cache_key = (str(date), days)
+            if cache_key not in spy_cache:
+                spy_cache[cache_key] = await _spy_return(date, days)
+            spy = spy_cache[cache_key]
             item["spy"][f"{days}d"] = spy
             item["alpha"][f"{days}d"] = round(ret - spy, 4) if spy is not None else None
         out.append(item)
