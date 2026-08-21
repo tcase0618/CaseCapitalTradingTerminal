@@ -1083,7 +1083,9 @@ def _open_interest_is_too_low(instrument: dict[str, Any]) -> bool:
 
 def _delta_out_of_band(instrument: dict[str, Any], strategy: str | None) -> bool:
     delta = abs(float(instrument.get("delta") or 0))
-    return delta < MIN_ABS_DELTA or delta > MAX_ABS_DELTA
+    strategy_name = str(strategy or "").upper()
+    min_delta = 0.30 if strategy_name in {"LONG_CALL_EVENT_SCOUT"} else MIN_ABS_DELTA
+    return delta < min_delta or delta > MAX_ABS_DELTA
 
 
 def _provider_delta_missing(instrument: dict[str, Any]) -> bool:

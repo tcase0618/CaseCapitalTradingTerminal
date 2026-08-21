@@ -39,11 +39,13 @@ def test_execution_delta_requires_provider_delta_and_grind_band():
     too_low = {"delta": 0.2, "provider_delta_present": True}
     too_high = {"delta": 0.9, "provider_delta_present": True}
     accepted = {"delta": 0.55, "provider_delta_present": True}
+    event_scout = {"delta": 0.34, "provider_delta_present": True}
 
     assert options_desk._provider_delta_missing(missing) is True
     assert options_desk._delta_out_of_band(too_low, "LONG_CALL") is True
     assert options_desk._delta_out_of_band(too_high, "LONG_CALL") is True
     assert options_desk._delta_out_of_band(accepted, "LONG_CALL") is False
+    assert options_desk._delta_out_of_band(event_scout, "LONG_CALL_EVENT_SCOUT") is False
 
 
 def test_risk_budget_uses_options_fund_lanes():
