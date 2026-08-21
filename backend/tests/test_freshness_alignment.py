@@ -113,3 +113,43 @@ def test_execution_gate_uses_fresh_cached_truth_before_refresh(monkeypatch):
     result = asyncio.run(run())
     assert result["decision"] == "PASS"
     assert result["truth"]["gate_source"] == "fresh_cached_truth"
+
+
+def test_execution_gate_force_refresh_timeout_uses_recent_cached_truth(monkeypatch):
+    cached = {
+        "decision": "PASS",
+        "truth_grade": "B",
+        "qc": {"scoped_blockers": {}},
+        "execution": {
+            "equity_execution_enabled": True,
+            "options_execution_enabled": True,
+            "equity_paper": True,
+            "options_paper": True,
+        },
+    }
+
+    async def cached_truth(*args, **kwargs):
+        # Simulate the normal 300s cache missing, then the wider forced-refresh
+        # fallback finding a recent valid snapshot.
+        if kwargs.get("max_age_seconds") == 1800:
+            return dict(cached)
+        return None
+
+    async def slow_refresh(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return {"decision": "BLOCK", "truth_grade": "F"}
+
+    import asyncio
+
+    monkeypatch.setenv("EXECUTION_GATE_TRUTH_TIMEOUT_SECONDS", "0.001")
+    monkeypatch.setenv("EXECUTION_GATE_REFRESH_FALLBACK_SECONDS", "1800")
+    monkeypatch.setattr(execution_gate, "_cached_truth_snapshot", cached_truth)
+    monkeypatch.setattr(data_truth, "overview", slow_refresh)
+
+    async def run():
+        return await execution_gate.check(scope="options", force_refresh=True, record=False)
+
+    result = asyncio.run(run())
+    assert result["decision"] == "PASS"
+    assert result["truth"]["gate_source"] == "cached_truth_after_refresh_error"
+    assert result["truth"]["refresh_error"] == "TimeoutError"

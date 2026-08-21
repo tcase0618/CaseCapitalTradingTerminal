@@ -51,10 +51,15 @@ async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
         from . import data_truth
         return await asyncio.wait_for(
             data_truth.overview(force_refresh=force_refresh, persist=True),
-            timeout=12.0,
+            timeout=float(os.environ.get("EXECUTION_GATE_TRUTH_TIMEOUT_SECONDS", "18.0") or 18.0),
         )
     except Exception as exc:
         cached = await _cached_truth_snapshot(allow_stale=False)
+        if not cached and force_refresh:
+            cached = await _cached_truth_snapshot(
+                max_age_seconds=int(os.environ.get("EXECUTION_GATE_REFRESH_FALLBACK_SECONDS", "1800") or 1800),
+                allow_stale=False,
+            )
         if cached:
             cached.setdefault("warnings", [])
             cached["gate_source"] = "cached_truth_after_refresh_error"
