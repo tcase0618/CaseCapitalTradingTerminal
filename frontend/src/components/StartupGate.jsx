@@ -71,6 +71,25 @@ export default function StartupGate({ children }) {
     return () => {};
   }, [session]);
 
+  useEffect(() => {
+    const interceptorId = axios.interceptors.response.use(
+      response => response,
+      error => {
+        const detail = error?.response?.data?.detail || "";
+        if (error?.response?.status === 403 && String(detail).includes("Operator session required")) {
+          sessionStorage.removeItem(SESSION_KEY);
+          configureTerminalSession(null);
+          setSession(null);
+          setBootOpened(true);
+          setMode("login");
+          setError("Operator session expired after backend restart. Enter the access code again.");
+        }
+        return Promise.reject(error);
+      }
+    );
+    return () => axios.interceptors.response.eject(interceptorId);
+  }, []);
+
   const forceBoot = useCallback(async () => {
     setBackend({ state: "checking", message: "Forcing desktop backend boot" });
     try {
