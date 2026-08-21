@@ -361,9 +361,11 @@ def start_scheduler():
     # the runtime guard in _daily_scan_job. Other scheduled data pulls keep
     # their own cadence and are not blocked by this stock-scan guard.
     for tag, hr, minute in [
+        ("midnight_scan", 0, 0),
         ("morning_scan", 8, 0),
-        ("midday_scan", 12, 1),
-        ("preclose_scan", 15, 30),
+        ("midday_scan", 13, 0),
+        ("afternoon_scan", 15, 0),
+        ("evening_scan", 18, 0),
     ]:
         _scheduler.add_job(
             _daily_scan_job,
@@ -840,7 +842,7 @@ def start_scheduler():
     )
     _scheduler.start()
     logger.info(
-        "Scheduler: stock scans 8:00/12:01/15:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
+        "Scheduler: stock scans 00:00/08:00/13:00/15:00/18:00 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
         "+ 5m active lottery monitor + alerts/flow/P&L/learning"
     )
 
