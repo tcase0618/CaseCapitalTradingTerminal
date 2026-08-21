@@ -360,11 +360,14 @@ def start_scheduler():
     # Original fixed stock-scan cadence, restricted to market-session days by
     # the runtime guard in _daily_scan_job. Other scheduled data pulls keep
     # their own cadence and are not blocked by this stock-scan guard.
-    for tag, hr in [("midnight_scan", 0), ("morning_scan", 8),
-                      ("midday_scan", 13), ("evening_scan", 18)]:
+    for tag, hr, minute in [
+        ("morning_scan", 8, 0),
+        ("midday_scan", 12, 1),
+        ("preclose_scan", 15, 30),
+    ]:
         _scheduler.add_job(
             _daily_scan_job,
-            CronTrigger(day_of_week="mon-fri", hour=hr, minute=0, timezone=ET),
+            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
             id=tag, replace_existing=True,
         )
     for tag, hr, minute in [
@@ -837,7 +840,7 @@ def start_scheduler():
     )
     _scheduler.start()
     logger.info(
-        "Scheduler: stock scans + Lottery League 8:45/9:36/10:00/12:00/15:35 "
+        "Scheduler: stock scans 8:00/12:01/15:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
         "+ 5m active lottery monitor + alerts/flow/P&L/learning"
     )
 
