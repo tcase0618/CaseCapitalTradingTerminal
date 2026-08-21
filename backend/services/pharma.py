@@ -633,6 +633,20 @@ async def import_fda_calendar(
     imported = 0
     if persist and rows:
         db = get_db()
+        live_dates = sorted(
+            str(row.get("pdufa_date") or "")[:10]
+            for row in rows
+            if str(row.get("pdufa_date") or "")[:10]
+        )
+        if live_dates and not summary["fallback_used"]:
+            await db.pharma_pdufa.delete_many({
+                "pdufa_date": {"$gte": live_dates[0], "$lte": live_dates[-1]},
+                "$or": [
+                    {"data_quality": "fallback_calendar"},
+                    {"source": "curated_seed"},
+                    {"source_list": "curated_seed"},
+                ],
+            })
         await db.pharma_pdufa_cache.update_one(
             {"_id": "calendar"},
             {"$set": {
