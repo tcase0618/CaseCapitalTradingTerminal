@@ -253,6 +253,20 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
         cache_age = _age_minutes(cached.get("generated_at"))
         if cached.get("rows") and cache_age is not None and cache_age * 60.0 <= INTEGRATION_CACHE_TTL_SECONDS:
             return [_demote_support_feed_blocks(row) for row in (cached.get("rows") or [])]
+        if cached.get("rows"):
+            cached_rows = []
+            for row in cached.get("rows") or []:
+                row = dict(row)
+                row["warnings"] = list(row.get("warnings") or [])
+                note = "using cached integration status; force QC refresh to re-probe optional providers"
+                if note not in row["warnings"]:
+                    row["warnings"].append(note)
+                if row.get("critical"):
+                    row["critical"] = False
+                    row["blocks_trading"] = False
+                    row["execution_scopes"] = []
+                cached_rows.append(row)
+            return [_demote_support_feed_blocks(row) for row in cached_rows]
 
     rows = []
     try:
