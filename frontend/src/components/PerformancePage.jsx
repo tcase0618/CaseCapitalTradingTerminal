@@ -24,15 +24,15 @@ export default function PerformancePage() {
 
   const refresh = useCallback(async () => {
     // Use independent .catch so one failure doesn't kill the others
-    axios.get(`${API}/performance/summary`).then(r => setPerf(r.data)).catch(e => console.error("perf:", e));
-    axios.get(`${API}/backtest/summary`).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
-    axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
-    axios.get(`${API}/signals/curve?days=${curveDays}`).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
-    axios.get(`${API}/signals/options_curve?days=${curveDays}`).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
-    axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
-    axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
-    axios.get(`${API}/edge/overview`).then(r => setEdge(r.data)).catch(e => console.error("edge:", e));
-    axios.get(`${API}/signals/options_gap?limit=500&threshold_pct=50`).then(r => setOptionsGap(r.data)).catch(e => console.error("options gap:", e));
+    axios.get(`${API}/performance/summary`, { timeout: 20000 }).then(r => setPerf(r.data)).catch(e => console.error("perf:", e));
+    axios.get(`${API}/backtest/summary`, { timeout: 15000 }).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
+    axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`, { timeout: 15000 }).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
+    axios.get(`${API}/signals/curve?days=${curveDays}`, { timeout: 15000 }).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
+    axios.get(`${API}/signals/options_curve?days=${curveDays}`, { timeout: 15000 }).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
+    axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`, { timeout: 20000 }).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
+    axios.get(`${API}/admin/price_source`, { timeout: 6000 }).then(r => setPriceSource(r.data)).catch(() => {});
+    axios.get(`${API}/edge/overview`, { timeout: 10000 }).then(r => setEdge(r.data)).catch(e => console.error("edge:", e));
+    axios.get(`${API}/signals/options_gap?limit=500&threshold_pct=50`, { timeout: 15000 }).then(r => setOptionsGap(r.data)).catch(e => console.error("options gap:", e));
   }, [curveDays]);
   useEffect(() => {
     refresh();

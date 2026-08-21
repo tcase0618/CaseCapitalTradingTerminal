@@ -207,7 +207,19 @@ async def check(
 
 
 async def overview(force_refresh: bool = False) -> dict[str, Any]:
-    # UI/header calls should not keep displaying an old BLOCK after data truth
-    # has recovered. Order paths still call check() directly and revalidate.
-    truth = None if force_refresh else await _cached_truth_snapshot(allow_stale=False)
+    # UI/header calls must be snappy. Order paths still call check() directly
+    # and revalidate against fresh truth before submitting anything.
+    truth = None
+    if not force_refresh:
+        truth = await _cached_truth_snapshot(allow_stale=False)
+        if not truth:
+            truth = await _cached_truth_snapshot(
+                max_age_seconds=int(os.environ.get("EXECUTION_GATE_UI_STALE_OK_SECONDS", "1800") or 1800),
+                allow_stale=True,
+            )
+            if truth:
+                truth.setdefault("warnings", [])
+                warning = "execution gate UI using stale cached truth; order paths still revalidate live"
+                if warning not in truth["warnings"]:
+                    truth["warnings"].append(warning)
     return await check(scope="system", force_refresh=force_refresh, truth=truth, record=False)

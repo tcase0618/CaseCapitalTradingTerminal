@@ -44,10 +44,10 @@ export default function QualityPage() {
     setLoading(true);
     try {
       const [overview, schedulerRows, eventRows, ibkrRows] = await Promise.all([
-        axios.get(`${API}/data_quality/overview`).then(r => r.data),
-        axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
-        axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
-        axios.get(`${API}/ibkr/applications`).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
+        axios.get(`${API}/data_quality/overview`, { timeout: 14000 }).then(r => r.data),
+        axios.get(`${API}/scheduler/overview`, { timeout: 8000 }).then(r => r.data).catch(() => null),
+        axios.get(`${API}/data_quality/events`, { params: { limit: 25 }, timeout: 8000 }).then(r => r.data).catch(() => ({ events: [] })),
+        axios.get(`${API}/ibkr/applications`, { timeout: 12000 }).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
       ]);
       setData(overview);
       setScheduler(schedulerRows);
@@ -71,9 +71,9 @@ export default function QualityPage() {
       const { data: fresh } = await axios.post(`${API}/data_quality/refresh`);
       setData(fresh);
       const [schedulerRows, eventRows, ibkrRows] = await Promise.all([
-        axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
-        axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
-        axios.get(`${API}/ibkr/applications`).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
+        axios.get(`${API}/scheduler/overview`, { timeout: 8000 }).then(r => r.data).catch(() => null),
+        axios.get(`${API}/data_quality/events`, { params: { limit: 25 }, timeout: 8000 }).then(r => r.data).catch(() => ({ events: [] })),
+        axios.get(`${API}/ibkr/applications`, { timeout: 12000 }).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
       ]);
       setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
@@ -90,9 +90,9 @@ export default function QualityPage() {
       const { data: result } = await axios.post(`${API}/data_quality/remediate`, null, { params: { limit: 18 } });
       setData(result.overview || result);
       const [schedulerRows, eventRows, ibkrRows] = await Promise.all([
-        axios.get(`${API}/scheduler/overview`).then(r => r.data).catch(() => null),
-        axios.get(`${API}/data_quality/events`, { params: { limit: 25 } }).then(r => r.data).catch(() => ({ events: [] })),
-        axios.get(`${API}/ibkr/applications`).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
+        axios.get(`${API}/scheduler/overview`, { timeout: 8000 }).then(r => r.data).catch(() => null),
+        axios.get(`${API}/data_quality/events`, { params: { limit: 25 }, timeout: 8000 }).then(r => r.data).catch(() => ({ events: [] })),
+        axios.get(`${API}/ibkr/applications`, { timeout: 12000 }).then(r => r.data).catch(e => ({ ok: false, reason: e?.message || "request failed", applications: [] })),
       ]);
       setScheduler(schedulerRows);
       setEvents(eventRows.events || []);
@@ -107,7 +107,7 @@ export default function QualityPage() {
     setWatchdogRunning(true);
     try {
       await axios.post(`${API}/scheduler/watchdog`, null, { params: { auto_fix: true, max_repairs: 8, critical_only: false } });
-      const { data: schedulerRows } = await axios.get(`${API}/scheduler/overview`);
+      const { data: schedulerRows } = await axios.get(`${API}/scheduler/overview`, { timeout: 8000 });
       setScheduler(schedulerRows);
     } finally {
       setWatchdogRunning(false);
@@ -119,7 +119,7 @@ export default function QualityPage() {
     setRepairing(key);
     try {
       await axios.post(`${API}/scheduler/repair/${encodeURIComponent(key)}`);
-      const { data: schedulerRows } = await axios.get(`${API}/scheduler/overview`);
+      const { data: schedulerRows } = await axios.get(`${API}/scheduler/overview`, { timeout: 8000 });
       setScheduler(schedulerRows);
     } finally {
       setRepairing("");

@@ -7,6 +7,7 @@ and what should block trading until refreshed.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,7 +23,7 @@ CRITICAL_MAX_AGE_MINUTES = {
 
 REMEDIATION_TIMEOUT_SECONDS = 24.0
 ATTEMPT_TIMEOUT_SECONDS = 8.0
-INTEGRATION_CACHE_TTL_SECONDS = 180.0
+INTEGRATION_CACHE_TTL_SECONDS = float(os.environ.get("DATA_QUALITY_INTEGRATION_CACHE_SECONDS", "600") or 600)
 
 
 def _now() -> datetime:

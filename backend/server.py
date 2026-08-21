@@ -1011,9 +1011,11 @@ async def congress_recent(days: int = 30):
 @api.get("/performance/summary")
 async def performance_summary():
     from services import metrics, pnl_tracker
-    proof = await metrics.summary()
-    sig = await pnl_tracker.performance_by_signals()
-    opt = await pnl_tracker.options_performance_summary()
+    proof, sig, opt = await asyncio.gather(
+        metrics.summary(),
+        pnl_tracker.performance_by_signals(),
+        pnl_tracker.options_performance_summary(),
+    )
     return {"signals": sig, "options": opt, "proof": proof}
 
 

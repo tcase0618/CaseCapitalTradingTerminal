@@ -23,16 +23,16 @@ export default function SettingsPage() {
 
   const loadSystem = async () => {
     await Promise.allSettled([
-      axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => setStatus({})),
-      axios.get(`${API}/admin/pipeline_criteria`).then(r => setCriteria(r.data)).catch(() => {}),
-      axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {}),
-      axios.get(`${API}/desktop/diagnostics`).then(r => setDiagnostics(r.data)).catch(() => {}),
-      axios.get(`${API}/desktop/update_strategy`).then(r => setUpdateStrategy(r.data)).catch(() => {}),
-      axios.get(`${API}/research/dashboard?limit_scans=180`).then(r => setResearch(r.data)).catch(() => setResearch({ ok: false })),
-      axios.get(`${API}/telegram/events?limit=20`).then(r => setTelegramOps(r.data)).catch(() => setTelegramOps({ ok: false })),
-      axios.get(`${API}/data_truth/overview`).then(r => setTruth(r.data)).catch(() => setTruth({ ok: false })),
-      axios.get(`${API}/ibkr/status`).then(r => setIbkr(r.data)).catch(e => setIbkr({ ok: false, reason: e?.message || "request failed" })),
-      axios.get(`${API}/ibkr/applications`).then(r => setIbkrApps(r.data)).catch(e => setIbkrApps({ ok: false, reason: e?.message || "request failed", applications: [] })),
+      axios.get(`${API}/status`, { timeout: 6000 }).then(r => setStatus(r.data)).catch(() => setStatus({})),
+      axios.get(`${API}/admin/pipeline_criteria`, { timeout: 8000 }).then(r => setCriteria(r.data)).catch(() => {}),
+      axios.get(`${API}/admin/integration_status`, { timeout: 12000 }).then(r => setAdmin(r.data)).catch(() => {}),
+      axios.get(`${API}/desktop/diagnostics`, { timeout: 8000 }).then(r => setDiagnostics(r.data)).catch(() => {}),
+      axios.get(`${API}/desktop/update_strategy`, { timeout: 8000 }).then(r => setUpdateStrategy(r.data)).catch(() => {}),
+      axios.get(`${API}/research/dashboard?limit_scans=180`, { timeout: 15000 }).then(r => setResearch(r.data)).catch(() => setResearch({ ok: false })),
+      axios.get(`${API}/telegram/events?limit=20`, { timeout: 8000 }).then(r => setTelegramOps(r.data)).catch(() => setTelegramOps({ ok: false })),
+      axios.get(`${API}/data_truth/overview`, { timeout: 10000 }).then(r => setTruth(r.data)).catch(() => setTruth({ ok: false })),
+      axios.get(`${API}/ibkr/status`, { timeout: 9000 }).then(r => setIbkr(r.data)).catch(e => setIbkr({ ok: false, reason: e?.message || "request failed" })),
+      axios.get(`${API}/ibkr/applications`, { timeout: 12000 }).then(r => setIbkrApps(r.data)).catch(e => setIbkrApps({ ok: false, reason: e?.message || "request failed", applications: [] })),
     ]);
   };
 
