@@ -533,20 +533,6 @@ def start_scheduler():
         id="terminal_weekly_report_friday_902pm",
         replace_existing=True,
     )
-    # Mid-day scan - 12:01 ET Mon-Fri
-    _scheduler.add_job(
-        _daily_scan_job,
-        CronTrigger(day_of_week="mon-fri", hour=12, minute=1, timezone=ET),
-        id="midday_scan_legacy",
-        replace_existing=True,
-    )
-    # Pre-close scan - 15:30 ET Mon-Fri
-    _scheduler.add_job(
-        _daily_scan_job,
-        CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=ET),
-        id="preclose_scan",
-        replace_existing=True,
-    )
     # v5.0 - regime gate every 30 min during market hours
     async def _regime_job():
         try:
