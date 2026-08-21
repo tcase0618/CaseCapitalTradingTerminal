@@ -178,7 +178,10 @@ export default function Dashboard() {
       setScan(data);
       toast(`SCAN COMPLETE — ${data.results?.length || 0} TARGETS`);
       refresh();
-    } catch { toast("SCAN FAILED"); }
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || "request failed";
+      toast(`SCAN FAILED - ${detail}`);
+    }
     setScanning(false);
   };
 
@@ -187,7 +190,10 @@ export default function Dashboard() {
     try {
       const { data } = await axios.post(`${API}/scan/dispatch`);
       toast(`DISPATCHED — ${data.messages_sent}/${data.messages_built} MSG · ${(data.char_counts || []).join("/")} CHARS`);
-    } catch { toast("DISPATCH FAILED"); }
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || "request failed";
+      toast(`DISPATCH FAILED - ${detail}`);
+    }
     setDispatching(false);
   };
 

@@ -1,8 +1,10 @@
 """FastAPI entrypoint: Stock Intelligence Telegram Bot backend."""
 from __future__ import annotations
 import asyncio
+import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import platform
@@ -34,6 +36,7 @@ app = FastAPI(title="Stock Intel Bot")
 api = APIRouter(prefix="/api")
 OPERATOR_SESSIONS: set[str] = set()
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+OPERATOR_TOKEN_VERSION = "cc1"
 AUTH_EXEMPT_PATHS = {
     "/api/auth/config",
     "/api/auth/login",
@@ -60,12 +63,67 @@ def _operator_configured() -> bool:
     return bool(_operator_hash())
 
 
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    pad = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + pad).encode("ascii"))
+
+
+def _operator_token_secret() -> str:
+    return os.environ.get("TERMINAL_SESSION_SECRET", "").strip() or _operator_hash()
+
+
+def _sign_operator_payload(payload: str) -> str:
+    secret = _operator_token_secret()
+    if not secret:
+        return ""
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _issue_operator_token() -> str:
+    secret = _operator_token_secret()
+    if not secret:
+        token = secrets.token_urlsafe(32)
+        OPERATOR_SESSIONS.add(token)
+        return token
+    payload = {
+        "iat": int(datetime.now(timezone.utc).timestamp()),
+        "nonce": secrets.token_urlsafe(16),
+        "mode": "operator",
+    }
+    encoded = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return f"{OPERATOR_TOKEN_VERSION}.{encoded}.{_sign_operator_payload(encoded)}"
+
+
+def _valid_signed_operator_token(token: str) -> bool:
+    if not token.startswith(f"{OPERATOR_TOKEN_VERSION}."):
+        return False
+    try:
+        _, encoded, signature = token.split(".", 2)
+        expected = _sign_operator_payload(encoded)
+        if not expected or not hmac.compare_digest(signature, expected):
+            return False
+        payload = json.loads(_b64url_decode(encoded).decode("utf-8"))
+        issued_at = int(payload.get("iat") or 0)
+        max_age = int(os.environ.get("TERMINAL_SESSION_MAX_AGE_SECONDS", str(7 * 24 * 60 * 60)))
+        if issued_at <= 0:
+            return False
+        if max_age > 0 and int(datetime.now(timezone.utc).timestamp()) - issued_at > max_age:
+            return False
+        return payload.get("mode") == "operator"
+    except Exception:
+        return False
+
+
 def _authorized_request(request: Request) -> bool:
     auth = request.headers.get("authorization", "")
     scheme, _, token = auth.partition(" ")
     if scheme.lower() != "bearer" or not token:
         token = request.headers.get("x-terminal-session", "").strip()
-    return bool(token and token in OPERATOR_SESSIONS)
+    return bool(token and (token in OPERATOR_SESSIONS or _valid_signed_operator_token(token)))
 
 
 @app.middleware("http")
@@ -131,8 +189,7 @@ async def auth_login(payload: AuthLoginRequest):
     attempted = hashlib.sha256(f"case-capital:{code}".encode("utf-8")).hexdigest()
     if expected and not hmac.compare_digest(attempted, expected):
         raise HTTPException(status_code=403, detail="Access denied.")
-    token = secrets.token_urlsafe(32)
-    OPERATOR_SESSIONS.add(token)
+    token = _issue_operator_token()
     return {
         "ok": True,
         "mode": "operator",
