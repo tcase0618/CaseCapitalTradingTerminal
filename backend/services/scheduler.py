@@ -409,9 +409,12 @@ def start_scheduler():
             status = payload.get("status") or {}
             forecast = payload.get("forecast") or {}
             summary = forecast.get("summary") or {}
+            reconciliation = payload.get("reconciliation") or {}
+            accuracy = payload.get("accuracy") or {}
             await log_activity(
                 f"Kronos 5m forecast refresh: {summary.get('positions', 0)} positions, "
-                f"health={status.get('health')}, pm_map={summary.get('mapped_pm', 0)}/{summary.get('positions', 0)}",
+                f"health={status.get('health')}, pm_map={summary.get('mapped_pm', 0)}/{summary.get('positions', 0)}, "
+                f"resolved={reconciliation.get('resolved', 0)}, proof={((accuracy.get('overall') or {}).get('sample') or 0)}",
                 "warn" if status.get("health") in {"STALE", "MISSING"} else "info",
                 {
                     "health": status.get("health"),
@@ -420,6 +423,10 @@ def start_scheduler():
                     "mapped_pm": summary.get("mapped_pm", 0),
                     "unmapped_pm": summary.get("unmapped_pm", 0),
                     "risk_flags": summary.get("risk_flags", 0),
+                    "resolved_disagreements": reconciliation.get("resolved", 0),
+                    "pending_disagreements": reconciliation.get("pending", 0),
+                    "accuracy_sample": (accuracy.get("overall") or {}).get("sample"),
+                    "learning_health": status.get("learning_health"),
                 },
             )
         except Exception as e:

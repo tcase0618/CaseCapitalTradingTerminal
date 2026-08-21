@@ -1458,10 +1458,22 @@ async def kronos_disagreements(limit: int = 200):
     return await kronos.disagreement_performance(limit=limit)
 
 
+@api.post("/kronos/disagreements/reconcile")
+async def kronos_disagreements_reconcile(limit: int = 750):
+    from services import kronos
+    return await kronos.reconcile_disagreements(limit=limit)
+
+
 @api.get("/kronos/accuracy")
 async def kronos_accuracy(limit: int = 800, persist: bool = False):
     from services import kronos
     return await kronos.candle_accuracy(limit=limit, persist=persist)
+
+
+@api.get("/kronos/learning")
+async def kronos_learning(limit: int = 1200, persist: bool = False):
+    from services import kronos
+    return await kronos.learning_state(limit=limit, persist=persist)
 
 
 @api.get("/kronos/calendar")

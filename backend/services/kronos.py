@@ -329,6 +329,167 @@ def _score_candle_features(features: dict[str, Any]) -> dict[str, Any]:
     return {"score": round(score, 2), "reasons": reasons[:5]}
 
 
+def _regime_from_features(features: dict[str, Any]) -> str:
+    structure = str((features or {}).get("structure") or "UNKNOWN").upper()
+    if structure == "HIGHER_HIGH":
+        return "TREND_UP"
+    if structure == "LOWER_LOW":
+        return "TREND_DOWN"
+    return "CHOP"
+
+
+def _accuracy_lookup(snapshot: dict[str, Any], symbol: str, timeframe: str, regime: str) -> dict[str, Any]:
+    def _match(rows: Any, key: str) -> dict[str, Any] | None:
+        for row in rows or []:
+            if str(row.get("key") or "").upper() == key.upper():
+                return row
+        return None
+
+    return {
+        "symbol": _match(snapshot.get("by_symbol"), symbol),
+        "timeframe": _match(snapshot.get("by_timeframe"), timeframe),
+        "regime": _match(snapshot.get("by_regime"), regime),
+        "overall": snapshot.get("overall") or {},
+    }
+
+
+async def _candle_learning_adjustment(symbol: str, timeframe: str, regime: str) -> dict[str, Any]:
+    """Return conservative calibration from the latest persisted accuracy proof."""
+    try:
+        db = get_db()
+        snap = await db.kronos_accuracy_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
+    except Exception as exc:
+        logger.debug("kronos learning snapshot unavailable: %s", exc)
+        snap = None
+    if not snap:
+        return {
+            "active": False,
+            "status": "NO_PROOF",
+            "forecast_multiplier": 1.0,
+            "confidence_multiplier": 1.0,
+            "cone_multiplier": 1.0,
+            "sample": 0,
+            "reason": "No mature Kronos accuracy snapshot exists yet.",
+        }
+    buckets = _accuracy_lookup(snap, symbol, timeframe, regime)
+    ordered = [buckets.get("symbol"), buckets.get("timeframe"), buckets.get("regime"), buckets.get("overall")]
+    bucket = next((b for b in ordered if b and int(b.get("sample") or 0) >= 12), None)
+    if not bucket:
+        return {
+            "active": False,
+            "status": "WARMING_UP",
+            "forecast_multiplier": 1.0,
+            "confidence_multiplier": 0.92,
+            "cone_multiplier": 1.15,
+            "sample": int((buckets.get("overall") or {}).get("sample") or 0),
+            "reason": "Not enough mature samples for dependable learning calibration.",
+        }
+
+    sample = int(bucket.get("sample") or 0)
+    win_rate = _num(bucket.get("direction_win_rate_pct"))
+    cone_rate = _num(bucket.get("cone_coverage_pct"))
+    mae = _num(bucket.get("mae_pct"))
+    forecast_mult = 1.0
+    confidence_mult = 1.0
+    cone_mult = 1.0
+    notes = []
+
+    if win_rate is not None:
+        if sample >= 20 and win_rate < 45:
+            forecast_mult *= 0.55
+            confidence_mult *= 0.68
+            notes.append("direction history poor; dampened forecast")
+        elif win_rate < 52:
+            forecast_mult *= 0.74
+            confidence_mult *= 0.82
+            notes.append("direction history below edge; reduced conviction")
+        elif win_rate >= 58:
+            forecast_mult *= 1.06
+            confidence_mult *= 1.05
+            notes.append("direction history positive; modestly reinforced")
+
+    if cone_rate is not None:
+        if cone_rate < 58:
+            cone_mult *= 1.65
+            notes.append("cone coverage weak; widened range")
+        elif cone_rate < 68:
+            cone_mult *= 1.28
+            notes.append("cone coverage below target; widened range")
+        elif cone_rate > 86:
+            cone_mult *= 0.92
+            notes.append("cone coverage loose; tightened range")
+
+    if mae is not None and mae > 0.45:
+        forecast_mult *= 0.88
+        cone_mult *= 1.18
+        notes.append("forecast error elevated; widened protection")
+
+    return {
+        "active": True,
+        "status": "CALIBRATED",
+        "bucket": bucket.get("key"),
+        "sample": sample,
+        "direction_win_rate_pct": win_rate,
+        "cone_coverage_pct": cone_rate,
+        "mae_pct": mae,
+        "forecast_multiplier": round(forecast_mult, 3),
+        "confidence_multiplier": round(confidence_mult, 3),
+        "cone_multiplier": round(cone_mult, 3),
+        "snapshot_at": snap.get("generated_at"),
+        "reason": "; ".join(notes) if notes else "Accuracy proof is acceptable; no major dampening applied.",
+    }
+
+
+def _apply_candle_learning(result: dict[str, Any], adjustment: dict[str, Any]) -> dict[str, Any]:
+    if not adjustment:
+        return result
+    result["learning_adjustment"] = adjustment
+    if not adjustment.get("active") and adjustment.get("status") != "WARMING_UP":
+        return result
+    forecast_mult = _num(adjustment.get("forecast_multiplier"), 1.0) or 1.0
+    confidence_mult = _num(adjustment.get("confidence_multiplier"), 1.0) or 1.0
+    cone_mult = _num(adjustment.get("cone_multiplier"), 1.0) or 1.0
+    old_forecast = _num(result.get("forecast_pct"), 0.0) or 0.0
+    old_low = _num(result.get("cone_low_pct"), old_forecast - 0.1) or old_forecast - 0.1
+    old_high = _num(result.get("cone_high_pct"), old_forecast + 0.1) or old_forecast + 0.1
+    width = max(abs(old_forecast - old_low), abs(old_high - old_forecast), 0.03) * cone_mult
+    new_forecast = old_forecast * forecast_mult
+    result["forecast_pct_raw"] = round(old_forecast, 3)
+    result["forecast_pct"] = round(new_forecast, 3)
+    result["cone_low_pct"] = round(new_forecast - width, 3)
+    result["cone_high_pct"] = round(new_forecast + width, 3)
+    result["confidence_raw"] = result.get("confidence")
+    result["confidence"] = int(max(18, min(92, (_num(result.get("confidence"), 50) or 50) * confidence_mult)))
+    noise = max(0.03, _num(result.get("noise_band_pct"), 0.06) or 0.06)
+    if abs(new_forecast) <= noise:
+        result["direction"] = "FLAT"
+    elif new_forecast > 0:
+        result["direction"] = "UP"
+    else:
+        result["direction"] = "DOWN"
+
+    close = _num((result.get("features") or {}).get("last_close") or (result.get("predicted_next_candle") or {}).get("open"))
+    if close and close > 0:
+        result["predicted_next_candle"] = {
+            "open": round(close, 4),
+            "high": round(close * (1 + max(new_forecast, 0) / 100 + width / 100), 4),
+            "low": round(close * (1 + min(new_forecast, 0) / 100 - width / 100), 4),
+            "close": round(close * (1 + new_forecast / 100), 4),
+        }
+
+    for h in result.get("horizons") or []:
+        center = _num(h.get("forecast_pct"), 0.0) or 0.0
+        low = _num(h.get("cone_low_pct"), center - width) or center - width
+        high = _num(h.get("cone_high_pct"), center + width) or center + width
+        h_width = max(abs(center - low), abs(high - center), 0.03) * cone_mult
+        h_center = center * forecast_mult
+        h["forecast_pct_raw"] = round(center, 3)
+        h["forecast_pct"] = round(h_center, 3)
+        h["cone_low_pct"] = round(h_center - h_width, 3)
+        h["cone_high_pct"] = round(h_center + h_width, 3)
+    return result
+
+
 async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int = 220, persist: bool = False) -> dict[str, Any]:
     """Candle-aware read-only forecast from raw OHLCV.
 
@@ -426,6 +587,8 @@ async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int
         "source": "raw_ohlcv_candle_engine",
         "generated_at": _now().isoformat(),
     }
+    adjustment = await _candle_learning_adjustment(ticker, tf, _regime_from_features(features))
+    result = _apply_candle_learning(result, adjustment)
     if persist:
         try:
             db = get_db()
@@ -914,20 +1077,224 @@ def _catalysts(signal: dict[str, Any]) -> list[str]:
     return tags[:5]
 
 
-async def disagreement_performance(limit: int = 200) -> dict[str, Any]:
+def _side_from_forecast(row: dict[str, Any]) -> str:
+    pct = _num(row.get("forecast_pct"))
+    bias = str(row.get("forecast_bias") or "").upper()
+    if pct is not None:
+        if pct >= 0.15:
+            return "BULL"
+        if pct <= -0.15:
+            return "BEAR"
+    if "BULL" in bias:
+        return "BULL"
+    if "BEAR" in bias:
+        return "BEAR"
+    return "NEUTRAL"
+
+
+def _side_from_pm(row: dict[str, Any]) -> str:
+    action = str(row.get("pm_action") or "").upper()
+    if action in {"ACCUMULATE", "STARTER", "BUY", "EQUITY", "OPTION", "BOTH", "ADD"}:
+        return "BULL"
+    if action in {"TRIM", "SELL", "REJECT", "PASS"}:
+        return "BEAR" if action in {"TRIM", "SELL"} else "NEUTRAL"
+    return "NEUTRAL"
+
+
+def _side_from_return(actual_pct: float | None, threshold: float = 0.25) -> str:
+    if actual_pct is None:
+        return "UNKNOWN"
+    if actual_pct >= threshold:
+        return "BULL"
+    if actual_pct <= -threshold:
+        return "BEAR"
+    return "NEUTRAL"
+
+
+def _winner_for_disagreement(row: dict[str, Any], actual_pct: float | None) -> str:
+    actual = _side_from_return(actual_pct)
+    if actual == "UNKNOWN":
+        return "PENDING"
+    if actual == "NEUTRAL":
+        return "NO_EDGE"
+    pm_side = _side_from_pm(row)
+    kronos_side = _side_from_forecast(row)
+    pm_right = pm_side == actual or (pm_side == "NEUTRAL" and actual == "BEAR")
+    kronos_right = kronos_side == actual
+    if pm_right and kronos_right:
+        return "BOTH_RIGHT"
+    if kronos_right and not pm_right:
+        return "KRONOS_WON"
+    if pm_right and not kronos_right:
+        return "PM_WON"
+    return "BOTH_WRONG"
+
+
+async def _return_since_generated(ticker: str, generated_at: Any, days: int = 45) -> dict[str, Any]:
+    generated = _parse_dt(generated_at)
+    if not ticker or generated is None:
+        return {"ok": False, "reason": "missing_ticker_or_timestamp"}
+    try:
+        from . import pricer
+        history = await pricer.get_history(ticker, days=days)
+    except Exception as exc:
+        logger.debug("kronos disagreement history failed %s: %s", ticker, exc)
+        history = {}
+    if not history:
+        return {"ok": False, "reason": "missing_price_history"}
+    dates = sorted(history.keys())
+    start_day = generated.date().isoformat()
+    base_date = next((d for d in dates if d >= start_day), None) or next((d for d in reversed(dates) if d <= start_day), None)
+    latest_date = dates[-1] if dates else None
+    if not base_date or not latest_date or latest_date <= base_date:
+        return {"ok": False, "reason": "not_enough_mature_history", "base_date": base_date, "latest_date": latest_date}
+    base = _num(history.get(base_date))
+    latest = _num(history.get(latest_date))
+    if not base or latest is None:
+        return {"ok": False, "reason": "invalid_history_prices", "base_date": base_date, "latest_date": latest_date}
+    return {
+        "ok": True,
+        "base_date": base_date,
+        "latest_date": latest_date,
+        "base_price": round(base, 4),
+        "latest_price": round(latest, 4),
+        "actual_return_pct": round((latest - base) / base * 100.0, 3),
+    }
+
+
+async def reconcile_disagreements(limit: int = 500, min_age_hours: float = 6.0) -> dict[str, Any]:
     db = get_db()
+    rows = await db.kronos_pm_disagreements.find(
+        {"status": {"$in": ["OPEN_AUDIT", "OUT_FOR_AUDIT", None]}},
+    ).sort("generated_at", 1).to_list(max(25, min(int(limit or 500), 1500)))
+    checked = 0
+    resolved = 0
+    archived = 0
+    pending = 0
+    errors = []
+    now = _now()
+    for row in rows:
+        checked += 1
+        generated = _parse_dt(row.get("generated_at"))
+        if generated is None or (now - generated).total_seconds() < float(min_age_hours) * 3600:
+            pending += 1
+            continue
+        update_filter = {"audit_id": row.get("audit_id")} if row.get("audit_id") else {"_id": row.get("_id")}
+        if str(row.get("pm_action") or "").upper() in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}:
+            result = await db.kronos_pm_disagreements.update_one(update_filter, {"$set": {
+                "status": "ARCHIVED_UNMAPPED",
+                "resolved_at": now.isoformat(),
+                "winner": "NO_PM_MAP",
+                "reconciliation_source": "pm_context_missing",
+                "reconciliation_note": "Archived because the row did not have a real PM route to compare against.",
+            }})
+            if result.modified_count:
+                archived += 1
+            else:
+                pending += 1
+            continue
+        outcome = await _return_since_generated(_ticker(row.get("ticker")), row.get("generated_at"))
+        if not outcome.get("ok"):
+            pending += 1
+            if outcome.get("reason") not in {"not_enough_mature_history"}:
+                errors.append({"ticker": row.get("ticker"), "reason": outcome.get("reason")})
+            continue
+        winner = _winner_for_disagreement(row, _num(outcome.get("actual_return_pct")))
+        update = {
+            "status": "RESOLVED",
+            "resolved_at": now.isoformat(),
+            "winner": winner,
+            "pm_side": _side_from_pm(row),
+            "kronos_side": _side_from_forecast(row),
+            "actual_side": _side_from_return(_num(outcome.get("actual_return_pct"))),
+            "outcome": outcome,
+            "actual_return_pct": outcome.get("actual_return_pct"),
+            "reconciliation_source": "daily_close_history",
+        }
+        result = await db.kronos_pm_disagreements.update_one(update_filter, {"$set": update})
+        if result.modified_count:
+            resolved += 1
+        else:
+            pending += 1
+    return {
+        "ok": True,
+        "checked": checked,
+        "resolved": resolved,
+        "archived_unmapped": archived,
+        "pending": pending,
+        "errors": errors[:20],
+        "generated_at": now.isoformat(),
+    }
+
+
+async def learning_state(limit: int = 1200, persist: bool = False) -> dict[str, Any]:
+    accuracy = await candle_accuracy(limit=limit, persist=persist)
+    overall = accuracy.get("overall") if accuracy.get("ok") else {}
+    recommendations = []
+    for row in (accuracy.get("by_timeframe") or []):
+        sample = int(row.get("sample") or 0)
+        if sample < 12:
+            recommendations.append({"scope": row.get("key"), "action": "COLLECT_MORE_SAMPLES", "reason": f"Only {sample} mature samples."})
+            continue
+        wr = _num(row.get("direction_win_rate_pct"))
+        cone = _num(row.get("cone_coverage_pct"))
+        if wr is not None and wr < 52:
+            recommendations.append({"scope": row.get("key"), "action": "DAMPEN_DIRECTION", "reason": f"Direction win rate {wr}% is below edge threshold."})
+        if cone is not None and cone < 68:
+            recommendations.append({"scope": row.get("key"), "action": "WIDEN_CONE", "reason": f"Cone coverage {cone}% is below 68% target."})
+    health = _learning_health_from_overall(overall)
+    return {
+        "ok": accuracy.get("ok", False),
+        "health": health,
+        "overall": overall,
+        "recommendations": recommendations[:18],
+        "calibration_note": "Kronos now feeds mature forecast accuracy back into live candle forecasts by dampening weak regimes and widening under-covered cones.",
+        "accuracy": accuracy,
+        "generated_at": _now().isoformat(),
+    }
+
+
+def _learning_health_from_overall(overall: dict[str, Any] | None) -> str:
+    overall = overall or {}
+    sample = int(overall.get("sample") or 0)
+    wr = _num(overall.get("direction_win_rate_pct"))
+    cone = _num(overall.get("cone_coverage_pct"))
+    if sample < 12:
+        return "WARMING_UP"
+    if sample >= 40 and wr is not None and wr >= 55 and (cone is None or cone >= 62):
+        return "IMPROVING"
+    if sample >= 40 and wr is not None and wr < 48:
+        return "DEFENSIVE"
+    return "LEARNING"
+
+
+async def disagreement_performance(limit: int = 200, auto_reconcile: bool = True) -> dict[str, Any]:
+    db = get_db()
+    reconciliation = await reconcile_disagreements(limit=max(limit, 250)) if auto_reconcile else None
     rows = await db.kronos_pm_disagreements.find({}, {"_id": 0}).sort("generated_at", -1).to_list(limit)
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         key = f"{row.get('forecast_bias')} vs {row.get('pm_action')}"
-        g = grouped.setdefault(key, {"setup": key, "count": 0, "open_audits": 0})
+        g = grouped.setdefault(key, {"setup": key, "count": 0, "open_audits": 0, "resolved": 0, "archived": 0, "pm_wins": 0, "kronos_wins": 0, "no_edge": 0})
         g["count"] += 1
-        if row.get("status") == "OPEN_AUDIT":
+        if row.get("status") in {"OPEN_AUDIT", "OUT_FOR_AUDIT"}:
             g["open_audits"] += 1
+        elif row.get("status") == "RESOLVED":
+            g["resolved"] += 1
+            winner = str(row.get("winner") or "")
+            if winner == "PM_WON":
+                g["pm_wins"] += 1
+            elif winner == "KRONOS_WON":
+                g["kronos_wins"] += 1
+            elif winner == "NO_EDGE":
+                g["no_edge"] += 1
+        elif row.get("status") == "ARCHIVED_UNMAPPED":
+            g["archived"] += 1
     return {
         "rows": rows,
         "summary": list(grouped.values()),
-        "note": "Performance resolves as future P/L records mature; open audits are retained for review.",
+        "reconciliation": reconciliation,
+        "note": "Disagreements auto-reconcile once enough post-signal price history exists; unresolved rows remain open audits.",
     }
 
 
@@ -1101,10 +1468,15 @@ async def status() -> dict[str, Any]:
     db = get_db()
     latest = await db.kronos_forecast_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
     latest_key = (latest or {}).get("snapshot_key") or _snapshot_key((latest or {}).get("generated_at") or _now().isoformat())
-    disagreements = await db.kronos_pm_disagreements.count_documents({
-        "status": "OPEN_AUDIT",
+    latest_disagreements = await db.kronos_pm_disagreements.count_documents({
+        "status": {"$in": ["OPEN_AUDIT", "OUT_FOR_AUDIT"]},
         "audit_id": {"$regex": f"^{re.escape(str(latest_key))}"},
     })
+    total_open_disagreements = await db.kronos_pm_disagreements.count_documents({
+        "status": {"$in": ["OPEN_AUDIT", "OUT_FOR_AUDIT", None]},
+    })
+    resolved_disagreements = await db.kronos_pm_disagreements.count_documents({"status": "RESOLVED"})
+    archived_disagreements = await db.kronos_pm_disagreements.count_documents({"status": "ARCHIVED_UNMAPPED"})
     age = _age_minutes((latest or {}).get("generated_at"))
     summary = (latest or {}).get("summary") or {}
     now = _now()
@@ -1117,11 +1489,15 @@ async def status() -> dict[str, Any]:
     health = _freshness_status(age)
     pm_coverage = "FULL" if not summary.get("unmapped_pm", 0) else "PARTIAL"
     try:
-        accuracy = await candle_accuracy(limit=600, persist=False)
+        accuracy = await db.kronos_accuracy_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
+        if not accuracy:
+            accuracy = await candle_accuracy(limit=300, persist=False)
         proof = accuracy.get("overall") if accuracy.get("ok") else {}
+        learning_health = _learning_health_from_overall(proof)
     except Exception as exc:
         logger.debug("kronos status accuracy degraded: %s", exc)
         proof = {}
+        learning_health = "UNKNOWN"
     return {
         "ok": True,
         "health": health,
@@ -1133,7 +1509,11 @@ async def status() -> dict[str, Any]:
         "unmapped_pm": summary.get("unmapped_pm", 0),
         "stale_position_context": summary.get("stale_position_context", 0),
         "risk_flags": summary.get("risk_flags", 0),
-        "open_disagreement_audits": disagreements,
+        "open_disagreement_audits": total_open_disagreements,
+        "latest_snapshot_open_disagreement_audits": latest_disagreements,
+        "resolved_disagreement_audits": resolved_disagreements,
+        "archived_unmapped_disagreement_audits": archived_disagreements,
+        "learning_health": learning_health,
         "calendar": {
             "direction_win_rate_pct": None,
             "cone_win_rate_pct": None,
@@ -1145,8 +1525,10 @@ async def status() -> dict[str, Any]:
 
 async def refresh_snapshot() -> dict[str, Any]:
     payload = await forecast(persist=True)
+    accuracy = await candle_accuracy(limit=1200, persist=True)
+    reconciliation = await reconcile_disagreements(limit=750)
     stat = await status()
-    return {"ok": True, "forecast": payload, "status": stat}
+    return {"ok": True, "forecast": payload, "accuracy": accuracy, "reconciliation": reconciliation, "status": stat}
 
 
 async def calendar_month(year: int, month: int) -> dict[str, Any]:

@@ -39,6 +39,7 @@ export default function KronosPage() {
   const [kronos, setKronos] = useState(null);
   const [kronosStatus, setKronosStatus] = useState(null);
   const [kronosAccuracy, setKronosAccuracy] = useState(null);
+  const [kronosLearning, setKronosLearning] = useState(null);
   const [disagreements, setDisagreements] = useState(null);
   const [tab, setTab] = useState("FORECAST");
   const [selectedKey, setSelectedKey] = useState(null);
@@ -69,7 +70,7 @@ export default function KronosPage() {
     const get = (path, fallback, timeout = 10000) =>
       axios.get(`${API}${path}`, { timeout }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
     try {
-      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, accuracyRes, disagreementRes] = await Promise.all([
+      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, accuracyRes, learningRes, disagreementRes] = await Promise.all([
         get("/scan/latest", { results: [] }),
         get("/portfolio_manager/latest", { decisions: [] }, 12000),
         get("/trade_floor/positions", { db_positions: [], live_alpaca: [] }),
@@ -82,6 +83,7 @@ export default function KronosPage() {
         get("/kronos/forecast?persist=true", { forecasts: [] }, 12000),
         get("/kronos/status", { ok: false, health: "DEGRADED" }, 12000),
         get("/kronos/accuracy?limit=900", { ok: false, overall: {} }, 16000),
+        get("/kronos/learning?limit=900", { ok: false, health: "UNKNOWN", recommendations: [] }, 16000),
         get("/kronos/disagreements?limit=250", { rows: [] }),
       ]);
       setScan(scanRes.data);
@@ -96,6 +98,7 @@ export default function KronosPage() {
       setKronos(kronosRes.data);
       setKronosStatus(statusRes.data);
       setKronosAccuracy(accuracyRes.data);
+      setKronosLearning(learningRes.data);
       setDisagreements(disagreementRes.data);
       setLastSync(new Date().toISOString());
     } finally {
@@ -121,6 +124,8 @@ export default function KronosPage() {
       if (d?.data) setDisagreements(d.data);
       const a = await axios.get(`${API}/kronos/accuracy?limit=900&persist=true`, { timeout: 16000 }).catch(() => null);
       if (a?.data) setKronosAccuracy(a.data);
+      const l = await axios.get(`${API}/kronos/learning?limit=900&persist=true`, { timeout: 16000 }).catch(() => null);
+      if (l?.data) setKronosLearning(l.data);
       setLastSync(new Date().toISOString());
     } finally {
       setActionLoading(false);
@@ -269,14 +274,16 @@ export default function KronosPage() {
         items={[
           { label: "Forecast Engine", value: kronosStatus?.health || "CHECKING" },
           { label: "LSE Feed", value: lseHealth?.ok ? "ONLINE" : "DEGRADED" },
+          { label: "Learning", value: kronosStatus?.learning_health || kronosLearning?.health || "CHECKING", color: learningColor(kronosStatus?.learning_health || kronosLearning?.health) },
           { label: "PM Context", value: kronosStatus?.pm_context_health || "CHECKING", color: (kronosStatus?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80", detail: `${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0} mapped` },
-          { label: "Open Audits", value: kronosStatus?.open_disagreement_audits ?? 0, color: kronosStatus?.open_disagreement_audits ? "#fbbf24" : "#4ade80" },
+          { label: "Open Audits", value: kronosStatus?.open_disagreement_audits ?? 0, color: kronosStatus?.open_disagreement_audits ? "#fbbf24" : "#4ade80", detail: `${kronosStatus?.resolved_disagreement_audits ?? 0} resolved / ${kronosStatus?.archived_unmapped_disagreement_audits ?? 0} archived` },
           { label: "Last Sync", value: fmtTime(lastSync), color: accent2 },
         ]}
       />
 
-      <div className="kronos-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(9, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
+      <div className="kronos-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
         <Stat label="MODEL HEALTH" value={kronosStatus?.health || "CHECKING"} sub={`snapshot ${ageText(kronosStatus?.snapshot_age_minutes)}`} color={healthColor(kronosStatus?.health)} accentBar />
+        <Stat label="LEARNING" value={kronosStatus?.learning_health || kronosLearning?.health || "CHECKING"} sub={`${kronosLearning?.overall?.sample ?? kronosAccuracy?.overall?.sample ?? 0} mature samples`} color={learningColor(kronosStatus?.learning_health || kronosLearning?.health)} />
         <Stat label="OPEN UNDERLYINGS" value={stats.underlyings} sub={`${activeForecasts.length} instruments`} color={accent} />
         <Stat label="SPY TODAY" value={`${market.direction || "UNKNOWN"} ${signed(market.forecast_pct)}%`} sub={`cone ${signed(market.cone_low_pct)} to ${signed(market.cone_high_pct)}%`} color={marketColor(market.direction)} />
         <Stat label="P/L DAY CONE" value={fmtMoney(cone.base_usd)} sub={`${fmtMoney(cone.low_usd)} to ${fmtMoney(cone.high_usd)}`} color={Number(cone.base_usd || 0) >= 0 ? "#4ade80" : "#f87171"} />
@@ -333,7 +340,8 @@ export default function KronosPage() {
         <Card title="FORECAST MEMORY / MODEL ACCOUNTABILITY" accentColor={accent2}>
           <div style={memoryGrid}>
             <MemoryItem label="Latest Snapshot" value={kronosStatus?.health || "CHECKING"} detail={`Age: ${ageText(kronosStatus?.snapshot_age_minutes)}. Latest daily snapshot updates in place; full runs are retained separately.`} />
-            <MemoryItem label="Disagreement Audits" value={(disagreements?.rows || []).length} detail="Each PM conflict is saved for future return review." />
+            <MemoryItem label="Learning Engine" value={kronosLearning?.health || kronosStatus?.learning_health || "CHECKING"} detail={kronosLearning?.calibration_note || "Forecast accuracy feeds back into live candle calibration."} />
+            <MemoryItem label="Disagreement Audits" value={`${kronosStatus?.open_disagreement_audits ?? 0} open`} detail={`${kronosStatus?.resolved_disagreement_audits ?? 0} resolved; ${kronosStatus?.archived_unmapped_disagreement_audits ?? 0} old unmapped rows archived.`} />
             <MemoryItem label="PM Map" value={`${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0}`} detail={`${kronosStatus?.unmapped_pm ?? 0} open instruments still unmapped to PM.`} />
             <MemoryItem label="Calendar Score" value={kronosStatus?.calendar?.scored_days ?? 0} detail={`Direction win ${kronosStatus?.calendar?.direction_win_rate_pct ?? "-"}% / cone win ${kronosStatus?.calendar?.cone_win_rate_pct ?? "-"}%.`} />
             <MemoryItem label="Candle Proof" value={kronosAccuracy?.overall?.sample ?? 0} detail={`Direction ${kronosAccuracy?.overall?.direction_win_rate_pct ?? "-"}% / cone ${kronosAccuracy?.overall?.cone_coverage_pct ?? "-"}% / MAE ${kronosAccuracy?.overall?.mae_pct ?? "-"}%.`} />
@@ -954,13 +962,17 @@ function ForecastStack({ item }) {
 function DisagreementView({ data, liveRows }) {
   const rows = data?.rows || [];
   const summary = data?.summary || [];
+  const reconciliation = data?.reconciliation || {};
+  const resolved = rows.filter(r => r.status === "RESOLVED").length;
+  const open = rows.filter(r => !r.status || r.status === "OPEN_AUDIT" || r.status === "OUT_FOR_AUDIT").length;
   return (
     <div>
       <div style={memoryGrid}>
         <MemoryItem label="Live Conflicts" value={liveRows.length} detail="Current Kronos vs PM disagreements." />
-        <MemoryItem label="Saved Audits" value={rows.length} detail="Stored disagreement snapshots." />
+        <MemoryItem label="Open Audits" value={open} detail={`${reconciliation.resolved || 0} reconciled on latest pull.`} />
+        <MemoryItem label="Resolved" value={resolved} detail="Matured against post-signal price action." />
         <MemoryItem label="Setups" value={summary.length} detail="Grouped disagreement patterns." />
-        <MemoryItem label="Performance" value="TRACKING" detail="Resolved when future returns mature." />
+        <MemoryItem label="Performance" value={summary.reduce((n, s) => n + Number(s.kronos_wins || 0), 0)} detail="Kronos wins logged when forecast beat PM after maturity." />
       </div>
       <Card title="PM DISAGREEMENT PERFORMANCE LEDGER" accentColor="#fbbf24">
         {!rows.length ? (
@@ -969,7 +981,7 @@ function DisagreementView({ data, liveRows }) {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
               <thead>
-                <tr><th style={th}>TIME</th><th style={th}>TICKER</th><th style={th}>TYPE</th><th style={th}>PM</th><th style={th}>KRONOS</th><th style={th}>SCORE</th><th style={th}>STATUS</th></tr>
+                <tr><th style={th}>TIME</th><th style={th}>TICKER</th><th style={th}>TYPE</th><th style={th}>PM</th><th style={th}>KRONOS</th><th style={th}>SCORE</th><th style={th}>ACTUAL</th><th style={th}>WINNER</th><th style={th}>STATUS</th></tr>
               </thead>
               <tbody>
                 {rows.slice(0, 80).map((r, i) => (
@@ -980,7 +992,9 @@ function DisagreementView({ data, liveRows }) {
                     <td style={{ ...td, color: routeColor(r.pm_action) }}>{r.pm_action}</td>
                     <td style={{ ...td, color: biasColors[r.forecast_bias] || labelLight }}>{r.forecast_bias}</td>
                     <td style={td}>{r.kronos_score}</td>
-                    <td style={{ ...td, color: "#fbbf24" }}>{r.status || "OPEN_AUDIT"}</td>
+                    <td style={{ ...td, color: pctColor(r.actual_return_pct) }}>{r.actual_return_pct == null ? "-" : `${signed(r.actual_return_pct)}%`}</td>
+                    <td style={{ ...td, color: winnerColor(r.winner) }}>{r.winner || "-"}</td>
+                    <td style={{ ...td, color: r.status === "RESOLVED" ? "#4ade80" : "#fbbf24" }}>{r.status || "OPEN_AUDIT"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1621,6 +1635,22 @@ function healthColor(v) {
   if (h === "LIVE") return "#4ade80";
   if (h === "AGING" || h === "DEGRADED") return "#fbbf24";
   if (h === "STALE" || h === "MISSING") return "#f87171";
+  return muted;
+}
+
+function learningColor(v) {
+  const h = String(v || "").toUpperCase();
+  if (h === "IMPROVING" || h === "CALIBRATED") return "#4ade80";
+  if (h === "LEARNING" || h === "WARMING_UP" || h === "UNKNOWN") return "#fbbf24";
+  if (h === "DEFENSIVE" || h === "NO_PROOF") return "#f87171";
+  return muted;
+}
+
+function winnerColor(v) {
+  const h = String(v || "").toUpperCase();
+  if (h === "KRONOS_WON" || h === "BOTH_RIGHT") return "#4ade80";
+  if (h === "PM_WON" || h === "NO_EDGE") return "#fbbf24";
+  if (h === "BOTH_WRONG") return "#f87171";
   return muted;
 }
 
