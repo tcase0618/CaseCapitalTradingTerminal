@@ -20,6 +20,7 @@ export default function PerformancePage() {
   const [refreshingPrices, setRefreshingPrices] = useState(false);
   const [priceSource, setPriceSource] = useState(null);
   const [edge, setEdge] = useState(null);
+  const [optionsGap, setOptionsGap] = useState(null);
 
   const refresh = useCallback(async () => {
     // Use independent .catch so one failure doesn't kill the others
@@ -31,6 +32,7 @@ export default function PerformancePage() {
     axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
     axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
     axios.get(`${API}/edge/overview`).then(r => setEdge(r.data)).catch(e => console.error("edge:", e));
+    axios.get(`${API}/signals/options_gap?limit=300`).then(r => setOptionsGap(r.data)).catch(e => console.error("options gap:", e));
   }, [curveDays]);
   useEffect(() => {
     refresh();
@@ -194,6 +196,8 @@ export default function PerformancePage() {
           );
         })()}
       </Card>
+
+      <OptionsAlphaGapCard data={optionsGap} />
 
       {/* Legacy detailed table — DEPRECATED replaced by Active/Closed split + Options bar chart above */}
       <Card title={`LEGACY DETAIL · ${tracker?.tracked || 0} TRACKED · COLLAPSED BY DEFAULT`}>
@@ -569,6 +573,71 @@ function MiniEdge({ label, value, color }) {
 
 const fmt = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}`;
 const pctColor = (v) => v == null ? muted : v > 0 ? "#4ade80" : v < 0 ? "#f87171" : labelLight;
+
+function OptionsAlphaGapCard({ data }) {
+  const rows = data?.top_missed_or_blocked || [];
+  return (
+    <Card title="OPTIONS ALPHA GAP — PROXY VS CAPTURED REALITY">
+      {!data ? (
+        <div style={{ color: muted, padding: 18 }}>Building options alpha gap diagnostics...</div>
+      ) : (
+        <div style={{ display: "grid", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+            <MiniGap label="Closed Equity Avg" value={data.closed_equity_avg_pct != null ? `${fmt(data.closed_equity_avg_pct)}%` : "—"} color={pctColor(data.closed_equity_avg_pct)} />
+            <MiniGap label="Closed Option Proxy Avg" value={data.closed_option_proxy_avg_pct != null ? `${fmt(data.closed_option_proxy_avg_pct)}%` : "—"} color={pctColor(data.closed_option_proxy_avg_pct)} />
+            <MiniGap label="100%+ Proxy Plays" value={data.option_proxy_100pct_plus || 0} color="#fbbf24" />
+            <MiniGap label="Captured / Attempted" value={data.captured_or_attempted_100pct_plus || 0} color={accent2} />
+          </div>
+          <div style={{ color: muted, fontSize: 11, lineHeight: 1.45 }}>
+            Option proxy is a convexity estimate from the first signal snapshot, not a filled trade. This table shows whether the Options Desk had an executable record or why it did not capture the move.
+          </div>
+          {!rows.length ? (
+            <div style={{ color: muted, padding: 12 }}>No 100%+ option proxy gaps detected in the current sample.</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
+                    <th style={th}>TICKER</th>
+                    <th style={th}>FIRST SEEN</th>
+                    <th style={th}>EQUITY</th>
+                    <th style={th}>OPTION PROXY</th>
+                    <th style={th}>STATUS</th>
+                    <th style={th}>WHY</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.slice(0, 12).map(r => (
+                    <tr key={`${r.ticker}-${r.first_seen_date}`} style={{ borderTop: hairline }}>
+                      <td style={{ ...td, color: accent, fontWeight: 900 }}>${r.ticker}</td>
+                      <td style={td}>{r.first_seen_date || "—"}</td>
+                      <td style={{ ...td, color: pctColor(r.equity_gain_pct), fontWeight: 800 }}>{r.equity_gain_pct != null ? `${fmt(r.equity_gain_pct)}%` : "—"}</td>
+                      <td style={{ ...td, color: pctColor(r.options_proxy_pct), fontWeight: 900 }}>{r.options_proxy_pct != null ? `${fmt(r.options_proxy_pct)}%` : "—"}</td>
+                      <td style={{ ...td, color: r.status === "CAPTURED_OR_ATTEMPTED" ? "#4ade80" : r.status === "BLOCKED_BY_OPTIONS_DESK" ? "#f87171" : "#fbbf24", fontWeight: 800 }}>
+                        {String(r.status || "UNKNOWN").replace(/_/g, " ")}
+                      </td>
+                      <td style={{ ...td, color: labelLight, minWidth: 260 }}>{r.reason || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function MiniGap({ label, value, color = labelLight }) {
+  return (
+    <div style={{ border: hairline, background: "rgba(255,255,255,0.018)", padding: "11px 12px", display: "grid", gap: 6 }}>
+      <span style={{ color: dim, fontSize: 9, letterSpacing: "0.14em" }}>{label}</span>
+      <strong style={{ color, fontSize: 22 }}>{value}</strong>
+    </div>
+  );
+}
+
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400 };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em" };
 const edgePanel = { border: hairline, padding: 12, background: "rgba(255,255,255,0.018)" };

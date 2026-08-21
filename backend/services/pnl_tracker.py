@@ -817,6 +817,104 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
     return out
 
 
+async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
+    """Compare equity signal outcomes against theoretical option proxy gains.
+
+    The proxy is useful for spotting missed convexity, but it is not a filled
+    trade record. This summary makes that distinction explicit and attaches the
+    latest Options Desk blocker reasons where available.
+    """
+    db = get_db()
+    rows = await signals_tracker_summary(limit=limit)
+    today = datetime.now(timezone.utc).date()
+    closed: list[dict[str, Any]] = []
+    active: list[dict[str, Any]] = []
+    for row in rows:
+        end = row.get("hold_end_date")
+        is_active = True
+        if end:
+            try:
+                is_active = datetime.fromisoformat(str(end)).date() >= today
+            except Exception:
+                is_active = bool(row.get("is_active"))
+        if is_active:
+            active.append(row)
+        else:
+            closed.append(row)
+
+    option_proxy_rows = [r for r in rows if r.get("options_return_proxy_pct") is not None]
+    closed_option_proxy = [r for r in closed if r.get("options_return_proxy_pct") is not None]
+    closed_equity = [r for r in closed if r.get("gain_pct") is not None]
+    huge_proxy = [r for r in option_proxy_rows if float(r.get("options_return_proxy_pct") or 0) >= 100]
+    tickers = sorted({str(r.get("ticker") or "").upper() for r in huge_proxy if r.get("ticker")})
+
+    latest_candidates = await db.options_desk_candidates.find(
+        {"ticker": {"$in": tickers}}, {"_id": 0}
+    ).sort("generated_at", -1).to_list(500) if tickers else []
+    candidate_by_ticker: dict[str, dict[str, Any]] = {}
+    for c in latest_candidates:
+        candidate_by_ticker.setdefault(str(c.get("ticker") or "").upper(), c)
+
+    order_rows = await db.options_desk_orders.find(
+        {"ticker": {"$in": tickers}}, {"_id": 0}
+    ).sort("created_at", -1).to_list(500) if tickers else []
+    order_by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for order in order_rows:
+        order_by_ticker.setdefault(str(order.get("ticker") or "").upper(), []).append(order)
+
+    def _avg(items: list[dict[str, Any]], key: str) -> float | None:
+        vals = [float(x[key]) for x in items if x.get(key) is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    missed = []
+    for row in sorted(huge_proxy, key=lambda r: float(r.get("options_return_proxy_pct") or 0), reverse=True)[:25]:
+        ticker = str(row.get("ticker") or "").upper()
+        candidate = candidate_by_ticker.get(ticker) or {}
+        orders = order_by_ticker.get(ticker) or []
+        blocked = candidate.get("blocked_reasons") or []
+        if orders:
+            status = "CAPTURED_OR_ATTEMPTED"
+            reason = f"{len(orders)} options order record(s) exist"
+        elif blocked:
+            status = "BLOCKED_BY_OPTIONS_DESK"
+            reason = "; ".join(str(x) for x in blocked[:4])
+        elif not row.get("options_premium_at_entry"):
+            status = "NO_EXECUTABLE_OPTION_SNAPSHOT"
+            reason = "Signal tracker has no entry premium/contract snapshot"
+        else:
+            status = "NOT_ROUTED_OR_NOT_BUILT"
+            reason = "No Options Desk candidate/order record found for this ticker"
+        missed.append({
+            "ticker": ticker,
+            "first_seen_date": row.get("first_seen_date"),
+            "equity_gain_pct": row.get("gain_pct"),
+            "equity_peak_gain_pct": row.get("peak_gain_pct"),
+            "options_proxy_pct": row.get("options_return_proxy_pct"),
+            "options_strategy": row.get("options_strategy"),
+            "options_premium_at_entry": row.get("options_premium_at_entry"),
+            "latest_candidate_route": candidate.get("route"),
+            "latest_candidate_ready": candidate.get("manual_fire_ready"),
+            "latest_blockers": blocked,
+            "status": status,
+            "reason": reason,
+        })
+
+    return {
+        "ok": True,
+        "basis": "option_proxy_not_filled_trade",
+        "tracked_rows": len(rows),
+        "closed_rows": len(closed),
+        "active_rows": len(active),
+        "closed_equity_avg_pct": _avg(closed_equity, "gain_pct"),
+        "closed_option_proxy_avg_pct": _avg(closed_option_proxy, "options_return_proxy_pct"),
+        "option_proxy_rows": len(option_proxy_rows),
+        "option_proxy_100pct_plus": len(huge_proxy),
+        "captured_or_attempted_100pct_plus": sum(1 for r in missed if r["status"] == "CAPTURED_OR_ATTEMPTED"),
+        "top_missed_or_blocked": missed,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def options_performance_summary() -> dict[str, Any]:
     db = get_db()
     rows = await db.options_performance.find({}, {"_id": 0}).to_list(5000)

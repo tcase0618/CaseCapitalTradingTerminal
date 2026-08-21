@@ -1337,3 +1337,167 @@ async def current_week_cached(scan_tickers: set[str] | None = None,
     snapshot["cache_status"] = "MISS"
     snapshot["cache_age_minutes"] = 0
     return _json_safe(snapshot)
+
+
+def _flatten_week_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket in (snapshot.get("by_day") or {}).values():
+        if isinstance(bucket, list):
+            rows.extend([r for r in bucket if isinstance(r, dict)])
+    rows.extend([r for r in snapshot.get("rows") or [] if isinstance(r, dict)])
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("ticker") or "").upper(), str(row.get("earnings_date") or ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def build_pm_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    """Translate an earnings setup into the scanner-shaped evidence PM expects.
+
+    This is advisory routing only. It does not submit orders and does not bypass
+    the existing PM/execution gate chain.
+    """
+    ticker = str(row.get("ticker") or "").upper().strip()
+    price = _num(row.get("current_price")) or 0.0
+    setup_score = _num(row.get("earnings_setup_score")) or 0.0
+    beat = _num(row.get("beat_probability_pct"))
+    hist_move = _num((row.get("historical_moves") or {}).get("avg_abs_move_pct")) or 6.0
+    hist_move = max(3.0, min(18.0, hist_move))
+    direction = "BULLISH"
+    signals = ["earnings_setup"]
+    if row.get("earnings_setup_rating") == "TRADEABLE":
+        signals.append("earnings_tradeable")
+    if row.get("options_pricing_signal") == "OPTIONS UNDERPRICED":
+        signals.append("earnings_options_underpriced")
+    if beat is not None and beat >= 60:
+        signals.append("earnings_beat_edge")
+    pead = row.get("pead") or {}
+    if pead.get("active"):
+        signals.append(str(pead.get("signal") or "pead_confirmed").lower())
+        direction = "BEARISH" if pead.get("direction") == "BEARISH" else "BULLISH"
+    if str((row.get("option_strategy") or {}).get("name") or "").upper().find("PUT") >= 0:
+        direction = "BEARISH"
+
+    target_mult = 1 + hist_move / 100.0
+    stop_mult = 1 - min(10.0, max(4.0, hist_move * 0.65)) / 100.0
+    if direction == "BEARISH":
+        target = price * (1 - hist_move / 100.0) if price else 0.0
+        stop = price * (1 + min(10.0, max(4.0, hist_move * 0.65)) / 100.0) if price else 0.0
+    else:
+        target = price * target_mult if price else 0.0
+        stop = price * stop_mult if price else 0.0
+
+    return _json_safe({
+        "ticker": ticker,
+        "source": "earnings_war_room",
+        "source_type": "earnings_pm_advisory",
+        "price": round(price, 4) if price else None,
+        "current_price": round(price, 4) if price else None,
+        "target_blended": round(target, 4) if target else None,
+        "target_high": round(target, 4) if target else None,
+        "stop_loss": round(stop, 4) if stop else None,
+        "entry_low": round(price * 0.995, 4) if price else None,
+        "entry_high": round(price * 1.005, 4) if price else None,
+        "signals": signals,
+        "signal_score": round(setup_score, 2),
+        "trade_score": round(setup_score, 2),
+        "learning_score": round(setup_score, 2),
+        "sector": row.get("sector"),
+        "risk": {
+            "level": "HIGH" if "earnings_tradeable" in signals else "MEDIUM",
+            "score": round(min(10.0, max(2.0, hist_move / 2.0)), 2),
+            "source": "earnings_event_risk",
+        },
+        "time_target": "earnings_event_window",
+        "options": {
+            "strategy": (row.get("option_strategy") or {}).get("name"),
+            "strategy_reason": (row.get("option_strategy") or {}).get("reason"),
+            "direction": direction,
+            "iv_rank": (row.get("options") or {}).get("iv_rank"),
+            "implied_move_pct": (row.get("options") or {}).get("implied_move_pct"),
+        },
+        "earnings": {
+            "earnings_date": row.get("earnings_date"),
+            "am_pm": row.get("am_pm"),
+            "setup_score": setup_score,
+            "setup_rating": row.get("earnings_setup_rating"),
+            "beat_probability_pct": beat,
+            "options_pricing_signal": row.get("options_pricing_signal"),
+            "historical_move_pct": hist_move,
+            "battle_card": row.get("battle_card"),
+        },
+    })
+
+
+async def route_week_to_pm(week_offset: int = 0, min_score: float = 58.0, persist: bool = True) -> dict[str, Any]:
+    from . import portfolio_manager
+
+    db = get_db()
+    last_scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1}, sort=[("finished_at", -1)])
+    scan_set = {str(r.get("ticker") or "").upper() for r in (last_scan or {}).get("results", []) or []}
+    snapshot = await current_week_cached(scan_tickers=scan_set, week_offset=week_offset, max_age_minutes=120)
+    rows = _flatten_week_rows(snapshot)
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        score = _num(row.get("earnings_setup_score")) or 0.0
+        pead = row.get("pead") or {}
+        if score >= float(min_score or 0) or row.get("earnings_setup_rating") == "TRADEABLE" or pead.get("active"):
+            eligible.append(row)
+
+    candidates = [build_pm_candidate(row) for row in eligible if row.get("ticker")]
+    pm_rows = portfolio_manager.evaluate_rows(candidates, equity=portfolio_manager.DEFAULT_EQUITY, mode="BALANCED")
+    by_ticker = {str(r.get("ticker") or "").upper(): r for r in pm_rows}
+    decisions = []
+    now_iso = _now().isoformat()
+    for row in eligible:
+        ticker = str(row.get("ticker") or "").upper()
+        pm = by_ticker.get(ticker) or {}
+        doc = _json_safe({
+            "ticker": ticker,
+            "earnings_date": row.get("earnings_date"),
+            "week_of": snapshot.get("week_of"),
+            "authority": "PM_DISCRETION_NO_EARNINGS_EXECUTION",
+            "pm_decision": pm,
+            "earnings_setup_score": row.get("earnings_setup_score"),
+            "earnings_setup_rating": row.get("earnings_setup_rating"),
+            "options_pricing_signal": row.get("options_pricing_signal"),
+            "option_strategy": row.get("option_strategy"),
+            "routed_at": now_iso,
+        })
+        decisions.append(doc)
+        if persist:
+            await db.earnings_pm_decisions.update_one(
+                {"ticker": ticker, "earnings_date": row.get("earnings_date")},
+                {"$set": stamped(doc)},
+                upsert=True,
+            )
+            try:
+                from . import postgres_store
+                await postgres_store.mirror_document("earnings_pm_decisions", doc, source="earnings")
+            except Exception:
+                pass
+    return {
+        "ok": True,
+        "week_of": snapshot.get("week_of"),
+        "week_offset": int(week_offset or 0),
+        "eligible": len(eligible),
+        "routed": len(decisions),
+        "min_score": float(min_score or 0),
+        "authority": "PM_DISCRETION_NO_EARNINGS_EXECUTION",
+        "decisions": decisions,
+        "generated_at": now_iso,
+    }
+
+
+async def latest_pm_decisions(limit: int = 100, ticker: str | None = None) -> dict[str, Any]:
+    db = get_db()
+    query: dict[str, Any] = {}
+    if ticker:
+        query["ticker"] = str(ticker).upper()
+    rows = await db.earnings_pm_decisions.find(query, {"_id": 0}).sort("routed_at", -1).to_list(max(1, min(500, int(limit or 100))))
+    return {"ok": True, "decisions": rows, "count": len(rows), "generated_at": _now().isoformat()}

@@ -61,14 +61,26 @@ def _same_scan(left: Any, right: Any) -> bool:
     return str(left).replace("Z", "+00:00") == str(right).replace("Z", "+00:00")
 
 
-def _freshness_blocker(key: str, label: str, detail: str) -> dict[str, Any]:
+def _freshness_blocker(key: str, label: str, detail: str, scopes: list[str] | None = None) -> dict[str, Any]:
     return {
         "key": key,
         "label": label,
         "status": "BLOCK",
         "critical": True,
         "blocks_trading": True,
-        "execution_scopes": ["system", "equity", "options"],
+        "execution_scopes": scopes or ["equity", "options"],
+        "detail": detail,
+    }
+
+
+def _freshness_warning(key: str, label: str, detail: str) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "status": "WARN",
+        "critical": False,
+        "blocks_trading": False,
+        "execution_scopes": [],
         "detail": detail,
     }
 
@@ -149,9 +161,10 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
             "pm_scan_mismatch",
             "PM Plan Scan Mismatch",
             f"PM plan is tied to {pm_scan_at or 'unknown'}, latest scan is {latest_scan_at}.",
+            ["equity", "options"],
         ))
     if latest_scan_at and not _same_scan(court_scan_at, latest_scan_at):
-        critical_freshness.append(_freshness_blocker(
+        critical_freshness.append(_freshness_warning(
             "case_court_scan_mismatch",
             "Case Court Scan Mismatch",
             f"Case Court docket is tied to {court_scan_at or 'unknown'}, latest scan is {latest_scan_at}.",
@@ -161,6 +174,7 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
             "options_scan_mismatch",
             "Options Desk Scan Mismatch",
             f"Options candidates are tied to {options_scan_at}, latest scan is {latest_scan_at}.",
+            ["options"],
         ))
     for row in critical_freshness:
         for scope in row["execution_scopes"]:

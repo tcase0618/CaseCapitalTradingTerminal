@@ -207,7 +207,7 @@ async def check(
 
 
 async def overview(force_refresh: bool = False) -> dict[str, Any]:
-    # UI/header calls should be fast and stable. Order paths call check() directly
-    # and still perform the full fresh validation before execution.
-    truth = None if force_refresh else await _cached_truth_snapshot(allow_stale=True)
+    # UI/header calls should not keep displaying an old BLOCK after data truth
+    # has recovered. Order paths still call check() directly and revalidate.
+    truth = None if force_refresh else await _cached_truth_snapshot(allow_stale=False)
     return await check(scope="system", force_refresh=force_refresh, truth=truth, record=False)

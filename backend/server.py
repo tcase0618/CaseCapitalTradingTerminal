@@ -977,6 +977,13 @@ async def signals_options_curve(days: int = 90):
     return {"days": days, "curve": await pnl_tracker.daily_options_pnl_curve(days=days)}
 
 
+@api.get("/signals/options_gap")
+async def signals_options_gap(limit: int = 300):
+    """Explain theoretical options proxy winners versus actual desk capture."""
+    from services import pnl_tracker
+    return await pnl_tracker.options_alpha_gap_summary(limit=limit)
+
+
 @api.get("/signals/benchmark_curve")
 async def signals_benchmark_curve(days: int = 90):
     """Total terminal performance versus SPY as the S&P 500 proxy."""
@@ -1261,6 +1268,18 @@ async def v32_earnings_divergences_dispatch(week_offset: int = 0):
     snapshot = await earnings_engine.current_week_cached(scan_tickers=scan_set, week_offset=week_offset)
     result = await telegram_service.dispatch_earnings_divergences(snapshot)
     return {"ok": result.get("messages_sent", 0) > 0, **result}
+
+
+@api.post("/v32/earnings_pm/route")
+async def v32_earnings_pm_route(week_offset: int = 0, min_score: float = 58.0):
+    from services import earnings_engine
+    return await earnings_engine.route_week_to_pm(week_offset=week_offset, min_score=min_score, persist=True)
+
+
+@api.get("/v32/earnings_pm/decisions")
+async def v32_earnings_pm_decisions(limit: int = 100, ticker: str | None = None):
+    from services import earnings_engine
+    return await earnings_engine.latest_pm_decisions(limit=limit, ticker=ticker)
 
 
 @api.get("/v32/lottery")

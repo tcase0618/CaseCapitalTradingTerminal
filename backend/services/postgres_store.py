@@ -45,6 +45,7 @@ CRITICAL_COLLECTIONS: tuple[str, ...] = (
     "options_desk_trades",
     "options_desk_risk_checks",
     "options_mark_audits",
+    "earnings_pm_decisions",
     "case_court_sessions",
     "case_court_trials",
     "pharma_pdufa",

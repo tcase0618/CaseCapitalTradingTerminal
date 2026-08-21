@@ -40,6 +40,8 @@ export default function EarningsPage() {
   const [weekOffset, setWeekOffset] = useState(0);
   const [dispatching, setDispatching] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState("");
+  const [routing, setRouting] = useState(false);
+  const [routeStatus, setRouteStatus] = useState("");
   const [lseHealth, setLseHealth] = useState(null);
 
   useEffect(() => {
@@ -103,6 +105,19 @@ export default function EarningsPage() {
     }
   };
 
+  const routeToPm = async () => {
+    setRouting(true);
+    setRouteStatus("");
+    try {
+      const res = await axios.post(`${API}/v32/earnings_pm/route`, null, { params: { week_offset: weekOffset, min_score: 58 } });
+      setRouteStatus(res.data?.ok ? `PM ROUTED ${res.data.routed || 0}` : "PM ROUTE FAILED");
+    } catch {
+      setRouteStatus("PM ROUTE FAILED");
+    } finally {
+      setRouting(false);
+    }
+  };
+
   return (
     <CrtShell title="EARNINGS WAR ROOM">
       <div className="earnings-war-room">
@@ -115,6 +130,9 @@ export default function EarningsPage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button style={weekButton} onClick={routeToPm} disabled={routing}>
+            {routing ? "ROUTING..." : "ROUTE TO PM"}
+          </button>
           <button style={weekButton} onClick={() => setWeekOffset(0)}>CURRENT</button>
           <button style={weekButton} onClick={() => setWeekOffset(v => v + 1)}>NEXT WEEK {">"}</button>
         </div>
@@ -133,6 +151,7 @@ export default function EarningsPage() {
       <div style={sourceStrip}>
         <span>SOURCES: {sourceSummaryWithLse || "NO LIVE SOURCE ROWS"}</span>
         <span>CACHE: {data?.cache_status || "PENDING"}{data?.cache_age_minutes != null ? ` | ${data.cache_age_minutes}M OLD` : ""}</span>
+        <span>PM: {routeStatus || "ADVISORY READY"}</span>
       </div>
 
       {loading && (

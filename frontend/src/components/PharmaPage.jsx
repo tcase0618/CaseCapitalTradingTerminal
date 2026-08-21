@@ -37,7 +37,7 @@ export default function PharmaPage() {
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
   const [selectedDate, setSelectedDate] = useState(null);
-  const [activeTab, setActiveTab] = useState("COMMAND");
+  const [activeTab, setActiveTab] = useState("FDA_CALENDAR");
 
   const loadCalendar = useCallback((year = calendarYear, month = calendarMonth, forceRefresh = false) => {
     setCalendarLoading(true);
@@ -45,7 +45,8 @@ export default function PharmaPage() {
       .then(r => {
         setCalendar(r.data || null);
         const firstEventDay = (r.data?.days || []).find(d => d.event_count > 0);
-        setSelectedDate(prev => prev || firstEventDay?.date || null);
+        const prefix = `${year}-${String(month).padStart(2, "0")}-`;
+        setSelectedDate(prev => (prev && String(prev).startsWith(prefix)) ? prev : firstEventDay?.date || null);
       })
       .catch(() => {})
       .finally(() => setCalendarLoading(false));
@@ -103,12 +104,13 @@ export default function PharmaPage() {
   };
 
   const summary = useMemo(() => {
-    const counts = pdufa.reduce((a, p) => {
+    const baseRows = pdufa.length ? pdufa : (calendar?.events || []);
+    const counts = baseRows.reduce((a, p) => {
       a[p.tier] = (a[p.tier] || 0) + 1;
       return a;
     }, {});
-    const sorted = [...pdufa].sort((a, b) => (b.binary_event_score || 0) - (a.binary_event_score || 0));
-    const urgent = pdufa.filter(p => Number(p.days_until) <= 14).sort((a, b) => (a.days_until || 999) - (b.days_until || 999));
+    const sorted = [...baseRows].sort((a, b) => (b.binary_event_score || 0) - (a.binary_event_score || 0));
+    const urgent = baseRows.filter(p => Number(p.days_until) <= 14).sort((a, b) => (a.days_until || 999) - (b.days_until || 999));
     const speculative = sorted.map(p => ({
       ...p,
       riskFlags: [
@@ -119,8 +121,8 @@ export default function PharmaPage() {
         p.trial?.status && !["COMPLETED", "ACTIVE_NOT_RECRUITING"].includes(p.trial.status) ? `trial ${p.trial.status}` : null,
       ].filter(Boolean),
     }));
-    return { counts, leader: sorted[0], urgent, speculative };
-  }, [pdufa]);
+    return { counts, leader: sorted[0], urgent, speculative, baseRows };
+  }, [pdufa, calendar]);
 
   return (
     <CrtShell
@@ -132,7 +134,7 @@ export default function PharmaPage() {
       }
     >
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="PDUFA - 90D" value={pdufa.length} sub="UPCOMING" color={accent} accentBar />
+        <Stat label="PDUFA - 90D" value={pdufa.length} sub={`${calendar?.summary?.events || 0} FDA MONTH`} color={accent} accentBar />
         <Stat label="CATALYST SHOCKS" value={shocks.length} sub={`${shocks.filter(s => Number(s.shock_score) >= 75).length} HOT`} color="#fb7185" />
         <Stat label="STRONG >=80" value={summary.counts.STRONG || 0} sub="AUTO-ENTER" color={TIER_COLOR.STRONG} />
         <Stat label="WATCH >=65" value={summary.counts.WATCH || 0} sub="MONITORING" color={TIER_COLOR.WATCH} />
@@ -143,8 +145,8 @@ export default function PharmaPage() {
 
       <div style={pharmaTabBar}>
         {[
-          ["COMMAND", "Command"],
           ["FDA_CALENDAR", "FDA Calendar"],
+          ["COMMAND", "Command"],
           ["TRACK_RECORD", "Track Record"],
         ].map(([key, label]) => (
           <button key={key} onClick={() => setActiveTab(key)} style={pharmaTab(activeTab === key)}>
@@ -208,7 +210,9 @@ export default function PharmaPage() {
               </div>
             </div>
           ) : (
-            <div style={{ color: muted, padding: 20 }}>No PDUFA events loaded. Run Pharma Scan.</div>
+            <div style={{ color: muted, padding: 20 }}>
+              No scored 90-day PDUFA events are loaded. The FDA Calendar tab still shows the imported live FDA docket.
+            </div>
           )}
         </Card>
 
@@ -257,7 +261,10 @@ export default function PharmaPage() {
 
           <Card title="PDUFA CALENDAR - NEXT 90 DAYS - SORTED BY SCORE">
         {!pdufa.length ? (
-          <div style={{ color: muted, padding: 20 }}>No PDUFA dates loaded. Click PHARMA SCAN to pull from FDA calendar.</div>
+          <div style={{ color: muted, padding: 20 }}>
+            No scored next-90-day PDUFA rows are currently active. FDA calendar has {calendar?.summary?.events || 0} event(s)
+            for {monthName(calendarMonth)} {calendarYear}; use the FDA Calendar subtab for the full docket.
+          </div>
         ) : (
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
