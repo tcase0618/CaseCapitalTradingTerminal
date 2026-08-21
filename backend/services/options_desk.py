@@ -72,6 +72,10 @@ OPTIONS_ALPACA_REFRESH_LIMIT = int(os.environ.get("OPTIONS_ALPACA_REFRESH_LIMIT"
 OPTIONS_EXECUTION_ENABLED = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
 OPTIONS_ALLOW_INDICATIVE_EXECUTION = os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
 OPTIONS_MAX_QUOTE_AGE_SECONDS = int(os.environ.get("OPTIONS_MAX_QUOTE_AGE_SECONDS", "900") or 900)
+OPTIONS_PM_MIN_SCORE = float(os.environ.get("OPTIONS_PM_MIN_SCORE", "56") or 56)
+OPTIONS_PM_MIN_RR = float(os.environ.get("OPTIONS_PM_MIN_RR", "1.20") or 1.20)
+OPTIONS_WATCH_MIN_SCORE = float(os.environ.get("OPTIONS_WATCH_MIN_SCORE", "45") or 45)
+OPTIONS_WATCH_MIN_RR = float(os.environ.get("OPTIONS_WATCH_MIN_RR", "1.15") or 1.15)
 ALPACA_DATA_BASE = "https://data.alpaca.markets"
 ALPACA_OPTIONS_FEED = os.environ.get("OPTIONS_APCA_DATA_FEED", "indicative").strip() or "indicative"
 OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
@@ -888,10 +892,10 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         reasons.append("PM prefers equity, but paper option scout is allowed if score/RR clear.")
     if score >= 76 and rr >= 1.7 and iv_rank < 75:
         return "BOTH", ["High score and clean option conditions allow both desks."]
-    if score >= 58 and rr >= 1.3 and (iv_rank < 80 or event_scout):
+    if score >= OPTIONS_PM_MIN_SCORE and rr >= OPTIONS_PM_MIN_RR and (iv_rank < 80 or event_scout):
         reasons.append("PM approves options as best expression for this setup.")
         return "OPTION", reasons
-    if action == "WATCH" and score >= 48 and rr >= 1.25 and (iv_rank < 75 or event_scout):
+    if action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank < 75 or event_scout):
         reasons.append("Paper scout lane: small defined-risk option allowed for PM watchlist learning.")
         return "OPTION", reasons
     return "EQUITY", ["Equity expression preferred under current PM thresholds."]
@@ -913,9 +917,9 @@ def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -
     iv_rank = float(opts.get("iv_rank") or 50)
     strategy = str(opts.get("strategy") or "").upper()
     event_scout = strategy in {"LONG_CALL_EVENT_SCOUT"}
-    if score >= 58 and rr >= 1.3 and (iv_rank < 80 or event_scout):
+    if score >= OPTIONS_PM_MIN_SCORE and rr >= OPTIONS_PM_MIN_RR and (iv_rank < 80 or event_scout):
         return True
-    return action == "WATCH" and score >= 48 and rr >= 1.25 and (iv_rank < 75 or event_scout)
+    return action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank < 75 or event_scout)
 
 
 def _risk_budget(route: str, action: str, score: float) -> float:
@@ -1148,8 +1152,10 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             pm_action = str(pm_row.get("action") or "").upper()
             should_refresh = (
                 pm_action in {"ACCUMULATE", "STARTER", "WATCH"}
-                and pm_score >= 48
-                and pm_rr >= 1.25
+                and (
+                    (pm_action == "WATCH" and pm_score >= OPTIONS_WATCH_MIN_SCORE and pm_rr >= OPTIONS_WATCH_MIN_RR)
+                    or (pm_action in {"ACCUMULATE", "STARTER"} and pm_score >= OPTIONS_PM_MIN_SCORE and pm_rr >= OPTIONS_PM_MIN_RR)
+                )
             )
             if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
                 from . import options_engine
@@ -1252,6 +1258,10 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
                 "min_option_premium": MIN_OPTION_PREMIUM,
                 "price_basis": PRICE_BASIS,
                 "alpaca_refresh_limit": OPTIONS_ALPACA_REFRESH_LIMIT,
+                "pm_min_score": OPTIONS_PM_MIN_SCORE,
+                "pm_min_rr": OPTIONS_PM_MIN_RR,
+                "watch_min_score": OPTIONS_WATCH_MIN_SCORE,
+                "watch_min_rr": OPTIONS_WATCH_MIN_RR,
                 "initial_stop_pct": OPTIONS_INITIAL_STOP_PCT,
                 "hard_stop_pct": OPTIONS_HARD_STOP_PCT,
                 "take_profit_tier1_pct": TAKE_PROFIT_TIER1_PCT,
@@ -1276,7 +1286,17 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
     if persist:
         await db.options_desk_candidates.delete_many({})
         if out:
-            await db.options_desk_candidates.insert_many([stamped(x) for x in out])
+            current_docs = [stamped(x) for x in out]
+            await db.options_desk_candidates.insert_many(current_docs)
+            history_docs = [
+                stamped({
+                    **x,
+                    "history_source": "options_desk_build_candidates",
+                    "history_recorded_at": _now(),
+                })
+                for x in out
+            ]
+            await db.options_desk_candidate_history.insert_many(history_docs)
     return {
         "generated_at": _now(),
         "scan_finished_at": (scan or {}).get("finished_at"),

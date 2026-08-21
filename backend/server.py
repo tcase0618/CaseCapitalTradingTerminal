@@ -978,10 +978,10 @@ async def signals_options_curve(days: int = 90):
 
 
 @api.get("/signals/options_gap")
-async def signals_options_gap(limit: int = 300):
+async def signals_options_gap(limit: int = 300, threshold_pct: float = 100.0):
     """Explain theoretical options proxy winners versus actual desk capture."""
     from services import pnl_tracker
-    return await pnl_tracker.options_alpha_gap_summary(limit=limit)
+    return await pnl_tracker.options_alpha_gap_summary(limit=limit, threshold_pct=threshold_pct)
 
 
 @api.get("/signals/benchmark_curve")

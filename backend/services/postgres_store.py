@@ -41,6 +41,7 @@ CRITICAL_COLLECTIONS: tuple[str, ...] = (
     "tf_journal",
     "tf_phase_outcomes",
     "options_desk_candidates",
+    "options_desk_candidate_history",
     "options_desk_orders",
     "options_desk_trades",
     "options_desk_risk_checks",

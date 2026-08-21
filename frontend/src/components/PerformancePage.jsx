@@ -32,7 +32,7 @@ export default function PerformancePage() {
     axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
     axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {});
     axios.get(`${API}/edge/overview`).then(r => setEdge(r.data)).catch(e => console.error("edge:", e));
-    axios.get(`${API}/signals/options_gap?limit=300`).then(r => setOptionsGap(r.data)).catch(e => console.error("options gap:", e));
+    axios.get(`${API}/signals/options_gap?limit=500&threshold_pct=50`).then(r => setOptionsGap(r.data)).catch(e => console.error("options gap:", e));
   }, [curveDays]);
   useEffect(() => {
     refresh();
@@ -576,6 +576,9 @@ const pctColor = (v) => v == null ? muted : v > 0 ? "#4ade80" : v < 0 ? "#f87171
 
 function OptionsAlphaGapCard({ data }) {
   const rows = data?.top_missed_or_blocked || [];
+  const threshold = data?.threshold_pct ?? 50;
+  const statusCounts = data?.status_counts || {};
+  const blockerCounts = data?.blocker_counts || {};
   return (
     <Card title="OPTIONS ALPHA GAP — PROXY VS CAPTURED REALITY">
       {!data ? (
@@ -585,14 +588,18 @@ function OptionsAlphaGapCard({ data }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
             <MiniGap label="Closed Equity Avg" value={data.closed_equity_avg_pct != null ? `${fmt(data.closed_equity_avg_pct)}%` : "—"} color={pctColor(data.closed_equity_avg_pct)} />
             <MiniGap label="Closed Option Proxy Avg" value={data.closed_option_proxy_avg_pct != null ? `${fmt(data.closed_option_proxy_avg_pct)}%` : "—"} color={pctColor(data.closed_option_proxy_avg_pct)} />
-            <MiniGap label="100%+ Proxy Plays" value={data.option_proxy_100pct_plus || 0} color="#fbbf24" />
-            <MiniGap label="Captured / Attempted" value={data.captured_or_attempted_100pct_plus || 0} color={accent2} />
+            <MiniGap label={`${threshold}%+ Proxy Plays`} value={data.option_proxy_threshold_plus || 0} color="#fbbf24" />
+            <MiniGap label="Captured / Attempted" value={data.captured_or_attempted_threshold_plus || 0} color={accent2} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
+            <MiniBreakdown title="CAPTURE STATUS" rows={statusCounts} color={accent} />
+            <MiniBreakdown title="TOP BLOCKERS" rows={blockerCounts} color="#f87171" />
           </div>
           <div style={{ color: muted, fontSize: 11, lineHeight: 1.45 }}>
             Option proxy is a convexity estimate from the first signal snapshot, not a filled trade. This table shows whether the Options Desk had an executable record or why it did not capture the move.
           </div>
           {!rows.length ? (
-            <div style={{ color: muted, padding: 12 }}>No 100%+ option proxy gaps detected in the current sample.</div>
+            <div style={{ color: muted, padding: 12 }}>No {threshold}%+ option proxy gaps detected in the current sample.</div>
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -634,6 +641,23 @@ function MiniGap({ label, value, color = labelLight }) {
     <div style={{ border: hairline, background: "rgba(255,255,255,0.018)", padding: "11px 12px", display: "grid", gap: 6 }}>
       <span style={{ color: dim, fontSize: 9, letterSpacing: "0.14em" }}>{label}</span>
       <strong style={{ color, fontSize: 22 }}>{value}</strong>
+    </div>
+  );
+}
+
+function MiniBreakdown({ title, rows, color }) {
+  const entries = Object.entries(rows || {}).slice(0, 6);
+  return (
+    <div style={{ border: hairline, background: "rgba(255,255,255,0.016)", padding: 12 }}>
+      <div style={{ color: dim, fontSize: 9, letterSpacing: "0.14em", marginBottom: 8 }}>{title}</div>
+      {entries.length === 0 ? (
+        <div style={{ color: muted, fontSize: 11 }}>No records.</div>
+      ) : entries.map(([k, v]) => (
+        <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 14, borderTop: hairline, padding: "7px 0", fontSize: 11 }}>
+          <span style={{ color: labelLight }}>{String(k).replace(/_/g, " ")}</span>
+          <b style={{ color }}>{v}</b>
+        </div>
+      ))}
     </div>
   );
 }

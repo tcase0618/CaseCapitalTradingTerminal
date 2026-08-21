@@ -11,6 +11,7 @@ Public API:
 from __future__ import annotations
 import asyncio
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -817,7 +818,7 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
     return out
 
 
-async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
+async def options_alpha_gap_summary(limit: int = 300, threshold_pct: float = 100.0) -> dict[str, Any]:
     """Compare equity signal outcomes against theoretical option proxy gains.
 
     The proxy is useful for spotting missed convexity, but it is not a filled
@@ -845,7 +846,8 @@ async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
     option_proxy_rows = [r for r in rows if r.get("options_return_proxy_pct") is not None]
     closed_option_proxy = [r for r in closed if r.get("options_return_proxy_pct") is not None]
     closed_equity = [r for r in closed if r.get("gain_pct") is not None]
-    huge_proxy = [r for r in option_proxy_rows if float(r.get("options_return_proxy_pct") or 0) >= 100]
+    threshold = max(0.0, float(threshold_pct or 100.0))
+    huge_proxy = [r for r in option_proxy_rows if float(r.get("options_return_proxy_pct") or 0) >= threshold]
     tickers = sorted({str(r.get("ticker") or "").upper() for r in huge_proxy if r.get("ticker")})
 
     latest_candidates = await db.options_desk_candidates.find(
@@ -861,20 +863,31 @@ async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
     order_by_ticker: dict[str, list[dict[str, Any]]] = {}
     for order in order_rows:
         order_by_ticker.setdefault(str(order.get("ticker") or "").upper(), []).append(order)
+    trade_rows = await db.options_desk_trades.find(
+        {"ticker": {"$in": tickers}}, {"_id": 0}
+    ).sort("closed_at", -1).to_list(500) if tickers else []
+    trade_by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for trade in trade_rows:
+        trade_by_ticker.setdefault(str(trade.get("ticker") or "").upper(), []).append(trade)
 
     def _avg(items: list[dict[str, Any]], key: str) -> float | None:
         vals = [float(x[key]) for x in items if x.get(key) is not None]
         return round(sum(vals) / len(vals), 2) if vals else None
 
     missed = []
-    for row in sorted(huge_proxy, key=lambda r: float(r.get("options_return_proxy_pct") or 0), reverse=True)[:25]:
+    status_counts = Counter()
+    blocker_counts = Counter()
+    captured_100pct_plus = 0
+    sorted_huge_proxy = sorted(huge_proxy, key=lambda r: float(r.get("options_return_proxy_pct") or 0), reverse=True)
+    for row in sorted_huge_proxy:
         ticker = str(row.get("ticker") or "").upper()
         candidate = candidate_by_ticker.get(ticker) or {}
         orders = order_by_ticker.get(ticker) or []
+        trades = trade_by_ticker.get(ticker) or []
         blocked = candidate.get("blocked_reasons") or []
-        if orders:
+        if orders or trades:
             status = "CAPTURED_OR_ATTEMPTED"
-            reason = f"{len(orders)} options order record(s) exist"
+            reason = f"{len(orders)} options order record(s), {len(trades)} trade record(s) exist"
         elif blocked:
             status = "BLOCKED_BY_OPTIONS_DESK"
             reason = "; ".join(str(x) for x in blocked[:4])
@@ -884,6 +897,13 @@ async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
         else:
             status = "NOT_ROUTED_OR_NOT_BUILT"
             reason = "No Options Desk candidate/order record found for this ticker"
+        status_counts[status] += 1
+        if status == "CAPTURED_OR_ATTEMPTED" and float(row.get("options_return_proxy_pct") or 0) >= 100:
+            captured_100pct_plus += 1
+        for blocker in blocked or [status]:
+            blocker_counts[str(blocker)] += 1
+        if len(missed) >= 25:
+            continue
         missed.append({
             "ticker": ticker,
             "first_seen_date": row.get("first_seen_date"),
@@ -892,9 +912,10 @@ async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
             "options_proxy_pct": row.get("options_return_proxy_pct"),
             "options_strategy": row.get("options_strategy"),
             "options_premium_at_entry": row.get("options_premium_at_entry"),
-            "latest_candidate_route": candidate.get("route"),
             "latest_candidate_ready": candidate.get("manual_fire_ready"),
             "latest_blockers": blocked,
+            "latest_candidate_provider": candidate.get("data_provider"),
+            "latest_candidate_route": candidate.get("route"),
             "status": status,
             "reason": reason,
         })
@@ -902,14 +923,19 @@ async def options_alpha_gap_summary(limit: int = 300) -> dict[str, Any]:
     return {
         "ok": True,
         "basis": "option_proxy_not_filled_trade",
+        "threshold_pct": threshold,
         "tracked_rows": len(rows),
         "closed_rows": len(closed),
         "active_rows": len(active),
         "closed_equity_avg_pct": _avg(closed_equity, "gain_pct"),
         "closed_option_proxy_avg_pct": _avg(closed_option_proxy, "options_return_proxy_pct"),
         "option_proxy_rows": len(option_proxy_rows),
-        "option_proxy_100pct_plus": len(huge_proxy),
-        "captured_or_attempted_100pct_plus": sum(1 for r in missed if r["status"] == "CAPTURED_OR_ATTEMPTED"),
+        "option_proxy_threshold_plus": len(huge_proxy),
+        "option_proxy_100pct_plus": len([r for r in option_proxy_rows if float(r.get("options_return_proxy_pct") or 0) >= 100]),
+        "captured_or_attempted_threshold_plus": status_counts.get("CAPTURED_OR_ATTEMPTED", 0),
+        "captured_or_attempted_100pct_plus": captured_100pct_plus,
+        "status_counts": dict(status_counts),
+        "blocker_counts": dict(blocker_counts.most_common(12)),
         "top_missed_or_blocked": missed,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
