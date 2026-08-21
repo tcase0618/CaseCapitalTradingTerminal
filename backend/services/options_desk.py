@@ -721,6 +721,27 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+async def _latest_scan_finished_at() -> str | None:
+    try:
+        scan = await get_db().scan_results.find_one({}, {"_id": 0, "finished_at": 1}, sort=[("finished_at", -1)])
+        return (scan or {}).get("finished_at")
+    except Exception:
+        return None
+
+
+def _candidate_scan_finished_at(rows: list[dict[str, Any]]) -> str | None:
+    for row in rows or []:
+        if row.get("scan_finished_at"):
+            return row.get("scan_finished_at")
+    return None
+
+
+async def _cached_candidates_stale(rows: list[dict[str, Any]]) -> bool:
+    latest = await _latest_scan_finished_at()
+    cached = _candidate_scan_finished_at(rows)
+    return bool(latest and cached and str(latest) != str(cached))
+
+
 def _options_data_policy(alpaca_refreshes_used: int | None = None) -> dict[str, Any]:
     return {
         "alpaca_refresh_limit": OPTIONS_ALPACA_REFRESH_LIMIT,
@@ -1236,11 +1257,12 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
 async def candidates() -> dict[str, Any]:
     db = get_db()
     rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
-    if not rows:
+    if not rows or await _cached_candidates_stale(rows):
         return await build_candidates(persist=True)
     rows = [_normalize_candidate_execution_state(x) for x in rows]
     return {
         "generated_at": _now(),
+        "scan_finished_at": _candidate_scan_finished_at(rows),
         "options_equity_basis": OPTIONS_EQUITY,
         "options_data_policy": _options_data_policy(
             sum(1 for x in rows if x.get("options_live_refresh_attempted"))
@@ -1651,10 +1673,11 @@ async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any
         }
     db = get_db()
     rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
-    if rows:
+    if rows and not await _cached_candidates_stale(rows):
         rows = [_normalize_candidate_execution_state(x) for x in rows]
         candidate_set = {
             "generated_at": _now(),
+            "scan_finished_at": _candidate_scan_finished_at(rows),
             "options_equity_basis": OPTIONS_EQUITY,
             "options_data_policy": _options_data_policy(
                 sum(1 for x in rows if x.get("options_live_refresh_attempted"))
