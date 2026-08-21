@@ -8,6 +8,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from services import options_desk  # noqa: E402
+from services import options_engine  # noqa: E402
+from services import portfolio_manager  # noqa: E402
 from services import tail_hunter  # noqa: E402
 
 
@@ -44,10 +46,55 @@ def test_execution_delta_requires_provider_delta_and_grind_band():
     assert options_desk._delta_out_of_band(accepted, "LONG_CALL") is False
 
 
-def test_risk_budget_is_flat_grind_budget_until_expectancy_proves_lane():
+def test_risk_budget_uses_options_fund_lanes():
     assert options_desk._risk_budget("EQUITY", "ACCUMULATE", 99) == 0.0
-    assert options_desk._risk_budget("OPTION", "WATCH", 52) == 255.0
-    assert options_desk._risk_budget("BOTH", "ACCUMULATE", 95) == 255.0
+    assert options_desk._risk_budget("OPTION", "WATCH", 52) == 200.0
+    assert options_desk._risk_budget("OPTION", "STARTER", 62) == 350.0
+    assert options_desk._risk_budget("OPTION", "ACCUMULATE", 72) == 600.0
+    assert options_desk._risk_budget("BOTH", "ACCUMULATE", 95) == 1000.0
+
+
+def test_pm_grade_anchor_gets_options_scout_strategy():
+    stock = {
+        "signals": ["CALL_SWEEP", "high_short_interest"],
+        "score": 62,
+        "risk_reward": 1.8,
+        "risk": {"level": "MEDIUM"},
+        "squeeze": {"score": 61},
+        "time_target": {"days_remaining": 18},
+    }
+
+    strategy = options_engine.select_strategy(stock, {"iv_rank": 55})
+
+    assert strategy["strategy"] in {"LONG_CALL", "LONG_CALL_SCOUT"}
+    assert strategy["direction"] == "BULL"
+
+
+def test_pm_option_view_allows_named_option_strategies():
+    row = {"options": {"strategy": "LONG_CALL_SCOUT", "iv_rank": 62}}
+
+    assert portfolio_manager._option_view(row, rr=1.25) == "CALL_ALLOWED"
+
+
+def test_options_route_permits_pm_approved_paper_scout():
+    pm_row = {
+        "action": "STARTER",
+        "pm_score": 60,
+        "risk_reward": 1.4,
+        "option_view": "CALL_ALLOWED",
+    }
+    scan_row = {
+        "options": {
+            "strategy": "LONG_CALL_SCOUT",
+            "iv_rank": 58,
+            "contract": {"symbol": "TEST260821C00010000", "ask": 2.0, "max_loss": 200.0},
+        }
+    }
+
+    route, reasons = options_desk._route(pm_row, scan_row)
+
+    assert route == "OPTION"
+    assert reasons
 
 
 def test_tail_hunter_selects_contract_in_delta_dte_budget_band():

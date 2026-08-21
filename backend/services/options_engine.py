@@ -559,50 +559,58 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
 def select_strategy(stock: dict, chain: dict | None) -> dict:
     """Pure-Python decision tree. Returns {strategy, reason, direction}."""
     signals = stock.get("signals") or []
-    risk_level = (stock.get("risk") or {}).get("level", "MEDIUM")
+    risk_level = str((stock.get("risk") or {}).get("level", "MEDIUM")).upper()
     sq_score = (stock.get("squeeze") or {}).get("score") or 0
     days = (stock.get("time_target") or {}).get("days_remaining") or 30
     iv_rank = (chain or {}).get("iv_rank", 50)
     score = _safe_float(stock.get("score") or stock.get("case_score") or stock.get("pm_score"))
+    rr = _safe_float(stock.get("risk_reward") or stock.get("rr") or stock.get("riskReward"))
     signal_set = {str(s) for s in signals}
+    lower_signals = {str(s).lower() for s in signals}
 
-    is_insider = "insider_cluster_buy" in signal_set
-    is_earnings = "upcoming_earnings" in signal_set
-    is_contract = "CONTRACT_SURGE" in signal_set
-    is_congress = "CONGRESSIONAL_BUY" in signal_set
-    is_bearish = bool({"BEARISH", "bearish", "risk_off", "negative_catalyst", "DARK_POOL_BEARISH"} & signal_set)
+    is_insider = "insider_cluster_buy" in lower_signals or "insider" in " ".join(lower_signals)
+    is_earnings = "upcoming_earnings" in lower_signals or "earnings" in " ".join(lower_signals)
+    is_contract = "contract_surge" in lower_signals or "contract" in " ".join(lower_signals)
+    is_congress = "congressional_buy" in lower_signals or "congress" in " ".join(lower_signals)
+    is_flow = bool({"call_sweep", "unusual_flow", "cheap_iv", "options_flow_bullish"} & lower_signals)
+    is_squeeze = "high_short_interest" in lower_signals or sq_score >= 55
+    is_bearish = bool({"bearish", "risk_off", "negative_catalyst", "dark_pool_bearish"} & lower_signals)
+    has_bullish_anchor = any([is_insider, is_contract, is_congress, is_flow, is_squeeze, is_earnings])
 
     # Rule order matters.
-    if is_earnings and days < 7:
+    if is_earnings and days < 2 and iv_rank > 80:
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
-                "reason": "IV crush imminent - buy stock directly or wait until after print"}
-    if iv_rank > 65:
+                "reason": "Binary event is inside 48h with extreme IV; single-leg premium is not a clean paper scout"}
+    if risk_level == "EXTREME" and score < 70:
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
-                "reason": "IV rank too high for single-leg premium; spreads are not execution-enabled yet"}
-    if risk_level == "EXTREME" or iv_rank > 80:
-        return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
-                "reason": "High risk or expensive IV - spread execution is not enabled yet"}
+                "reason": "Extreme setup needs stronger PM score before the Options Desk can scout it"}
     if is_bearish:
-        if iv_rank > 55:
+        if iv_rank > 75 and score < 70:
             return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
-                    "reason": "Bearish setup has elevated IV; spread execution is not enabled yet"}
+                    "reason": "Bearish setup has expensive IV without enough score for a paper scout"}
         return {"strategy": "LONG_PUT", "direction": "BEAR",
                 "reason": "Bearish evidence detected - PM should express with puts only if liquidity clears"}
-    if sq_score > 75 and days < 14 and iv_rank < 60:
+    if sq_score > 75 and days < 14 and iv_rank < 75:
         return {"strategy": "LONG_CALL", "direction": "BULL",
                 "reason": "High squeeze probability with a near catalyst - directional call candidate"}
-    if (risk_level == "LOW" and is_contract and 21 <= days <= 60 and iv_rank > 50):
-        return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
-                "reason": "Government-contract catalyst has elevated IV; wait for single-leg pricing or LEAPS review"}
-    if is_insider and sq_score > 50 and days > 30 and iv_rank < 40:
+    if is_insider and sq_score > 50 and days > 30 and iv_rank < 65:
         return {"strategy": "LONG_CALL", "direction": "BULL",
-                "reason": "Cheap IV entry on insider accumulation - buy calls while volatility is low"}
+                "reason": "Insider accumulation with acceptable IV - directional call candidate"}
     if is_congress and risk_level == "LOW":
         return {"strategy": "LONG_CALL", "direction": "BULL",
                 "reason": "High-conviction low-risk congressional setup - single-leg call only if liquidity clears"}
     if score >= 78 and days >= 120 and iv_rank < 70:
         return {"strategy": "LEAPS_CALL_CANDIDATE", "direction": "BULL",
                 "reason": "High-score long-horizon setup - route to LEAPS sleeve for long-dated exposure"}
+    if has_bullish_anchor and score >= 58 and rr >= 1.3 and iv_rank < 80:
+        return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
+                "reason": "PM-grade bullish anchor with acceptable IV; small paper option scout if Alpaca liquidity clears"}
+    if has_bullish_anchor and score >= 52 and rr >= 1.1 and iv_rank < 70:
+        return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
+                "reason": "Watchlist paper scout candidate; requires live contract and risk preflight"}
+    if is_contract and score >= 55 and days >= 14 and iv_rank < 75:
+        return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
+                "reason": "Contract catalyst is option-eligible for a small scout after liquidity validation"}
     return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
             "reason": "No affirmative setup - no default options trade"}
 

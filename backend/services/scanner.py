@@ -474,10 +474,23 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     try:
         from . import options_desk as _od
         if _od.options_execution_enabled():
-            await log_activity(
-                "Options Desk auto-execute is handled by the dedicated scheduler sweep; scan did not fire a duplicate options run.",
-                "info",
-            )
+            async def _options_post_scan_execute() -> None:
+                try:
+                    result = await _od.refresh_and_auto_execute_latest()
+                    await log_activity(
+                        f"Options Desk post-scan auto-execute: {len(result.get('submitted', []))} submitted, "
+                        f"{len(result.get('skipped', []))} skipped",
+                        "success" if result.get("submitted") else "info",
+                        {
+                            "summary": result.get("summary"),
+                            "submitted": result.get("submitted"),
+                            "skipped": (result.get("skipped") or [])[:10],
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Options Desk post-scan auto-execute failed: %s", exc)
+                    await log_activity(f"Options Desk post-scan auto-execute failed: {exc}", "warning")
+            asyncio.create_task(_options_post_scan_execute())
         else:
             await log_activity("Options Desk auto-execute skipped; ENABLE_OPTIONS_EXECUTION is off", "info")
     except Exception as e:

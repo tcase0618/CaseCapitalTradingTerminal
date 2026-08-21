@@ -874,8 +874,6 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         return "PASS", ["PM did not approve active sizing."]
     if opts.get("strategy") == "AVOID_OPTIONS" or pm_row.get("option_view") == "STOCK_ONLY":
         return "EQUITY", ["Options engine says avoid options or hold stock instead."]
-    if pm_row.get("option_view") == "STOCK_PREFERRED":
-        return "EQUITY", ["PM prefers equity expression over options for this setup."]
     iv_rank = float(opts.get("iv_rank") or 50)
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
@@ -884,12 +882,14 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         return "EQUITY", ["No usable option contract or spread candidate."]
     if pm_row.get("option_view") == "SPREAD_ONLY" and not spread:
         return "EQUITY", ["PM requires a defined-risk spread, but no spread candidate was built."]
-    if score >= 78 and rr >= 2.2 and iv_rank < 65:
+    if pm_row.get("option_view") == "STOCK_PREFERRED":
+        reasons.append("PM prefers equity, but paper option scout is allowed if score/RR clear.")
+    if score >= 76 and rr >= 1.7 and iv_rank < 75:
         return "BOTH", ["High score and clean option conditions allow both desks."]
-    if score >= 64 and rr >= 1.5:
+    if score >= 58 and rr >= 1.3 and iv_rank < 80:
         reasons.append("PM approves options as best expression for this setup.")
         return "OPTION", reasons
-    if action == "WATCH" and score >= 52 and rr >= 1.15:
+    if action == "WATCH" and score >= 50 and rr >= 1.1 and iv_rank < 75:
         reasons.append("Paper scout lane: small defined-risk option allowed for PM watchlist learning.")
         return "OPTION", reasons
     return "EQUITY", ["Equity expression preferred under current PM thresholds."]
@@ -902,25 +902,34 @@ def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -
         return False
     if opts.get("strategy") == "AVOID_OPTIONS" or pm_row.get("option_view") == "STOCK_ONLY":
         return False
-    if pm_row.get("option_view") == "STOCK_PREFERRED":
-        return False
     if pm_row.get("option_view") == "SPREAD_ONLY" and not (opts.get("spread") or {}):
+        return False
+    if not (opts.get("contract") or opts.get("spread")):
         return False
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
-    if score >= 64 and rr >= 1.5:
+    iv_rank = float(opts.get("iv_rank") or 50)
+    if score >= 58 and rr >= 1.3 and iv_rank < 80:
         return True
-    return action == "WATCH" and score >= 52 and rr >= 1.15
+    return action == "WATCH" and score >= 50 and rr >= 1.1 and iv_rank < 75
 
 
 def _risk_budget(route: str, action: str, score: float) -> float:
     if route not in {"OPTION", "BOTH"}:
         return 0.0
-    grind_lane_equity_pct = 0.85
-    grind_risk_pct_flat = 0.015
     cap = min(OPTIONS_EQUITY * MAX_RISK_PCT, MAX_RISK_USD)
-    flat_budget = OPTIONS_EQUITY * grind_lane_equity_pct * grind_risk_pct_flat
-    return round(min(flat_budget, cap), 2)
+    action = str(action or "").upper()
+    if route == "BOTH":
+        budget = BOTH_RISK_USD
+    elif action == "WATCH":
+        budget = WATCH_RISK_USD
+    elif action == "ACCUMULATE":
+        budget = ACCUMULATE_RISK_USD
+    elif action == "STARTER":
+        budget = STARTER_RISK_USD
+    else:
+        budget = STANDARD_RISK_USD
+    return round(min(budget, cap), 2)
 
 
 async def _auto_orders_submitted_today() -> int:

@@ -189,9 +189,14 @@ def _option_view(row: dict[str, Any], rr: float) -> str:
     if opts.get("hold_stock_instead") or opts.get("strategy") == "AVOID_OPTIONS":
         return "STOCK_ONLY"
     iv_rank = _num(opts.get("iv_rank"), default=-1)
-    if iv_rank >= 65:
+    strategy = str(opts.get("strategy") or "").upper()
+    if strategy in {"LONG_CALL", "LONG_PUT", "LONG_CALL_SCOUT", "LEAPS_CALL_CANDIDATE"}:
+        return "CALL_ALLOWED"
+    if iv_rank >= 80:
         return "SPREAD_ONLY"
-    if rr >= 2.2 and iv_rank >= 0 and iv_rank < 45:
+    if rr >= 1.5 and iv_rank >= 0 and iv_rank < 75:
+        return "CALL_ALLOWED"
+    if rr >= 1.15 and iv_rank >= 0 and iv_rank < 65:
         return "CALL_ALLOWED"
     return "STOCK_PREFERRED"
 
