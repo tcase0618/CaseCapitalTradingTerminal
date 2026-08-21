@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { Link } from "react-router-dom";
@@ -24,20 +24,41 @@ function scoreColor(s) {
 }
 
 export default function PharmaPage() {
+  const now = new Date();
   const [pdufa, setPdufa] = useState([]);
   const [active, setActive] = useState([]);
+  const [shocks, setShocks] = useState([]);
   const [track, setTrack] = useState({});
   const [freeIntel, setFreeIntel] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [scanning, setScanning] = useState(false);
+  const [calendar, setCalendar] = useState(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
+  const [calendarYear, setCalendarYear] = useState(now.getFullYear());
+  const [selectedDate, setSelectedDate] = useState(null);
 
-  const reload = () => {
+  const loadCalendar = useCallback((year = calendarYear, month = calendarMonth) => {
+    setCalendarLoading(true);
+    axios.get(`${API}/pharma/fda_calendar`, { params: { year, month }, timeout: 15000 })
+      .then(r => {
+        setCalendar(r.data || null);
+        const firstEventDay = (r.data?.days || []).find(d => d.event_count > 0);
+        setSelectedDate(prev => prev || firstEventDay?.date || null);
+      })
+      .catch(() => {})
+      .finally(() => setCalendarLoading(false));
+  }, [calendarMonth, calendarYear]);
+
+  const reload = useCallback(() => {
     axios.get(`${API}/pharma/pdufa?days=90`).then(r => setPdufa(r.data.results || [])).catch(() => {});
+    axios.get(`${API}/pharma/shocks?limit=50`).then(r => setShocks(r.data.results || [])).catch(() => {});
     axios.get(`${API}/pharma/active`).then(r => setActive(r.data.plays || [])).catch(() => {});
     axios.get(`${API}/pharma/track_record`).then(r => setTrack(r.data || {})).catch(() => {});
-  };
+    loadCalendar();
+  }, [loadCalendar]);
 
-  useEffect(reload, []);
+  useEffect(() => { reload(); }, [reload]);
 
   useEffect(() => {
     const top = [...pdufa]
@@ -61,11 +82,18 @@ export default function PharmaPage() {
 
   const runScan = async () => {
     setScanning(true);
-    toast("PHARMA SCAN INITIATED");
+    toast("PHARMA SCAN + CATALYST SHOCK SWEEP INITIATED");
     try {
-      const { data } = await axios.post(`${API}/pharma/scan`);
-      toast(`PHARMA SCAN - ${data.results?.length || 0} PDUFA - ${data.duration_sec}s`);
+      const [calendar, shock] = await Promise.all([
+        axios.post(`${API}/pharma/scan`),
+        axios.post(`${API}/pharma/shocks/scan`),
+      ]);
+      toast(
+        `PHARMA SCAN - ${calendar.data.results?.length || 0} PDUFA - `
+        + `${shock.data.hot_count || 0} HOT SHOCKS`
+      );
       reload();
+      loadCalendar(calendarYear, calendarMonth);
     } catch {
       toast("PHARMA SCAN FAILED");
     } finally {
@@ -104,12 +132,29 @@ export default function PharmaPage() {
     >
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="PDUFA - 90D" value={pdufa.length} sub="UPCOMING" color={accent} accentBar />
+        <Stat label="CATALYST SHOCKS" value={shocks.length} sub={`${shocks.filter(s => Number(s.shock_score) >= 75).length} HOT`} color="#fb7185" />
         <Stat label="STRONG >=80" value={summary.counts.STRONG || 0} sub="AUTO-ENTER" color={TIER_COLOR.STRONG} />
         <Stat label="WATCH >=65" value={summary.counts.WATCH || 0} sub="MONITORING" color={TIER_COLOR.WATCH} />
         <Stat label="ACTIVE PLAYS" value={active.length} sub={`${track.open || 0} OPEN`} color={accent2} />
         <Stat label="HIT RATE" value={track.hit_rate != null ? `${(track.hit_rate * 100).toFixed(0)}%` : "-"} sub={`${track.winners || 0}/${track.settled || 0} SETTLED`} color="#4ade80" />
         <Stat label="UNREALIZED P&L" value={track.avg_unrealized_pct != null ? `${track.avg_unrealized_pct >= 0 ? "+" : ""}${track.avg_unrealized_pct}%` : "-"} sub="AVG OPEN" color={(track.avg_unrealized_pct ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
       </div>
+
+      <FdaCalendar
+        data={calendar}
+        loading={calendarLoading}
+        month={calendarMonth}
+        year={calendarYear}
+        selectedDate={selectedDate}
+        setSelectedDate={setSelectedDate}
+        setMonth={(m) => { setCalendarMonth(Number(m)); loadCalendar(calendarYear, Number(m)); }}
+        setYear={(y) => { setCalendarYear(Number(y)); loadCalendar(Number(y), calendarMonth); }}
+        refresh={() => loadCalendar(calendarYear, calendarMonth)}
+      />
+
+      <Card title="CATALYST SHOCK TAPE - SAME DAY CLINICAL / FDA NEWS" accentColor="#fb7185">
+        <ShockTape rows={shocks} />
+      </Card>
 
       <div style={commandGrid}>
         <Card title="BINARY EVENT COMMAND READ" accentColor={accent}>
@@ -243,6 +288,149 @@ export default function PharmaPage() {
   );
 }
 
+function FdaCalendar({ data, loading, month, year, selectedDate, setSelectedDate, setMonth, setYear, refresh }) {
+  const cells = buildFdaCells(year, month, data?.days || []);
+  const years = data?.available_years?.length ? data.available_years : [year, year + 1, year - 1];
+  const selected = (data?.days || []).find(d => d.date === selectedDate) || (data?.days || []).find(d => d.event_count > 0);
+  const summary = data?.summary || {};
+  const weeks = fdaWeekSummary(cells);
+  return (
+    <Card title="FDA CALENDAR - PM ROUTED BINARY EVENTS" accentColor="#a78bfa">
+      <div style={calendarShellHeader}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <select value={month} onChange={e => setMonth(e.target.value)} style={selectStyle}>
+            {Array.from({ length: 12 }).map((_, i) => <option key={i + 1} value={i + 1}>{monthName(i + 1)}</option>)}
+          </select>
+          <select value={year} onChange={e => setYear(e.target.value)} style={selectStyle}>
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+          <button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "LOADING" : "REFRESH FDA"}</button>
+        </div>
+        <div style={calendarSummaryStrip}>
+          <span>EVENTS <b>{summary.events || 0}</b></span>
+          <span>HOT <b>{summary.hot || 0}</b></span>
+          <span>PM <b>{summary.pm_ready || 0}</b></span>
+          <span>OPTIONS <b>{summary.option_ready || 0}</b></span>
+          <span>BLOCK <b>{summary.blocked || 0}</b></span>
+        </div>
+      </div>
+      <div style={calendarHeroStats}>
+        <div style={calendarHeroTile("#a78bfa")}><span>FDA Month</span><strong>{monthName(month)}</strong><small>{year}</small></div>
+        <div style={calendarHeroTile("#fbbf24")}><span>Hot Dockets</span><strong>{summary.hot || 0}</strong><small>score >= 70</small></div>
+        <div style={calendarHeroTile("#4ade80")}><span>PM Routed</span><strong>{summary.pm_ready || 0}</strong><small>judge-ready</small></div>
+        <div style={calendarHeroTile(accent2)}><span>Option Ready</span><strong>{summary.option_ready || 0}</strong><small>contract captured</small></div>
+        <div style={calendarHeroTile("#f87171")}><span>Data Blocks</span><strong>{summary.blocked || 0}</strong><small>cannot route</small></div>
+      </div>
+      <div style={calendarBoard}>
+        <div style={{ minWidth: 0 }}>
+          <div style={calendarWeekHeader}>
+            {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => <span key={d}>{d}</span>)}
+          </div>
+          <div style={calendarGrid}>
+            {cells.map((cell, i) => (
+              <button
+                key={cell.date || `blank-${i}`}
+                disabled={!cell.date}
+                onClick={() => cell.date && setSelectedDate(cell.date)}
+                title={fdaDayTitle(cell.day)}
+                style={fdaCalendarCell(cell, selected?.date === cell.date)}
+              >
+                <span style={calendarDayNumber}>{cell.dayNumber || ""}</span>
+                {cell.day?.event_count > 0 && (
+                  <span style={calendarDayPayload}>
+                    <strong>{cell.day.event_count} FDA</strong>
+                    <small>{cell.day.hot_count || 0} hot / {cell.day.pm_ready_count || 0} PM</small>
+                    <small>{cell.day.best_score != null ? `${Number(cell.day.best_score).toFixed(0)}/100` : "pending"}</small>
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={calendarWeekRail}>
+          {weeks.map((week, idx) => (
+            <button key={idx} style={calendarWeekCard(fdaWeekColor(week))} title={`Week ${idx + 1}\nEvents: ${week.events}\nHot: ${week.hot}\nBlocks: ${week.blocked}`}>
+              <span>Week {idx + 1}</span>
+              <strong>{week.events}</strong>
+              <small>{week.hot} hot</small>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <SelectedFdaDay day={selected} />
+      </div>
+    </Card>
+  );
+}
+
+function SelectedFdaDay({ day }) {
+  if (!day) {
+    return <div style={{ color: muted, padding: 20 }}>Select an FDA calendar day to inspect PM dockets, options snapshots, and evidence gates.</div>;
+  }
+  if (!day.events?.length) {
+    return <div style={{ color: muted, padding: 20 }}>No FDA/PDUFA events on {day.date}.</div>;
+  }
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={panelTitle}>// SELECTED FDA DOCKET - {day.date}</div>
+      {day.events.map((event, idx) => (
+        <FdaEventDocket key={`${event.ticker}-${event.pdufa_date}-${idx}`} event={event} />
+      ))}
+    </div>
+  );
+}
+
+function FdaEventDocket({ event }) {
+  const gate = event.data_gate || {};
+  const pm = event.pm_summary || {};
+  const opt = event.option_summary || {};
+  const scenario = event.scenario || {};
+  const strategy = event.strategy_read || {};
+  const gateColor = gate.decision === "BLOCK" ? "#f87171" : gate.decision === "WATCH" ? "#fbbf24" : "#4ade80";
+  return (
+    <div style={fdaDocketCard(gateColor)}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+        <div>
+          <Link to={`/ticker/${event.ticker}`} style={{ color: accent, fontSize: 22, fontWeight: 900, textDecoration: "none" }}>${event.ticker}</Link>
+          <div style={{ color: labelLight, marginTop: 5 }}>{event.drug || "Unknown drug"} - {event.indication || "unknown indication"}</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "flex-start" }}>
+          <span style={badge(scoreColor(event.binary_event_score))}>{Number(event.binary_event_score || 0).toFixed(0)}/100</span>
+          <span style={badge(gateColor)}>GATE {gate.decision || "UNKNOWN"}</span>
+          <span style={badge(pm.action === "REJECT" ? "#f87171" : pm.action === "NOT_ROUTED" ? "#9ca3af" : "#4ade80")}>PM {pm.action || "PENDING"}</span>
+          <span style={badge(opt.ok ? "#4ade80" : "#fbbf24")}>OPT {opt.status || "NO_SNAPSHOT"}</span>
+        </div>
+      </div>
+      <div style={fdaDocketGrid}>
+        <MiniRead label="PDUFA" value={event.pdufa_date || "-"} sub={`${event.days_until ?? "-"} days`} color="#a78bfa" />
+        <MiniRead label="Strategy" value={strategy.lane || "-"} sub={strategy.strategy || "-"} color={accent2} />
+        <MiniRead label="Approval Proxy" value={scenario.approval_probability_proxy != null ? `${scenario.approval_probability_proxy}%` : "-"} sub={scenario.model || "research"} color="#4ade80" />
+        <MiniRead label="Scenario" value={`${fmtSigned(scenario.base_move_pct)} base`} sub={`${fmtSigned(scenario.bear_move_pct)} / ${fmtSigned(scenario.bull_move_pct)}`} color={scenario.base_move_pct >= 0 ? "#4ade80" : "#f87171"} />
+        <MiniRead label="Contract" value={opt.contract || "NONE"} sub={opt.expiration ? `${opt.expiration} ${opt.strike || ""}` : opt.reason || "-"} color={opt.ok ? "#4ade80" : "#fbbf24"} />
+        <MiniRead label="Data Score" value={gate.score != null ? `${gate.score}/100` : "-"} sub={(gate.blockers || [])[0] || (gate.warnings || [])[0] || "clean"} color={gateColor} />
+      </div>
+      <div style={sourceChipRow}>
+        {(gate.sources || []).slice(0, 8).map(source => (
+          <span key={source.key} style={badge(source.status === "PASS" ? "#4ade80" : source.status === "BLOCK" ? "#f87171" : "#fbbf24")}>
+            {source.key}:{source.status}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MiniRead({ label, value, sub, color = labelLight }) {
+  return (
+    <div style={miniReadCard}>
+      <span>{label}</span>
+      <strong style={{ color }}>{value}</strong>
+      <small>{sub || "-"}</small>
+    </div>
+  );
+}
+
 function ActiveTable({ rows }) {
   return (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -276,6 +464,46 @@ function TrackTable({ rows }) {
         </tr>
       ))}</tbody>
     </table>
+  );
+}
+
+function ShockTape({ rows }) {
+  const top = [...(rows || [])].sort((a, b) => (b.shock_score || 0) - (a.shock_score || 0)).slice(0, 10);
+  if (!top.length) {
+    return (
+      <div style={{ color: muted, padding: 20 }}>
+        No same-day pharma catalyst shocks captured yet. This tape watches clinical trial, Phase 3, oncology vaccine, FDA approval, and trial-failure headlines.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "grid", gap: 9 }}>
+      {top.map((r, i) => {
+        const score = Number(r.shock_score || 0);
+        const color = r.direction === "BEARISH" ? "#f87171" : score >= 85 ? "#4ade80" : "#fbbf24";
+        const terms = [...(r.bullish_terms || []), ...(r.bearish_terms || [])].slice(0, 4);
+        return (
+          <div key={`${r.ticker}-${r.url || r.title || i}`} style={shockRow(color)}>
+            <div style={{ minWidth: 84 }}>
+              <Link to={`/ticker/${r.ticker}`} style={{ color: accent, textDecoration: "none", fontWeight: 900 }}>${r.ticker}</Link>
+              <div style={{ color, fontSize: 10, marginTop: 4, fontWeight: 900 }}>{score.toFixed(0)}/100</div>
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ color: labelLight, fontWeight: 800, lineHeight: 1.35 }}>{r.title || "Clinical/FDA catalyst detected"}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+                <span style={badge(color)}>{r.direction || "WATCH"}</span>
+                <span style={badge(accent2)}>{r.source || r.source_key || "NEWS"}</span>
+                {terms.map(term => <span key={term} style={badge("#93c5fd")}>{String(term).toUpperCase()}</span>)}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", minWidth: 96 }}>
+              <div style={{ color: labelLight, fontWeight: 800 }}>{r.current_price ? `$${Number(r.current_price).toFixed(2)}` : "-"}</div>
+              {r.url && <a href={r.url} target="_blank" rel="noreferrer" style={{ color: accent2, fontSize: 10, letterSpacing: "0.12em", textDecoration: "none" }}>SOURCE</a>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -325,6 +553,11 @@ function DepthMetric({ label, value, sub, color = labelLight }) {
 function ResearchPanel({ p }) {
   const comp = p.score_components || {};
   const trial = p.trial || {};
+  const gate = p.data_gate || {};
+  const pm = p.pm_summary || {};
+  const opt = p.option_summary || {};
+  const strategy = p.strategy_read || {};
+  const scenario = p.scenario || {};
   const fdaLink = trial.nct_id ? `https://clinicaltrials.gov/study/${trial.nct_id}` : "https://www.fda.gov/drugs/development-resources/drug-approvals-and-databases";
   return (
     <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 24 }}>
@@ -337,6 +570,15 @@ function ResearchPanel({ p }) {
             <span style={{ color: scoreColor(v.points * 4), fontWeight: 700, textAlign: "right" }}>{v.points}/{v.max}</span>
           </div>
         ))}
+        <div style={{ ...panelTitle, marginTop: 18 }}>// PM / OPTIONS ROUTING</div>
+        <div style={fdaDocketGrid}>
+          <MiniRead label="Gate" value={gate.decision || "UNKNOWN"} sub={(gate.blockers || [])[0] || (gate.warnings || [])[0] || "clean"} color={gate.decision === "BLOCK" ? "#f87171" : gate.decision === "WATCH" ? "#fbbf24" : "#4ade80"} />
+          <MiniRead label="PM Ruling" value={pm.action || "NOT_ROUTED"} sub={pm.score != null ? `score ${Number(pm.score).toFixed(1)}` : pm.authority || "-"} color={pm.action === "REJECT" ? "#f87171" : pm.action === "NOT_ROUTED" ? muted : "#4ade80"} />
+          <MiniRead label="Option" value={opt.contract || opt.status || "NONE"} sub={opt.expiration || opt.reason || "-"} color={opt.ok ? "#4ade80" : "#fbbf24"} />
+          <MiniRead label="Strategy" value={strategy.lane || "-"} sub={strategy.strategy || "-"} color={accent2} />
+          <MiniRead label="Approval Proxy" value={scenario.approval_probability_proxy != null ? `${scenario.approval_probability_proxy}%` : "-"} sub={scenario.model || "research"} color="#4ade80" />
+          <MiniRead label="Scenario" value={`${fmtSigned(scenario.base_move_pct)} base`} sub={`${fmtSigned(scenario.bear_move_pct)} / ${fmtSigned(scenario.bull_move_pct)}`} color={scenario.base_move_pct >= 0 ? "#4ade80" : "#f87171"} />
+        </div>
       </div>
       <div>
         <div style={panelTitle}>// CLINICAL DATA</div>
@@ -374,6 +616,85 @@ function money(value) {
   return `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 }
 
+function fmtSigned(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function monthName(month) {
+  const idx = Math.max(0, Math.min(11, Number(month) - 1));
+  return ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"][idx];
+}
+
+function buildFdaCells(year, month, days) {
+  const first = new Date(Number(year), Number(month) - 1, 1);
+  const count = new Date(Number(year), Number(month), 0).getDate();
+  const byDate = new Map((days || []).map(day => [day.date, day]));
+  const cells = [];
+  for (let i = 0; i < first.getDay(); i += 1) cells.push({ date: null, dayNumber: null, day: null });
+  for (let d = 1; d <= count; d += 1) {
+    const date = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    cells.push({ date, dayNumber: d, day: byDate.get(date) || { date, day: d, event_count: 0, events: [], status: "EMPTY" } });
+  }
+  while (cells.length % 7 !== 0) cells.push({ date: null, dayNumber: null, day: null });
+  return cells;
+}
+
+function fdaWeekSummary(cells) {
+  const weeks = [];
+  for (let i = 0; i < cells.length; i += 7) {
+    const slice = cells.slice(i, i + 7).map(c => c.day).filter(Boolean);
+    weeks.push({
+      events: slice.reduce((a, d) => a + Number(d.event_count || 0), 0),
+      hot: slice.reduce((a, d) => a + Number(d.hot_count || 0), 0),
+      blocked: slice.reduce((a, d) => a + Number(d.blocked_count || 0), 0),
+    });
+  }
+  return weeks;
+}
+
+function fdaDayTitle(day) {
+  if (!day?.event_count) return "No FDA events";
+  return (day.events || []).map(e => `$${e.ticker} ${e.drug || ""} ${Number(e.binary_event_score || 0).toFixed(0)}/100`).join("\n");
+}
+
+function fdaStatusColor(status) {
+  if (status === "BLOCK") return "#f87171";
+  if (status === "HOT") return "#fbbf24";
+  if (status === "EVENT") return "#a78bfa";
+  return "rgba(255,255,255,0.09)";
+}
+
+function fdaWeekColor(week) {
+  if (week.blocked) return "#f87171";
+  if (week.hot) return "#fbbf24";
+  if (week.events) return "#a78bfa";
+  return dim;
+}
+
+function fdaCalendarCell(cell, active) {
+  const color = fdaStatusColor(cell.day?.status);
+  const hasEvent = Number(cell.day?.event_count || 0) > 0;
+  return {
+    minHeight: 112,
+    border: active ? `1px solid ${accent2}` : `0.5px solid ${hasEvent ? `${color}88` : "rgba(255,255,255,0.08)"}`,
+    background: hasEvent
+      ? `linear-gradient(180deg, ${color}22, rgba(255,255,255,0.018))`
+      : "rgba(255,255,255,0.015)",
+    boxShadow: active ? `0 0 22px ${accent2}22` : "none",
+    color: labelLight,
+    display: "grid",
+    alignContent: "space-between",
+    padding: "9px 8px",
+    textAlign: "left",
+    cursor: cell.date ? "pointer" : "default",
+    opacity: cell.date ? 1 : 0.28,
+    fontFamily: "JetBrains Mono",
+    overflow: "hidden",
+  };
+}
+
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em", fontSize: 12 };
 const commandGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(300px, 0.8fr)", gap: 18 };
@@ -387,6 +708,40 @@ const miniPanel = { border: hairline, background: "rgba(255,255,255,0.018)", pad
 const panelTitle = { color: labelLight, fontSize: 11, letterSpacing: "0.14em", marginBottom: 10, fontWeight: 700 };
 const depthCard = { border: hairline, borderTop: "1px solid rgba(147,197,253,0.7)", background: "linear-gradient(180deg, rgba(147,197,253,0.055), rgba(255,255,255,0.012))", padding: 13 };
 const depthMetrics = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7, marginTop: 12 };
+const calendarShellHeader = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
+const calendarSummaryStrip = { display: "flex", gap: 14, flexWrap: "wrap", color: muted, fontSize: 10, letterSpacing: "0.14em" };
+const calendarHeroStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10, marginBottom: 18 };
+const calendarHeroTile = (color) => ({
+  border: `0.5px solid ${color}55`,
+  background: `linear-gradient(180deg, ${color}12, rgba(255,255,255,0.015))`,
+  padding: "12px 13px",
+  display: "grid",
+  gap: 6,
+  minHeight: 82,
+});
+const calendarBoard = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 120px", gap: 12, alignItems: "stretch" };
+const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 10, letterSpacing: "0.08em", margin: "12px 0 8px" };
+const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 };
+const calendarDayNumber = { alignSelf: "flex-start", color: dim, fontSize: 10, lineHeight: 1 };
+const calendarDayPayload = { display: "grid", gap: 3, placeItems: "center", textAlign: "center", color: labelLight, minHeight: 62 };
+const calendarWeekRail = { display: "grid", gap: 7, alignContent: "start", paddingTop: 24 };
+const calendarWeekCard = (color) => ({
+  minHeight: 67,
+  border: `0.5px solid ${color}55`,
+  background: `${color}10`,
+  color: labelLight,
+  textAlign: "left",
+  padding: "9px 10px",
+  display: "grid",
+  gap: 3,
+  fontFamily: "JetBrains Mono",
+  cursor: "default",
+});
+const selectStyle = { ...buttonStyle(labelLight), color: labelLight, background: "#06070c" };
+const fdaDocketCard = (color) => ({ border: `0.5px solid ${color}66`, borderLeft: `3px solid ${color}`, background: "rgba(255,255,255,0.018)", padding: "14px 16px" });
+const fdaDocketGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8, marginTop: 12 };
+const sourceChipRow = { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 };
+const miniReadCard = { border: hairline, background: "rgba(255,255,255,0.018)", padding: "9px 10px", display: "grid", gap: 5, minWidth: 0 };
 function riskCard(flagCount) {
   const color = flagCount ? "#f87171" : "#4ade80";
   return { border: `0.5px solid ${color}55`, background: `${color}0b`, padding: "11px 12px" };
@@ -397,6 +752,9 @@ function badge(color) {
 function urgentRow(days) {
   const color = Number(days) <= 7 ? "#f87171" : "#fb923c";
   return { display: "flex", alignItems: "center", gap: 10, border: `0.5px solid ${color}55`, background: `${color}0c`, padding: "10px 12px", fontSize: 12 };
+}
+function shockRow(color) {
+  return { display: "flex", alignItems: "center", gap: 14, border: `0.5px solid ${color}55`, background: `${color}0c`, padding: "12px 14px", fontSize: 12, minWidth: 0 };
 }
 function buttonStyle(color) {
   return { background: "transparent", border: `0.5px solid ${color}`, color, fontSize: 11, padding: "8px 16px", cursor: "pointer", letterSpacing: "0.14em", fontFamily: "JetBrains Mono", fontWeight: 700 };

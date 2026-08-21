@@ -77,17 +77,70 @@ ALPACA_OPTIONS_FEED = os.environ.get("OPTIONS_APCA_DATA_FEED", "indicative").str
 OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
 ET = ZoneInfo("America/New_York")
 
-KEY = os.environ.get("OPTIONS_APCA_API_KEY_ID", "").strip()
-SECRET = os.environ.get("OPTIONS_APCA_API_SECRET_KEY", "").strip()
-TRADE_BASE = os.environ.get("OPTIONS_APCA_API_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
-if TRADE_BASE.endswith("/v2"):
-    TRADE_BASE = TRADE_BASE[:-3]
+def _options_key() -> str:
+    return os.environ.get("OPTIONS_APCA_API_KEY_ID", "").strip()
 
-HEADERS = {
-    "APCA-API-KEY-ID": KEY,
-    "APCA-API-SECRET-KEY": SECRET,
-    "Content-Type": "application/json",
-}
+
+def _options_secret() -> str:
+    return os.environ.get("OPTIONS_APCA_API_SECRET_KEY", "").strip()
+
+
+def _equity_key() -> str:
+    return os.environ.get("APCA_API_KEY_ID", "").strip()
+
+
+def _options_trade_base() -> str:
+    base = os.environ.get("OPTIONS_APCA_API_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
+    if base.endswith("/v2"):
+        base = base[:-3]
+    return base
+
+
+def _options_headers() -> dict[str, str]:
+    return {
+        "APCA-API-KEY-ID": _options_key(),
+        "APCA-API-SECRET-KEY": _options_secret(),
+        "Content-Type": "application/json",
+    }
+
+
+def _mask_key(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return f"{value[:2]}...{value[-2:]}"
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def options_account_route_guard() -> dict[str, Any]:
+    """Prove Options Desk requests are routed through OPTIONS_APCA only."""
+    opt_key = _options_key()
+    opt_secret = _options_secret()
+    equity_key = _equity_key()
+    if not opt_key or not opt_secret:
+        return {
+            "ok": False,
+            "reason": "missing_options_alpaca_keys",
+            "options_key_id": _mask_key(opt_key),
+            "equity_key_id": _mask_key(equity_key),
+            "base_url": _options_trade_base(),
+        }
+    if equity_key and opt_key == equity_key:
+        return {
+            "ok": False,
+            "reason": "options_credentials_match_equity_account",
+            "options_key_id": _mask_key(opt_key),
+            "equity_key_id": _mask_key(equity_key),
+            "base_url": _options_trade_base(),
+        }
+    return {
+        "ok": True,
+        "options_key_id": _mask_key(opt_key),
+        "equity_key_id": _mask_key(equity_key),
+        "base_url": _options_trade_base(),
+        "paper_only": paper_only(),
+    }
 
 
 def _now() -> str:
@@ -99,11 +152,11 @@ def _now_et() -> str:
 
 
 def configured() -> bool:
-    return bool(KEY and SECRET)
+    return bool(_options_key() and _options_secret())
 
 
 def paper_only() -> bool:
-    return "paper-api.alpaca.markets" in TRADE_BASE
+    return "paper-api.alpaca.markets" in _options_trade_base()
 
 
 def options_execution_enabled() -> bool:
@@ -140,8 +193,8 @@ async def _options_market_status() -> dict[str, Any]:
     if not configured():
         return {**status, "ok": False, "reason": "missing_options_alpaca_keys"}
     try:
-        async with httpx.AsyncClient(timeout=5.0, headers=HEADERS) as client:
-            r = await client.get(f"{TRADE_BASE}/v2/clock")
+        async with httpx.AsyncClient(timeout=5.0, headers=_options_headers()) as client:
+            r = await client.get(f"{_options_trade_base()}/v2/clock")
         if r.status_code in (200, 201):
             clock = r.json()
             status.update({
@@ -293,19 +346,21 @@ async def _send_exit_message(symbol: str, ticker: str, reason: str, entry: float
 
 
 async def account() -> dict[str, Any]:
-    if not configured():
-        return {"ok": False, "configured": False, "paper_only": paper_only(), "reason": "missing_options_alpaca_keys"}
+    route = options_account_route_guard()
+    if not route.get("ok"):
+        return {"ok": False, "configured": configured(), "paper_only": paper_only(), "route": route, "reason": route.get("reason")}
     try:
         premium_used = await daily_premium_used()
-        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
-            r = await client.get(f"{TRADE_BASE}/v2/account")
+        async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
+            r = await client.get(f"{_options_trade_base()}/v2/account")
         if r.status_code != 200:
-            return {"ok": False, "configured": True, "paper_only": paper_only(), "reason": f"alpaca_http_{r.status_code}"}
+            return {"ok": False, "configured": True, "paper_only": paper_only(), "route": route, "reason": f"alpaca_http_{r.status_code}"}
         data = r.json()
         return {
             "ok": True,
             "configured": True,
             "paper_only": paper_only(),
+            "route": route,
             "daily_premium_used": premium_used,
             "daily_premium_cap": OPTIONS_DAILY_PREMIUM_CAP_USD,
             "account": {
@@ -319,29 +374,61 @@ async def account() -> dict[str, Any]:
             },
         }
     except Exception as exc:
-        return {"ok": False, "configured": True, "paper_only": paper_only(), "reason": exc.__class__.__name__}
+        return {"ok": False, "configured": True, "paper_only": paper_only(), "route": route, "reason": exc.__class__.__name__}
 
 
 async def positions() -> dict[str, Any]:
-    if not configured():
-        return {"positions": [], "configured": False}
+    route = options_account_route_guard()
+    if not route.get("ok"):
+        return {"positions": [], "configured": configured(), "route": route}
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
-            r = await client.get(f"{TRADE_BASE}/v2/positions")
-        return {"positions": r.json() if r.status_code == 200 else [], "configured": True}
+        async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
+            r = await client.get(f"{_options_trade_base()}/v2/positions")
+        return {"positions": r.json() if r.status_code == 200 else [], "configured": True, "route": route}
     except Exception:
-        return {"positions": [], "configured": True}
+        return {"positions": [], "configured": True, "route": route}
 
 
 async def orders(status: str = "all", limit: int = 100) -> dict[str, Any]:
-    if not configured():
-        return {"orders": [], "configured": False}
+    route = options_account_route_guard()
+    if not route.get("ok"):
+        return {"orders": [], "configured": configured(), "route": route}
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
-            r = await client.get(f"{TRADE_BASE}/v2/orders", params={"status": status, "limit": limit})
-        return {"orders": r.json() if r.status_code == 200 else [], "configured": True}
+        async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
+            r = await client.get(f"{_options_trade_base()}/v2/orders", params={"status": status, "limit": limit})
+        return {"orders": r.json() if r.status_code == 200 else [], "configured": True, "route": route}
     except Exception:
-        return {"orders": [], "configured": True}
+        return {"orders": [], "configured": True, "route": route}
+
+
+async def account_identity() -> dict[str, Any]:
+    route = options_account_route_guard()
+    payload: dict[str, Any] = {
+        "ok": bool(route.get("ok")),
+        "configured": configured(),
+        "paper_only": paper_only(),
+        "route": route,
+    }
+    if not route.get("ok"):
+        return payload
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=_options_headers()) as client:
+            r = await client.get(f"{_options_trade_base()}/v2/account")
+        payload["alpaca_status_code"] = r.status_code
+        if r.status_code == 200:
+            data = r.json() or {}
+            payload["account"] = {
+                "status": data.get("status"),
+                "options_trading_level": data.get("options_trading_level"),
+                "options_approved_level": data.get("options_approved_level"),
+                "trading_blocked": data.get("trading_blocked"),
+                "account_number_last4": str(data.get("account_number") or "")[-4:],
+            }
+        else:
+            payload["reason"] = f"alpaca_http_{r.status_code}"
+    except Exception as exc:
+        payload.update({"ok": False, "reason": exc.__class__.__name__})
+    return payload
 
 
 def _order_premium_usd(order: dict[str, Any]) -> float:
@@ -420,7 +507,7 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
         "limit": 100,
     }
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
+        async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
             r = await client.get(f"{ALPACA_DATA_BASE}/v1beta1/options/snapshots/{parsed['root']}", params=params)
         if r.status_code != 200:
             return {"ok": False, "symbol": symbol, "reason": f"alpaca_data_http_{r.status_code}"}
@@ -1368,8 +1455,9 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     gate = await execution_gate.check(scope="options", ticker=ticket.get("ticker"), record=True)
     if not gate.get("ok"):
         return {"ok": False, "reason": "execution_gate_blocked", "gate": gate, "candidate": ticket}
-    if not configured():
-        return {"ok": False, "reason": "missing_options_alpaca_keys", "candidate": ticket}
+    route = options_account_route_guard()
+    if not route.get("ok"):
+        return {"ok": False, "reason": route.get("reason") or "options_account_route_blocked", "route": route, "candidate": ticket}
     if not OPTIONS_EXECUTION_ENABLED:
         return {"ok": False, "reason": "options_execution_disabled", "candidate": ticket}
     if not paper_only():
@@ -1452,8 +1540,8 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         "limit_price": round(order_limit, 2),
         "client_order_id": client_order_id,
     }
-    async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
-        r = await client.post(f"{TRADE_BASE}/v2/orders", json=payload)
+    async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
+        r = await client.post(f"{_options_trade_base()}/v2/orders", json=payload)
     if r.status_code not in (200, 201):
         return {"ok": False, "reason": f"alpaca_rejected_{r.status_code}", "detail": r.text[:220], "candidate": ticket}
     order = r.json()
@@ -1465,6 +1553,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         "client_order_id": client_order_id,
         "submitted_at": _now(),
         "status": "submitted",
+        "account_route": route,
         "exit_policy": exit_policy,
         "fresh_preflight": preflight,
         "pricing_truth": pricing_truth,
@@ -1657,16 +1746,17 @@ async def refresh_and_auto_execute_latest(limit: int | None = None) -> dict[str,
 
 
 async def close(symbol: str, qty: int | None = None) -> dict[str, Any]:
-    if not configured():
-        return {"ok": False, "reason": "missing_options_alpaca_keys"}
+    route = options_account_route_guard()
+    if not route.get("ok"):
+        return {"ok": False, "reason": route.get("reason") or "options_account_route_blocked", "route": route}
     market_status = await _options_market_status()
     if not market_status.get("is_open"):
         return {"ok": False, "reason": "options_market_closed", "market_status": market_status}
     payload: dict[str, Any] = {"symbol": symbol, "side": "sell", "type": "market", "time_in_force": "day"}
     if qty:
         payload["qty"] = str(int(qty))
-    async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
-        r = await client.post(f"{TRADE_BASE}/v2/orders", json=payload)
+    async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
+        r = await client.post(f"{_options_trade_base()}/v2/orders", json=payload)
     if r.status_code not in (200, 201):
         detail = r.text[:220]
         if "no available quote" not in detail.lower():
@@ -1683,8 +1773,8 @@ async def close(symbol: str, qty: int | None = None) -> dict[str, Any]:
         }
         if qty:
             limit_payload["qty"] = str(int(qty))
-        async with httpx.AsyncClient(timeout=15.0, headers=HEADERS) as client:
-            retry = await client.post(f"{TRADE_BASE}/v2/orders", json=limit_payload)
+        async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
+            retry = await client.post(f"{_options_trade_base()}/v2/orders", json=limit_payload)
         if retry.status_code not in (200, 201):
             return {
                 "ok": False,
@@ -1697,11 +1787,12 @@ async def close(symbol: str, qty: int | None = None) -> dict[str, Any]:
         return {
             "ok": True,
             "order": retry.json(),
+            "account_route": route,
             "fallback": "limit_sell_after_no_quote_market_reject",
             "market_reject_detail": detail,
             "snapshot": snap,
         }
-    return {"ok": True, "order": r.json()}
+    return {"ok": True, "order": r.json(), "account_route": route}
 
 
 def _order_fill_price(order: dict[str, Any]) -> float:

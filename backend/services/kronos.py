@@ -127,6 +127,336 @@ async def _spy_history() -> list[float]:
     return await asyncio.to_thread(_yf)
 
 
+def _norm_candle(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    close = _num(row.get("close") or row.get("c") or row.get("last") or row.get("price"))
+    open_ = _num(row.get("open") or row.get("o") or close)
+    high = _num(row.get("high") or row.get("h") or close)
+    low = _num(row.get("low") or row.get("l") or close)
+    if close is None or open_ is None or high is None or low is None:
+        return None
+    high = max(high, open_, close)
+    low = min(low, open_, close)
+    ts = row.get("timestamp") or row.get("datetime") or row.get("date") or row.get("time") or row.get("t")
+    return {
+        "timestamp": str(ts or ""),
+        "open": float(open_),
+        "high": float(high),
+        "low": float(low),
+        "close": float(close),
+        "volume": _num(row.get("volume") or row.get("v"), 0.0) or 0.0,
+    }
+
+
+def _ema(vals: list[float], period: int) -> float | None:
+    if not vals:
+        return None
+    k = 2 / (period + 1)
+    ema = vals[0]
+    for v in vals[1:]:
+        ema = v * k + ema * (1 - k)
+    return ema
+
+
+def _rsi(vals: list[float], period: int = 14) -> float | None:
+    if len(vals) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(-period, 0):
+        delta = vals[i] - vals[i - 1]
+        gains.append(max(delta, 0))
+        losses.append(abs(min(delta, 0)))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _atr_pct(candles: list[dict[str, Any]], period: int = 14) -> float:
+    if len(candles) < 2:
+        return 0.5
+    trs = []
+    for i in range(max(1, len(candles) - period), len(candles)):
+        cur, prev = candles[i], candles[i - 1]
+        tr = max(
+            cur["high"] - cur["low"],
+            abs(cur["high"] - prev["close"]),
+            abs(cur["low"] - prev["close"]),
+        )
+        if cur["close"]:
+            trs.append(tr / cur["close"] * 100)
+    return max(0.03, sum(trs) / len(trs)) if trs else 0.5
+
+
+def _volume_z(candles: list[dict[str, Any]], lookback: int = 30) -> float | None:
+    vols = [float(c.get("volume") or 0) for c in candles[-lookback:] if _num(c.get("volume")) is not None]
+    if len(vols) < 6:
+        return None
+    last = vols[-1]
+    base = vols[:-1]
+    mean = sum(base) / len(base)
+    var = sum((x - mean) ** 2 for x in base) / max(1, len(base) - 1)
+    sd = math.sqrt(var)
+    return round((last - mean) / sd, 2) if sd else 0.0
+
+
+def _vwap_distance(candles: list[dict[str, Any]], lookback: int = 30) -> float | None:
+    rows = candles[-lookback:]
+    total_vol = sum(max(0.0, float(c.get("volume") or 0)) for c in rows)
+    if total_vol <= 0:
+        return None
+    vwap = sum(((c["high"] + c["low"] + c["close"]) / 3) * max(0.0, float(c.get("volume") or 0)) for c in rows) / total_vol
+    last = rows[-1]["close"]
+    return ((last - vwap) / vwap) * 100 if vwap else None
+
+
+def _candle_features(candles: list[dict[str, Any]]) -> dict[str, Any]:
+    last = candles[-1]
+    prev = candles[-2] if len(candles) > 1 else last
+    closes = [c["close"] for c in candles]
+    rng = max(0.000001, last["high"] - last["low"])
+    body = last["close"] - last["open"]
+    body_pct = (body / last["open"]) * 100 if last["open"] else 0.0
+    range_pct = (rng / last["open"]) * 100 if last["open"] else 0.0
+    upper_wick_pct = ((last["high"] - max(last["open"], last["close"])) / rng) * 100
+    lower_wick_pct = ((min(last["open"], last["close"]) - last["low"]) / rng) * 100
+    gap_pct = ((last["open"] - prev["close"]) / prev["close"]) * 100 if prev["close"] else 0.0
+    atr = _atr_pct(candles)
+    ema9 = _ema(closes[-60:], 9)
+    ema21 = _ema(closes[-80:], 21)
+    ema50 = _ema(closes[-120:], 50)
+    rsi = _rsi(closes)
+    vol_z = _volume_z(candles)
+    vwap_dist = _vwap_distance(candles)
+    returns = [
+        ((closes[i] - closes[i - 1]) / closes[i - 1]) * 100
+        for i in range(max(1, len(closes) - 10), len(closes))
+        if closes[i - 1]
+    ]
+    momentum_3 = sum(returns[-3:]) if len(returns) >= 3 else sum(returns)
+    momentum_5 = sum(returns[-5:]) if len(returns) >= 5 else sum(returns)
+    higher_highs = sum(1 for i in range(max(1, len(candles) - 5), len(candles)) if candles[i]["high"] > candles[i - 1]["high"])
+    lower_lows = sum(1 for i in range(max(1, len(candles) - 5), len(candles)) if candles[i]["low"] < candles[i - 1]["low"])
+    structure = "HIGHER_HIGH" if higher_highs > lower_lows else "LOWER_LOW" if lower_lows > higher_highs else "MIXED"
+    pattern = "BULLISH_BODY" if body_pct > atr * 0.25 else "BEARISH_BODY" if body_pct < -atr * 0.25 else "DOJI"
+    if lower_wick_pct > 55 and body_pct >= 0:
+        pattern = "LOWER_WICK_REJECTION"
+    elif upper_wick_pct > 55 and body_pct <= 0:
+        pattern = "UPPER_WICK_REJECTION"
+    return {
+        "last_close": round(last["close"], 4),
+        "last_open": round(last["open"], 4),
+        "last_high": round(last["high"], 4),
+        "last_low": round(last["low"], 4),
+        "body_pct": round(body_pct, 3),
+        "range_pct": round(range_pct, 3),
+        "upper_wick_pct": round(upper_wick_pct, 1),
+        "lower_wick_pct": round(lower_wick_pct, 1),
+        "gap_pct": round(gap_pct, 3),
+        "atr_pct": round(atr, 3),
+        "ema9": round(ema9, 4) if ema9 else None,
+        "ema21": round(ema21, 4) if ema21 else None,
+        "ema50": round(ema50, 4) if ema50 else None,
+        "rsi14": round(rsi, 1) if rsi is not None else None,
+        "vwap_distance_pct": round(vwap_dist, 3) if vwap_dist is not None else None,
+        "volume_z": vol_z,
+        "momentum_3_pct": round(momentum_3, 3),
+        "momentum_5_pct": round(momentum_5, 3),
+        "structure": structure,
+        "last_candle_pattern": pattern,
+        "latest_timestamp": last.get("timestamp"),
+    }
+
+
+def _sigmoid(x: float) -> float:
+    return 1 / (1 + math.exp(-max(-10, min(10, x))))
+
+
+def _score_candle_features(features: dict[str, Any]) -> dict[str, Any]:
+    score = 0.0
+    reasons: list[str] = []
+    ema9, ema21, ema50 = features.get("ema9"), features.get("ema21"), features.get("ema50")
+    close = features.get("last_close") or 0
+    atr = max(0.03, float(features.get("atr_pct") or 0.5))
+    if ema9 and ema21:
+        if ema9 > ema21:
+            score += 13
+            reasons.append("EMA9 above EMA21")
+        else:
+            score -= 13
+            reasons.append("EMA9 below EMA21")
+    if ema21 and ema50:
+        if ema21 > ema50:
+            score += 7
+            reasons.append("EMA21 above EMA50")
+        else:
+            score -= 7
+            reasons.append("EMA21 below EMA50")
+    if ema21 and close:
+        score += max(-10, min(10, ((close - ema21) / ema21) * 100 / max(atr, 0.1) * 4))
+    mom3 = float(features.get("momentum_3_pct") or 0)
+    mom5 = float(features.get("momentum_5_pct") or 0)
+    score += max(-16, min(16, (mom3 + mom5 * 0.55) / max(atr, 0.1) * 5))
+    body = float(features.get("body_pct") or 0)
+    score += max(-9, min(9, body / max(atr, 0.1) * 4))
+    if features.get("last_candle_pattern") == "LOWER_WICK_REJECTION":
+        score += 7
+        reasons.append("lower wick rejection")
+    elif features.get("last_candle_pattern") == "UPPER_WICK_REJECTION":
+        score -= 7
+        reasons.append("upper wick rejection")
+    rsi = features.get("rsi14")
+    if rsi is not None:
+        if 48 <= rsi <= 68:
+            score += 5
+        elif rsi > 78:
+            score -= 5
+        elif rsi < 35:
+            score -= 3
+    vwap_dist = features.get("vwap_distance_pct")
+    if vwap_dist is not None:
+        score += max(-7, min(7, float(vwap_dist) / max(atr, 0.1) * 2))
+    if features.get("structure") == "HIGHER_HIGH":
+        score += 5
+    elif features.get("structure") == "LOWER_LOW":
+        score -= 5
+    vol_z = features.get("volume_z")
+    if vol_z is not None and abs(float(vol_z)) >= 1.0:
+        score += 3 if score >= 0 else -3
+    return {"score": round(score, 2), "reasons": reasons[:5]}
+
+
+async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int = 220, persist: bool = False) -> dict[str, Any]:
+    """Candle-aware read-only forecast from raw OHLCV.
+
+    This is intentionally separate from the portfolio forecast engine. It uses
+    numerical OHLCV, not TradingView pixels.
+    """
+    ticker = _ticker(symbol) or "SPY"
+    tf = str(timeframe or "5m").lower()
+    try:
+        from . import london_strategic_edge as lse
+        payload = await lse.candles(ticker, timeframe=tf, limit=max(60, min(int(limit or 220), 500)), order="asc")
+        candles = [_norm_candle(r) for r in _rows(payload)]
+        candles = [c for c in candles if c]
+        provider = payload.get("provider") or "london_strategic_edge"
+        degraded = not bool(payload.get("ok"))
+    except Exception as exc:
+        logger.debug("kronos candle forecast LSE failed %s %s: %s", ticker, tf, exc)
+        candles = []
+        provider = "london_strategic_edge"
+        degraded = True
+    if len(candles) < 35:
+        vals = await _spy_history() if ticker == "SPY" else []
+        if len(vals) >= 35:
+            candles = [{"timestamp": "", "open": v, "high": v, "low": v, "close": v, "volume": 0.0} for v in vals[-120:]]
+            provider = "pricer_close_fallback"
+            degraded = True
+    if len(candles) < 20:
+        return {
+            "ok": False,
+            "symbol": ticker,
+            "timeframe": tf,
+            "direction": "UNKNOWN",
+            "reason": "insufficient_ohlcv",
+            "provider": provider,
+            "degraded": True,
+            "candles": len(candles),
+        }
+    features = _candle_features(candles)
+    scored = _score_candle_features(features)
+    atr = max(0.03, float(features.get("atr_pct") or 0.5))
+    expected_pct = max(-3.5, min(3.5, scored["score"] / 55 * atr))
+    noise_band = max(0.06, min(0.32, atr * 0.22))
+    up_prob = _sigmoid(scored["score"] / 18)
+    down_prob = 1 - up_prob
+    flat_prob = max(0.06, min(0.38, 0.34 - min(0.28, abs(expected_pct) / max(noise_band, 0.01) * 0.11)))
+    directional_mass = 1 - flat_prob
+    up = round(up_prob * directional_mass * 100, 1)
+    down = round(down_prob * directional_mass * 100, 1)
+    flat = round(flat_prob * 100, 1)
+    direction = "FLAT"
+    if expected_pct > noise_band and up >= 52:
+        direction = "UP"
+    elif expected_pct < -noise_band and down >= 52:
+        direction = "DOWN"
+    close = features["last_close"]
+    predicted_close = close * (1 + expected_pct / 100)
+    half_range = max(atr * 0.55, noise_band)
+    pred = {
+        "open": round(close, 4),
+        "high": round(close * (1 + max(expected_pct, 0) / 100 + half_range / 100), 4),
+        "low": round(close * (1 + min(expected_pct, 0) / 100 - half_range / 100), 4),
+        "close": round(predicted_close, 4),
+    }
+    horizons = []
+    for bars, mult in ((1, 1.0), (3, 1.65), (5, 2.15), ("EOD", 3.2)):
+        horizon_pct = expected_pct * (mult if isinstance(bars, str) else math.sqrt(mult))
+        cone = half_range * (mult if isinstance(bars, str) else math.sqrt(mult))
+        horizons.append({
+            "horizon": f"{bars} BAR" if isinstance(bars, int) else str(bars),
+            "forecast_pct": round(horizon_pct, 3),
+            "cone_low_pct": round(horizon_pct - cone, 3),
+            "cone_high_pct": round(horizon_pct + cone, 3),
+            "up_probability": up,
+            "down_probability": down,
+            "flat_probability": flat,
+        })
+    result = {
+        "ok": True,
+        "symbol": ticker,
+        "timeframe": tf,
+        "direction": direction,
+        "forecast_pct": round(expected_pct, 3),
+        "confidence": int(max(25, min(88, max(up, down) + abs(scored["score"]) * 0.25))),
+        "probabilities": {"up": up, "down": down, "flat": flat},
+        "noise_band_pct": round(noise_band, 3),
+        "cone_low_pct": round(expected_pct - half_range, 3),
+        "cone_high_pct": round(expected_pct + half_range, 3),
+        "predicted_next_candle": pred,
+        "horizons": horizons,
+        "features": features,
+        "score": scored["score"],
+        "drivers": scored["reasons"],
+        "provider": provider,
+        "degraded": degraded,
+        "source": "raw_ohlcv_candle_engine",
+        "generated_at": _now().isoformat(),
+    }
+    if persist:
+        try:
+            db = get_db()
+            await db.kronos_candle_predictions.insert_one(stamped(result))
+        except Exception as exc:
+            logger.debug("kronos candle prediction persistence skipped: %s", exc)
+    return result
+
+
+async def candle_forecast_suite(symbol: str = "SPY", persist: bool = False) -> dict[str, Any]:
+    timeframes = ["5m", "15m", "1h", "1d"]
+    results = await asyncio.gather(
+        *(candle_forecast(symbol=symbol, timeframe=tf, persist=persist) for tf in timeframes),
+        return_exceptions=True,
+    )
+    rows = []
+    for tf, row in zip(timeframes, results):
+        if isinstance(row, Exception):
+            rows.append({"ok": False, "symbol": _ticker(symbol), "timeframe": tf, "error": str(row), "direction": "UNKNOWN"})
+        else:
+            rows.append(row)
+    primary = next((r for r in rows if r.get("ok") and r.get("timeframe") == "5m"), None) or next((r for r in rows if r.get("ok")), None)
+    return {
+        "ok": bool(primary),
+        "symbol": _ticker(symbol) or "SPY",
+        "primary": primary,
+        "timeframes": rows,
+        "generated_at": _now().isoformat(),
+    }
+
+
 def _ret(vals: list[float], days: int) -> float:
     if len(vals) <= days or vals[-days - 1] == 0:
         return 0.0
@@ -149,6 +479,22 @@ def _vol(vals: list[float], days: int = 20) -> float:
 
 
 async def market_forecast() -> dict[str, Any]:
+    candle = await candle_forecast_suite("SPY", persist=False)
+    primary = candle.get("primary") if isinstance(candle, dict) else None
+    if isinstance(primary, dict) and primary.get("ok"):
+        return {
+            "symbol": "SPY",
+            "direction": primary.get("direction") or "UNKNOWN",
+            "forecast_pct": round(_num(primary.get("forecast_pct"), 0.0) or 0.0, 2),
+            "cone_low_pct": round(_num(primary.get("cone_low_pct"), -1.0) or -1.0, 2),
+            "cone_high_pct": round(_num(primary.get("cone_high_pct"), 1.0) or 1.0, 2),
+            "confidence": primary.get("confidence") or 20,
+            "last_price": (primary.get("features") or {}).get("last_close"),
+            "realized_vol_20d": (primary.get("features") or {}).get("atr_pct"),
+            "source": "kronos_candle_engine/raw_ohlcv",
+            "reason": "candle-aware OHLCV model with adaptive noise band",
+            "candle_engine": candle,
+        }
     vals = await _spy_history()
     if len(vals) < 5:
         return {
@@ -165,7 +511,7 @@ async def market_forecast() -> dict[str, Any]:
     vol = _vol(vals, 20)
     base = (r1 * 0.42) + (r5 / 5 * 0.35) + (r20 / 20 * 0.23)
     base = max(-2.8, min(2.8, base))
-    direction = "UP" if base > 0.12 else "DOWN" if base < -0.12 else "FLAT"
+    direction = "UP" if base > 0.06 else "DOWN" if base < -0.06 else "FLAT"
     confidence = int(max(25, min(82, 50 + abs(base) * 12 + min(12, abs(r5)))))
     return {
         "symbol": "SPY",
@@ -229,6 +575,27 @@ def _freshness_status(age_minutes: float | None) -> str:
     if age_minutes <= 180:
         return "AGING"
     return "STALE"
+
+
+def _parse_dt(ts: Any) -> datetime | None:
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw[:len(fmt)], fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    return None
 
 
 def _action_allows_position(action: str, instrument: str) -> bool:
@@ -564,6 +931,172 @@ async def disagreement_performance(limit: int = 200) -> dict[str, Any]:
     }
 
 
+def _empty_accuracy_bucket(key: str = "ALL") -> dict[str, Any]:
+    return {
+        "key": key,
+        "sample": 0,
+        "pending": 0,
+        "direction_wins": 0,
+        "direction_losses": 0,
+        "direction_win_rate_pct": None,
+        "cone_wins": 0,
+        "cone_losses": 0,
+        "cone_coverage_pct": None,
+        "mae_pct": None,
+        "rmse_pct": None,
+        "avg_error_pct": None,
+    }
+
+
+def _finalize_accuracy_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    sample = int(bucket.get("sample") or 0)
+    direction_total = int(bucket.get("direction_wins") or 0) + int(bucket.get("direction_losses") or 0)
+    cone_total = int(bucket.get("cone_wins") or 0) + int(bucket.get("cone_losses") or 0)
+    abs_errors = bucket.pop("_abs_errors", [])
+    sq_errors = bucket.pop("_sq_errors", [])
+    errors = bucket.pop("_errors", [])
+    bucket["direction_win_rate_pct"] = round(bucket["direction_wins"] / direction_total * 100, 1) if direction_total else None
+    bucket["cone_coverage_pct"] = round(bucket["cone_wins"] / cone_total * 100, 1) if cone_total else None
+    bucket["mae_pct"] = round(sum(abs_errors) / len(abs_errors), 3) if abs_errors else None
+    bucket["rmse_pct"] = round(math.sqrt(sum(sq_errors) / len(sq_errors)), 3) if sq_errors else None
+    bucket["avg_error_pct"] = round(sum(errors) / len(errors), 3) if errors else None
+    bucket["sample"] = sample
+    return bucket
+
+
+def _add_accuracy_sample(bucket: dict[str, Any], row: dict[str, Any]) -> None:
+    actual = _num(row.get("actual_pct"))
+    forecast = _num(row.get("forecast_pct"))
+    if actual is None or forecast is None:
+        bucket["pending"] = int(bucket.get("pending") or 0) + 1
+        return
+    bucket["sample"] = int(bucket.get("sample") or 0) + 1
+    noise = max(0.03, _num(row.get("noise_band_pct"), 0.06) or 0.06)
+    forecast_dir = "FLAT" if abs(forecast) <= noise else ("UP" if forecast > 0 else "DOWN")
+    actual_dir = "FLAT" if abs(actual) <= noise else ("UP" if actual > 0 else "DOWN")
+    if forecast_dir == actual_dir:
+        bucket["direction_wins"] = int(bucket.get("direction_wins") or 0) + 1
+    else:
+        bucket["direction_losses"] = int(bucket.get("direction_losses") or 0) + 1
+    cone_low = _num(row.get("cone_low_pct"))
+    cone_high = _num(row.get("cone_high_pct"))
+    if cone_low is not None and cone_high is not None:
+        lo, hi = sorted([cone_low, cone_high])
+        if lo <= actual <= hi:
+            bucket["cone_wins"] = int(bucket.get("cone_wins") or 0) + 1
+        else:
+            bucket["cone_losses"] = int(bucket.get("cone_losses") or 0) + 1
+    err = actual - forecast
+    bucket.setdefault("_errors", []).append(err)
+    bucket.setdefault("_abs_errors", []).append(abs(err))
+    bucket.setdefault("_sq_errors", []).append(err * err)
+
+
+async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, Any]:
+    """Score persisted candle forecasts against the next available OHLCV candle.
+
+    Pending rows stay pending until a future candle exists. This makes Kronos'
+    accuracy display falsifiable without mutating the original forecast.
+    """
+    db = get_db()
+    rows = await db.kronos_candle_predictions.find(
+        {"ok": True},
+        {"_id": 0},
+    ).sort("generated_at", -1).to_list(max(50, min(int(limit or 800), 2500)))
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (_ticker(row.get("symbol")) or "SPY", str(row.get("timeframe") or "5m").lower())
+        grouped.setdefault(key, []).append(row)
+
+    scored: list[dict[str, Any]] = []
+    pending = 0
+    try:
+        from . import london_strategic_edge as lse
+    except Exception as exc:
+        return {"ok": False, "error": f"lse_unavailable:{exc}", "sample": 0, "pending": len(rows)}
+
+    for (symbol, timeframe), preds in grouped.items():
+        try:
+            payload = await lse.candles(symbol, timeframe=timeframe, limit=500, order="asc")
+            candles = [_norm_candle(r) for r in _rows(payload)]
+            candles = [c for c in candles if c and _parse_dt(c.get("timestamp"))]
+        except Exception as exc:
+            logger.debug("kronos accuracy candles failed %s %s: %s", symbol, timeframe, exc)
+            candles = []
+        if not candles:
+            pending += len(preds)
+            continue
+        candle_pairs = [(_parse_dt(c.get("timestamp")), c) for c in candles]
+        candle_pairs = [(dt, c) for dt, c in candle_pairs if dt]
+        for pred in preds:
+            generated = _parse_dt(pred.get("generated_at") or pred.get("created_at"))
+            base = _num((pred.get("features") or {}).get("last_close") or (pred.get("predicted_next_candle") or {}).get("open"))
+            if generated is None or base is None or base <= 0:
+                pending += 1
+                continue
+            actual_candle = next((c for dt, c in candle_pairs if dt > generated), None)
+            if not actual_candle:
+                pending += 1
+                continue
+            actual_close = _num(actual_candle.get("close"))
+            if actual_close is None:
+                pending += 1
+                continue
+            actual_pct = (actual_close - base) / base * 100.0
+            structure = str((pred.get("features") or {}).get("structure") or "UNKNOWN").upper()
+            regime = (
+                "TREND_UP" if structure == "HIGHER_HIGH"
+                else "TREND_DOWN" if structure == "LOWER_LOW"
+                else "CHOP"
+            )
+            scored.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "regime": regime,
+                "generated_at": pred.get("generated_at"),
+                "actual_at": actual_candle.get("timestamp"),
+                "direction": pred.get("direction"),
+                "forecast_pct": _num(pred.get("forecast_pct")),
+                "actual_pct": round(actual_pct, 3),
+                "error_pct": round(actual_pct - (_num(pred.get("forecast_pct"), 0.0) or 0.0), 3),
+                "noise_band_pct": _num(pred.get("noise_band_pct"), 0.06),
+                "cone_low_pct": _num(pred.get("cone_low_pct")),
+                "cone_high_pct": _num(pred.get("cone_high_pct")),
+                "confidence": pred.get("confidence"),
+                "provider": pred.get("provider"),
+            })
+
+    overall = _empty_accuracy_bucket("ALL")
+    by_timeframe: dict[str, dict[str, Any]] = {}
+    by_regime: dict[str, dict[str, Any]] = {}
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for row in scored:
+        _add_accuracy_sample(overall, row)
+        _add_accuracy_sample(by_timeframe.setdefault(row["timeframe"], _empty_accuracy_bucket(row["timeframe"])), row)
+        _add_accuracy_sample(by_regime.setdefault(row["regime"], _empty_accuracy_bucket(row["regime"])), row)
+        _add_accuracy_sample(by_symbol.setdefault(row["symbol"], _empty_accuracy_bucket(row["symbol"])), row)
+    overall["pending"] = pending
+    result = {
+        "ok": True,
+        "overall": _finalize_accuracy_bucket(overall),
+        "by_timeframe": [_finalize_accuracy_bucket(v) for v in by_timeframe.values()],
+        "by_regime": [_finalize_accuracy_bucket(v) for v in by_regime.values()],
+        "by_symbol": sorted((_finalize_accuracy_bucket(v) for v in by_symbol.values()), key=lambda r: r.get("sample") or 0, reverse=True)[:20],
+        "recent": scored[:80],
+        "pending": pending,
+        "stored_predictions": len(rows),
+        "scored_predictions": len(scored),
+        "source": "kronos_candle_predictions + next raw OHLCV candle",
+        "generated_at": _now().isoformat(),
+    }
+    if persist:
+        try:
+            await db.kronos_accuracy_snapshots.insert_one(stamped(result))
+        except Exception as exc:
+            logger.debug("kronos accuracy persistence skipped: %s", exc)
+    return result
+
+
 async def status() -> dict[str, Any]:
     db = get_db()
     latest = await db.kronos_forecast_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
@@ -583,6 +1116,12 @@ async def status() -> dict[str, Any]:
     )
     health = _freshness_status(age)
     pm_coverage = "FULL" if not summary.get("unmapped_pm", 0) else "PARTIAL"
+    try:
+        accuracy = await candle_accuracy(limit=600, persist=False)
+        proof = accuracy.get("overall") if accuracy.get("ok") else {}
+    except Exception as exc:
+        logger.debug("kronos status accuracy degraded: %s", exc)
+        proof = {}
     return {
         "ok": True,
         "health": health,
@@ -600,6 +1139,7 @@ async def status() -> dict[str, Any]:
             "cone_win_rate_pct": None,
             "scored_days": scored_days,
         },
+        "proof": proof,
     }
 
 
@@ -722,7 +1262,7 @@ def _calendar_verdict(forecast_pct: float | None, spy_actual_pct: float | None, 
         return {"status": "NO_FORECAST", "score": 0}
     if spy_actual_pct is None:
         return {"status": "PENDING", "score": 0}
-    if abs(forecast_pct) < 0.12:
+    if abs(forecast_pct) < 0.06:
         return {"status": "WATCH", "score": 50}
     direction_ok = (forecast_pct >= 0 and spy_actual_pct >= 0) or (forecast_pct < 0 and spy_actual_pct < 0)
     total_ok = total_actual_pct is None or (forecast_pct >= 0 and total_actual_pct >= 0) or (forecast_pct < 0 and total_actual_pct < 0)
@@ -734,7 +1274,7 @@ def _calendar_verdict(forecast_pct: float | None, spy_actual_pct: float | None, 
 
 
 def _direction_win(forecast_pct: float | None, spy_actual_pct: float | None) -> bool | None:
-    if forecast_pct is None or spy_actual_pct is None or abs(forecast_pct) < 0.12:
+    if forecast_pct is None or spy_actual_pct is None or abs(forecast_pct) < 0.06:
         return None
     return (forecast_pct >= 0 and spy_actual_pct >= 0) or (forecast_pct < 0 and spy_actual_pct < 0)
 

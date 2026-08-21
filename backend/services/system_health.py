@@ -93,8 +93,15 @@ async def overview() -> dict[str, Any]:
         db["reason"] = str(exc)[:220]
 
     alpaca = await _alpaca_probe()
+    try:
+        from . import postgres_store
+        postgres = await postgres_store.status()
+    except Exception as exc:
+        postgres = {"enabled": False, "ready": False, "last_error": str(exc)[:220]}
     env = {
         "mongodb": _mask(os.environ.get("MONGO_URL")),
+        "postgres": _mask(os.environ.get("POSTGRES_DSN")),
+        "postgres_enabled": os.environ.get("POSTGRES_ENABLED", "false").lower() == "true",
         "db_name": os.environ.get("DB_NAME", ""),
         "anthropic": _mask(os.environ.get("ANTHROPIC_API_KEY")),
         "claude_disabled": os.environ.get("DISABLE_CLAUDE_ANALYSIS", "").lower() == "true",
@@ -122,6 +129,7 @@ async def overview() -> dict[str, Any]:
         "ready_for_journal_learning": bool(db.get("ok") and db.get("counts", {}).get("tf_trades")),
         "blockers": blockers,
         "database": db,
+        "postgres": postgres,
         "alpaca": alpaca,
         "env": env,
     }

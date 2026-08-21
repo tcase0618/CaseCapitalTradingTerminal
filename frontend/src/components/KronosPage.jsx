@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { DataConfidenceStrip } from "./Institutional";
+import TradingViewMiniChart from "./TradingViewMiniChart";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
 
@@ -37,12 +38,14 @@ export default function KronosPage() {
   const [macro, setMacro] = useState(null);
   const [kronos, setKronos] = useState(null);
   const [kronosStatus, setKronosStatus] = useState(null);
+  const [kronosAccuracy, setKronosAccuracy] = useState(null);
   const [disagreements, setDisagreements] = useState(null);
   const [tab, setTab] = useState("FORECAST");
   const [selectedKey, setSelectedKey] = useState(null);
   const [selectedContext, setSelectedContext] = useState(null);
   const [chartKey, setChartKey] = useState("SPY");
   const [chartCandles, setChartCandles] = useState(null);
+  const [candleSuite, setCandleSuite] = useState(null);
   const [chartLoading, setChartLoading] = useState(false);
   const [sandboxDraft, setSandboxDraft] = useState("SPY");
   const [sandboxSymbol, setSandboxSymbol] = useState("SPY");
@@ -66,7 +69,7 @@ export default function KronosPage() {
     const get = (path, fallback, timeout = 10000) =>
       axios.get(`${API}${path}`, { timeout }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
     try {
-      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, disagreementRes] = await Promise.all([
+      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, accuracyRes, disagreementRes] = await Promise.all([
         get("/scan/latest", { results: [] }),
         get("/portfolio_manager/latest", { decisions: [] }, 12000),
         get("/trade_floor/positions", { db_positions: [], live_alpaca: [] }),
@@ -78,6 +81,7 @@ export default function KronosPage() {
         get("/data/lse/macro?limit=80", { economic_calendar: [], bond_yields: [] }),
         get("/kronos/forecast?persist=true", { forecasts: [] }, 12000),
         get("/kronos/status", { ok: false, health: "DEGRADED" }, 12000),
+        get("/kronos/accuracy?limit=900", { ok: false, overall: {} }, 16000),
         get("/kronos/disagreements?limit=250", { rows: [] }),
       ]);
       setScan(scanRes.data);
@@ -91,6 +95,7 @@ export default function KronosPage() {
       setMacro(macroRes.data);
       setKronos(kronosRes.data);
       setKronosStatus(statusRes.data);
+      setKronosAccuracy(accuracyRes.data);
       setDisagreements(disagreementRes.data);
       setLastSync(new Date().toISOString());
     } finally {
@@ -114,6 +119,8 @@ export default function KronosPage() {
       setKronosStatus(r.data?.status || null);
       const d = await axios.get(`${API}/kronos/disagreements?limit=250`, { timeout: 10000 }).catch(() => null);
       if (d?.data) setDisagreements(d.data);
+      const a = await axios.get(`${API}/kronos/accuracy?limit=900&persist=true`, { timeout: 16000 }).catch(() => null);
+      if (a?.data) setKronosAccuracy(a.data);
       setLastSync(new Date().toISOString());
     } finally {
       setActionLoading(false);
@@ -184,15 +191,19 @@ export default function KronosPage() {
     let cancelled = false;
     const ticker = chartChoice?.ticker || "SPY";
     setChartLoading(true);
+    setCandleSuite(null);
     const path = ticker === "SPY"
       ? `${API}/price/history/SPY?days=140`
       : `${API}/data/lse/candles/${ticker}?timeframe=1d&limit=140&order=asc`;
-    axios.get(path, { timeout: 12000 })
-      .then(res => {
-        if (!cancelled) setChartCandles(res.data);
-      })
-      .catch(e => {
-        if (!cancelled) setChartCandles({ rows: [], error: e.message, degraded: true });
+    Promise.all([
+      axios.get(path, { timeout: 12000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
+      axios.get(`${API}/kronos/candle_forecast/${ticker}?persist=true`, { timeout: 16000 }).catch(e => ({ data: { ok: false, error: e.message, timeframes: [] } })),
+    ])
+      .then(([priceRes, candleRes]) => {
+        if (!cancelled) {
+          setChartCandles(priceRes.data);
+          setCandleSuite(candleRes.data);
+        }
       })
       .finally(() => {
         if (!cancelled) setChartLoading(false);
@@ -325,8 +336,10 @@ export default function KronosPage() {
             <MemoryItem label="Disagreement Audits" value={(disagreements?.rows || []).length} detail="Each PM conflict is saved for future return review." />
             <MemoryItem label="PM Map" value={`${kronosStatus?.mapped_pm ?? 0}/${kronosStatus?.positions ?? 0}`} detail={`${kronosStatus?.unmapped_pm ?? 0} open instruments still unmapped to PM.`} />
             <MemoryItem label="Calendar Score" value={kronosStatus?.calendar?.scored_days ?? 0} detail={`Direction win ${kronosStatus?.calendar?.direction_win_rate_pct ?? "-"}% / cone win ${kronosStatus?.calendar?.cone_win_rate_pct ?? "-"}%.`} />
+            <MemoryItem label="Candle Proof" value={kronosAccuracy?.overall?.sample ?? 0} detail={`Direction ${kronosAccuracy?.overall?.direction_win_rate_pct ?? "-"}% / cone ${kronosAccuracy?.overall?.cone_coverage_pct ?? "-"}% / MAE ${kronosAccuracy?.overall?.mae_pct ?? "-"}%.`} />
             <MemoryItem label="Morning Report" value="09:30" detail="SPY forecast plus open-position P/L cone dispatches to Telegram Mon-Fri." />
           </div>
+          <KronosAccuracyPanel accuracy={kronosAccuracy} />
         </Card>
       )}
 
@@ -335,11 +348,14 @@ export default function KronosPage() {
           choice={chartChoice}
           choices={chartChoices}
           candles={chartCandles}
+          candleSuite={candleSuite}
           forecast={chartForecast}
           loading={chartLoading}
           onSelect={setChartKey}
         />
       )}
+
+      {tab === "FORECAST" && <KronosAccuracyPanel accuracy={kronosAccuracy} compact />}
 
       {tab === "FORECAST" && <div style={topGrid}>
         <Card title="KRONOS SELECTION MATRIX" accentColor="#a78bfa">
@@ -401,6 +417,76 @@ function KronosStatusPanel({ status, lseHealth, pm, lastSync }) {
   );
 }
 
+function KronosAccuracyPanel({ accuracy, compact = false }) {
+  const overall = accuracy?.overall || {};
+  const tfRows = accuracy?.by_timeframe || [];
+  const regimeRows = accuracy?.by_regime || [];
+  const recent = accuracy?.recent || [];
+  const ok = accuracy?.ok !== false;
+  return (
+    <div style={{ display: "grid", gap: 14, marginTop: compact ? 0 : 18 }}>
+      <div style={proofGrid}>
+        <Mini label="PROOF SAMPLE" value={overall.sample ?? 0} color={labelLight} />
+        <Mini label="PENDING" value={overall.pending ?? accuracy?.pending ?? 0} color={(overall.pending || accuracy?.pending) ? "#fbbf24" : "#4ade80"} />
+        <Mini label="DIR WIN" value={overall.direction_win_rate_pct == null ? "-" : `${overall.direction_win_rate_pct}%`} color={rateColor(overall.direction_win_rate_pct)} />
+        <Mini label="CONE HIT" value={overall.cone_coverage_pct == null ? "-" : `${overall.cone_coverage_pct}%`} color={rateColor(overall.cone_coverage_pct)} />
+        <Mini label="MAE" value={overall.mae_pct == null ? "-" : `${overall.mae_pct}%`} color={errorColor(overall.mae_pct)} />
+        <Mini label="RMSE" value={overall.rmse_pct == null ? "-" : `${overall.rmse_pct}%`} color={errorColor(overall.rmse_pct)} />
+      </div>
+      {!ok && <div style={{ ...explainText, color: "#fbbf24" }}>Kronos proof is degraded: {accuracy?.error || "accuracy endpoint unavailable"}</div>}
+      {!compact && (
+        <div style={proofTables}>
+          <ProofTable title="TIMEFRAME ACCURACY" rows={tfRows} />
+          <ProofTable title="REGIME ACCURACY" rows={regimeRows} />
+        </div>
+      )}
+      {!compact && recent.length ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+            <thead>
+              <tr><th style={th}>TIME</th><th style={th}>SYMBOL</th><th style={th}>TF</th><th style={th}>CALL</th><th style={th}>FORECAST</th><th style={th}>ACTUAL</th><th style={th}>ERROR</th><th style={th}>REGIME</th></tr>
+            </thead>
+            <tbody>
+              {recent.slice(0, 28).map((r, i) => (
+                <tr key={`${r.generated_at}-${r.symbol}-${r.timeframe}-${i}`}>
+                  <td style={td}>{fmtDate(r.generated_at)}</td>
+                  <td style={{ ...td, color: accent, fontWeight: 900 }}>${r.symbol}</td>
+                  <td style={td}>{r.timeframe}</td>
+                  <td style={{ ...td, color: marketColor(r.direction) }}>{r.direction}</td>
+                  <td style={td}>{fmtPct(r.forecast_pct)}</td>
+                  <td style={{ ...td, color: pctColor(r.actual_pct) }}>{fmtPct(r.actual_pct)}</td>
+                  <td style={{ ...td, color: errorColor(Math.abs(Number(r.error_pct || 0))) }}>{fmtPct(r.error_pct)}</td>
+                  <td style={td}>{r.regime}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      <div style={explainText}>
+        Proof scores compare each saved Kronos candle forecast to the next raw OHLCV candle. Pending forecasts are not counted as wins or losses.
+      </div>
+    </div>
+  );
+}
+
+function ProofTable({ title, rows }) {
+  return (
+    <div style={stackPanel}>
+      <div style={sectionLabel}>{title}</div>
+      {!rows?.length ? <div style={emptySmall}>No mature forecast samples yet.</div> : rows.map(row => (
+        <div key={row.key} style={proofRow}>
+          <strong>{String(row.key || "-").toUpperCase()}</strong>
+          <span>n={row.sample || 0}</span>
+          <span style={{ color: rateColor(row.direction_win_rate_pct) }}>DIR {row.direction_win_rate_pct == null ? "-" : `${row.direction_win_rate_pct}%`}</span>
+          <span style={{ color: rateColor(row.cone_coverage_pct) }}>CONE {row.cone_coverage_pct == null ? "-" : `${row.cone_coverage_pct}%`}</span>
+          <span style={{ color: errorColor(row.mae_pct) }}>MAE {row.mae_pct == null ? "-" : `${row.mae_pct}%`}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SelectionMatrix({ rows, selectedKey, onSelect }) {
   if (!rows.length) return <EmptyState />;
   return (
@@ -424,19 +510,21 @@ function SelectionMatrix({ rows, selectedKey, onSelect }) {
   );
 }
 
-function KronosTerminalChart({ choice, choices, candles, forecast, loading, onSelect }) {
+function KronosTerminalChart({ choice, choices, candles, candleSuite, forecast, loading, onSelect }) {
   const rows = buildTerminalChartRows(candles, forecast);
+  const candleRows = candleSuite?.timeframes || [];
+  const primary = candleSuite?.primary || candleRows.find(r => r?.ok);
   const color = forecast?.color || accent2;
   const last = rows.filter(r => r.actual != null).slice(-1)[0];
   return (
-    <Card title="KRONOS MARKET CHART / LSE PRICE + FORECAST CONE" accentColor={color}>
+    <Card title="KRONOS COMMAND CENTER / CANDLE ENGINE" accentColor={color}>
       <div style={terminalChartLayout}>
         <div style={terminalChartBody}>
           <div style={chartHeaderRow}>
             <div>
               <div style={{ color, fontSize: 24, fontWeight: 900, letterSpacing: "0.08em" }}>${choice?.ticker || "SPY"}</div>
               <div style={{ color: muted, fontSize: 10, letterSpacing: "0.14em", marginTop: 5 }}>
-                {choice?.label || "SPY MARKET FORECAST"} / {forecast?.horizon || "1D"} / LSE CANDLES
+                {choice?.label || "SPY MARKET FORECAST"} / RAW OHLCV CANDLE ENGINE / TRADINGVIEW VISUAL
               </div>
             </div>
             <div style={{ textAlign: "right" }}>
@@ -446,6 +534,39 @@ function KronosTerminalChart({ choice, choices, candles, forecast, loading, onSe
               </div>
             </div>
           </div>
+          <div style={kronosCommandGrid}>
+            <div style={tradingViewShell}>
+              <TradingViewMiniChart ticker={choice?.ticker || "SPY"} companyName={`${choice?.ticker || "SPY"} Kronos Candle View`} height={620} />
+            </div>
+            <div style={candlePredictionPanel}>
+              <div style={sectionLabel}>KRONOS NEXT CANDLE</div>
+              <div style={{ color: marketColor(primary?.direction), fontSize: 30, fontWeight: 900, letterSpacing: "0.08em", marginTop: 10 }}>
+                {primary?.direction || "CHECKING"} {signed(primary?.forecast_pct)}%
+              </div>
+              <div style={probGrid}>
+                <MiniProb label="UP" value={primary?.probabilities?.up} color="#4ade80" />
+                <MiniProb label="DOWN" value={primary?.probabilities?.down} color="#f87171" />
+                <MiniProb label="FLAT" value={primary?.probabilities?.flat} color="#fbbf24" />
+              </div>
+              <div style={ohlcGrid}>
+                {["open", "high", "low", "close"].map(k => (
+                  <div key={k} style={ohlcBox}>
+                    <span>{k.toUpperCase()}</span>
+                    <strong>{primary?.predicted_next_candle?.[k] == null ? "-" : Number(primary.predicted_next_candle[k]).toFixed(2)}</strong>
+                  </div>
+                ))}
+              </div>
+              <div style={candleFeatureStack}>
+                <PlanRow k="Pattern" v={primary?.features?.last_candle_pattern || "-"} color={accent2} />
+                <PlanRow k="Trend" v={primary?.features?.structure || "-"} color={primary?.features?.structure === "HIGHER_HIGH" ? "#4ade80" : primary?.features?.structure === "LOWER_LOW" ? "#f87171" : "#fbbf24"} />
+                <PlanRow k="ATR / Noise" v={`${num(primary?.features?.atr_pct, 2)}% / ${num(primary?.noise_band_pct, 2)}%`} />
+                <PlanRow k="RSI / VWAP" v={`${num(primary?.features?.rsi14, 1)} / ${signed(primary?.features?.vwap_distance_pct)}%`} />
+                <PlanRow k="Volume Z" v={primary?.features?.volume_z ?? "-"} color={Number(primary?.features?.volume_z || 0) >= 1 ? "#4ade80" : muted} />
+                <PlanRow k="Source" v={primary?.provider || "raw_ohlcv"} color={primary?.degraded ? "#fbbf24" : "#4ade80"} />
+              </div>
+            </div>
+          </div>
+          <CandleHorizonTable rows={candleRows} />
           <div style={chartBox(430)}>
             {loading ? (
               <div style={loadingText}>LOADING LSE PRICE TAPE...</div>
@@ -475,7 +596,7 @@ function KronosTerminalChart({ choice, choices, candles, forecast, loading, onSe
             )}
           </div>
           <div style={explainText}>
-            Cone is read-only forecast intelligence. It uses LSE price tape for the selected instrument and Kronos forecast pressure from PM route, open exposure, scan evidence, and macro context.
+            TradingView is the human chart. Kronos analyzes raw OHLCV candles underneath it, then keeps the portfolio forecast engine separate from candle prediction.
           </div>
         </div>
         <div style={chartSelectorRail}>
@@ -567,10 +688,11 @@ function KronosCalendarView({ data, loading, month, year, selected, setSelected,
   const cells = buildCalendarCells(year, month, data?.days || []);
   const summary = calendarSummary(data?.days || []);
   const apiSummary = data?.summary || {};
+  const weeks = calendarWeekSummary(cells);
   return (
     <div style={{ display: "grid", gap: 22 }}>
       <Card title="KRONOS CALENDAR / PREDICTION ACCOUNTABILITY" accentColor={accent2}>
-        <div style={calendarToolbar}>
+        <div style={calendarShellHeader}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <select value={month} onChange={e => setMonth(e.target.value)} style={selectStyle}>
               {Array.from({ length: 12 }).map((_, i) => <option key={i + 1} value={i + 1}>{monthName(i + 1)}</option>)}
@@ -580,35 +702,42 @@ function KronosCalendarView({ data, loading, month, year, selected, setSelected,
             </select>
             <button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "LOADING" : "REFRESH MONTH"}</button>
           </div>
-          <div style={calendarLegend}>
-            <span><i style={legendDot("#4ade80")} /> GOOD</span>
-            <span><i style={legendDot("#f87171")} /> BAD</span>
-            <span><i style={legendDot("#fbbf24")} /> WATCH/PENDING</span>
+          <button onClick={() => { setMonth(new Date().getMonth() + 1); setYear(new Date().getFullYear()); }} style={calendarMonthButton}>THIS MONTH</button>
+        </div>
+        <div style={calendarHeroStats}>
+          <div style={calendarHeroTile("#4ade80")}><span>Good Days</span><strong>{summary.good}</strong><small>prediction wins</small></div>
+          <div style={calendarHeroTile("#f87171")}><span>Bad Days</span><strong>{summary.bad}</strong><small>misses</small></div>
+          <div style={calendarHeroTile("#fbbf24")}><span>Hit Rate</span><strong>{summary.hitRate}%</strong><small>{summary.watch} watch/pending</small></div>
+          <div style={calendarHeroTile(accent2)}><span>Directional</span><strong>{apiSummary.direction_win_rate_pct == null ? "-" : `${apiSummary.direction_win_rate_pct}%`}</strong><small>UP/DOWN win</small></div>
+          <div style={calendarHeroTile("#a78bfa")}><span>Cone</span><strong>{apiSummary.cone_win_rate_pct == null ? "-" : `${apiSummary.cone_win_rate_pct}%`}</strong><small>coverage</small></div>
+        </div>
+        <div style={calendarBoard}>
+          <div style={{ minWidth: 0 }}>
+            <div style={calendarWeekHeader}>
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => <span key={d}>{d}</span>)}
+            </div>
+            <div style={calendarGrid}>
+              {cells.map((cell, i) => (
+                <button
+                  key={cell.date || `blank-${i}`}
+                  disabled={!cell.date}
+                  onClick={() => cell.day && setSelected(cell.day)}
+                  title={calendarTitle(cell.day)}
+                  style={calendarCell(cell, selected?.date === cell.date)}
+                >
+                  <span style={calendarDayNumber}>{cell.dayNumber || ""}</span>
+                  {cell.day?.has_prediction && (
+                    <span style={calendarDayPayload}>
+                      <strong>{fmtPct(cell.day.spy_actual_pct)}</strong>
+                      <small>{cell.day.status || "WATCH"}</small>
+                      <small>{cell.day.direction_win == null ? "pending" : cell.day.direction_win ? "direction win" : "direction miss"}</small>
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-        <div style={miniGrid}>
-          <Mini label="GOOD DAYS" value={summary.good} color="#4ade80" />
-          <Mini label="BAD DAYS" value={summary.bad} color="#f87171" />
-          <Mini label="WATCH/PENDING" value={summary.watch} color="#fbbf24" />
-          <Mini label="HIT RATE" value={`${summary.hitRate}%`} color={summary.hitRate >= 60 ? "#4ade80" : summary.hitRate >= 45 ? "#fbbf24" : "#f87171"} />
-          <Mini label="UP/DOWN WIN" value={apiSummary.direction_win_rate_pct == null ? "-" : `${apiSummary.direction_win_rate_pct}%`} color={rateColor(apiSummary.direction_win_rate_pct)} />
-          <Mini label="CONE WIN" value={apiSummary.cone_win_rate_pct == null ? "-" : `${apiSummary.cone_win_rate_pct}%`} color={rateColor(apiSummary.cone_win_rate_pct)} />
-        </div>
-        <div style={calendarWeekHeader}>
-          {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map(d => <span key={d}>{d}</span>)}
-        </div>
-        <div style={calendarGrid}>
-          {cells.map((cell, i) => (
-            <button
-              key={cell.date || `blank-${i}`}
-              disabled={!cell.date}
-              onClick={() => cell.day && setSelected(cell.day)}
-              title={calendarTitle(cell.day)}
-              style={calendarCell(cell, selected?.date === cell.date)}
-            >
-              <span>{cell.dayNumber || ""}</span>
-            </button>
-          ))}
+          <WeekRail weeks={weeks} mode="kronos" />
         </div>
       </Card>
 
@@ -650,6 +779,20 @@ function CalendarDayDetail({ day }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
+    </div>
+  );
+}
+
+function WeekRail({ weeks }) {
+  return (
+    <div style={calendarWeekRail}>
+      {weeks.map((week, idx) => (
+        <button key={idx} style={calendarWeekCard(calendarWeekColor(week))} title={`Week ${idx + 1}\nGood: ${week.good}\nBad: ${week.bad}\nWatch: ${week.watch}`}>
+          <span>Week {idx + 1}</span>
+          <strong>{week.good - week.bad >= 0 ? "+" : ""}{week.good - week.bad}</strong>
+          <small>{week.days} days</small>
+        </button>
+      ))}
     </div>
   );
 }
@@ -1201,6 +1344,27 @@ function calendarSummary(days) {
   };
 }
 
+function calendarWeekSummary(cells) {
+  const weeks = [];
+  for (let i = 0; i < cells.length; i += 7) {
+    const chunk = cells.slice(i, i + 7);
+    const days = chunk.map(c => c.day).filter(Boolean);
+    const predicted = days.filter(d => d.has_prediction);
+    const good = predicted.filter(d => d.status === "GOOD").length;
+    const bad = predicted.filter(d => d.status === "BAD").length;
+    const watch = predicted.filter(d => !["GOOD", "BAD"].includes(d.status)).length;
+    weeks.push({ days: predicted.length, good, bad, watch });
+  }
+  return weeks;
+}
+
+function calendarWeekColor(week) {
+  if (!week?.days) return "rgba(255,255,255,0.16)";
+  if ((week.good || 0) > (week.bad || 0)) return "#4ade80";
+  if ((week.bad || 0) > (week.good || 0)) return "#f87171";
+  return "#fbbf24";
+}
+
 function calendarStatusColor(status) {
   if (status === "GOOD") return "#4ade80";
   if (status === "BAD") return "#f87171";
@@ -1424,6 +1588,13 @@ function signed(v) {
   return `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
 }
 
+function num(v, digits = 2) {
+  if (v == null || v === "") return "-";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(digits);
+}
+
 function pctColor(v) {
   if (v == null) return muted;
   return Number(v) >= 0 ? "#4ade80" : "#f87171";
@@ -1434,6 +1605,14 @@ function rateColor(v) {
   const n = Number(v);
   if (n >= 60) return "#4ade80";
   if (n >= 45) return "#fbbf24";
+  return "#f87171";
+}
+
+function errorColor(v) {
+  if (v == null || !Number.isFinite(Number(v))) return muted;
+  const n = Math.abs(Number(v));
+  if (n <= 0.15) return "#4ade80";
+  if (n <= 0.45) return "#fbbf24";
   return "#f87171";
 }
 
@@ -1467,6 +1646,50 @@ function routeColor(v) {
   if (v === "HELD_NOT_IN_LATEST_PM") return "#fbbf24";
   if (v === "PASS") return "#f87171";
   return muted;
+}
+
+function MiniProb({ label, value, color }) {
+  return (
+    <div style={{ border: hairline, padding: 10, background: "rgba(255,255,255,0.02)", minWidth: 0 }}>
+      <div style={{ color: dim, fontSize: 9, letterSpacing: "0.14em" }}>{label}</div>
+      <strong style={{ color, fontSize: 18, letterSpacing: "0.04em" }}>{value == null ? "-" : `${Number(value).toFixed(1)}%`}</strong>
+    </div>
+  );
+}
+
+function CandleHorizonTable({ rows }) {
+  const clean = (rows || []).filter(r => r?.ok);
+  if (!clean.length) {
+    return <div style={{ ...explainText, border: hairline, padding: 14, marginTop: 14 }}>Kronos candle engine is waiting on enough OHLCV rows.</div>;
+  }
+  return (
+    <div style={candleTableWrap}>
+      <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+        <thead>
+          <tr>
+            <th style={th}>HORIZON</th>
+            <th style={th}>UP</th>
+            <th style={th}>DOWN</th>
+            <th style={th}>FLAT</th>
+            <th style={th}>FORECAST</th>
+            <th style={th}>CONE</th>
+          </tr>
+        </thead>
+        <tbody>
+          {clean.map(row => (
+            <tr key={row.timeframe}>
+              <td style={{ ...td, color: accent2, fontWeight: 900 }}>{String(row.timeframe || "").toUpperCase()}</td>
+              <td style={{ ...td, color: "#4ade80" }}>{num(row.probabilities?.up, 1)}%</td>
+              <td style={{ ...td, color: "#f87171" }}>{num(row.probabilities?.down, 1)}%</td>
+              <td style={{ ...td, color: "#fbbf24" }}>{num(row.probabilities?.flat, 1)}%</td>
+              <td style={{ ...td, color: marketColor(row.direction), fontWeight: 900 }}>{row.direction} {signed(row.forecast_pct)}%</td>
+              <td style={td}>{signed(row.cone_low_pct)}% to {signed(row.cone_high_pct)}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function PlanRow({ k, v, color = labelLight }) {
@@ -1629,10 +1852,31 @@ const explainText = { marginTop: 12, color: muted, fontSize: 11, lineHeight: 1.6
 const auditGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 };
 const tabBar = { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 };
 const memoryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 18 };
+const proofGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))", gap: 10 };
+const proofTables = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 };
+const proofRow = {
+  display: "grid",
+  gridTemplateColumns: "minmax(80px, 1fr) 54px 72px 82px 80px",
+  gap: 8,
+  alignItems: "center",
+  borderTop: hairline,
+  padding: "8px 0",
+  color: muted,
+  fontSize: 10,
+  letterSpacing: "0.06em",
+};
 const terminalChartLayout = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 210px", gap: 16, alignItems: "stretch" };
 const terminalChartBody = { minWidth: 0 };
 const chartHeaderRow = { display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", marginBottom: 12, flexWrap: "wrap" };
 const chartSelectorRail = { border: hairline, background: "rgba(0,0,0,0.18)", padding: 12, display: "flex", flexDirection: "column", gap: 8, maxHeight: 535, overflowY: "auto" };
+const kronosCommandGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.55fr) minmax(300px, 0.75fr)", gap: 14, alignItems: "stretch", marginBottom: 14 };
+const tradingViewShell = { border: hairline, background: "rgba(0,0,0,0.2)", minWidth: 0, overflow: "hidden" };
+const candlePredictionPanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, minWidth: 0 };
+const probGrid = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12 };
+const ohlcGrid = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 12 };
+const ohlcBox = { border: hairline, background: "rgba(0,0,0,0.16)", padding: 10, display: "grid", gap: 5, color: dim, fontSize: 9, letterSpacing: "0.14em" };
+const candleFeatureStack = { marginTop: 12 };
+const candleTableWrap = { border: hairline, background: "rgba(0,0,0,0.18)", marginBottom: 14, overflowX: "auto" };
 const loadingText = { height: "100%", display: "grid", placeItems: "center", color: muted, fontSize: 12, letterSpacing: "0.12em" };
 const sandboxControlRow = { display: "grid", gridTemplateColumns: "190px auto minmax(0, 1fr)", gap: 14, alignItems: "end" };
 const sandboxInput = {
@@ -1649,11 +1893,52 @@ const sandboxInput = {
   outline: "none",
 };
 const sandboxGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(320px, 0.75fr)", gap: 22 };
+const calendarShellHeader = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
+const calendarHeroStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10, marginBottom: 18 };
+const calendarHeroTile = (color) => ({
+  border: `0.5px solid ${color}55`,
+  background: `linear-gradient(145deg, ${color}16, rgba(255,255,255,0.025))`,
+  borderRadius: 8,
+  minHeight: 78,
+  padding: 12,
+  display: "grid",
+  alignContent: "space-between",
+  boxShadow: `inset 0 -2px 0 ${color}66`,
+});
+const calendarMonthButton = {
+  background: "rgba(255,255,255,0.035)",
+  border: "0.5px solid rgba(255,255,255,0.16)",
+  color: labelLight,
+  borderRadius: 7,
+  padding: "9px 12px",
+  fontSize: 10,
+  letterSpacing: "0.1em",
+  fontFamily: "JetBrains Mono, Courier New",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+const calendarBoard = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 120px", gap: 12, alignItems: "stretch" };
 const calendarToolbar = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
 const calendarLegend = { display: "flex", gap: 14, flexWrap: "wrap", color: muted, fontSize: 10, letterSpacing: "0.12em" };
-const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8, color: dim, fontSize: 10, letterSpacing: "0.14em", margin: "12px 0 8px" };
-const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8 };
+const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 10, letterSpacing: "0.08em", margin: "12px 0 8px" };
+const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 };
 const calendarDetailGrid = { display: "grid", gridTemplateColumns: "minmax(320px, 0.8fr) minmax(0, 1.2fr)", gap: 18, alignItems: "start" };
+const calendarDayNumber = { alignSelf: "flex-end", color: dim, fontSize: 10, lineHeight: 1 };
+const calendarDayPayload = { display: "grid", gap: 3, placeItems: "center", textAlign: "center", color: labelLight, minHeight: 54 };
+const calendarWeekRail = { display: "grid", gap: 7, alignContent: "start", paddingTop: 24 };
+const calendarWeekCard = (color) => ({
+  minHeight: 72,
+  border: `0.5px solid ${color}55`,
+  background: `linear-gradient(145deg, ${color}14, rgba(255,255,255,0.02))`,
+  borderRadius: 8,
+  color: labelLight,
+  padding: 10,
+  display: "grid",
+  gap: 4,
+  textAlign: "left",
+  fontFamily: "JetBrains Mono, Courier New",
+  cursor: "default",
+});
 const selectStyle = {
   background: "#050509",
   border: hairline,
@@ -1706,17 +1991,24 @@ function chartChoiceButton(active, color = accent2) {
 
 function calendarCell(cell, active) {
   const color = calendarStatusColor(cell.day?.status);
+  const hasData = Boolean(cell.day?.has_prediction);
   return {
-    aspectRatio: "1 / 0.72",
-    minHeight: 64,
-    background: !cell.date ? "transparent" : cell.day?.has_prediction ? `${color}18` : "rgba(255,255,255,0.014)",
-    border: !cell.date ? "0.5px solid transparent" : `0.5px solid ${active ? accent : cell.day?.has_prediction ? `${color}88` : "rgba(255,255,255,0.08)"}`,
-    color: !cell.date ? "transparent" : cell.day?.has_prediction ? labelLight : dim,
+    aspectRatio: "1 / 1.2",
+    minHeight: 96,
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    alignItems: "stretch",
+    background: !cell.date ? "transparent" : hasData ? `linear-gradient(135deg, ${color}20, rgba(255,255,255,0.025))` : "rgba(255,255,255,0.018)",
+    border: !cell.date ? "0.5px solid transparent" : `0.5px solid ${active ? accent : hasData ? `${color}88` : "rgba(255,255,255,0.09)"}`,
+    color: !cell.date ? "transparent" : hasData ? labelLight : dim,
     cursor: cell.date ? "pointer" : "default",
     textAlign: "left",
-    padding: 10,
+    padding: 9,
     fontFamily: "JetBrains Mono, Courier New",
     fontWeight: 900,
-    boxShadow: active ? `0 0 18px ${accent}24` : cell.day?.has_prediction ? `inset 0 -3px 0 ${color}` : "none",
+    borderRadius: 7,
+    boxShadow: active ? `0 0 0 1px ${accent}, 0 0 22px ${accent}24` : hasData ? `inset 0 -3px 0 ${color}, 0 0 18px ${color}10` : "none",
+    overflow: "hidden",
   };
 }

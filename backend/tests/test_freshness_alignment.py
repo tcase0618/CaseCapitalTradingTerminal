@@ -69,3 +69,47 @@ def test_edgar_outage_is_warning_not_execution_blocker():
     assert row["status"] == "DOWN"
     assert row["blocks_trading"] is False
     assert row["execution_scopes"] == []
+
+
+def test_data_truth_persistence_quota_error_is_explicit_blocker():
+    err = RuntimeError("you are over your space quota, using 512 MB of 512 MB. Writes are blocked on your cluster")
+    row = data_truth._persistence_blocker(err)
+
+    assert row["key"] == "database_persistence_block"
+    assert row["blocks_trading"] is True
+    assert row["execution_scopes"] == ["system", "equity", "options"]
+    assert "storage quota" in row["detail"].lower()
+
+
+def test_execution_gate_uses_fresh_cached_truth_before_refresh(monkeypatch):
+    cached = {
+        "decision": "PASS",
+        "truth_grade": "B",
+        "qc": {"scoped_blockers": {}},
+        "execution": {
+            "equity_execution_enabled": True,
+            "options_execution_enabled": True,
+            "equity_paper": True,
+            "options_paper": True,
+        },
+    }
+
+    async def cached_truth(*args, **kwargs):
+        return dict(cached)
+
+    async def should_not_refresh(*args, **kwargs):
+        raise AssertionError("fresh cached truth should short-circuit refresh")
+
+    import asyncio
+
+    monkeypatch.setattr(execution_gate, "_cached_truth_snapshot", cached_truth)
+    monkeypatch.setattr(execution_gate, "_truth_snapshot", execution_gate._truth_snapshot)
+
+    async def run():
+        from services import data_truth
+        monkeypatch.setattr(data_truth, "overview", should_not_refresh)
+        return await execution_gate.check(scope="equity", record=False)
+
+    result = asyncio.run(run())
+    assert result["decision"] == "PASS"
+    assert result["truth"]["gate_source"] == "fresh_cached_truth"

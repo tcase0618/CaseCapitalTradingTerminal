@@ -114,6 +114,12 @@ async def auth_config():
     }
 
 
+@api.get("/postgres/status")
+async def postgres_status():
+    from services import postgres_store
+    return await postgres_store.status()
+
+
 @api.post("/auth/login")
 async def auth_login(payload: AuthLoginRequest):
     code = (payload.code or "").strip()
@@ -1440,10 +1446,22 @@ async def kronos_market_forecast():
     return await kronos.market_forecast()
 
 
+@api.get("/kronos/candle_forecast/{symbol}")
+async def kronos_candle_forecast(symbol: str, persist: bool = False):
+    from services import kronos
+    return await kronos.candle_forecast_suite(symbol=symbol, persist=persist)
+
+
 @api.get("/kronos/disagreements")
 async def kronos_disagreements(limit: int = 200):
     from services import kronos
     return await kronos.disagreement_performance(limit=limit)
+
+
+@api.get("/kronos/accuracy")
+async def kronos_accuracy(limit: int = 800, persist: bool = False):
+    from services import kronos
+    return await kronos.candle_accuracy(limit=limit, persist=persist)
 
 
 @api.get("/kronos/calendar")
@@ -1705,10 +1723,43 @@ async def pharma_scan_endpoint():
     return await pharma.run_pharma_scan(triggered_by="api")
 
 
+@api.post("/pharma/shocks/scan")
+async def pharma_shock_scan_endpoint():
+    from services import pharma
+    return await pharma.run_catalyst_shock_scan(triggered_by="api", force_refresh=True)
+
+
+@api.get("/pharma/shocks")
+async def pharma_shocks(limit: int = 100):
+    from services import pharma
+    rows = await pharma.get_catalyst_shocks(limit=limit)
+    return {"results": rows, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
 @api.get("/pharma/pdufa")
 async def pharma_pdufa(days: int = 90):
     from services import pharma
     rows = await pharma.get_pdufa_within_days(days=days)
+    return {"results": rows, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
+@api.get("/pharma/fda_calendar")
+async def pharma_fda_calendar(year: int | None = None, month: int | None = None):
+    from services import pharma
+    return await pharma.get_fda_calendar_month(year=year, month=month)
+
+
+@api.get("/pharma/options_snapshots")
+async def pharma_options_snapshots(limit: int = 100, ticker: str | None = None):
+    from services import pharma
+    rows = await pharma.get_option_snapshots(limit=limit, ticker=ticker)
+    return {"results": rows, "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+
+@api.get("/pharma/pm_decisions")
+async def pharma_pm_decisions(limit: int = 100, ticker: str | None = None):
+    from services import pharma
+    rows = await pharma.get_pm_decisions(limit=limit, ticker=ticker)
     return {"results": rows, "fetched_at": datetime.now(timezone.utc).isoformat()}
 
 
@@ -1804,7 +1855,15 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup():
-    from services import learning_engine, pnl_tracker
+    from services import learning_engine, pnl_tracker, postgres_store
+    try:
+        pg = await postgres_store.status()
+        if pg.get("enabled") and not pg.get("ready"):
+            logger.warning("Postgres enabled but not ready: %s", pg.get("last_error"))
+        elif pg.get("ready"):
+            logger.info("Postgres durability layer ready")
+    except Exception as e:
+        logger.warning("Postgres init skipped: %s", e)
     db_ready = True
     try:
         await learning_engine.ensure_weights_exist()
@@ -2173,6 +2232,12 @@ async def options_desk_account():
     return await options_desk.account()
 
 
+@api.get("/options_desk/account_identity")
+async def options_desk_account_identity():
+    from services import options_desk
+    return await options_desk.account_identity()
+
+
 @api.get("/options_desk/positions")
 async def options_desk_positions():
     from services import options_desk
@@ -2375,6 +2440,11 @@ async def portfolio_manager_ratchet_events(limit: int = 50):
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    try:
+        from services import postgres_store
+        await postgres_store.close_pool()
+    except Exception:
+        pass
     scheduler.shutdown_scheduler()
 
 # v5.0 — include router at end so all endpoints register

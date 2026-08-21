@@ -42,6 +42,11 @@ def kill_switch_state() -> dict[str, Any]:
 
 
 async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
+    if not force_refresh:
+        cached = await _cached_truth_snapshot(allow_stale=False)
+        if cached:
+            cached.setdefault("gate_source", "fresh_cached_truth")
+            return cached
     try:
         from . import data_truth
         return await asyncio.wait_for(
@@ -49,11 +54,19 @@ async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
             timeout=12.0,
         )
     except Exception as exc:
+        cached = await _cached_truth_snapshot(allow_stale=False)
+        if cached:
+            cached.setdefault("warnings", [])
+            cached["gate_source"] = "cached_truth_after_refresh_error"
+            cached["refresh_error"] = exc.__class__.__name__
+            cached["refresh_error_detail"] = str(exc)[:220]
+            return cached
         return {
             "ok": False,
             "truth_grade": "F",
             "decision": "BLOCK",
             "error": str(exc)[:220],
+            "error_type": exc.__class__.__name__,
         }
 
 
@@ -176,7 +189,13 @@ async def check(
     }
     if record:
         try:
-            await get_db().execution_gate_checks.insert_one(stamped(payload))
+            doc = stamped(payload)
+            await get_db().execution_gate_checks.insert_one(doc)
+            try:
+                from . import postgres_store
+                await postgres_store.mirror_document("execution_gate_checks", doc)
+            except Exception:
+                pass
         except Exception:
             pass
     return payload

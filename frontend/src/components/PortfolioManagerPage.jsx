@@ -433,10 +433,11 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
   const cells = buildPmCalendarCells(year, month, rows);
   const monthRows = rows.filter(r => dateParts(r.date).year === year && dateParts(r.date).month === month);
   const summary = pmCalendarSummary(monthRows);
+  const weeks = pmWeekSummary(cells);
   return (
     <div style={{ display: "grid", gap: 18 }}>
       <Card title="PM P/L CALENDAR" accentColor={accent}>
-        <div style={calendarToolbar}>
+        <div style={calendarShellHeader}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <select value={month} onChange={e => setMonth(Number(e.target.value))} style={selectStyle}>
               {Array.from({ length: 12 }).map((_, i) => <option key={i + 1} value={i + 1}>{pmMonthName(i + 1)}</option>)}
@@ -446,43 +447,43 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
             </select>
             <button onClick={refresh} disabled={loading} style={outlineButton(accent)}>{loading ? "LOADING" : "REFRESH P/L"}</button>
           </div>
-          <div style={calendarLegend}>
-            <span><i style={legendDot("#4ade80")} /> GREEN DAY</span>
-            <span><i style={legendDot("#f87171")} /> RED DAY</span>
-            <span><i style={legendDot("#fbbf24")} /> FLAT / NO DATA</span>
+          <button onClick={() => { setMonth(new Date().getMonth() + 1); setYear(new Date().getFullYear()); }} style={calendarMonthButton}>THIS MONTH</button>
+        </div>
+        <div style={calendarHeroStats}>
+          <div style={calendarHeroTile(pctColor(summary.avg))}><span>Month Avg</span><strong>{fmtPct(summary.avg)}</strong><small>{monthRows.length} trading days</small></div>
+          <div style={calendarHeroTile("#4ade80")}><span>Green Days</span><strong>{summary.green}</strong><small>positive fund days</small></div>
+          <div style={calendarHeroTile("#f87171")}><span>Red Days</span><strong>{summary.red}</strong><small>negative fund days</small></div>
+          <div style={calendarHeroTile(summary.spyWins >= summary.spyLosses ? "#4ade80" : "#f87171")}><span>Vs SPY</span><strong>{summary.spyWins}/{summary.spyLosses}</strong><small>{summary.spyWinRate}% win rate</small></div>
+          <div style={calendarHeroTile(pctColor(summary.relativeAvg))}><span>Return Diff</span><strong>{fmtPct(summary.relativeAvg)}</strong><small>fund minus SPY</small></div>
+          <div style={calendarHeroTile("#a78bfa")}><span>Range</span><strong>{fmtPct(summary.best)}</strong><small>worst {fmtPct(summary.worst)}</small></div>
+        </div>
+        <div style={calendarBoard}>
+          <div style={{ minWidth: 0 }}>
+            <div style={calendarWeekHeader}>
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => <span key={d}>{d}</span>)}
+            </div>
+            <div style={calendarGrid}>
+              {cells.map((cell, i) => (
+                <button
+                  key={cell.date || `blank-${i}`}
+                  disabled={!cell.date}
+                  onClick={() => cell.row && setSelected(cell.row)}
+                  title={pmCalendarTitle(cell.row)}
+                  style={pmCalendarCell(cell, selected?.date === cell.date)}
+                >
+                  <span style={calendarDayNumber}>{cell.dayNumber || ""}</span>
+                  {cell.row && (
+                    <span style={calendarDayPayload}>
+                      <strong>{fmtPct(cell.row.terminal_total_pct)}</strong>
+                      <small>SPY {fmtPct(cell.row.spy_return_pct)}</small>
+                      <small style={{ color: pctColor(cell.row.relative_pct) }}>DIFF {fmtPct(cell.row.relative_pct)}</small>
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-        <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 16, flexWrap: "wrap" }}>
-          <Stat label="MONTH AVG" value={fmtPct(summary.avg)} sub={`${monthRows.length} trading days`} color={pctColor(summary.avg)} accentBar />
-          <Stat label="GREEN DAYS" value={summary.green} sub="positive terminal total" color="#4ade80" />
-          <Stat label="RED DAYS" value={summary.red} sub="negative terminal total" color="#f87171" />
-          <Stat label="DAYS WON VS SPY" value={`${summary.spyWins}/${summary.spyLosses}`} sub={`${summary.spyWinRate}% win rate`} color={summary.spyWins >= summary.spyLosses ? "#4ade80" : "#f87171"} />
-          <Stat label="RETURN DIFF" value={fmtPct(summary.relativeAvg)} sub="avg fund minus SPY" color={pctColor(summary.relativeAvg)} />
-          <Stat label="BEST DAY" value={fmtPct(summary.best)} sub="terminal total" color="#4ade80" />
-          <Stat label="WORST DAY" value={fmtPct(summary.worst)} sub="terminal total" color="#f87171" />
-        </div>
-        <div style={calendarWeekHeader}>
-          {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map(d => <span key={d}>{d}</span>)}
-        </div>
-        <div style={calendarGrid}>
-          {cells.map((cell, i) => (
-            <button
-              key={cell.date || `blank-${i}`}
-              disabled={!cell.date}
-              onClick={() => cell.row && setSelected(cell.row)}
-              title={pmCalendarTitle(cell.row)}
-              style={pmCalendarCell(cell, selected?.date === cell.date)}
-            >
-              <span>{cell.dayNumber || ""}</span>
-              {cell.row && (
-                <span style={{ display: "grid", gap: 3 }}>
-                  <strong>{fmtPct(cell.row.terminal_total_pct)}</strong>
-                  <small style={{ color: muted, fontSize: 9, letterSpacing: "0.08em" }}>SPY {fmtPct(cell.row.spy_return_pct)}</small>
-                  <small style={{ color: pctColor(cell.row.relative_pct), fontSize: 9, letterSpacing: "0.08em" }}>DIFF {fmtPct(cell.row.relative_pct)}</small>
-                </span>
-              )}
-            </button>
-          ))}
+          <PMWeekRail weeks={weeks} />
         </div>
       </Card>
 
@@ -1804,6 +1805,18 @@ function pmCalendarSummary(rows) {
   };
 }
 
+function pmWeekSummary(cells) {
+  const weeks = [];
+  for (let i = 0; i < cells.length; i += 7) {
+    const rows = cells.slice(i, i + 7).map(c => c.row).filter(Boolean);
+    const total = rows.reduce((sum, row) => sum + (Number(row.terminal_total_pct) || 0), 0);
+    const spy = rows.reduce((sum, row) => sum + (Number(row.spy_return_pct) || 0), 0);
+    const green = rows.filter(row => Number(row.terminal_total_pct) > 0).length;
+    weeks.push({ days: rows.length, total, spy, green });
+  }
+  return weeks;
+}
+
 function pmDetailChartRows(rows, selectedDate) {
   const idx = rows.findIndex(r => r.date === selectedDate);
   const start = Math.max(0, idx - 8);
@@ -1884,27 +1897,87 @@ function pmCalendarCell(cell, active) {
   const value = cell.row?.terminal_total_pct;
   const color = pctColor(value);
   return {
-    aspectRatio: "1 / 0.74",
-    minHeight: 68,
+    aspectRatio: "1 / 1.2",
+    minHeight: 96,
     display: "flex",
     flexDirection: "column",
     justifyContent: "space-between",
-    alignItems: "flex-start",
-    background: !cell.date ? "transparent" : cell.row ? `${color}18` : "rgba(255,255,255,0.014)",
-    border: !cell.date ? "0.5px solid transparent" : `0.5px solid ${active ? accent : cell.row ? `${color}88` : "rgba(255,255,255,0.08)"}`,
+    alignItems: "stretch",
+    background: !cell.date ? "transparent" : cell.row ? `linear-gradient(135deg, ${color}20, rgba(255,255,255,0.025))` : "rgba(255,255,255,0.018)",
+    border: !cell.date ? "0.5px solid transparent" : `0.5px solid ${active ? accent : cell.row ? `${color}88` : "rgba(255,255,255,0.09)"}`,
     color: !cell.date ? "transparent" : labelLight,
     cursor: cell.date && cell.row ? "pointer" : "default",
-    padding: 10,
+    padding: 9,
     fontFamily: "JetBrains Mono",
     fontWeight: 900,
-    boxShadow: active ? `0 0 18px ${accent}24` : cell.row ? `inset 0 -3px 0 ${color}` : "none",
+    borderRadius: 7,
+    boxShadow: active ? `0 0 0 1px ${accent}, 0 0 22px ${accent}24` : cell.row ? `inset 0 -3px 0 ${color}, 0 0 18px ${color}10` : "none",
+    overflow: "hidden",
   };
 }
 
+function PMWeekRail({ weeks }) {
+  return (
+    <div style={calendarWeekRail}>
+      {weeks.map((week, idx) => {
+        const color = pctColor(week.total);
+        return (
+          <button key={idx} style={calendarWeekCard(color)} title={`Week ${idx + 1}\nFund: ${fmtPct(week.total)}\nSPY: ${fmtPct(week.spy)}\nGreen days: ${week.green}`}>
+            <span>Week {idx + 1}</span>
+            <strong>{fmtPct(week.total)}</strong>
+            <small>{week.days} days</small>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const calendarShellHeader = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
+const calendarHeroStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10, marginBottom: 18 };
+const calendarHeroTile = (color) => ({
+  border: `0.5px solid ${color}55`,
+  background: `linear-gradient(145deg, ${color}16, rgba(255,255,255,0.025))`,
+  borderRadius: 8,
+  minHeight: 78,
+  padding: 12,
+  display: "grid",
+  alignContent: "space-between",
+  boxShadow: `inset 0 -2px 0 ${color}66`,
+});
+const calendarMonthButton = {
+  background: "rgba(255,255,255,0.035)",
+  border: "0.5px solid rgba(255,255,255,0.16)",
+  color: labelLight,
+  borderRadius: 7,
+  padding: "9px 12px",
+  fontSize: 10,
+  letterSpacing: "0.1em",
+  fontFamily: "JetBrains Mono",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+const calendarBoard = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 120px", gap: 12, alignItems: "stretch" };
 const calendarToolbar = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
 const calendarLegend = { display: "flex", gap: 14, flexWrap: "wrap", color: muted, fontSize: 10, letterSpacing: "0.12em" };
-const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8, color: dim, fontSize: 10, letterSpacing: "0.14em", margin: "12px 0 8px" };
-const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8 };
+const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 10, letterSpacing: "0.08em", margin: "12px 0 8px" };
+const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 };
+const calendarDayNumber = { alignSelf: "flex-end", color: dim, fontSize: 10, lineHeight: 1 };
+const calendarDayPayload = { display: "grid", gap: 3, placeItems: "center", textAlign: "center", color: labelLight, minHeight: 54 };
+const calendarWeekRail = { display: "grid", gap: 7, alignContent: "start", paddingTop: 24 };
+const calendarWeekCard = (color) => ({
+  minHeight: 72,
+  border: `0.5px solid ${color}55`,
+  background: `linear-gradient(145deg, ${color}14, rgba(255,255,255,0.02))`,
+  borderRadius: 8,
+  color: labelLight,
+  padding: 10,
+  display: "grid",
+  gap: 4,
+  textAlign: "left",
+  fontFamily: "JetBrains Mono",
+  cursor: "default",
+});
 const pmDetailGrid = { display: "grid", gridTemplateColumns: "minmax(330px, 0.9fr) minmax(0, 1.1fr)", gap: 18, alignItems: "start" };
 const selectStyle = {
   background: "#050509",

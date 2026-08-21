@@ -31,11 +31,24 @@ import httpx
 logger = logging.getLogger(__name__)
 
 ALPACA_DATA_BASE = "https://data.alpaca.markets"
-ALPACA_KEY = (os.environ.get("OPTIONS_APCA_API_KEY_ID") or os.environ.get("APCA_API_KEY_ID") or "").strip()
-ALPACA_SECRET = (os.environ.get("OPTIONS_APCA_API_SECRET_KEY") or os.environ.get("APCA_API_SECRET_KEY") or "").strip()
-ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 ALPACA_OPTIONS_FEED = os.environ.get("OPTIONS_APCA_DATA_FEED", "indicative").strip() or "indicative"
 OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
+
+
+def _alpaca_key() -> str:
+    return os.environ.get("OPTIONS_APCA_API_KEY_ID", "").strip()
+
+
+def _alpaca_secret() -> str:
+    return os.environ.get("OPTIONS_APCA_API_SECRET_KEY", "").strip()
+
+
+def _alpaca_headers() -> dict[str, str]:
+    return {"APCA-API-KEY-ID": _alpaca_key(), "APCA-API-SECRET-KEY": _alpaca_secret()}
+
+
+def _alpaca_options_configured() -> bool:
+    return bool(_alpaca_key() and _alpaca_secret())
 
 
 def _is_nan(v) -> bool:
@@ -107,10 +120,10 @@ def _parse_occ_symbol(symbol: str) -> dict[str, Any] | None:
 
 
 async def _alpaca_stock_price(ticker: str) -> float | None:
-    if not (ALPACA_KEY and ALPACA_SECRET):
+    if not _alpaca_options_configured():
         return None
     try:
-        async with httpx.AsyncClient(timeout=12.0, headers=ALPACA_HEADERS) as client:
+        async with httpx.AsyncClient(timeout=12.0, headers=_alpaca_headers()) as client:
             r = await client.get(f"{ALPACA_DATA_BASE}/v2/stocks/{ticker}/trades/latest", params={"feed": "iex"})
         if r.status_code == 200:
             trade = (r.json() or {}).get("trade") or {}
@@ -131,7 +144,7 @@ async def _alpaca_chain_page(client: httpx.AsyncClient, ticker: str, params: dic
 
 async def _fetch_alpaca_options_data(ticker: str, catalyst_date: str | None = None) -> dict[str, Any] | None:
     """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
-    if not (ALPACA_KEY and ALPACA_SECRET):
+    if not _alpaca_options_configured():
         return None
     try:
         import pandas as pd
@@ -153,7 +166,7 @@ async def _fetch_alpaca_options_data(ticker: str, catalyst_date: str | None = No
             "strike_price_lte": round(strike_hi, 2),
         }
         snapshots: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=25.0, headers=ALPACA_HEADERS) as client:
+        async with httpx.AsyncClient(timeout=25.0, headers=_alpaca_headers()) as client:
             for _ in range(8):
                 page = await _alpaca_chain_page(client, ticker, params)
                 snapshots.update(page.get("snapshots") or {})

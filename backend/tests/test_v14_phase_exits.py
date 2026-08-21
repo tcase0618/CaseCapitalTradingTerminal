@@ -20,6 +20,11 @@ from services.db import get_db, stamped  # noqa: E402
 from services import trade_floor_phases as phases  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _disable_live_alpaca_qty(monkeypatch):
+    monkeypatch.setattr(phases, "_alpaca_available_qty", lambda ticker: _const(None))
+
+
 def _recent_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -99,6 +104,50 @@ async def test_phase2_moves_stop_to_phase1_exit_price(monkeypatch):
     assert doc["current_stop"] == 121.0, doc["current_stop"]
     assert "2" in doc["phases_hit"]
     assert abs(doc["qty_remaining"] - 0.09) < 1e-6, doc["qty_remaining"]
+    await db.tf_trades.delete_many({"client_order_id": cli})
+    await db.tf_phase_exits.delete_many({"parent_client_order_id": cli})
+
+
+@pytest.mark.asyncio
+async def test_phase_exit_caps_sell_to_live_alpaca_available_qty(monkeypatch):
+    db = get_db()
+    cli = "tf-phase-test-live-qty-cap"
+    sold = {}
+    await db.tf_trades.delete_many({"client_order_id": cli})
+    await db.tf_phase_exits.delete_many({"parent_client_order_id": cli})
+    await db.tf_trades.insert_one(stamped({
+        "client_order_id": cli, "order_id": "alp-test-live-qty", "ticker": "TEST",
+        "signal_combo": ["INSIDER"], "instrument": "fractional",
+        "notional": 100.0, "limit_price": 100.0,
+        "entry_price_ref": 100.0, "filled_avg_price": 100.0,
+        "stop_price": 88.0, "current_stop": 88.0, "stop_pct": 0.12,
+        "axiom_target": 120.0, "phase1_target": 120.0, "phase2_target": 130.0,
+        "phase": 1, "phases_hit": {},
+        "qty_total": 1.0,
+        # Stale ledger says 70% remains, but Alpaca only has 25% available.
+        "qty_remaining": 0.7,
+        "peak_price_since_entry": 100.0,
+        "hold_window_days": 30, "sector": "technology",
+        "status": "OPEN", "fill_status": "FILLED",
+        "submitted_at": _recent_iso(),
+        "filled_at": _recent_iso(),
+    }))
+
+    async def fake_sell(ticker, qty, client_order_id):
+        sold["qty"] = qty
+        return {"id": f"fake-{ticker}-{qty}", "filled_avg_price": None}
+
+    monkeypatch.setattr(phases, "_alpaca_available_qty", lambda ticker: _const(0.25))
+    monkeypatch.setattr(phases, "_alpaca_market_sell", fake_sell)
+    monkeypatch.setattr(phases, "_current_price", lambda t: _const(122.0))
+    monkeypatch.setattr(phases, "_send_telegram", lambda text: _noop())
+
+    await phases.process_phase_exits()
+    doc = await db.tf_trades.find_one({"client_order_id": cli}, {"_id": 0})
+    assert sold["qty"] == 0.25
+    assert doc["qty_available_source"] == "alpaca_live"
+    assert doc["qty_remaining"] == 0
+    assert doc["phases_hit"]["1"]["qty_sold"] == 0.25
     await db.tf_trades.delete_many({"client_order_id": cli})
     await db.tf_phase_exits.delete_many({"parent_client_order_id": cli})
 

@@ -73,6 +73,24 @@ def _freshness_blocker(key: str, label: str, detail: str) -> dict[str, Any]:
     }
 
 
+def _persistence_blocker(error: Exception) -> dict[str, Any]:
+    detail = str(error)[:500]
+    label = "Database Persistence Block"
+    key = "database_persistence_block"
+    if "space quota" in detail.lower() or "writes are blocked" in detail.lower():
+        detail = "MongoDB writes are blocked because the cluster is at its storage quota. Free storage or upgrade the cluster before execution is allowed."
+    return {
+        "key": key,
+        "label": label,
+        "status": "BLOCK",
+        "critical": True,
+        "blocks_trading": True,
+        "execution_scopes": ["system", "equity", "options"],
+        "detail": detail,
+        "error_type": error.__class__.__name__,
+    }
+
+
 def _execution_flags() -> dict[str, Any]:
     equity_enabled = os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
     options_enabled = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -208,6 +226,26 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
         },
     }
     if persist:
-        await db.data_truth_snapshots.insert_one(stamped(payload))
-        await db.bot_state.update_one({"_id": "data_truth_latest"}, {"$set": payload}, upsert=True)
+        try:
+            await db.data_truth_snapshots.insert_one(stamped(payload))
+            await db.bot_state.update_one({"_id": "data_truth_latest"}, {"$set": payload}, upsert=True)
+            try:
+                from . import postgres_store
+                await postgres_store.mirror_document("data_truth_snapshots", payload)
+                await postgres_store.upsert_snapshot("bot_state", "data_truth_latest", {"_id": "data_truth_latest", **payload}, source="data_truth")
+            except Exception:
+                pass
+            payload["persistence"] = {"ok": True}
+        except Exception as exc:
+            blocker = _persistence_blocker(exc)
+            scoped = payload["qc"].setdefault("scoped_blockers", {})
+            counts = payload["qc"].setdefault("scoped_blocker_counts", {})
+            for scope in blocker["execution_scopes"]:
+                scoped.setdefault(scope, []).append(blocker)
+                counts[scope] = len(scoped.get(scope) or [])
+            payload["ok"] = False
+            payload["tradable"] = False
+            payload["decision"] = "BLOCK"
+            payload["truth_grade"] = "F"
+            payload["persistence"] = {"ok": False, "blocker": blocker}
     return payload

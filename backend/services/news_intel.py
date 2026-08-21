@@ -69,6 +69,24 @@ DISCOVERY_FEEDS = [
         "lane": "discovery",
     },
     {
+        "key": "google_clinical_trial_breakout",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=clinical%20trial%20results%20biotech%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
+        "key": "google_phase3_biotech_breakout",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=phase%203%20trial%20biotech%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
+        "key": "google_oncology_vaccine_breakout",
+        "source": "Google News",
+        "url": "https://news.google.com/rss/search?q=cancer%20vaccine%20trial%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",
+        "lane": "discovery",
+    },
+    {
         "key": "google_contract_awards",
         "source": "Google News",
         "url": "https://news.google.com/rss/search?q=defense%20contract%20award%20stock%20when%3A1d&hl=en-US&gl=US&ceid=US:en",

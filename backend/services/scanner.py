@@ -433,6 +433,11 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         ),
     }
     await db.scan_results.insert_one(dict(scan_doc))
+    try:
+        from . import postgres_store
+        await postgres_store.mirror_document("scan_results", scan_doc)
+    except Exception:
+        pass
     # Record P&L tracking rows (one per ticker, signal & options)
     try:
         await pnl_tracker.record_scan_picks(scan_doc)
@@ -490,6 +495,20 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         }},
         upsert=True,
     )
+    try:
+        from . import postgres_store
+        await postgres_store.upsert_snapshot("bot_state", "state", {
+            "_id": "state",
+            "last_scan_at": finished.isoformat(),
+            "last_scan_summary": {
+                "pre_filter_passed": pre_filter_count,
+                "results_count": len(final),
+                "claude_calls_made": fresh_calls,
+                "claude_cache_hits": cache_hits,
+            },
+        }, source="scanner")
+    except Exception:
+        pass
     await log_activity(
         f"Scan complete: {len(final)} analyses ({fresh_calls} batched Claude call, "
         f"{cache_hits} cached) in {scan_doc['duration_sec']}s",

@@ -89,6 +89,14 @@ async def _daily_scan_job():
             await asyncio.wait_for(case_court.run_trials(limit=30, persist=True), timeout=30.0)
         except Exception as exc:
             logger.warning("case court post-scan refresh failed: %s", exc)
+        try:
+            from . import pharma
+            await asyncio.wait_for(
+                pharma.run_catalyst_shock_scan(triggered_by="post_stock_scan", force_refresh=True),
+                timeout=30.0,
+            )
+        except Exception as exc:
+            logger.warning("pharma catalyst post-scan refresh failed: %s", exc)
         await telegram_events.dispatch_scan_report(scan)
     except Exception as e:
         logger.exception("daily scan job failed: %s", e)
@@ -132,6 +140,34 @@ async def _flow_refresh_job():
         await log_activity(f"Flow refresh complete for {len(tickers)} tickers", "info")
     except Exception as e:
         logger.exception("flow refresh job failed: %s", e)
+
+
+async def _pharma_catalyst_shock_job():
+    """Refresh same-day pharma catalyst news during regular market hours."""
+    try:
+        now_et = datetime.now(ET)
+        if now_et.weekday() >= 5:
+            return
+        h, m = now_et.hour, now_et.minute
+        if h < 9 or h > 16 or (h == 9 and m < 30):
+            return
+        from . import pharma
+        result = await pharma.run_catalyst_shock_scan(
+            triggered_by="scheduler_pharma_shock",
+            force_refresh=True,
+        )
+        await log_activity(
+            f"Pharma catalyst shock refresh: {result.get('candidate_count', 0)} candidates, "
+            f"{result.get('hot_count', 0)} hot",
+            "warn" if result.get("hot_count") else "info",
+            {
+                "candidate_count": result.get("candidate_count", 0),
+                "hot_count": result.get("hot_count", 0),
+                "source": result.get("source"),
+            },
+        )
+    except Exception as e:
+        logger.exception("pharma catalyst shock job failed: %s", e)
 
 
 async def _pnl_refresh_job():
@@ -399,6 +435,12 @@ def start_scheduler():
         _flow_refresh_job,
         CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15", timezone=ET),
         id="flow_refresh",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _pharma_catalyst_shock_job,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/10", timezone=ET),
+        id="pharma_catalyst_shock_10m",
         replace_existing=True,
     )
     # Options open sweep: close/refresh risk first, then submit PM-approved buys.

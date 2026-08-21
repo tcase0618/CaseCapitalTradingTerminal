@@ -12,6 +12,7 @@ const scanCommands = [
   { id: "main", label: "Full Signal Scan", endpoint: "/scan/run", method: "post", complete: d => `${d.results?.length || 0} targets` },
   { id: "gov", label: "Gov Contracts Scan", endpoint: "/scan/gov", method: "post", complete: d => `${d.results?.length || 0} contract plays` },
   { id: "pharma", label: "Pharma PDUFA Scan", endpoint: "/pharma/scan", method: "post", complete: d => `${d.results?.length || 0} PDUFA rows` },
+  { id: "pharma_shock", label: "Pharma Catalyst Shock Sweep", endpoint: "/pharma/shocks/scan", method: "post", complete: d => `${d.candidate_count || 0} shocks / ${d.hot_count || 0} hot` },
   { id: "lottery", label: "Lottery Scan", endpoint: "/lottery/scan", method: "post", complete: d => `${d.count || d.results?.length || 0} candidates` },
   {
     id: "dispatch",

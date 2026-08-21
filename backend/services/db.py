@@ -30,10 +30,18 @@ def stamped(doc: dict | None = None) -> dict:
 
 async def log_activity(message: str, level: str = "info", meta: dict | None = None):
     db = get_db()
-    await db.activity_log.insert_one({
+    doc = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "level": level,
         "message": message,
         "meta": meta or {},
         "feature_version": FEATURE_VERSION,
-    })
+    }
+    await db.activity_log.insert_one(doc)
+    try:
+        from . import postgres_store
+        await postgres_store.mirror_document("activity_log", doc)
+    except Exception:
+        # Postgres is a parallel durability layer during migration; it must not
+        # break the active Mongo-backed runtime.
+        pass

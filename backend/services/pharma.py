@@ -30,6 +30,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from calendar import monthrange
 
 import httpx
 from bs4 import BeautifulSoup
@@ -47,6 +48,70 @@ US_POPULATION = 333_000_000  # US Census 2024 rounded
 PDUFA_CACHE_HOURS = 168  # weekly scrape per spec
 AUTO_ENTER_SCORE = 80
 TELEGRAM_THRESHOLD = 70
+CATALYST_SHOCK_THRESHOLD = 75
+PHARMA_OPTION_SNAPSHOT_THRESHOLD = 70
+PHARMA_OPTION_SNAPSHOT_BUDGET = 500.0
+PHARMA_PM_ROUTE_THRESHOLD = 70
+
+
+async def _mirror_pg(collection: str, doc: dict[str, Any]) -> None:
+    try:
+        from . import postgres_store
+        await postgres_store.mirror_document(collection, doc, source="pharma")
+    except Exception:
+        pass
+
+PHARMA_COMPANY_ALIASES: dict[str, str] = {
+    "MODERNA": "MRNA",
+    "BIONTECH": "BNTX",
+    "REGENERON": "REGN",
+    "VERTEX": "VRTX",
+    "ALNYLAM": "ALNY",
+    "BIOMARIN": "BMRN",
+    "SAREPTA": "SRPT",
+    "NOVAVAX": "NVAX",
+    "GILEAD": "GILD",
+    "MERCK": "MRK",
+    "BRISTOL MYERS": "BMY",
+    "ELI LILLY": "LLY",
+    "PFIZER": "PFE",
+    "ASTRAZENECA": "AZN",
+    "AMGEN": "AMGN",
+    "INCYTE": "INCY",
+    "AXSOME": "AXSM",
+}
+
+PHARMA_CATALYST_WEIGHTS: dict[str, int] = {
+    "phase 3": 20,
+    "phase iii": 20,
+    "pivotal": 18,
+    "primary endpoint": 18,
+    "met endpoint": 16,
+    "statistically significant": 16,
+    "clinical trial": 12,
+    "trial results": 14,
+    "vaccine": 10,
+    "cancer": 10,
+    "oncology": 10,
+    "fda approval": 22,
+    "approved": 16,
+    "breakthrough therapy": 15,
+    "fast track": 10,
+    "orphan drug": 8,
+}
+
+PHARMA_BEARISH_CATALYST_WEIGHTS: dict[str, int] = {
+    "failed to meet": 26,
+    "failed": 24,
+    "fails": 24,
+    "missed endpoint": 22,
+    "did not meet": 22,
+    "complete response letter": 22,
+    "response letter": 18,
+    "crl": 18,
+    "halted": 16,
+    "hold": 14,
+}
 
 
 # ─────── Disease prevalence map — NIH / CDC sourced static percentages ───────
@@ -127,6 +192,58 @@ def lookup_prevalence(indication: str) -> dict[str, Any]:
         "patient_count": int(US_POPULATION * best_pct / 100.0),
         "source": "NIH/CDC",
         "matched": best_key,
+    }
+
+
+def _article_text(article: dict[str, Any]) -> str:
+    return f"{article.get('title', '')} {article.get('summary', '')}".strip()
+
+
+def _map_pharma_article_tickers(article: dict[str, Any]) -> list[str]:
+    text = _article_text(article)
+    upper = text.upper()
+    mapped = {
+        str(t).upper().strip()
+        for t in (article.get("tickers") or [])
+        if str(t or "").strip()
+    }
+    for alias, ticker in PHARMA_COMPANY_ALIASES.items():
+        if alias in upper:
+            mapped.add(ticker)
+    for match in re.findall(r"\$([A-Z][A-Z0-9.]{0,5})\b", text):
+        mapped.add(match.upper().strip("."))
+    return sorted(t for t in mapped if 1 < len(t) <= 6)
+
+
+def _has_phrase(text: str, phrase: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text) is not None
+
+
+def _score_catalyst_shock(article: dict[str, Any], ticker: str, price: float | None = None) -> dict[str, Any]:
+    text = _article_text(article).lower()
+    bullish_hits = [term for term in PHARMA_CATALYST_WEIGHTS if _has_phrase(text, term)]
+    bearish_hits = [term for term in PHARMA_BEARISH_CATALYST_WEIGHTS if _has_phrase(text, term)]
+    bullish_score = sum(PHARMA_CATALYST_WEIGHTS[t] for t in bullish_hits)
+    bearish_score = sum(PHARMA_BEARISH_CATALYST_WEIGHTS[t] for t in bearish_hits)
+    age = article.get("age_minutes")
+    try:
+        age = float(age) if age is not None else None
+    except (TypeError, ValueError):
+        age = None
+    recency = 18 if age is not None and age <= 90 else 12 if age is not None and age <= 360 else 7
+    ticker_weight = 15 if ticker else 0
+    source_score = int(article.get("score") or 0)
+    news_quality = 12 if source_score >= 80 else 8 if source_score >= 65 else 4
+    score = max(0, min(100, 28 + bullish_score + recency + ticker_weight + news_quality - bearish_score))
+    direction = "BEARISH" if bearish_score > bullish_score else "BULLISH" if bullish_score else "WATCH"
+    return {
+        "shock_score": round(score, 1),
+        "direction": direction,
+        "tier": "BREAKOUT" if score >= 85 else "WATCH" if score >= CATALYST_SHOCK_THRESHOLD else "MONITOR",
+        "bullish_terms": bullish_hits[:8],
+        "bearish_terms": bearish_hits[:8],
+        "age_minutes": age,
+        "current_price": price,
     }
 
 
@@ -437,6 +554,482 @@ def compute_binary_event_score(
     }
 
 
+async def build_option_snapshot(row: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
+    """Create an auditable option thesis for a pharma alert.
+
+    Research only: this captures the contract and quote evidence that existed
+    at alert time. It never submits, stages, modifies, or cancels orders.
+    """
+    ticker = str(row.get("ticker") or "").upper().strip()
+    pdufa_date = str(row.get("pdufa_date") or "").strip()
+    drug = str(row.get("drug") or "").strip()
+    base = {
+        "ticker": ticker,
+        "drug": drug,
+        "pdufa_date": pdufa_date,
+        "alert_score": row.get("binary_event_score"),
+        "alert_price": row.get("current_price"),
+        "snapshot_at": _now().isoformat(),
+        "budget": PHARMA_OPTION_SNAPSHOT_BUDGET,
+        "authority": "RESEARCH_ONLY_NO_EXECUTION",
+        "strategy": "LONG_CALL",
+        "direction": "BULL",
+    }
+
+    if not ticker:
+        snap = {**base, "ok": False, "status": "NO_TICKER", "reason": "missing ticker"}
+    else:
+        try:
+            chain = await options_engine.get_options_data(ticker, catalyst_date=pdufa_date or None)
+            if not chain:
+                snap = {**base, "ok": False, "status": "NO_CHAIN", "reason": "no options chain available"}
+            else:
+                contract = options_engine.find_best_contract(chain, "BULL", budget=PHARMA_OPTION_SNAPSHOT_BUDGET)
+                chain_meta = {
+                    "spot": chain.get("price"),
+                    "expiration_selected": chain.get("expiration"),
+                    "iv_rank": chain.get("iv_rank"),
+                    "iv_label": chain.get("iv_label"),
+                    "atm_iv": chain.get("atm_iv"),
+                    "data_provider": chain.get("data_provider"),
+                    "data_feed": chain.get("data_feed"),
+                    "data_quality": chain.get("data_quality"),
+                    "snapshot_count": chain.get("snapshot_count"),
+                    "expiration_window": chain.get("expiration_window"),
+                    "strike_window": chain.get("strike_window"),
+                }
+                if contract:
+                    spread = float(contract.get("spread") or 0)
+                    premium = float(contract.get("premium") or 0)
+                    spread_pct = round((spread / premium) * 100, 2) if premium > 0 else None
+                    snap = {
+                        **base,
+                        "ok": True,
+                        "status": "CONTRACT_SNAPSHOT",
+                        "reason": "validated research contract captured",
+                        "chain": chain_meta,
+                        "contract": contract,
+                        "liquidity": contract.get("liquidity"),
+                        "spread_pct": spread_pct,
+                        "max_loss": contract.get("max_loss"),
+                        "contracts_at_budget": contract.get("contracts_at_budget"),
+                        "tradeability": (
+                            "CLEAN" if contract.get("liquidity") == "GOOD"
+                            else "WATCH" if contract.get("liquidity") == "WARN"
+                            else "RESEARCH_ONLY"
+                        ),
+                    }
+                else:
+                    snap = {
+                        **base,
+                        "ok": False,
+                        "status": "NO_VALID_CONTRACT",
+                        "reason": "chain loaded but no premium/delta/liquidity-valid contract selected",
+                        "chain": chain_meta,
+                    }
+        except Exception as exc:
+            logger.warning("Pharma option snapshot failed for %s: %s", ticker, exc)
+            snap = {**base, "ok": False, "status": "SNAPSHOT_ERROR", "reason": str(exc)}
+
+    if persist and ticker:
+        try:
+            db = get_db()
+            await db.pharma_option_snapshots.update_one(
+                {"ticker": ticker, "pdufa_date": pdufa_date, "drug": drug},
+                {"$set": stamped(snap)},
+                upsert=True,
+            )
+            await _mirror_pg("pharma_option_snapshots", snap)
+        except Exception as exc:
+            logger.warning("Persist pharma option snapshot failed for %s: %s", ticker, exc)
+            snap["persist_error"] = str(exc)
+    return snap
+
+
+def _component_points(row: dict[str, Any], key: str) -> float:
+    try:
+        return float(((row.get("score_components") or {}).get(key) or {}).get("points") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_pm_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert a pharma catalyst row into the PM's normal scan-row shape."""
+    ticker = str(row.get("ticker") or "").upper().strip()
+    score = float(row.get("binary_event_score") or 0)
+    price = float(row.get("current_price") or 0)
+    target = round(price * 1.40, 2) if price > 0 else 0.0
+    stop = round(price * 0.85, 2) if price > 0 else 0.0
+    signals = ["PHARMA_PDUFA", "BINARY_FDA_CATALYST"]
+    if _component_points(row, "phase3") >= 15:
+        signals.append("PHARMA_PHASE_3")
+    if _component_points(row, "insider") >= 8:
+        signals.append("PHARMA_INSIDER_BUYING")
+    if _component_points(row, "short") >= 10:
+        signals.append("PHARMA_SHORT_SQUEEZE")
+    if _component_points(row, "iv") >= 10:
+        signals.append("PHARMA_CHEAP_IV")
+
+    snap = row.get("option_snapshot") or {}
+    chain = snap.get("chain") or {}
+    contract = snap.get("contract") or {}
+    if snap.get("ok") and contract:
+        opts = {
+            "strategy": "LONG_CALL",
+            "direction": "BULL",
+            "strategy_reason": "Pharma binary catalyst with captured contract snapshot; PM retains final authority.",
+            "data_provider": chain.get("data_provider") or contract.get("data_provider"),
+            "data_feed": chain.get("data_feed") or contract.get("data_feed"),
+            "data_quality": chain.get("data_quality") or contract.get("data_quality"),
+            "iv_rank": chain.get("iv_rank"),
+            "iv_label": chain.get("iv_label"),
+            "atm_iv": chain.get("atm_iv"),
+            "spot": chain.get("spot") or price,
+            "expiration": contract.get("expiration") or chain.get("expiration_selected"),
+            "contract": contract,
+            "crush_risk": "HIGH" if float(chain.get("iv_rank") or row.get("iv_rank") or 50) >= 70 else "MODERATE",
+            "crush_recommendation": "Defined premium only; reassess before catalyst and never hold through FDA binary without PM approval.",
+        }
+    else:
+        opts = {
+            "strategy": "AVOID_OPTIONS",
+            "direction": "NONE",
+            "strategy_reason": f"No validated pharma option snapshot: {snap.get('reason') or 'not captured'}",
+            "iv_rank": row.get("iv_rank"),
+            "iv_label": "UNKNOWN",
+            "contract": None,
+        }
+
+    risk_score = 55.0
+    if row.get("data_quality") == "fallback_calendar":
+        risk_score += 8.0
+    if not snap.get("ok"):
+        risk_score += 8.0
+    if float(row.get("iv_rank") or 50) >= 70:
+        risk_score += 8.0
+    risk_score = min(85.0, risk_score)
+
+    return {
+        "ticker": ticker,
+        "source": "pharma",
+        "source_type": "PHARMA_PDUFA",
+        "price": price,
+        "target_blended": target,
+        "target_high": target,
+        "stop_loss": stop,
+        "entry_low": round(price * 0.99, 2) if price > 0 else None,
+        "entry_high": round(price * 1.01, 2) if price > 0 else None,
+        "signals": signals,
+        "signal_score": min(10.0, score / 10.0),
+        "trade_score": min(40.0, score / 1.75),
+        "learning_score": 0.0,
+        "sector": "Healthcare",
+        "risk": {"score": risk_score, "level": "HIGH", "stop_loss": stop},
+        "options": opts,
+        "time_target": {"target_date": row.get("pdufa_date"), "days_remaining": row.get("days_until") or 30},
+        "pharma": {
+            "drug": row.get("drug"),
+            "indication": row.get("indication"),
+            "pdufa_date": row.get("pdufa_date"),
+            "binary_event_score": score,
+            "tier": row.get("tier"),
+            "prevalence": row.get("prevalence"),
+            "trial": row.get("trial"),
+            "data_quality": row.get("data_quality"),
+        },
+    }
+
+
+async def route_to_pm(row: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
+    """Ask PM for a ruling on a pharma candidate without executing anything."""
+    from . import portfolio_manager
+
+    candidate = build_pm_candidate(row)
+    decisions = portfolio_manager.evaluate_rows(
+        [candidate],
+        equity=portfolio_manager.DEFAULT_EQUITY,
+        mode="BALANCED",
+    )
+    decision = decisions[0] if decisions else {}
+    docket = {
+        "ticker": candidate.get("ticker"),
+        "drug": row.get("drug"),
+        "pdufa_date": row.get("pdufa_date"),
+        "routed_at": _now().isoformat(),
+        "authority": "PM_DISCRETION_NO_PHARMA_EXECUTION",
+        "candidate": candidate,
+        "decision": decision,
+        "option_snapshot": row.get("option_snapshot"),
+    }
+    if persist and candidate.get("ticker"):
+        try:
+            db = get_db()
+            await db.pharma_pm_decisions.update_one(
+                {
+                    "ticker": candidate["ticker"],
+                    "pdufa_date": row.get("pdufa_date"),
+                    "drug": row.get("drug"),
+                },
+                {"$set": stamped(docket)},
+                upsert=True,
+            )
+            await _mirror_pg("pharma_pm_decisions", docket)
+        except Exception as exc:
+            logger.warning("Persist pharma PM decision failed for %s: %s", candidate.get("ticker"), exc)
+            docket["persist_error"] = str(exc)
+    return docket
+
+
+def _as_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value in (None, ""):
+            return default
+        n = float(value)
+        return n if n == n else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _date_from_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        try:
+            return datetime.fromisoformat(str(value)[:10])
+        except Exception:
+            return None
+
+
+def pharma_data_gate(row: dict[str, Any]) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    neutralized: list[str] = []
+    sources: list[dict[str, Any]] = []
+
+    ticker = str(row.get("ticker") or "").upper().strip()
+    if not ticker:
+        blockers.append("missing_ticker")
+    sources.append({"key": "ticker_match", "status": "PASS" if ticker else "BLOCK", "detail": ticker or "-"})
+
+    pdufa_date = str(row.get("pdufa_date") or "").strip()
+    parsed_pdufa = _date_from_iso(pdufa_date)
+    if not parsed_pdufa:
+        blockers.append("missing_pdufa_date")
+    else:
+        days_until = (parsed_pdufa.date() - _now().date()).days
+        if days_until < 0:
+            warnings.append("pdufa_date_elapsed")
+        if days_until > 365:
+            warnings.append("pdufa_date_far_out")
+    source_name = row.get("source") or row.get("data_quality") or "unknown"
+    source_status = "WARN" if row.get("data_quality") == "fallback_calendar" else "PASS" if source_name != "unknown" else "WARN"
+    sources.append({"key": "fda_calendar", "status": source_status, "detail": source_name})
+    if source_status == "WARN":
+        warnings.append("calendar_source_fallback")
+
+    price = _as_float(row.get("current_price"))
+    if price is None or price <= 0:
+        blockers.append("missing_live_price")
+    sources.append({"key": "price", "status": "PASS" if price and price > 0 else "BLOCK", "detail": price})
+
+    trial = row.get("trial") or {}
+    has_trial = bool(trial.get("nct_id") or trial.get("status") or trial.get("phases"))
+    sources.append({"key": "clinical_trials", "status": "PASS" if has_trial else "NEUTRAL", "detail": trial.get("nct_id") or trial.get("status") or "-"})
+    if not has_trial:
+        neutralized.append("clinical_trials")
+
+    insider = row.get("insider_summary")
+    sources.append({"key": "insider_cluster", "status": "PASS" if insider else "NEUTRAL", "detail": (insider or {}).get("summary") if isinstance(insider, dict) else "-"})
+    if not insider:
+        neutralized.append("insider_cluster")
+
+    short_pct = _as_float(row.get("short_pct"))
+    sources.append({"key": "short_interest", "status": "PASS" if short_pct is not None else "NEUTRAL", "detail": short_pct})
+    if short_pct is None:
+        neutralized.append("short_interest")
+
+    iv_rank = _as_float(row.get("iv_rank"))
+    sources.append({"key": "implied_volatility", "status": "PASS" if iv_rank is not None else "NEUTRAL", "detail": iv_rank})
+    if iv_rank is None:
+        neutralized.append("implied_volatility")
+
+    snap = row.get("option_snapshot") or {}
+    snap_ok = bool(snap.get("ok") and snap.get("contract"))
+    if _as_float(row.get("binary_event_score"), 0) >= PHARMA_OPTION_SNAPSHOT_THRESHOLD and not snap_ok:
+        warnings.append("no_validated_option_snapshot")
+    sources.append({
+        "key": "option_snapshot",
+        "status": "PASS" if snap_ok else "WARN" if snap else "NEUTRAL",
+        "detail": snap.get("status") or snap.get("reason") or "-",
+    })
+
+    evaluated_at = _date_from_iso(row.get("evaluated_at") or row.get("updated_at") or row.get("created_at"))
+    age_hours = None
+    if evaluated_at:
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+        age_hours = round((_now() - evaluated_at).total_seconds() / 3600, 2)
+        if age_hours > 24:
+            warnings.append("pharma_row_stale_gt_24h")
+    else:
+        warnings.append("missing_evaluation_timestamp")
+    sources.append({"key": "freshness", "status": "PASS" if age_hours is not None and age_hours <= 24 else "WARN", "detail": age_hours})
+
+    decision = "BLOCK" if blockers else "WATCH" if warnings else "PASS"
+    score = 100 - (len(blockers) * 25) - (len(warnings) * 6) - (len(neutralized) * 2)
+    return {
+        "decision": decision,
+        "score": max(0, min(100, round(score, 1))),
+        "blockers": blockers,
+        "warnings": warnings,
+        "neutralized_exhibits": sorted(set(neutralized)),
+        "sources": sources,
+        "age_hours": age_hours,
+    }
+
+
+def pharma_strategy_read(row: dict[str, Any]) -> dict[str, Any]:
+    score = _as_float(row.get("binary_event_score"), 0) or 0
+    days = _as_float(row.get("days_until"), 999) or 999
+    iv_rank = _as_float(row.get("iv_rank"), 50) or 50
+    snap = row.get("option_snapshot") or {}
+    contract = snap.get("contract") or {}
+    data_gate = row.get("data_gate") or pharma_data_gate(row)
+    if data_gate.get("decision") == "BLOCK":
+        lane = "DATA_BLOCK"
+        strategy = "PASS_UNTIL_DATA_CLEAN"
+    elif days <= 7:
+        lane = "BINARY_WINDOW"
+        strategy = "DEFINED_PREMIUM_ONLY"
+    elif iv_rank >= 70:
+        lane = "EXPENSIVE_VOL"
+        strategy = "DEBIT_SPREAD_OR_PASS"
+    elif score >= 80 and snap.get("ok") and contract:
+        lane = "CATALYST_CALL"
+        strategy = "LONG_CALL_RESEARCH_CANDIDATE"
+    elif score >= 70:
+        lane = "PM_REVIEW"
+        strategy = "WATCH_FOR_OPTION_SNAPSHOT"
+    else:
+        lane = "MONITOR"
+        strategy = "NO_TRADE"
+    return {
+        "lane": lane,
+        "strategy": strategy,
+        "hold_through_binary": False,
+        "reason": "PM must explicitly approve any binary FDA hold; Pharma only supplies evidence.",
+    }
+
+
+def pharma_scenario_model(row: dict[str, Any]) -> dict[str, Any]:
+    score = _as_float(row.get("binary_event_score"), 0) or 0
+    prevalence_pct = _as_float(((row.get("prevalence") or {}).get("pct")), 0.1) or 0.1
+    short_pct = _as_float(row.get("short_pct"), 0) or 0
+    iv_rank = _as_float(row.get("iv_rank"), 50) or 50
+    approval_proxy = max(15, min(75, 30 + (score - 50) * 0.55 + min(prevalence_pct, 10) * 0.8))
+    squeeze_boost = min(15, short_pct * 0.55)
+    iv_drag = max(0, (iv_rank - 55) * 0.25)
+    return {
+        "approval_probability_proxy": round(approval_proxy, 1),
+        "bull_move_pct": round(25 + squeeze_boost + max(0, score - 70) * 0.7, 1),
+        "base_move_pct": round((approval_proxy - 45) * 0.55 - iv_drag, 1),
+        "bear_move_pct": round(-18 - max(0, 70 - score) * 0.35 - iv_drag, 1),
+        "iv_crush_risk": "HIGH" if iv_rank >= 70 else "MEDIUM" if iv_rank >= 45 else "LOW",
+        "model": "heuristic_research_not_prediction",
+    }
+
+
+def _hydrate_pharma_row(row: dict[str, Any]) -> dict[str, Any]:
+    hydrated = dict(row)
+    hydrated["data_gate"] = pharma_data_gate(hydrated)
+    hydrated["strategy_read"] = pharma_strategy_read(hydrated)
+    hydrated["scenario"] = pharma_scenario_model(hydrated)
+    pm = hydrated.get("pm_decision") or {}
+    decision = pm.get("decision") or {}
+    hydrated["pm_summary"] = {
+        "action": decision.get("action") or "NOT_ROUTED",
+        "score": decision.get("pm_score") or decision.get("score"),
+        "risk_reward": decision.get("risk_reward"),
+        "authority": pm.get("authority") or "PM_PENDING",
+        "routed_at": pm.get("routed_at"),
+    }
+    snap = hydrated.get("option_snapshot") or {}
+    contract = snap.get("contract") or {}
+    hydrated["option_summary"] = {
+        "status": snap.get("status") or "NO_SNAPSHOT",
+        "ok": bool(snap.get("ok") and contract),
+        "contract": contract.get("symbol") or contract.get("contractSymbol"),
+        "expiration": contract.get("expiration") or (snap.get("chain") or {}).get("expiration_selected"),
+        "strike": contract.get("strike"),
+        "premium": contract.get("premium"),
+        "spread_pct": snap.get("spread_pct"),
+        "tradeability": snap.get("tradeability") or "UNKNOWN",
+        "reason": snap.get("reason"),
+    }
+    return hydrated
+
+
+async def get_fda_calendar_month(year: int | None = None, month: int | None = None) -> dict[str, Any]:
+    now = _now()
+    year = int(year or now.year)
+    month = max(1, min(12, int(month or now.month)))
+    start = datetime(year, month, 1, tzinfo=timezone.utc).date()
+    end = datetime(year, month, monthrange(year, month)[1], tzinfo=timezone.utc).date()
+
+    db = get_db()
+    rows = await db.pharma_pdufa.find(
+        {"pdufa_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}},
+        {"_id": 0},
+    ).sort("pdufa_date", 1).to_list(500)
+    hydrated = [_hydrate_pharma_row(r) for r in rows]
+    days: list[dict[str, Any]] = []
+    for day in range(1, end.day + 1):
+        d = datetime(year, month, day, tzinfo=timezone.utc).date()
+        events = [r for r in hydrated if str(r.get("pdufa_date"))[:10] == d.isoformat()]
+        hot = [e for e in events if _as_float(e.get("binary_event_score"), 0) >= TELEGRAM_THRESHOLD]
+        pm_ready = [e for e in events if (e.get("pm_summary") or {}).get("action") not in {None, "NOT_ROUTED"}]
+        blocked = [e for e in events if (e.get("data_gate") or {}).get("decision") == "BLOCK"]
+        best = max((_as_float(e.get("binary_event_score"), 0) or 0 for e in events), default=None)
+        days.append({
+            "date": d.isoformat(),
+            "day": day,
+            "events": events,
+            "event_count": len(events),
+            "hot_count": len(hot),
+            "pm_ready_count": len(pm_ready),
+            "blocked_count": len(blocked),
+            "best_score": best,
+            "status": "BLOCK" if blocked else "HOT" if hot else "EVENT" if events else "EMPTY",
+        })
+
+    year_rows = await db.pharma_pdufa.find({}, {"_id": 0, "pdufa_date": 1}).to_list(1000)
+    available_years = sorted({
+        int(str(r.get("pdufa_date", "0000"))[:4])
+        for r in year_rows
+        if str(r.get("pdufa_date", ""))[:4].isdigit()
+    }, reverse=True)
+    return {
+        "ok": True,
+        "year": year,
+        "month": month,
+        "month_start": start.isoformat(),
+        "month_end": end.isoformat(),
+        "days": days,
+        "events": hydrated,
+        "summary": {
+            "events": len(hydrated),
+            "hot": sum(1 for r in hydrated if _as_float(r.get("binary_event_score"), 0) >= TELEGRAM_THRESHOLD),
+            "pm_ready": sum(1 for r in hydrated if (r.get("pm_summary") or {}).get("action") not in {None, "NOT_ROUTED"}),
+            "option_ready": sum(1 for r in hydrated if (r.get("option_summary") or {}).get("ok")),
+            "blocked": sum(1 for r in hydrated if (r.get("data_gate") or {}).get("decision") == "BLOCK"),
+        },
+        "available_years": available_years or [year, year + 1],
+        "generated_at": now.isoformat(),
+    }
+
+
 # ─────── Master pharma scan ───────
 async def _cached_pdufa() -> list[dict[str, Any]]:
     """Return cached PDUFA list, refreshing weekly per spec."""
@@ -562,6 +1155,9 @@ async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "auto_entered": score["score"] >= AUTO_ENTER_SCORE,
             "evaluated_at": _now().isoformat(),
         }
+        row["data_gate"] = pharma_data_gate(row)
+        row["strategy_read"] = pharma_strategy_read(row)
+        row["scenario"] = pharma_scenario_model(row)
         enriched.append(row)
         # Persist to pdufa collection
         await db.pharma_pdufa.update_one(
@@ -569,26 +1165,92 @@ async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
             {"$set": stamped(row)},
             upsert=True,
         )
+        await _mirror_pg("pharma_pdufa", row)
         # Auto-enter into active plays if score >= 80
         if row["auto_entered"]:
+            active_play = {
+                "ticker": t,
+                "pdufa_date": p["pdufa_date"],
+                "drug": p["drug"],
+                "indication": p.get("indication"),
+                "entry_score": row["binary_event_score"],
+                "entry_price": prices.get(t),
+                "entry_date": _today_iso(),
+                "source": "auto",
+                "tier": row["tier"],
+                "prevalence_pct": prevalence["pct"],
+            }
             await db.pharma_active_plays.update_one(
                 {"ticker": t, "pdufa_date": p["pdufa_date"]},
-                {"$setOnInsert": stamped({
-                    "ticker": t,
-                    "pdufa_date": p["pdufa_date"],
-                    "drug": p["drug"],
-                    "indication": p.get("indication"),
-                    "entry_score": row["binary_event_score"],
-                    "entry_price": prices.get(t),
-                    "entry_date": _today_iso(),
-                    "source": "auto",
-                    "tier": row["tier"],
-                    "prevalence_pct": prevalence["pct"],
-                })},
+                {"$setOnInsert": stamped(active_play)},
                 upsert=True,
             )
+            await _mirror_pg("pharma_active_plays", active_play)
 
     enriched.sort(key=lambda x: -x["binary_event_score"])
+
+    hot_for_options = [r for r in enriched if r["binary_event_score"] >= PHARMA_OPTION_SNAPSHOT_THRESHOLD]
+    if hot_for_options:
+        option_sem = asyncio.Semaphore(2)
+
+        async def _snap(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            async with option_sem:
+                return row, await build_option_snapshot(row, persist=True)
+
+        snapshot_pairs = await asyncio.gather(*[_snap(r) for r in hot_for_options], return_exceptions=True)
+        for pair in snapshot_pairs:
+            if isinstance(pair, Exception):
+                logger.warning("Pharma option snapshot gather failed: %s", pair)
+                continue
+            row, snap = pair
+            row["option_snapshot"] = snap
+            row["data_gate"] = pharma_data_gate(row)
+            row["strategy_read"] = pharma_strategy_read(row)
+            row["scenario"] = pharma_scenario_model(row)
+            try:
+                await db.pharma_pdufa.update_one(
+                    {"ticker": row["ticker"], "pdufa_date": row["pdufa_date"], "drug": row["drug"]},
+                    {"$set": {
+                        "option_snapshot": snap,
+                        "option_snapshot_at": snap.get("snapshot_at"),
+                        "data_gate": row["data_gate"],
+                        "strategy_read": row["strategy_read"],
+                        "scenario": row["scenario"],
+                    }},
+                    upsert=True,
+                )
+                await _mirror_pg("pharma_pdufa", row)
+            except Exception as exc:
+                logger.warning("Attach pharma option snapshot failed for %s: %s", row.get("ticker"), exc)
+
+    hot_for_pm = [
+        r for r in enriched
+        if r["binary_event_score"] >= PHARMA_PM_ROUTE_THRESHOLD
+        and (r.get("data_gate") or {}).get("decision") != "BLOCK"
+    ]
+    if hot_for_pm:
+        pm_sem = asyncio.Semaphore(4)
+
+        async def _pm(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            async with pm_sem:
+                return row, await route_to_pm(row, persist=True)
+
+        pm_pairs = await asyncio.gather(*[_pm(r) for r in hot_for_pm], return_exceptions=True)
+        for pair in pm_pairs:
+            if isinstance(pair, Exception):
+                logger.warning("Pharma PM route gather failed: %s", pair)
+                continue
+            row, docket = pair
+            row["pm_decision"] = docket
+            try:
+                await db.pharma_pdufa.update_one(
+                    {"ticker": row["ticker"], "pdufa_date": row["pdufa_date"], "drug": row["drug"]},
+                    {"$set": {"pm_decision": docket, "pm_routed_at": docket.get("routed_at")}},
+                    upsert=True,
+                )
+                await _mirror_pg("pharma_pdufa", row)
+            except Exception as exc:
+                logger.warning("Attach pharma PM decision failed for %s: %s", row.get("ticker"), exc)
 
     finished = _now()
     duration = round((finished - started).total_seconds(), 2)
@@ -616,6 +1278,82 @@ async def run_pharma_scan(triggered_by: str = "manual") -> dict[str, Any]:
     }
 
 
+async def run_catalyst_shock_scan(triggered_by: str = "manual", force_refresh: bool = True) -> dict[str, Any]:
+    """Detect same-day clinical/FDA catalyst shocks outside the PDUFA calendar."""
+    started = _now()
+    await log_activity(f"Pharma catalyst shock scan started ({triggered_by})", "info")
+    from . import news_intel
+
+    intel = await news_intel.latest(force_refresh=force_refresh, lane="discovery", limit=120)
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for article in intel.get("articles") or []:
+        text = _article_text(article).lower()
+        if not any(_has_phrase(text, term) for term in [*PHARMA_CATALYST_WEIGHTS, *PHARMA_BEARISH_CATALYST_WEIGHTS]):
+            continue
+        for ticker in _map_pharma_article_tickers(article):
+            key = (ticker, str(article.get("id") or article.get("url") or article.get("title") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            price = await pricer.get_latest_close(ticker, force=True)
+            score = _score_catalyst_shock(article, ticker, price)
+            if score["shock_score"] < 55:
+                continue
+            row = stamped({
+                "ticker": ticker,
+                "event_type": "PHARMA_CATALYST_SHOCK",
+                "source": article.get("source"),
+                "source_key": article.get("source_key"),
+                "title": article.get("title"),
+                "summary": article.get("summary"),
+                "url": article.get("url"),
+                "published_at": article.get("published_at"),
+                "detected_at": _now().isoformat(),
+                "triggered_by": triggered_by,
+                "news_score": article.get("score"),
+                "bias": article.get("bias"),
+                **score,
+            })
+            candidates.append(row)
+
+    candidates.sort(key=lambda row: (row.get("shock_score") or 0, -(row.get("age_minutes") or 999999)), reverse=True)
+    db = get_db()
+    for row in candidates:
+        await db.pharma_catalyst_shocks.update_one(
+            {"ticker": row["ticker"], "url": row.get("url")},
+            {"$set": row},
+            upsert=True,
+        )
+        await _mirror_pg("pharma_catalyst_shocks", row)
+
+    hot = [r for r in candidates if (r.get("shock_score") or 0) >= CATALYST_SHOCK_THRESHOLD]
+    try:
+        if hot:
+            from . import telegram_events
+            await telegram_events.dispatch_pharma_shock_alerts(hot, triggered_by=triggered_by)
+    except Exception as exc:
+        logger.warning("Pharma shock telegram dispatch failed: %s", exc)
+
+    finished = _now()
+    duration = round((finished - started).total_seconds(), 2)
+    await log_activity(
+        f"Pharma catalyst shock scan complete - {len(candidates)} candidates, {len(hot)} hot ({duration}s)",
+        "success" if hot else "info",
+    )
+    return {
+        "ok": True,
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration_sec": duration,
+        "triggered_by": triggered_by,
+        "source": "news_intel.discovery",
+        "candidate_count": len(candidates),
+        "hot_count": len(hot),
+        "results": candidates[:50],
+    }
+
+
 def format_pharma_alert(r: dict[str, Any]) -> str:
     """Per-spec Telegram format for score ≥ 70 pharma plays."""
     from . import telegram_service as ts
@@ -636,6 +1374,29 @@ def format_pharma_alert(r: dict[str, Any]) -> str:
     cur = r.get("current_price") or 0
     target = cur * 1.40 if cur else 0
     upside = 40.0
+    snap = r.get("option_snapshot") or {}
+    contract = snap.get("contract") or {}
+    contract_symbol = contract.get("symbol") or contract.get("contractSymbol")
+    if snap.get("ok") and contract_symbol:
+        option_line = (
+            f"OPTIONS SNAPSHOT - {ts._esc(str(contract_symbol))} - "
+            f"{ts._esc(str(contract.get('expiration') or '?'))} - "
+            f"{contract.get('strike')}C - mid ${contract.get('premium')} - "
+            f"bid/ask ${contract.get('bid')}/${contract.get('ask')} - "
+            f"IV {contract.get('iv')} - {ts._esc(str(contract.get('liquidity') or 'UNKNOWN'))}"
+        )
+    else:
+        option_line = (
+            f"OPTIONS SNAPSHOT - NO VALIDATED CONTRACT - "
+            f"{ts._esc(str(snap.get('status') or 'NOT_CAPTURED'))}: "
+            f"{ts._esc(str(snap.get('reason') or 'snapshot unavailable'))}"
+        )
+    pm = (r.get("pm_decision") or {}).get("decision") or {}
+    pm_line = (
+        f"PM RULING - {ts._esc(str(pm.get('action') or 'PENDING'))} - "
+        f"score {pm.get('pm_score', '-')} - RR {pm.get('risk_reward', '-')} - "
+        f"{ts._esc(str(pm.get('option_view') or 'NO_VIEW'))}"
+    )
     return (
         f"1. <b>${ts._esc(r['ticker'])}</b> · <code>{score:.0f}/100</code> · 🔴H · "
         f"CASE SCORE <b>{score:.0f}</b> {tier_emoji}\n"
@@ -645,13 +1406,36 @@ def format_pharma_alert(r: dict[str, Any]) -> str:
         f"💰 ${cur:.2f} → ${target:.2f} +{upside:.1f}% · "
         f"{ts._esc(r['pdufa_date'])} · 1–{r.get('days_until', 30)}d\n"
         f"🛑 Stop ${cur * 0.85:.2f} · ⚠️ Regulatory binary volatility\n"
-        f"🎯 LONG_CALL · ATM exp post-PDUFA · IV {r.get('iv_rank') or '?'}%\n"
+        f"{option_line}\n"
+        f"{pm_line}\n"
         f"🎰 {ts._esc(r['tier'])} {score:.0f}/100 · P(approval): 70% · "
         f"P(rejection): 30% · Max: $500"
     )
 
 
 # ─────── Query helpers for the React tab ───────
+def format_pharma_shock_alert(r: dict[str, Any]) -> str:
+    """Telegram card for same-day clinical/FDA news shocks."""
+    from . import telegram_service as ts
+    score = r.get("shock_score") or 0
+    ticker = r.get("ticker") or "?"
+    direction = r.get("direction") or "WATCH"
+    terms = [*r.get("bullish_terms", []), *r.get("bearish_terms", [])][:4]
+    price = r.get("current_price")
+    price_line = f"${float(price):.2f}" if isinstance(price, (int, float)) and price > 0 else "-"
+    return (
+        f"<b>CASE CAPITAL | PHARMA CATALYST SHOCK</b>\n"
+        f"<code>{datetime.now(timezone.utc).astimezone().strftime('%b %d %H:%M')}</code>\n\n"
+        f"<b>${ts._esc(ticker)}</b> - <code>{float(score):.0f}/100</code> - <b>{ts._esc(direction)}</b>\n"
+        f"{ts._esc(r.get('title') or 'Clinical/FDA catalyst detected')}\n\n"
+        f"Price: <b>{ts._esc(price_line)}</b>\n"
+        f"Evidence: {ts._esc(', '.join(terms) or 'pharma catalyst terms')}\n"
+        f"Source: {ts._esc(r.get('source') or 'news')}\n\n"
+        f"<i>Research alert only: clinical shocks require PM confirmation before execution.</i>"
+        + (f"\n<a href=\"{ts._esc(r.get('url'))}\">Open source</a>" if r.get("url") else "")
+    )
+
+
 async def get_pdufa_within_days(days: int = 90) -> list[dict[str, Any]]:
     db = get_db()
     horizon = (_now().date() + timedelta(days=days)).isoformat()
@@ -663,7 +1447,34 @@ async def get_pdufa_within_days(days: int = 90) -> list[dict[str, Any]]:
     for row in rows:
         row.setdefault("source", "curated_seed")
         row.setdefault("data_quality", "fallback_calendar")
-    return rows
+    return [_hydrate_pharma_row(row) for row in rows]
+
+
+async def get_option_snapshots(limit: int = 100, ticker: str | None = None) -> list[dict[str, Any]]:
+    db = get_db()
+    safe_limit = max(1, min(int(limit or 100), 500))
+    query: dict[str, Any] = {}
+    if ticker:
+        query["ticker"] = str(ticker).upper().strip()
+    return await db.pharma_option_snapshots.find(query, {"_id": 0}).sort("snapshot_at", -1).to_list(safe_limit)
+
+
+async def get_pm_decisions(limit: int = 100, ticker: str | None = None) -> list[dict[str, Any]]:
+    db = get_db()
+    safe_limit = max(1, min(int(limit or 100), 500))
+    query: dict[str, Any] = {}
+    if ticker:
+        query["ticker"] = str(ticker).upper().strip()
+    return await db.pharma_pm_decisions.find(query, {"_id": 0}).sort("routed_at", -1).to_list(safe_limit)
+
+
+async def get_catalyst_shocks(limit: int = 100) -> list[dict[str, Any]]:
+    db = get_db()
+    safe_limit = max(1, min(int(limit or 100), 250))
+    return await db.pharma_catalyst_shocks.find(
+        {},
+        {"_id": 0},
+    ).sort("detected_at", -1).to_list(safe_limit)
 
 
 async def get_active_plays() -> list[dict[str, Any]]:

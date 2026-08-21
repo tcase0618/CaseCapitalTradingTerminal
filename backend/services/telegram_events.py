@@ -522,6 +522,82 @@ async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: st
     }
 
 
+async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
+    hot = [r for r in rows if _num(r.get("shock_score")) >= 75]
+    if not hot:
+        return {"ok": True, "sent": False, "count": 0, "reason": "no_hot_pharma_shocks"}
+
+    db = get_db()
+    sent_rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    cutoff = _now() - timedelta(minutes=max(1, PHARMA_ALERT_COOLDOWN_MINUTES))
+
+    from . import pharma
+
+    for row in hot[:5]:
+        ticker = str(row.get("ticker") or "").upper()
+        url_key = hashlib.sha1(str(row.get("url") or row.get("title") or "").encode("utf-8")).hexdigest()[:12]
+        dedupe_key = f"pharma_shock:{ticker}:{url_key}"
+        recent = await db.telegram_deliveries.find_one(
+            {
+                "batch_type": "pharma_shock_alert",
+                "sent": True,
+                "metadata.dedupe_key": dedupe_key,
+                "created_at": {"$gte": cutoff.isoformat()},
+            },
+            {"_id": 1},
+        )
+        if recent:
+            skipped.append({"ticker": ticker, "reason": "cooldown", "dedupe_key": dedupe_key})
+            continue
+        event = await emit_event(
+            "pharma_catalyst_shock",
+            severity="watch",
+            scope="pharma",
+            ticker=ticker,
+            batch_id=dedupe_key,
+            title="Pharma catalyst shock",
+            summary=f"{ticker} shock {_num(row.get('shock_score')):.0f}; {row.get('direction') or 'WATCH'}",
+            details={
+                "ticker": ticker,
+                "shock_score": row.get("shock_score"),
+                "direction": row.get("direction"),
+                "title": row.get("title"),
+                "source": row.get("source"),
+                "url": row.get("url"),
+                "triggered_by": triggered_by,
+                "trading_impact": "watch_only_pm_required",
+            },
+            priority="summary",
+        )
+        text = pharma.format_pharma_shock_alert(row)
+        sent = await _send(text)
+        await _record_delivery(
+            "pharma_shock_alert",
+            "Case Capital Pharma Catalyst Shock",
+            text,
+            [event],
+            sent,
+            metadata={
+                "dedupe_key": dedupe_key,
+                "ticker": ticker,
+                "shock_score": row.get("shock_score"),
+                "direction": row.get("direction"),
+                "triggered_by": triggered_by,
+                "cooldown_minutes": PHARMA_ALERT_COOLDOWN_MINUTES,
+            },
+        )
+        sent_rows.append({"ticker": ticker, "sent": sent, "dedupe_key": dedupe_key})
+
+    return {
+        "ok": True,
+        "sent": any(r.get("sent") for r in sent_rows),
+        "count": len(sent_rows),
+        "sent_rows": sent_rows,
+        "skipped": skipped,
+    }
+
+
 async def dispatch_options_execution_report(result: dict[str, Any]) -> dict[str, Any]:
     submitted = result.get("submitted") or []
     skipped = result.get("skipped") or []
