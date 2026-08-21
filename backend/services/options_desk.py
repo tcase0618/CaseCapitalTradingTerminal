@@ -1126,18 +1126,36 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
         pm_row = by_ticker.get(ticker)
-        opts = row.get("options") or {}
-        if not ticker or not pm_row or not opts:
+        if not ticker or not pm_row:
             continue
+        row = {
+            **row,
+            "score": pm_row.get("pm_score"),
+            "pm_score": pm_row.get("pm_score"),
+            "risk_reward": pm_row.get("risk_reward"),
+        }
+        opts = row.get("options") or {}
         attempted_live_refresh = False
         try:
-            if _pm_can_consider_options(pm_row, row) and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
+            pm_score = float(pm_row.get("pm_score") or 0)
+            pm_rr = float(pm_row.get("risk_reward") or 0)
+            pm_action = str(pm_row.get("action") or "").upper()
+            should_refresh = (
+                pm_action in {"ACCUMULATE", "STARTER", "WATCH"}
+                and pm_score >= 50
+                and pm_rr >= 1.1
+            )
+            if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
                 from . import options_engine
                 attempted_live_refresh = True
                 refreshed = await options_engine.analyze_ticker(row)
                 if refreshed:
                     opts = refreshed
                     row = {**row, "options": opts}
+                    pm_row = {
+                        **pm_row,
+                        "option_view": portfolio_manager._option_view(row, float(pm_row.get("risk_reward") or 0)),
+                    }
                 alpaca_refreshes += 1
         except Exception:
             pass
