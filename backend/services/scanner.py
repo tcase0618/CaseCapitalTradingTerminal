@@ -201,6 +201,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     # Apply 2+ signal pre-filter (after CONCENTRATION_WIN finalization)
     candidates = _finalize_signals_and_filter(by_ticker, fundamentals)
     pre_filter_count = len(candidates)
+    live_price_meta: dict[str, dict[str, Any]] = {}
+    if candidates:
+        try:
+            live_price_meta = await pricer.batch_live_price_meta([c["ticker"] for c in candidates])
+        except Exception as e:
+            logger.warning("scanner live price overlay failed: %s", e)
+            live_price_meta = {}
 
     await log_activity(
         f"Aggregated: {len(raw['insider_clusters'])} insider, "
@@ -214,7 +221,17 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     enriched: list[dict[str, Any]] = []
     for c in candidates:
         ticker = c["ticker"]
-        fund = fundamentals.get(ticker, {}) or {}
+        fund = dict(fundamentals.get(ticker, {}) or {})
+        price_meta = live_price_meta.get(ticker) or {}
+        if price_meta.get("price"):
+            fund["price"] = float(price_meta["price"])
+        if price_meta:
+            fund["price_source"] = price_meta.get("source")
+            fund["price_timestamp"] = price_meta.get("provider_ts")
+            fund["price_age_seconds"] = price_meta.get("age_seconds")
+            fund["price_fresh"] = price_meta.get("fresh")
+            fund["premarket_confirmed"] = price_meta.get("premarket_confirmed")
+            fund["price_warning"] = price_meta.get("warning")
         gov_summary = c.get("gov_summary") or {}
         short_pct_val = _short_pct(c)
 
@@ -235,6 +252,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         c["squeeze"] = sq
         c["time_target"] = tt
         c["price"] = fund.get("price")
+        c["price_meta"] = price_meta
+        c["price_source"] = price_meta.get("source") if price_meta else None
+        c["price_timestamp"] = price_meta.get("provider_ts") if price_meta else None
+        c["price_age_seconds"] = price_meta.get("age_seconds") if price_meta else None
+        c["price_fresh"] = price_meta.get("fresh") if price_meta else False
+        c["premarket_confirmed"] = price_meta.get("premarket_confirmed") if price_meta else False
+        c["price_warning"] = price_meta.get("warning") if price_meta else "no_live_price_meta"
         c["market_cap"] = fund.get("market_cap")
         c["sector"] = fund.get("sector")
         c["beta"] = fund.get("beta")
@@ -336,6 +360,13 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "stop_loss": stop_loss,
             "cached": a.get("cached", False),
             "price": c["price"],
+            "price_source": c.get("price_source"),
+            "price_timestamp": c.get("price_timestamp"),
+            "price_age_seconds": c.get("price_age_seconds"),
+            "price_fresh": c.get("price_fresh"),
+            "premarket_confirmed": c.get("premarket_confirmed"),
+            "price_warning": c.get("price_warning"),
+            "price_meta": c.get("price_meta") or {},
             "market_cap": c["market_cap"],
             "sector": c["sector"],
             "risk": c["risk"],
@@ -419,6 +450,10 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
     )
     previous_signature = (previous or {}).get("scan_signature") or ((previous or {}).get("freshness") or {}).get("signature")
     duplicate = bool(previous_signature and previous_signature == signature)
+    price_rows = [r for r in final if r.get("price")]
+    fresh_price_rows = [r for r in price_rows if r.get("price_fresh")]
+    premarket_rows = [r for r in price_rows if r.get("premarket_confirmed")]
+    stale_price_rows = [r for r in price_rows if r.get("price_warning")]
     scan_doc["scan_signature"] = signature
     scan_doc["freshness"] = {
         "status": "DUPLICATE_SIGNATURE" if duplicate else "FRESH_SIGNATURE",
@@ -426,6 +461,10 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         "duplicate_of": (previous or {}).get("finished_at") if duplicate else None,
         "previous_triggered_by": (previous or {}).get("triggered_by") if duplicate else None,
         "blocks_trading": False,
+        "price_rows": len(price_rows),
+        "fresh_price_rows": len(fresh_price_rows),
+        "premarket_confirmed_rows": len(premarket_rows),
+        "stale_price_rows": len(stale_price_rows),
         "detail": (
             "Fresh scan completed but evidence fingerprint matched the previous scan; treat as unchanged source evidence, not an old scan record."
             if duplicate else

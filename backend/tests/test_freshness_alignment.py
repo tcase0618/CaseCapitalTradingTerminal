@@ -1,4 +1,4 @@
-from services import data_quality, data_truth, execution_gate, scanner, telegram_events
+from services import data_quality, data_truth, execution_gate, pricer, scanner, telegram_events
 
 
 def test_scan_signature_changes_when_price_changes():
@@ -153,3 +153,70 @@ def test_execution_gate_force_refresh_timeout_uses_recent_cached_truth(monkeypat
     assert result["decision"] == "PASS"
     assert result["truth"]["gate_source"] == "cached_truth_after_refresh_error"
     assert result["truth"]["refresh_error"] == "TimeoutError"
+
+
+def test_scanner_alpaca_feed_order_includes_24h_feeds(monkeypatch):
+    monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "overnight,boats,sip,iex,")
+
+    assert pricer._scanner_alpaca_feeds() == ["overnight", "boats", "sip", "iex", None]
+
+
+def test_live_price_meta_prefers_fresh_alpaca_feed(monkeypatch):
+    calls = []
+
+    async def fake_alpaca(ticker, *, feed=None):
+        calls.append(feed)
+        if feed == "overnight":
+            return None
+        if feed == "boats":
+            return {
+                "price": 101.25,
+                "source": "alpaca_latest_trade_boats",
+                "provider_ts": "2026-08-24T04:01:00Z",
+                "age_seconds": 12,
+                "fresh": True,
+            }
+        raise AssertionError("fresh feed should short-circuit slower fallbacks")
+
+    import asyncio
+
+    monkeypatch.delenv("ALPACA_STOCK_FEED", raising=False)
+    monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "overnight,boats,sip,iex,")
+    monkeypatch.setattr(pricer, "_alpaca_trade_meta", fake_alpaca)
+
+    meta = asyncio.run(pricer.live_price_meta("ldos"))
+    assert calls == ["overnight", "boats"]
+    assert meta["ticker"] == "LDOS"
+    assert meta["price"] == 101.25
+    assert meta["premarket_confirmed"] is True
+    assert meta["warning"] is None
+
+
+def test_live_price_meta_marks_stale_alpaca_without_hiding_it(monkeypatch):
+    async def fake_alpaca(ticker, *, feed=None):
+        if feed == "overnight":
+            return {
+                "price": 99.5,
+                "source": "alpaca_latest_trade_overnight",
+                "provider_ts": "2026-08-21T20:00:00Z",
+                "age_seconds": 100000,
+                "fresh": False,
+            }
+        return None
+
+    async def should_not_fallback(ticker):
+        raise AssertionError("stale Alpaca evidence should be returned with warning")
+
+    import asyncio
+
+    monkeypatch.delenv("ALPACA_STOCK_FEED", raising=False)
+    monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "overnight,iex")
+    monkeypatch.setattr(pricer, "_alpaca_trade_meta", fake_alpaca)
+    monkeypatch.setattr(pricer, "_finnhub_quote", should_not_fallback)
+    monkeypatch.setattr(pricer, "_yf_latest_close", should_not_fallback)
+
+    meta = asyncio.run(pricer.live_price_meta("BAH"))
+    assert meta["price"] == 99.5
+    assert meta["fresh"] is False
+    assert meta["premarket_confirmed"] is False
+    assert meta["warning"] == "alpaca_trade_timestamp_stale"

@@ -56,14 +56,66 @@ _SOURCE = (
 )
 
 
-async def _alpaca_quote(ticker: str) -> float | None:
-    """Alpaca latest trade — primary source per v5.0 spec."""
+def _parse_provider_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _age_seconds(provider_ts: Any) -> float | None:
+    ts = _parse_provider_ts(provider_ts)
+    if not ts:
+        return None
+    return max(0.0, (_now() - ts).total_seconds())
+
+
+def _live_price_max_age_seconds() -> int:
+    try:
+        return int(os.environ.get("SCANNER_LIVE_PRICE_MAX_AGE_SECONDS", "1800"))
+    except Exception:
+        return 1800
+
+
+def _scanner_alpaca_feeds() -> list[str | None]:
+    """Feed order for scanner live pricing.
+
+    Alpaca 24/5 overnight data uses `overnight` on Basic or `boats` on Algo
+    Trader Plus. SIP/IEX cover regular and premarket/after-hours depending on
+    account permissions. An empty item means "try Alpaca default feed".
+    """
+    raw = os.environ.get("ALPACA_SCANNER_FEEDS", "overnight,boats,sip,iex,").split(",")
+    feeds: list[str | None] = []
+    for item in raw:
+        feed = item.strip().lower()
+        value = feed or None
+        if value not in feeds:
+            feeds.append(value)
+    return feeds
+
+
+async def _alpaca_trade_meta(ticker: str, *, feed: str | None = None) -> dict[str, Any] | None:
+    """Alpaca latest trade with provider timestamp.
+
+    The scanner uses this to distinguish a real overnight/premarket mark from
+    a stale last-regular-session print. That distinction matters more than the
+    price itself for the 00:00 and 08:00 scans.
+    """
     if not (ALPACA_KEY and ALPACA_SECRET):
         return None
     try:
         async with httpx.AsyncClient(timeout=6.0) as c:
+            params: dict[str, str] = {}
+            if feed:
+                params["feed"] = feed
             r = await c.get(
                 f"{ALPACA_DATA_BASE}/stocks/{ticker}/trades/latest",
+                params=params,
                 headers={
                     "APCA-API-KEY-ID": ALPACA_KEY,
                     "APCA-API-SECRET-KEY": ALPACA_SECRET,
@@ -72,10 +124,151 @@ async def _alpaca_quote(ticker: str) -> float | None:
             if r.status_code != 200:
                 return None
             data = r.json()
-            price = (data.get("trade") or {}).get("p")
-            return float(price) if price else None
+            trade = data.get("trade") or {}
+            price = trade.get("p")
+            if not price:
+                return None
+            age_s = _age_seconds(trade.get("t"))
+            max_age = _live_price_max_age_seconds()
+            source = "alpaca_latest_trade"
+            if feed:
+                source = f"{source}_{feed}"
+            return {
+                "price": float(price),
+                "source": source,
+                "provider_ts": trade.get("t"),
+                "age_seconds": round(age_s, 2) if age_s is not None else None,
+                "fresh": bool(age_s is not None and age_s <= max_age),
+                "max_age_seconds": max_age,
+                "raw": trade,
+            }
     except Exception:
         return None
+
+
+async def _alpaca_quote(ticker: str) -> float | None:
+    """Alpaca latest trade price — primary source per v5.0 spec."""
+    meta = await _alpaca_trade_meta(ticker, feed=os.environ.get("ALPACA_STOCK_FEED") or None)
+    if not meta:
+        meta = await _alpaca_trade_meta(ticker, feed="iex")
+    return float(meta["price"]) if meta and meta.get("price") else None
+
+
+async def live_price_meta(ticker: str) -> dict[str, Any]:
+    """Return best scanner/live price metadata without hiding stale sources."""
+    ticker = (ticker or "").upper().strip()
+    empty = {
+        "ticker": ticker,
+        "price": None,
+        "source": "unavailable",
+        "provider_ts": None,
+        "age_seconds": None,
+        "fresh": False,
+        "premarket_confirmed": False,
+        "warning": "no_live_price",
+    }
+    if not ticker:
+        return empty
+
+    preferred_feed = (os.environ.get("ALPACA_STOCK_FEED") or "").strip().lower() or None
+    feeds = []
+    if preferred_feed:
+        feeds.append(preferred_feed)
+    feeds.extend(_scanner_alpaca_feeds())
+    tried_feeds: list[str | None] = []
+    stale_alpaca: dict[str, Any] | None = None
+    for feed in feeds:
+        if feed in tried_feeds:
+            continue
+        tried_feeds.append(feed)
+        meta = await _alpaca_trade_meta(ticker, feed=feed)
+        if not meta:
+            continue
+        meta.update({
+            "ticker": ticker,
+            "premarket_confirmed": bool(meta.get("fresh")),
+            "warning": None if meta.get("fresh") else "alpaca_trade_timestamp_stale",
+        })
+        if meta.get("fresh"):
+            return meta
+        if stale_alpaca is None:
+            stale_alpaca = meta
+
+    if stale_alpaca is not None:
+        return stale_alpaca
+
+    fh_price = await _finnhub_quote(ticker)
+    if fh_price is not None:
+        return {
+            "ticker": ticker,
+            "price": float(fh_price),
+            "source": "finnhub_quote",
+            "provider_ts": _now().isoformat(),
+            "age_seconds": 0,
+            "fresh": True,
+            "premarket_confirmed": False,
+            "warning": "not_confirmed_24h_market",
+        }
+
+    yf_price = await _yf_latest_close(ticker)
+    if yf_price is not None:
+        return {
+            "ticker": ticker,
+            "price": float(yf_price),
+            "source": "yfinance_latest_close",
+            "provider_ts": None,
+            "age_seconds": None,
+            "fresh": False,
+            "premarket_confirmed": False,
+            "warning": "fallback_close_not_24h_market",
+        }
+    return empty
+
+
+async def batch_live_price_meta(
+    tickers: list[str],
+    *,
+    concurrency: int = 8,
+) -> dict[str, dict[str, Any]]:
+    """Fetch live scanner price metadata for a list of tickers.
+
+    This intentionally bypasses the 10-minute close cache so scheduled scans
+    can detect whether the market-data evidence actually advanced.
+    """
+    clean = list(dict.fromkeys(t.upper().strip() for t in tickers if t))
+    if not clean:
+        return {}
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _one(t: str) -> tuple[str, dict[str, Any]]:
+        async with sem:
+            return t, await live_price_meta(t)
+
+    pairs = await asyncio.gather(*[_one(t) for t in clean])
+    db = get_db()
+    now_iso = _now().isoformat()
+    for t, meta in pairs:
+        if meta.get("price") is None:
+            continue
+        try:
+            await db.price_cache.update_one(
+                {"ticker": t},
+                {"$set": {
+                    "ticker": t,
+                    "price": float(meta["price"]),
+                    "fetched_at": now_iso,
+                    "source": meta.get("source"),
+                    "provider_ts": meta.get("provider_ts"),
+                    "age_seconds": meta.get("age_seconds"),
+                    "fresh": meta.get("fresh"),
+                    "premarket_confirmed": meta.get("premarket_confirmed"),
+                    "warning": meta.get("warning"),
+                }},
+                upsert=True,
+            )
+        except Exception:
+            pass
+    return {t: meta for t, meta in pairs}
 
 # Shared HTTP client (created lazily)
 _client: httpx.AsyncClient | None = None
