@@ -1542,45 +1542,86 @@ async def scan_tabs():
         ).upper()
 
     previous = None
-    previous_tickers = set()
     if scan and scan.get("finished_at"):
         previous = await get_db().scan_results.find_one(
             {"finished_at": {"$lt": scan.get("finished_at")}},
-            {"_id": 0, "results.ticker": 1, "candidate_ledger.candidates.ticker": 1},
+            {
+                "_id": 0,
+                "finished_at": 1,
+                "results.ticker": 1,
+                "results.options": 1,
+                "results.signals": 1,
+                "results.earnings_this_week": 1,
+                "results.earnings_summary": 1,
+                "lottery_picks.ticker": 1,
+                "earnings_week.by_day": 1,
+                "candidate_ledger.candidates.ticker": 1,
+                "candidate_ledger.candidates.sources": 1,
+                "candidate_ledger.candidates.rows": 1,
+            },
             sort=[("finished_at", -1)],
         )
-        previous_tickers = {
-            _ticker_from_row(row)
-            for row in ((previous or {}).get("results") or [])
-            if _ticker_from_row(row)
-        }
-        previous_tickers.update({
-            _ticker_from_row(row)
-            for row in (((previous or {}).get("candidate_ledger") or {}).get("candidates") or [])
-            if _ticker_from_row(row)
-        })
 
     current_docket = (ledger or {}).get("candidates") or []
+    previous_docket = (((previous or {}).get("candidate_ledger") or {}).get("candidates") or [])
+
+    def _ticker_set(rows):
+        return {_ticker_from_row(row) for row in (rows or []) if _ticker_from_row(row)}
+
+    def _source_ticker_set(rows, source):
+        found = set()
+        for row in rows or []:
+            sources = set(row.get("sources") or []) if isinstance(row, dict) else set()
+            nested_rows = set((row.get("rows") or {}).keys()) if isinstance(row, dict) else set()
+            if source in sources or source in nested_rows:
+                ticker = _ticker_from_row(row)
+                if ticker:
+                    found.add(ticker)
+        return found
+
+    previous_core = _ticker_set((previous or {}).get("results") or [])
+    previous_lottery = _ticker_set((previous or {}).get("lottery_picks") or []) | _source_ticker_set(previous_docket, "lottery")
+    previous_options = _source_ticker_set(previous_docket, "options") | {
+        _ticker_from_row(row)
+        for row in ((previous or {}).get("results") or [])
+        if ((row.get("options") or {}).get("strategy") not in {None, "", "AVOID_OPTIONS"})
+    }
+    previous_pharma = _source_ticker_set(previous_docket, "pharma")
+    previous_earnings = _source_ticker_set(previous_docket, "earnings") | {
+        _ticker_from_row(row)
+        for rows in ((((previous or {}).get("earnings_week") or {}).get("by_day") or {}).values())
+        for row in (rows or [])
+        if _ticker_from_row(row)
+    }
+    previous_tab_sets = {
+        "core": previous_core,
+        "docket": _ticker_set(previous_docket) or previous_core,
+        "lottery": previous_lottery or previous_core,
+        "options": previous_options,
+        "pharma": previous_pharma,
+        "earnings": previous_earnings,
+        "court": previous_core,
+    }
     tab_sets = {
-        "core": {_ticker_from_row(row) for row in tab_rows["core"] if _ticker_from_row(row)},
-        "docket": {_ticker_from_row(row) for row in current_docket if _ticker_from_row(row)},
-        "lottery": {_ticker_from_row(row) for row in tab_rows["lottery"] if _ticker_from_row(row)},
-        "options": {_ticker_from_row(row) for row in tab_rows["options"] if _ticker_from_row(row)},
-        "pharma": {_ticker_from_row(row) for row in tab_rows["pharma"] if _ticker_from_row(row)},
+        "core": _ticker_set(tab_rows["core"]),
+        "docket": _ticker_set(current_docket),
+        "lottery": _ticker_set(tab_rows["lottery"]),
+        "options": _ticker_set(tab_rows["options"]),
+        "pharma": _ticker_set(tab_rows["pharma"]),
         "earnings": {
             _ticker_from_row(row)
             for rows in ((tab_rows["earnings"] or {}).get("by_day") or {}).values()
             for row in (rows or [])
             if _ticker_from_row(row)
         },
-        "court": {_ticker_from_row(row) for row in tab_rows["case_court"] if _ticker_from_row(row)},
+        "court": _ticker_set(tab_rows["case_court"]),
     }
     new_since_previous = {
         key: {
-            "count": len(sorted(tickers - previous_tickers)),
-            "tickers": sorted(tickers - previous_tickers)[:18],
+            "count": len(sorted(tickers - previous_tab_sets.get(key, set()))),
+            "tickers": sorted(tickers - previous_tab_sets.get(key, set()))[:18],
             "total": len(tickers),
-            "previous_scan_at": ((previous or {}).get("finished_at") if scan and scan.get("finished_at") else None),
+            "previous_scan_at": (previous or {}).get("finished_at"),
         }
         for key, tickers in tab_sets.items()
     }
