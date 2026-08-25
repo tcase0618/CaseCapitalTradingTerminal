@@ -23,6 +23,13 @@ def _now_iso():
 logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 ET = pytz.timezone("America/New_York")
+STOCK_SCAN_CADENCE_ET = [
+    ("midnight_scan", 0, 0),
+    ("morning_scan", 8, 0),
+    ("midday_scan", 12, 0),
+    ("afternoon_scan", 15, 0),
+    ("evening_scan", 18, 30),
+]
 
 
 async def _stock_scan_market_day_now() -> tuple[bool, str]:
@@ -83,10 +90,21 @@ async def _daily_scan_job():
                 pass
             return
         from . import telegram_events
-        scan = await scanner.run_scan(triggered_by="scheduler")
+        scan_task = asyncio.create_task(scanner.run_scan(triggered_by="scheduler"))
+        lottery_task = asyncio.create_task(lottery.run_dedicated_lottery_scan(triggered_by="scheduler_cycle"))
+        scan = await scan_task
+        try:
+            lottery_result = await asyncio.wait_for(lottery_task, timeout=45.0)
+            await log_activity(
+                f"Scheduler cycle lottery scan complete: {lottery_result.get('count', 0)} candidates",
+                "info",
+                {"count": lottery_result.get("count", 0), "triggered_by": "scheduler_cycle"},
+            )
+        except Exception as exc:
+            logger.warning("lottery scan in scheduled cycle failed: %s", exc)
         try:
             from . import case_court
-            await asyncio.wait_for(case_court.run_trials(limit=30, persist=True), timeout=30.0)
+            await asyncio.wait_for(case_court.run_trials(limit=75, persist=True), timeout=45.0)
         except Exception as exc:
             logger.warning("case court post-scan refresh failed: %s", exc)
         try:
@@ -357,34 +375,14 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return
     _scheduler = AsyncIOScheduler(timezone=ET)
-    # Original fixed stock-scan cadence, restricted to market-session days by
-    # the runtime guard in _daily_scan_job. Other scheduled data pulls keep
-    # their own cadence and are not blocked by this stock-scan guard.
-    for tag, hr, minute in [
-        ("midnight_scan", 0, 0),
-        ("morning_scan", 8, 0),
-        ("midday_scan", 13, 0),
-        ("afternoon_scan", 15, 0),
-        ("evening_scan", 18, 0),
-    ]:
+    # Coordinated stock-scan cadence, restricted to market-session days by the
+    # runtime guard in _daily_scan_job. The job runs the core scanner and
+    # specialist scan families together before PM/Court/Telegram publication.
+    for tag, hr, minute in STOCK_SCAN_CADENCE_ET:
         _scheduler.add_job(
             _daily_scan_job,
             CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
             id=tag, replace_existing=True,
-        )
-    for tag, hr, minute in [
-        ("lottery_premarket_845", 8, 45),
-        ("lottery_open_pass_936", 9, 36),
-        ("lottery_open_followup_1000", 10, 0),
-        ("lottery_midday_1200", 12, 0),
-        ("lottery_decision_1535", 15, 35),
-    ]:
-        _scheduler.add_job(
-            _dedicated_lottery_scan_job,
-            CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
-            args=[tag],
-            id=tag,
-            replace_existing=True,
         )
     # v5.1 - auto-digest goes out 5 min after each scheduled scan
     # Grouped Telegram scan reports are dispatched by _daily_scan_job. There

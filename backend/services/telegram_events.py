@@ -294,11 +294,44 @@ def _top_rows(rows: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]
     return sorted(rows, key=lambda r: _num(r.get("pm_score") or r.get("signal_score") or r.get("score")), reverse=True)[:limit]
 
 
+async def _new_scan_tickers(scan: dict[str, Any], results: list[dict[str, Any]], limit: int = 12) -> dict[str, Any]:
+    """Compare the current core scan against the previous saved scan.
+
+    This is intentionally based on scanner results only. Specialist-family
+    counts live in the candidate ledger, while this line answers the operator's
+    direct question: which symbols newly appeared in the current stock scan.
+    """
+    tickers = sorted({str(r.get("ticker") or "").upper() for r in results if r.get("ticker")})
+    finished_at = scan.get("finished_at")
+    query: dict[str, Any] = {}
+    if finished_at:
+        query = {"finished_at": {"$lt": finished_at}}
+    previous = await get_db().scan_results.find_one(
+        query,
+        {"_id": 0, "finished_at": 1, "results.ticker": 1},
+        sort=[("finished_at", -1)],
+    )
+    previous_tickers = {
+        str(r.get("ticker") or "").upper()
+        for r in ((previous or {}).get("results") or [])
+        if r.get("ticker")
+    }
+    new_tickers = [t for t in tickers if t not in previous_tickers]
+    return {
+        "count": len(new_tickers),
+        "tickers": new_tickers,
+        "display": new_tickers[:limit],
+        "truncated": max(0, len(new_tickers) - limit),
+        "previous_scan_at": (previous or {}).get("finished_at"),
+    }
+
+
 async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     from . import case_court, data_quality, edge_dashboard, execution_gate, options_desk, portfolio_manager
 
     results = scan.get("results") or []
     scan_id = str(scan.get("finished_at") or scan.get("created_at") or _now_iso())
+    new_scan = await _new_scan_tickers(scan, results)
     pm = await portfolio_manager.latest_portfolio_plan()
     court = await case_court.latest()
     court_summary = court.get("summary") or {}
@@ -358,6 +391,16 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Duration: <b>{scan.get('duration_sec', '--')}s</b>",
         f"Universe: <b>{scan.get('universe_size', '--')}</b>",
         f"Passed scanner: <b>{len(results)}</b>",
+        (
+            "New stocks found this scan: "
+            f"<b>{new_scan['count']}</b>"
+            + (
+                f" | {', '.join('$' + _esc(t) for t in new_scan['display'])}"
+                if new_scan["display"]
+                else ""
+            )
+            + (f" +{new_scan['truncated']} more" if new_scan["truncated"] else "")
+        ),
         "",
         "<b>PM ROUTING</b>",
         f"Equity: <b>{routes['EQUITY']}</b> | Options: <b>{routes['OPTION']}</b> | Both: <b>{routes['BOTH']}</b> | Watch: <b>{routes['WATCH']}</b> | Pass: <b>{routes['PASS']}</b>",
@@ -403,6 +446,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
                 "pm_scan_finished_at": pm.get("scan_finished_at"),
                 "case_court_scan_finished_at": (court.get("summary") or {}).get("scan_finished_at"),
             },
+            "new_scan_tickers": new_scan,
             "edge": edge.get("edge") or {},
             "strategy_lanes": lane_counts,
             "options": opt_summary,
