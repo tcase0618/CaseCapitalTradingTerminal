@@ -257,6 +257,11 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
     candidates = [v for k, v in sorted(by_ticker.items()) if k]
     for entry in candidates:
         source_set = set(entry.get("sources") or [])
+        read_only_sources = [
+            source
+            for source, row in (entry.get("rows") or {}).items()
+            if isinstance(row, dict) and row.get("read_only")
+        ]
         if "options" in source_set and "core_scan" in source_set:
             entry["final_route"] = "BOTH_PM_REVIEW"
         elif "options" in source_set:
@@ -270,12 +275,13 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
         elif "pharma_calendar" in source_set or "pharma_core_overlap" in source_set:
             entry["final_route"] = "PHARMA_PM_REVIEW"
         elif "earnings_calendar" in source_set or "earnings_core_overlap" in source_set:
-            entry["final_route"] = "EARNINGS_PM_REVIEW"
+            entry["final_route"] = "READ_ONLY_RESEARCH"
         elif "sec_filings" in source_set:
-            sec_row = (entry.get("rows") or {}).get("sec_filings") or {}
-            entry["final_route"] = "READ_ONLY_RESEARCH" if sec_row.get("read_only") else "SEC_PM_REVIEW"
+            entry["final_route"] = "READ_ONLY_RESEARCH"
         elif "core_scan" in source_set:
             entry["final_route"] = "EQUITY_PM_REVIEW"
+        if read_only_sources and not (source_set - set(read_only_sources) - {"pm"}):
+            entry["final_route"] = "READ_ONLY_RESEARCH"
         max_quality = min((q.get("score", 0) for q in (entry.get("quality") or {}).values()), default=0)
         entry["candidate_quality_score"] = max_quality
 

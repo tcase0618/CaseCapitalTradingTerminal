@@ -204,12 +204,30 @@ async def _earnings_rows(scan_rows: list[dict[str, Any]]) -> list[dict[str, Any]
             for row in day_rows or []:
                 ticker = _ticker(row.get("ticker"))
                 if ticker:
-                    out.append(_base_row(row=row, screener_id="earnings_calendar", family="EARNINGS", lane=str(row.get("timing") or "EARNINGS"), score=_num(row.get("score"), 52)))
+                    out.append(_base_row(
+                        row=row,
+                        screener_id="earnings_calendar",
+                        family="EARNINGS",
+                        lane=str(row.get("timing") or "EARNINGS"),
+                        score=_num(row.get("score"), 52),
+                        pm_routable=False,
+                        read_only=True,
+                        notes=["Earnings scanner is research-only and tracked outside PM routing."],
+                    ))
     except Exception:
         pass
     for row in scan_rows:
         if row.get("earnings_this_week") or row.get("earnings_summary"):
-            out.append(_base_row(row=row, screener_id="earnings_core_overlap", family="EARNINGS", lane="CORE_EARNINGS_SIGNAL", score=max(_num(row.get("signal_score"), 0) * 10, 52)))
+            out.append(_base_row(
+                row=row,
+                screener_id="earnings_core_overlap",
+                family="EARNINGS",
+                lane="CORE_EARNINGS_SIGNAL",
+                score=max(_num(row.get("signal_score"), 0) * 10, 52),
+                pm_routable=False,
+                read_only=True,
+                notes=["Earnings overlap is research-only and does not alter PM routing."],
+            ))
     return out
 
 
@@ -248,9 +266,16 @@ async def _sec_rows() -> list[dict[str, Any]]:
             family="SEC",
             lane=f"{bias}_FILING",
             score=_num(row.get("narrative_lock_score") or row.get("significance"), 45),
-            pm_routable=not bearish,
-            read_only=bearish,
-            notes=(["SEC bearish is read-only and cannot veto or block PM routing."] if bearish else []),
+            pm_routable=False,
+            read_only=True,
+            notes=[
+                "SEC scanner is research-only and tracked outside PM routing.",
+                *(
+                    ["SEC bearish is read-only and cannot veto or block PM routing."]
+                    if bearish
+                    else []
+                ),
+            ],
         ))
     return out
 
@@ -271,9 +296,12 @@ def _dedupe(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_family: dict[str, int] = {}
+    by_pm_family: dict[str, int] = {}
+    by_read_only_family: dict[str, int] = {}
     by_screener: dict[str, int] = {}
     pm_routable = 0
     read_only = 0
+    sec_read_only = 0
     sec_bearish_read_only = 0
     for row in rows:
         scanner = row.get("strategy_scanner") or {}
@@ -283,16 +311,24 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         by_screener[screener_id] = by_screener.get(screener_id, 0) + 1
         if row.get("pm_routable"):
             pm_routable += 1
+            by_pm_family[family] = by_pm_family.get(family, 0) + 1
         if row.get("read_only"):
             read_only += 1
+            by_read_only_family[family] = by_read_only_family.get(family, 0) + 1
         if family == "SEC" and row.get("read_only"):
-            sec_bearish_read_only += 1
+            sec_read_only += 1
+            lane = str(scanner.get("lane") or "")
+            if lane.startswith("BEARISH"):
+                sec_bearish_read_only += 1
     return {
         "total": len(rows),
         "pm_routable": pm_routable,
         "read_only": read_only,
+        "sec_read_only": sec_read_only,
         "sec_bearish_read_only": sec_bearish_read_only,
         "by_family": by_family,
+        "by_pm_family": by_pm_family,
+        "by_read_only_family": by_read_only_family,
         "by_screener": by_screener,
         "case_court_active_routing": False,
         "sec_bearish_veto_enabled": False,

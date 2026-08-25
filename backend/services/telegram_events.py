@@ -423,7 +423,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         for r in top
         if r.get("ticker")
     ]
-    family_counts = screener_summary.get("by_family") or {}
+    family_counts = {
+        k: v
+        for k, v in ((screener_summary.get("by_pm_family") or {}).items())
+        if k not in {"EARNINGS", "SEC"}
+    }
     screener_counts = screener_summary.get("by_screener") or {}
     screener_lines = [
         f"{_esc(k)}: <b>{v}</b>"
@@ -457,9 +461,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),
         "",
         "<b>SCANNER FAMILIES</b>",
-        f"Strategy candidates: <b>{screener_summary.get('total', 0)}</b> | PM-routable: <b>{screener_summary.get('pm_routable', 0)}</b> | Read-only: <b>{screener_summary.get('read_only', 0)}</b>",
+        f"PM-routable strategy candidates: <b>{screener_summary.get('pm_routable', 0)}</b>",
         *([f"Families: {' | '.join(screener_lines)}"] if screener_lines else []),
-        f"SEC bearish read-only: <b>{screener_summary.get('sec_bearish_read_only', 0)}</b> | Veto: <b>OFF</b>",
+        "Earnings + SEC: <b>RESEARCH-ONLY</b> | PM: <b>OFF</b> | Telegram: <b>OFF</b>",
         "Case Court: <b>OFF ACTIVE ROUTING</b>",
         "",
         "<b>QC</b>",
