@@ -267,7 +267,7 @@ def _pm_action_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _expression_counts(pm_rows: list[dict[str, Any]], opt_rows: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"EQUITY": 0, "OPTION": 0, "BOTH": 0, "PASS": 0, "WATCH": 0, "OTHER": 0}
+    counts = {"EQUITY": 0, "OPTION": 0, "BOTH": 0, "REJECT": 0, "PASS": 0, "WATCH": 0, "OTHER": 0}
     opt_by_ticker = {
         str(row.get("ticker") or "").upper(): str(row.get("route") or "").upper()
         for row in opt_rows
@@ -284,6 +284,7 @@ def _expression_counts(pm_rows: list[dict[str, Any]], opt_rows: list[dict[str, A
         elif action == "WATCH":
             counts["WATCH"] += 1
         elif action in {"REJECT", "PASS"}:
+            counts["REJECT"] += 1
             counts["PASS"] += 1
         else:
             counts["OTHER"] += 1
@@ -292,6 +293,41 @@ def _expression_counts(pm_rows: list[dict[str, Any]], opt_rows: list[dict[str, A
 
 def _top_rows(rows: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda r: _num(r.get("pm_score") or r.get("signal_score") or r.get("score")), reverse=True)[:limit]
+
+
+def _option_blocker_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows or []:
+        if row.get("manual_fire_ready"):
+            continue
+        for reason in row.get("blocked_reasons") or []:
+            key = str(reason or "").strip()
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
+
+
+def _route_for_pm_row(row: dict[str, Any], opt_by_ticker: dict[str, dict[str, Any]]) -> str:
+    ticker = str(row.get("ticker") or "").upper()
+    opt_route = str((opt_by_ticker.get(ticker) or {}).get("route") or "").upper()
+    action = str(row.get("action") or row.get("decision") or "").upper()
+    if opt_route in {"OPTION", "BOTH"}:
+        return opt_route
+    if action in {"ACCUMULATE", "STARTER"}:
+        return "EQUITY"
+    if action == "WATCH":
+        return "WATCH"
+    if action in {"REJECT", "PASS"}:
+        return "REJECT"
+    return "SCAN"
+
+
+def _court_posture_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows or []:
+        posture = str((row.get("judge") or {}).get("advisory_posture") or "UNKNOWN").upper()
+        counts[posture] = counts.get(posture, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
 
 
 async def _new_scan_tickers(scan: dict[str, Any], results: list[dict[str, Any]], limit: int = 12) -> dict[str, Any]:
@@ -333,12 +369,12 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     scan_id = str(scan.get("finished_at") or scan.get("created_at") or _now_iso())
     new_scan = await _new_scan_tickers(scan, results)
     pm = await portfolio_manager.latest_portfolio_plan()
-    court = await case_court.latest()
+    court = await case_court.latest(limit=75)
     court_summary = court.get("summary") or {}
     alignment_notes: list[str] = []
     if not _same_scan(court_summary.get("scan_finished_at"), scan.get("finished_at")):
         try:
-            refreshed = await case_court.run_trials(limit=30, persist=True)
+            refreshed = await case_court.run_trials(limit=75, persist=True)
             if refreshed.get("ok"):
                 court = refreshed
                 court_summary = refreshed.get("summary") or {}
@@ -356,6 +392,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     court_rows = court.get("trials") or []
     opt_summary = options.get("summary") or {}
     opt_rows = options.get("candidates") or []
+    opt_by_ticker = {
+        str(row.get("ticker") or "").upper(): row
+        for row in opt_rows
+        if row.get("ticker")
+    }
     lane_counts: dict[str, int] = {}
     for row in opt_rows:
         lane = ((row.get("strategy_lane") or {}).get("lane") or "UNKNOWN")
@@ -364,18 +405,29 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"{_esc(k)}: <b>{v}</b>"
         for k, v in sorted(lane_counts.items(), key=lambda item: item[1], reverse=True)[:5]
     ]
+    option_blockers = _option_blocker_counts(opt_rows)
+    option_blocker_lines = [
+        f"{_esc(k)}: <b>{v}</b>"
+        for k, v in list(option_blockers.items())[:6]
+    ]
     routes = _expression_counts(pm_rows, opt_rows)
     pm_actions = _pm_action_counts(pm_rows)
+    pm_action_total = sum(pm_actions.values())
     blockers = (qc.get("summary") or {}).get("blockers", 0)
     qc_decision = (qc.get("trading_gate") or {}).get("decision") or "UNKNOWN"
     severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers else "info"
 
     top = _top_rows(pm_rows or results, 6)
     top_lines = [
-        f"${_esc(r.get('ticker'))} {str(r.get('action') or r.get('route') or 'SCAN').upper()} "
+        f"${_esc(r.get('ticker'))} {_esc(_route_for_pm_row(r, opt_by_ticker))} {str(r.get('action') or r.get('route') or 'SCAN').upper()} "
         f"{_num(r.get('pm_score') or r.get('signal_score')):.1f}"
         for r in top
         if r.get("ticker")
+    ]
+    court_postures = _court_posture_counts(court_rows)
+    court_posture_lines = [
+        f"{_esc(k)}: <b>{v}</b>"
+        for k, v in list(court_postures.items())[:4]
     ]
     court_counts = {
         "ready": sum(1 for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok")),
@@ -403,12 +455,14 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         ),
         "",
         "<b>PM ROUTING</b>",
-        f"Equity: <b>{routes['EQUITY']}</b> | Options: <b>{routes['OPTION']}</b> | Both: <b>{routes['BOTH']}</b> | Watch: <b>{routes['WATCH']}</b> | Pass: <b>{routes['PASS']}</b>",
-        f"PM actions: <b>{pm_actions['ACCUMULATE']}</b> accumulate | <b>{pm_actions['STARTER']}</b> starter | <b>{pm_actions['WATCH']}</b> watch | <b>{pm_actions['REJECT']}</b> reject",
-        f"Options ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('total', 0)}",
+        f"Routed: Equity <b>{routes['EQUITY']}</b> | Options <b>{routes['OPTION']}</b> | Both <b>{routes['BOTH']}</b> | Watch <b>{routes['WATCH']}</b> | Rejected <b>{routes['REJECT']}</b>",
+        f"PM actions: <b>{pm_actions['ACCUMULATE']}</b> accumulate | <b>{pm_actions['STARTER']}</b> starter | <b>{pm_actions['WATCH']}</b> watch | <b>{pm_actions['REJECT']}</b> reject | Total <b>{pm_action_total}</b>",
+        f"Options ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('total', 0)} | Routed option names: <b>{routes['OPTION'] + routes['BOTH']}</b>",
+        *([f"Options blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
         "",
         "<b>CASE COURT</b>",
-        f"Advisory aligned: <b>{court_counts['ready']}</b> | Needs data: <b>{court_counts['needs_data']}</b> | Rejected: <b>{court_counts['rejected']}</b>",
+        f"Trials: <b>{len(court_rows)}</b> | Advisory aligned: <b>{court_counts['ready']}</b> | Needs data: <b>{court_counts['needs_data']}</b> | Rejected: <b>{court_counts['rejected']}</b>",
+        *([f"Postures: {' | '.join(court_posture_lines)}"] if court_posture_lines else []),
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
@@ -449,8 +503,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
             "new_scan_tickers": new_scan,
             "edge": edge.get("edge") or {},
             "strategy_lanes": lane_counts,
+            "option_blockers": option_blockers,
             "options": opt_summary,
-            "court": court_counts,
+            "court": {**court_counts, "trials": len(court_rows), "postures": court_postures},
         },
     }
 
