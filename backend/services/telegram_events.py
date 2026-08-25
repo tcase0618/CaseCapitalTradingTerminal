@@ -366,33 +366,24 @@ async def _new_scan_tickers(scan: dict[str, Any], results: list[dict[str, Any]],
 
 
 async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
-    from . import case_court, data_quality, edge_dashboard, execution_gate, options_desk, portfolio_manager
+    from . import data_quality, edge_dashboard, execution_gate, options_desk, portfolio_manager, strategy_screeners
 
     results = scan.get("results") or []
     scan_id = str(scan.get("finished_at") or scan.get("created_at") or _now_iso())
     new_scan = await _new_scan_tickers(scan, results)
     pm = await portfolio_manager.latest_portfolio_plan()
-    court = await case_court.latest(limit=75)
-    court_summary = court.get("summary") or {}
     alignment_notes: list[str] = []
-    if not _same_scan(court_summary.get("scan_finished_at"), scan.get("finished_at")):
-        try:
-            refreshed = await case_court.run_trials(limit=75, persist=True)
-            if refreshed.get("ok"):
-                court = refreshed
-                court_summary = refreshed.get("summary") or {}
-        except Exception as exc:
-            alignment_notes.append(f"case_court_refresh_failed:{str(exc)[:120]}")
-    if not _same_scan((court.get("summary") or {}).get("scan_finished_at"), scan.get("finished_at")):
-        alignment_notes.append("case_court_scan_mismatch")
     if not _same_scan(pm.get("scan_finished_at"), scan.get("finished_at")):
         alignment_notes.append("pm_scan_mismatch")
+    screeners = await strategy_screeners.run_all(scan=scan, persist=True)
+    screener_summary = screeners.get("summary") or {}
+    if not _same_scan(screeners.get("scan_finished_at"), scan.get("finished_at")):
+        alignment_notes.append("strategy_screeners_scan_mismatch")
     qc = await data_quality.overview(force_refresh=False, record_event=False)
     gate = await execution_gate.overview(force_refresh=False)
     edge = await edge_dashboard.overview()
     options = await options_desk.candidates()
     pm_rows = _pm_rows(pm)
-    court_rows = court.get("trials") or []
     opt_summary = options.get("summary") or {}
     opt_rows = options.get("candidates") or []
     opt_by_ticker = {
@@ -432,16 +423,12 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         for r in top
         if r.get("ticker")
     ]
-    court_postures = _court_posture_counts(court_rows)
-    court_posture_lines = [
+    family_counts = screener_summary.get("by_family") or {}
+    screener_counts = screener_summary.get("by_screener") or {}
+    screener_lines = [
         f"{_esc(k)}: <b>{v}</b>"
-        for k, v in list(court_postures.items())[:4]
+        for k, v in sorted(family_counts.items(), key=lambda item: item[0])[:8]
     ]
-    court_counts = {
-        "ready": sum(1 for r in court_rows if (r.get("judge") or {}).get("advisory_alignment_ok")),
-        "rejected": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() in {"PM_REJECTED", "REJECTED"}),
-        "needs_data": sum(1 for r in court_rows if str((r.get("judge") or {}).get("advisory_posture") or "").upper() == "REQUIRES_CLEANER_DATA"),
-    }
     text = "\n".join([
         "<b>CASE CAPITAL | SCAN REPORT</b>",
         f"<code>{_now_et()}</code>",
@@ -469,9 +456,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         *([f"Options execution blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
         *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),
         "",
-        "<b>CASE COURT</b>",
-        f"Trials: <b>{len(court_rows)}</b> | Advisory aligned: <b>{court_counts['ready']}</b> | Needs data: <b>{court_counts['needs_data']}</b> | Rejected: <b>{court_counts['rejected']}</b>",
-        *([f"Postures: {' | '.join(court_posture_lines)}"] if court_posture_lines else []),
+        "<b>SCANNER FAMILIES</b>",
+        f"Strategy candidates: <b>{screener_summary.get('total', 0)}</b> | PM-routable: <b>{screener_summary.get('pm_routable', 0)}</b> | Read-only: <b>{screener_summary.get('read_only', 0)}</b>",
+        *([f"Families: {' | '.join(screener_lines)}"] if screener_lines else []),
+        f"SEC bearish read-only: <b>{screener_summary.get('sec_bearish_read_only', 0)}</b> | Veto: <b>OFF</b>",
+        "Case Court: <b>OFF ACTIVE ROUTING</b>",
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
@@ -508,7 +497,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
                 "alignment_notes": alignment_notes,
                 "scan_finished_at": scan.get("finished_at"),
                 "pm_scan_finished_at": pm.get("scan_finished_at"),
-                "case_court_scan_finished_at": (court.get("summary") or {}).get("scan_finished_at"),
+                "strategy_screeners_scan_finished_at": screeners.get("scan_finished_at"),
             },
             "new_scan_tickers": new_scan,
             "edge": edge.get("edge") or {},
@@ -516,7 +505,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
             "option_blockers": option_blockers,
             "options_not_routed_by_pm": non_option_routed,
             "options": opt_summary,
-            "court": {**court_counts, "trials": len(court_rows), "postures": court_postures},
+            "strategy_screeners": {
+                **screener_summary,
+                "by_screener": screener_counts,
+            },
+            "case_court": {"active_routing": False},
         },
     }
 

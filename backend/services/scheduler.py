@@ -103,10 +103,18 @@ async def _daily_scan_job():
         except Exception as exc:
             logger.warning("lottery scan in scheduled cycle failed: %s", exc)
         try:
-            from . import case_court
-            await asyncio.wait_for(case_court.run_trials(limit=75, persist=True), timeout=45.0)
+            from . import candidate_ledger, strategy_screeners
+
+            screeners = await asyncio.wait_for(strategy_screeners.run_all(scan=scan, persist=True), timeout=45.0)
+            await asyncio.wait_for(candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True), timeout=45.0)
+            await log_activity(
+                f"Strategy screeners complete: {((screeners.get('summary') or {}).get('pm_routable') or 0)} PM-routable, "
+                f"{((screeners.get('summary') or {}).get('read_only') or 0)} read-only",
+                "info",
+                screeners.get("summary") or {},
+            )
         except Exception as exc:
-            logger.warning("case court post-scan refresh failed: %s", exc)
+            logger.warning("strategy screener post-scan refresh failed: %s", exc)
         try:
             from . import pharma
             await asyncio.wait_for(
@@ -377,7 +385,7 @@ def start_scheduler():
     _scheduler = AsyncIOScheduler(timezone=ET)
     # Coordinated stock-scan cadence, restricted to market-session days by the
     # runtime guard in _daily_scan_job. The job runs the core scanner and
-    # specialist scan families together before PM/Court/Telegram publication.
+    # specialist scan families together before PM/Telegram publication.
     for tag, hr, minute in STOCK_SCAN_CADENCE_ET:
         _scheduler.add_job(
             _daily_scan_job,
@@ -826,7 +834,7 @@ def start_scheduler():
     )
     _scheduler.start()
     logger.info(
-        "Scheduler: stock scans 00:00/08:00/13:00/15:00/18:00 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
+        "Scheduler: stock scans 00:00/08:00/12:00/15:00/18:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
         "+ 5m active lottery monitor + alerts/flow/P&L/learning"
     )
 

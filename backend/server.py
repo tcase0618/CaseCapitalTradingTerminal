@@ -901,6 +901,14 @@ async def free_data_fred_latest(series_id: str):
 @api.post("/scan/run")
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
+    try:
+        from services import candidate_ledger, lottery, strategy_screeners
+
+        await lottery.run_dedicated_lottery_scan(triggered_by="admin_dashboard_cycle")
+        await strategy_screeners.run_all(scan=scan, persist=True)
+        await candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True)
+    except Exception as exc:
+        scan["strategy_screener_error"] = str(exc)
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
         from services import telegram_events
         await telegram_events.dispatch_scan_report(scan)
@@ -1506,15 +1514,22 @@ async def scan_candidate_ledger(rebuild: bool = True):
     return await candidate_ledger.latest(rebuild=rebuild)
 
 
+@api.get("/scan/strategy_screeners")
+async def scan_strategy_screeners(persist: bool = True):
+    from services import strategy_screeners
+    scan = await scanner.latest_scan()
+    return await strategy_screeners.run_all(scan=scan, persist=persist)
+
+
 @api.get("/scan/tabs")
 async def scan_tabs():
-    from services import candidate_ledger, case_court, lottery, options_desk, pharma
+    from services import candidate_ledger, lottery, options_desk, pharma, strategy_screeners
     scan = await scanner.latest_scan()
     ledger = await candidate_ledger.latest(rebuild=True)
-    lottery_board, options_payload, court_payload = await asyncio.gather(
+    lottery_board, options_payload, screeners_payload = await asyncio.gather(
         lottery.board(),
         options_desk.candidates(),
-        case_court.latest(limit=75),
+        strategy_screeners.run_all(scan=scan, persist=True),
         return_exceptions=True,
     )
     try:
@@ -1527,7 +1542,8 @@ async def scan_tabs():
         "options": [] if isinstance(options_payload, Exception) else options_payload.get("candidates", []),
         "pharma": pharma_rows if isinstance(pharma_rows, list) else pharma_rows.get("results", []),
         "earnings": (scan or {}).get("earnings_week") or {},
-        "case_court": [] if isinstance(court_payload, Exception) else court_payload.get("trials", []),
+        "strategy_screeners": [] if isinstance(screeners_payload, Exception) else screeners_payload.get("candidates", []),
+        "case_court": [],
     }
 
     def _ticker_from_row(row):
@@ -1600,7 +1616,8 @@ async def scan_tabs():
         "options": previous_options,
         "pharma": previous_pharma,
         "earnings": previous_earnings,
-        "court": previous_core,
+        "strategy_screeners": _source_ticker_set(previous_docket, "strategy_screeners") or previous_core,
+        "court": set(),
     }
     tab_sets = {
         "core": _ticker_set(tab_rows["core"]),
@@ -1614,7 +1631,8 @@ async def scan_tabs():
             for row in (rows or [])
             if _ticker_from_row(row)
         },
-        "court": _ticker_set(tab_rows["case_court"]),
+        "strategy_screeners": _ticker_set(tab_rows["strategy_screeners"]),
+        "court": set(),
     }
     new_since_previous = {
         key: {
@@ -1634,7 +1652,8 @@ async def scan_tabs():
         "errors": {
             "lottery": str(lottery_board) if isinstance(lottery_board, Exception) else None,
             "options": str(options_payload) if isinstance(options_payload, Exception) else None,
-            "case_court": str(court_payload) if isinstance(court_payload, Exception) else None,
+            "strategy_screeners": str(screeners_payload) if isinstance(screeners_payload, Exception) else None,
+            "case_court": None,
             "pharma": pharma_rows.get("error") if isinstance(pharma_rows, dict) else None,
         },
     }

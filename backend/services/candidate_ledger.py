@@ -1,8 +1,9 @@
 """Unified candidate ledger for multi-scan routing.
 
-Each scan family can keep its own logic and UI, but the PM and Case Court need
-one deduped docket per cycle. This module builds that docket from the latest
-core scan plus already-running specialist outputs. It does not execute trades.
+Each scan family can keep its own logic and UI, while PMs receive one deduped
+docket per cycle. Case Court is intentionally not in the active routing path.
+This module builds that docket from the latest core scan plus already-running
+specialist outputs. It does not execute trades.
 """
 from __future__ import annotations
 
@@ -102,7 +103,7 @@ def _new_entry(cycle_id: str, ticker: str) -> dict[str, Any]:
         "rows": {},
         "quality": {},
         "pm": {},
-        "case_court": {"status": "PENDING"},
+        "case_court": {"status": "READ_ONLY_NOT_IN_ACTIVE_PM_WORKFLOW"},
         "final_route": "PM_REVIEW",
     }
 
@@ -185,6 +186,27 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
 
     if include_external:
         try:
+            from . import strategy_screeners
+
+            screeners = await strategy_screeners.run_all(scan=scan, persist=True, include_options_native=True)
+            for row in _rows(screeners, "candidates"):
+                ticker = _ticker(row.get("ticker") or row.get("underlying"))
+                if not ticker:
+                    continue
+                scanner = row.get("strategy_scanner") or {}
+                source = str(scanner.get("screener_id") or row.get("source_scan") or "strategy_screener")
+                tags = [
+                    "STRATEGY_SCANNER",
+                    str(scanner.get("family") or row.get("scanner_family") or ""),
+                    str(scanner.get("lane") or ""),
+                ]
+                if row.get("read_only"):
+                    tags.append("READ_ONLY")
+                _merge_source(ensure(ticker), source, row, tags)
+        except Exception:
+            pass
+
+        try:
             from . import options_desk
 
             options = await options_desk.candidates()
@@ -243,6 +265,15 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
             entry["final_route"] = "PHARMA_PM_REVIEW"
         elif "lottery" in source_set:
             entry["final_route"] = "LOTTERY_PM_REVIEW"
+        elif any(str(s).startswith("lottery_") for s in source_set):
+            entry["final_route"] = "LOTTERY_PM_REVIEW"
+        elif "pharma_calendar" in source_set or "pharma_core_overlap" in source_set:
+            entry["final_route"] = "PHARMA_PM_REVIEW"
+        elif "earnings_calendar" in source_set or "earnings_core_overlap" in source_set:
+            entry["final_route"] = "EARNINGS_PM_REVIEW"
+        elif "sec_filings" in source_set:
+            sec_row = (entry.get("rows") or {}).get("sec_filings") or {}
+            entry["final_route"] = "READ_ONLY_RESEARCH" if sec_row.get("read_only") else "SEC_PM_REVIEW"
         elif "core_scan" in source_set:
             entry["final_route"] = "EQUITY_PM_REVIEW"
         max_quality = min((q.get("score", 0) for q in (entry.get("quality") or {}).values()), default=0)
@@ -255,8 +286,12 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
         "pharma": sum(1 for c in candidates if "pharma" in c.get("sources", [])),
         "lottery": sum(1 for c in candidates if "lottery" in c.get("sources", [])),
         "earnings": sum(1 for c in candidates if "earnings" in c.get("sources", [])),
+        "strategy_screeners": sum(1 for c in candidates if any(str(s).startswith(("lottery_", "pharma_", "earnings_", "options_", "sec_")) for s in c.get("sources", []))),
+        "sec_read_only": sum(1 for c in candidates if ((c.get("rows") or {}).get("sec_filings") or {}).get("read_only")),
         "discovery": sum(1 for c in candidates if "discovery" in c.get("sources", [])),
         "pm_attached": sum(1 for c in candidates if c.get("pm")),
+        "case_court_active_routing": False,
+        "sec_bearish_veto_enabled": False,
     }
     doc = stamped({
         "ok": True,

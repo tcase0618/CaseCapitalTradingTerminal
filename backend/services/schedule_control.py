@@ -35,7 +35,7 @@ class ScheduleSource:
 
 
 SOURCES: tuple[ScheduleSource, ...] = (
-    ScheduleSource("latest_scan", "Core Stock Scan", "SCANNER", "00:00 / 08:00 / 13:00 / 15:00 / 18:00 ET on market days", 510, "scan_results", ("finished_at", "created_at"), sort=("finished_at", -1), critical=True, execution_scopes=("equity", "options"), repair="run_stock_scan_if_market_open", market_session_only=True),
+    ScheduleSource("latest_scan", "Core Stock Scan", "SCANNER", "00:00 / 08:00 / 12:00 / 15:00 / 18:30 ET on market days", 510, "scan_results", ("finished_at", "created_at"), sort=("finished_at", -1), critical=True, execution_scopes=("equity", "options"), repair="run_stock_scan_if_market_open", market_session_only=True),
     ScheduleSource("live_positions", "Live Position Snapshot", "EXECUTION", "Every 5 minutes from Alpaca, all sessions", 8, "bot_state", ("snapshot_at", "created_at"), query={"_id": "live_position_snapshot_latest"}, critical=True, execution_scopes=("equity", "options"), repair="repull_alpaca_positions"),
     ScheduleSource("options_risk", "Options Risk Marks", "EXECUTION", "Every 5 minutes from Alpaca position authority", 8, "options_desk_risk_checks", ("checked_at", "created_at"), sort=("checked_at", -1), critical=True, execution_scopes=("options",), repair="recheck_options_positions"),
     ScheduleSource("earnings_week", "Earnings Calendar", "CATALYST", "Cached UI refresh with background repull", 180, "earnings_snapshots", ("created_at", "generated_at"), sort=("created_at", -1), repair="refresh_current_earnings_week"),
@@ -45,7 +45,7 @@ SOURCES: tuple[ScheduleSource, ...] = (
     ScheduleSource("georisk", "GeoRisk Map Feed", "GEORISK", "20-minute cache + watchdog refresh", 60, "georisk_snapshots", ("generated_at", "created_at"), sort=("created_at", -1), repair="refresh_georisk"),
     ScheduleSource("pharma", "Pharma Pipeline", "PHARMA", "On scan + watchdog refresh", 720, "pharma_pdufa", ("evaluated_at", "created_at"), sort=("created_at", -1), repair="refresh_pharma_pipeline"),
     ScheduleSource("lottery", "Lottery League Scan", "LOTTERY", "08:45 / 09:36 / 10:00 / 12:00 / 15:35 ET on market days", 390, "ll_scans", ("scanned_at", "created_at"), query={"_id": "current"}, repair="run_lottery_scan_if_market_open", market_session_only=True),
-    ScheduleSource("case_court", "Case Court Docket", "CASE COURT", "After scan or watchdog refresh", 540, "bot_state", ("updated_at", "created_at"), query={"_id": "case_court_latest"}, repair="refresh_case_court"),
+    ScheduleSource("strategy_screeners", "Strategy Scanner Fan-Out", "SCANNER", "After every coordinated stock scan", 540, "strategy_screeners", ("generated_at", "created_at"), query={"_id": "latest"}, repair="refresh_strategy_screeners"),
     ScheduleSource("research_lab", "R&D Lab Snapshot", "RESEARCH", "Hourly", 90, "bot_state", ("snapshot_at", "created_at"), query={"_id": "research_lab_latest"}, repair="refresh_research_lab"),
     ScheduleSource("truth_review", "Truth Review Ledger", "TRUTH", "Weekly packet + watchdog ledger refresh", 720, "bot_state", ("generated_at", "created_at"), query={"_id": "truth_review_latest"}, repair="refresh_truth_review"),
     ScheduleSource("pnl_refresh", "P&L / Return Tracker", "PERFORMANCE", "02:00 and 23:00 ET", 1560, "activity_log", ("ts", "created_at"), query={"message": {"$regex": "P&L refresh", "$options": "i"}}, sort=("ts", -1), repair="refresh_due_pnl_returns"),
@@ -200,11 +200,12 @@ async def _repair_lottery() -> dict[str, Any]:
     return {"ok": True, "outcome": "refreshed", "detail": {"count": payload.get("count")}, "generated_at": ((payload.get("scan") or {}).get("scanned_at"))}
 
 
-async def _repair_case_court() -> dict[str, Any]:
-    from . import case_court
+async def _repair_strategy_screeners() -> dict[str, Any]:
+    from . import scanner, strategy_screeners
 
-    payload = await case_court.run_trials(limit=30, persist=True)
-    return {"ok": True, "outcome": "refreshed", "detail": {"trials": len(payload.get("trials") or []), "summary": payload.get("summary")}, "session_id": payload.get("session_id")}
+    scan = await scanner.latest_scan()
+    payload = await strategy_screeners.run_all(scan=scan, persist=True)
+    return {"ok": True, "outcome": "refreshed", "detail": payload.get("summary"), "generated_at": payload.get("generated_at")}
 
 
 async def _repair_research_lab() -> dict[str, Any]:
@@ -253,7 +254,7 @@ def _repair_registry() -> dict[str, RepairFn]:
         "georisk": _repair_georisk,
         "pharma": _repair_pharma,
         "lottery": _repair_lottery,
-        "case_court": _repair_case_court,
+        "strategy_screeners": _repair_strategy_screeners,
         "research_lab": _repair_research_lab,
         "truth_review": _repair_truth_review,
         "pnl_refresh": _repair_pnl,
@@ -272,11 +273,11 @@ async def rows() -> list[dict[str, Any]]:
         paused = bool(src.market_session_only and not market_day)
         status = _status(age, src.max_age_minutes, market_paused=paused)
         notes: list[str] = []
-        if src.key == "case_court" and latest_scan_at:
-            court_scan_at = ((doc.get("summary") or {}).get("scan_finished_at") or doc.get("scan_finished_at"))
-            if not _same_scan(court_scan_at, latest_scan_at):
+        if src.key == "strategy_screeners" and latest_scan_at:
+            screener_scan_at = doc.get("scan_finished_at")
+            if not _same_scan(screener_scan_at, latest_scan_at):
                 status = "STALE"
-                notes.append(f"scan_mismatch: court={court_scan_at or 'unknown'} latest={latest_scan_at}")
+                notes.append(f"scan_mismatch: strategy_screeners={screener_scan_at or 'unknown'} latest={latest_scan_at}")
         stale = status in {"STALE", "MISSING", "DOWN"}
         out.append({
             "key": src.key,
@@ -293,7 +294,7 @@ async def rows() -> list[dict[str, Any]]:
             "repair": src.repair,
             "market_session_only": src.market_session_only,
             "market_state": market_reason if src.market_session_only else "runs independent of stock market session",
-            "latest_scan_finished_at": latest_scan_at if src.key == "case_court" else None,
+            "latest_scan_finished_at": latest_scan_at if src.key == "strategy_screeners" else None,
             "notes": notes,
         })
     return out

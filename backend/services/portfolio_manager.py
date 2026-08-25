@@ -527,6 +527,51 @@ def _exposure(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"by_sector": _rows(by_sector), "by_action": _rows(by_action), "by_option_view": _rows(by_option_view)}
 
 
+def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One PM row per ticker, with Core rows kept as the base when present."""
+    merged: dict[str, dict[str, Any]] = {}
+    for row in core_rows or []:
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        merged[ticker] = {
+            **row,
+            "strategy_screeners": list(row.get("strategy_screeners") or []),
+            "scanner_sources": list(row.get("scanner_sources") or ["core_scan"]),
+        }
+    for row in strategy_rows or []:
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        scanner = row.get("strategy_scanner") or {}
+        screener_id = str(scanner.get("screener_id") or row.get("source_scan") or "strategy_screener")
+        if ticker not in merged:
+            merged[ticker] = {
+                **row,
+                "strategy_screeners": [scanner],
+                "scanner_sources": [screener_id],
+            }
+            continue
+        base = merged[ticker]
+        base.setdefault("strategy_screeners", []).append(scanner)
+        sources = list(base.get("scanner_sources") or [])
+        if screener_id not in sources:
+            sources.append(screener_id)
+        base["scanner_sources"] = sources
+        base["signals"] = list(dict.fromkeys([*(_signals(base)), *(_signals(row))]))
+        base["signal_score"] = max(_num(base.get("signal_score")), _num(row.get("signal_score")))
+        base["trade_score"] = max(_num(base.get("trade_score")), _num(row.get("trade_score")))
+        if not base.get("price") and row.get("price"):
+            base["price"] = row.get("price")
+        if not base.get("sector") and row.get("sector"):
+            base["sector"] = row.get("sector")
+        base["targets"] = base.get("targets") or row.get("targets") or {}
+        if not base.get("stop_loss") and row.get("stop_loss"):
+            base["stop_loss"] = row.get("stop_loss")
+        base["strategy_scanner_overlay"] = True
+    return list(merged.values())
+
+
 async def _account_equity() -> tuple[float | None, str]:
     try:
         from . import trade_floor
@@ -541,7 +586,21 @@ async def _account_equity() -> tuple[float | None, str]:
 async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO", ruleset_id: str | None = None) -> dict[str, Any]:
     db = get_db()
     scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
-    rows = (scan or {}).get("results") or []
+    core_rows = (scan or {}).get("results") or []
+    strategy_payload: dict[str, Any] = {}
+    strategy_rows: list[dict[str, Any]] = []
+    try:
+        from . import strategy_screeners
+
+        strategy_payload = await strategy_screeners.pm_rows(scan=scan, persist=True)
+        strategy_rows = strategy_payload.get("rows") or []
+    except Exception as exc:
+        strategy_payload = {
+            "ok": False,
+            "error": str(exc),
+            "summary": {"pm_rows": 0, "case_court_active_routing": False, "sec_bearish_veto_enabled": False},
+        }
+    rows = _merge_strategy_rows(core_rows, strategy_rows)
     account_equity, equity_source = await _account_equity()
     equity_basis = float(equity or account_equity or DEFAULT_EQUITY)
     if equity:
@@ -576,6 +635,14 @@ async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO",
         },
         "claude_required": False,
         "summary": _summary(recommendations, equity_basis, active_mode, equity_source, regime),
+        "input_rows": {
+            "core": len(core_rows),
+            "strategy_pm": len(strategy_rows),
+            "merged": len(rows),
+            "case_court_active_routing": False,
+            "sec_bearish_veto_enabled": False,
+        },
+        "strategy_screeners": strategy_payload.get("summary") or {},
         "exposure": _exposure(recommendations),
         "recommendations": recommendations,
         "rules": {
