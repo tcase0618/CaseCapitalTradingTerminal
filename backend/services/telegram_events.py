@@ -407,6 +407,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     ]
     routes = _expression_counts(pm_rows, opt_rows)
     pm_actions = _pm_action_counts(pm_rows)
+    opp = pm.get("opportunity_cost") or {}
     pm_action_total = sum(pm_actions.values())
     blockers = (qc.get("summary") or {}).get("blockers", 0)
     qc_decision = (qc.get("trading_gate") or {}).get("decision") or "UNKNOWN"
@@ -457,6 +458,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Routed: Equity <b>{routes['EQUITY']}</b> | Options <b>{routes['OPTION']}</b> | Both <b>{routes['BOTH']}</b> | Watch <b>{routes['WATCH']}</b> | Rejected <b>{routes['REJECT']}</b>",
         f"PM actions: <b>{pm_actions['ACCUMULATE']}</b> accumulate | <b>{pm_actions['STARTER']}</b> starter | <b>{pm_actions['WATCH']}</b> watch | <b>{pm_actions['REJECT']}</b> reject | Total <b>{pm_action_total}</b>",
         f"Options ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('total', 0)} | Routed option names: <b>{routes['OPTION'] + routes['BOTH']}</b>",
+        f"Turnover engine: <b>{opp.get('positions_reviewed', 0)}</b> holdings reviewed | Replace: <b>{len(opp.get('replacement_candidates') or [])}</b> | Trim/exit: <b>{len(opp.get('trim_reviews') or [])}</b>",
         *([f"Options execution blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
         *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),
         "",
@@ -509,6 +511,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
             "option_blockers": option_blockers,
             "options_not_routed_by_pm": non_option_routed,
             "options": opt_summary,
+            "opportunity_cost": {
+                "positions_reviewed": opp.get("positions_reviewed", 0),
+                "replacement_candidates": opp.get("replacement_candidates") or [],
+                "trim_reviews": opp.get("trim_reviews") or [],
+            },
             "strategy_screeners": {
                 **screener_summary,
                 "by_screener": screener_counts,

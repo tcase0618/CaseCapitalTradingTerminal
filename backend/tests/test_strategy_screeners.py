@@ -1,4 +1,4 @@
-from services import portfolio_manager, strategy_screeners
+from services import portfolio_manager, strategy_ideology, strategy_screeners
 
 
 def test_sec_bearish_filing_is_read_only_and_not_pm_routable():
@@ -51,6 +51,43 @@ def test_sec_all_biases_are_research_only_contract():
     assert built["strategy_scanner"]["lane"] == "BULLISH_FILING"
     assert built["pm_routable"] is False
     assert built["read_only"] is True
+
+
+def test_strategy_row_carries_case_score_and_confidence():
+    row = strategy_screeners._base_row(
+        row={
+            "ticker": "RUNR",
+            "price": 3.25,
+            "signals": ["RVOL", "ROTATION"],
+            "triggers": ["RVOL", "ROTATION"],
+            "components": {"rvol": 12, "rotation": 11, "structure": 7},
+        },
+        screener_id="lottery_supernova",
+        family="LOTTERY",
+        lane="SUPERNOVA",
+        score=82,
+    )
+
+    assert row["strategy_case"]["strategy_id"] == "lottery_supernova"
+    assert row["strategy_case"]["case_score"] > 70
+    assert 0.15 <= row["strategy_case"]["confidence"] <= 0.78
+    assert row["strategy_case"]["risk_shape"] == "very_high_variance_fat_tail"
+    assert row["case_score"] == row["strategy_scanner"]["case_score"]
+    assert row["strategy_confidence"] == row["strategy_scanner"]["confidence"]
+
+
+def test_strategy_ideology_unknown_has_safe_defaults():
+    case = strategy_ideology.case_score(
+        strategy_id="missing_strategy",
+        native_score=55,
+        row={"ticker": "ABC", "price": 10},
+        family="UNKNOWN",
+        lane="GENERIC",
+    )
+
+    assert case["strategy_id"] == "missing_strategy"
+    assert case["preferred_expression"] == "pm_decides"
+    assert case["confidence"] <= 0.65
 
 
 def test_summary_separates_pm_and_read_only_families():
@@ -107,3 +144,34 @@ def test_pm_merge_preserves_core_and_adds_strategy_signals():
     assert "CORE_SIGNAL" in merged[0]["signals"]
     assert "LOTTERY_SIGNAL" in merged[0]["signals"]
     assert "lottery_supernova" in merged[0]["scanner_sources"]
+    assert merged[0]["case_score"] == strategy[0]["case_score"]
+    assert merged[0]["strategy_confidence"] == strategy[0]["strategy_confidence"]
+
+
+def test_opportunity_cost_flags_weak_holding_for_replacement():
+    recommendations = [
+        {
+            "ticker": "WEAK",
+            "action": "WATCH",
+            "pm_score": 42,
+            "allocation_usd": 0,
+            "case_score": 0,
+            "strategy_confidence": 0,
+        },
+        {
+            "ticker": "HOT",
+            "action": "ACCUMULATE",
+            "pm_score": 82,
+            "allocation_usd": 100,
+            "case_score": 88,
+            "strategy_confidence": 0.72,
+        },
+    ]
+    positions = [{"symbol": "WEAK", "unrealized_plpc": "-0.08", "market_value": "250"}]
+
+    review = portfolio_manager._opportunity_cost_review(recommendations, positions, equity=1000)
+
+    assert review["positions_reviewed"] == 1
+    assert review["trim_reviews"][0]["ticker"] == "WEAK"
+    assert review["replacement_candidates"][0]["sell_review"] == "WEAK"
+    assert review["replacement_candidates"][0]["buy_candidate"] == "HOT"

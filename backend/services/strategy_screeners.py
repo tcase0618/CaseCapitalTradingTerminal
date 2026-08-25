@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import get_db, stamped
+from . import strategy_ideology
 
 SCREENER_VERSION = "strategy-screeners-v1.0"
 
@@ -86,6 +87,13 @@ def _base_row(
         lane,
         *raw_signals[:8],
     ]))
+    strategy_case = strategy_ideology.case_score(
+        strategy_id=screener_id,
+        native_score=score,
+        row={**row, "price": px or row.get("price")},
+        family=family,
+        lane=lane,
+    )
     return {
         "ticker": ticker,
         "company": row.get("company") or row.get("name") or ticker,
@@ -108,10 +116,15 @@ def _base_row(
             "family": family,
             "lane": lane,
             "native_score": round(score, 1),
+            "case_score": strategy_case["case_score"],
+            "confidence": strategy_case["confidence"],
             "pm_routable": bool(pm_routable),
             "read_only": bool(read_only),
             "notes": notes or [],
         },
+        "strategy_case": strategy_case,
+        "case_score": strategy_case["case_score"],
+        "strategy_confidence": strategy_case["confidence"],
         "source_scan": screener_id,
         "scanner_family": family,
         "pm_routable": bool(pm_routable),

@@ -122,6 +122,9 @@ def _pm_score(row: dict[str, Any], price: float, target: float, stop: float) -> 
     learning_score = _num(row.get("learning_score"))
     squeeze_score = _num((row.get("squeeze") or {}).get("score"))
     risk_score = _num((row.get("risk") or {}).get("score"))
+    strategy_case = row.get("strategy_case") or {}
+    case_score = _num(row.get("case_score") or strategy_case.get("case_score"))
+    confidence = _num(row.get("strategy_confidence") or strategy_case.get("confidence"))
     upside = _upside_pct(price, target)
     downside = _downside_pct(price, stop)
     rr = _rr(upside, downside)
@@ -132,8 +135,22 @@ def _pm_score(row: dict[str, Any], price: float, target: float, stop: float) -> 
     learning_component = min(10.0, max(0.0, learning_score))
     squeeze_component = min(8.0, squeeze_score * 0.08)
     rr_component = min(16.0, rr * 5.0)
+    case_component = min(10.0, case_score * 0.10) if case_score else 0.0
+    confidence_component = min(6.0, confidence * 6.0) if confidence else 0.0
+    low_confidence_penalty = max(0.0, (0.45 - confidence) * 12.0) if confidence else 2.0
     penalty = min(25.0, risk_score * 0.12)
-    score = signal_component + trade_component + analyst_component + learning_component + squeeze_component + rr_component - penalty
+    score = (
+        signal_component
+        + trade_component
+        + analyst_component
+        + learning_component
+        + squeeze_component
+        + rr_component
+        + case_component
+        + confidence_component
+        - penalty
+        - low_confidence_penalty
+    )
     score = max(0.0, min(100.0, score))
     return round(score, 1), {
         "signal_component": round(signal_component, 1),
@@ -142,6 +159,9 @@ def _pm_score(row: dict[str, Any], price: float, target: float, stop: float) -> 
         "learning_component": round(learning_component, 1),
         "squeeze_component": round(squeeze_component, 1),
         "risk_reward_component": round(rr_component, 1),
+        "strategy_case_component": round(case_component, 1),
+        "strategy_confidence_component": round(confidence_component, 1),
+        "low_confidence_penalty": round(low_confidence_penalty, 1),
         "risk_penalty": round(penalty, 1),
     }
 
@@ -161,7 +181,14 @@ def _action(score: float, rr: float, signal_count: int, risk_score: float, profi
     return "REJECT"
 
 
-def _sizing(action: str, score: float, price: float, stop: float, equity: float, profile: dict[str, Any]) -> dict[str, Any]:
+def _case_confidence(row: dict[str, Any]) -> tuple[float, float]:
+    strategy_case = row.get("strategy_case") or {}
+    case_score = _num(row.get("case_score") or strategy_case.get("case_score"), 0)
+    confidence = _num(row.get("strategy_confidence") or strategy_case.get("confidence"), 0)
+    return case_score, confidence
+
+
+def _sizing(action: str, score: float, price: float, stop: float, equity: float, profile: dict[str, Any], row: dict[str, Any] | None = None) -> dict[str, Any]:
     if action in {"WATCH", "REJECT"} or price <= 0:
         return {"allocation_usd": 0.0, "shares": 0.0, "risk_usd": 0.0, "position_pct": 0.0}
     max_position = equity * profile["max_position_pct"]
@@ -171,7 +198,15 @@ def _sizing(action: str, score: float, price: float, stop: float, equity: float,
         risk_budget *= 0.55
         max_position *= 0.55
     score_multiplier = 0.65 + min(0.35, max(0.0, score - 58.0) / 42.0)
-    risk_budget *= score_multiplier
+    case_score, confidence = _case_confidence(row or {})
+    case_multiplier = 1.0
+    confidence_multiplier = 1.0
+    if case_score:
+        case_multiplier = max(0.65, min(1.18, 0.75 + case_score / 200.0))
+    if confidence:
+        confidence_multiplier = max(0.48, min(1.12, 0.45 + confidence))
+    risk_budget *= score_multiplier * case_multiplier * confidence_multiplier
+    max_position *= min(1.15, case_multiplier * confidence_multiplier)
     shares_by_risk = risk_budget / risk_per_share
     shares_by_position = max_position / price
     shares = max(0.0, min(shares_by_risk, shares_by_position))
@@ -181,6 +216,11 @@ def _sizing(action: str, score: float, price: float, stop: float, equity: float,
         "shares": round(shares, 4),
         "risk_usd": round(shares * risk_per_share, 2),
         "position_pct": round((allocation / equity) * 100.0, 2) if equity > 0 else 0.0,
+        "sizing_multipliers": {
+            "pm_score": round(score_multiplier, 3),
+            "strategy_case": round(case_multiplier, 3),
+            "confidence": round(confidence_multiplier, 3),
+        },
     }
 
 
@@ -371,8 +411,9 @@ def evaluate_rows(
         action, regime_note = _regime_adjusted_action(action, score, rr, signals, row, regime)
         if regime_note:
             cautions.append(regime_note)
-        sizing = _sizing(action, score, price, stop, equity, profile)
+        sizing = _sizing(action, score, price, stop, equity, profile, row)
         ratchet = _ratchet_plan(action, price, target, stop, upside, rr, signals)
+        strategy_case = row.get("strategy_case") or {}
         out.append({
             "ticker": ticker,
             "action": action,
@@ -393,6 +434,10 @@ def evaluate_rows(
             "option_view": _option_view(row, rr),
             "signals": signals,
             "ratchet_plan": ratchet,
+            "strategy_case": strategy_case,
+            "case_score": _num(row.get("case_score") or strategy_case.get("case_score")),
+            "strategy_confidence": _num(row.get("strategy_confidence") or strategy_case.get("confidence")),
+            "sizing_multipliers": sizing.get("sizing_multipliers") or {},
             "trade_score": row.get("trade_score"),
             "signal_score": row.get("signal_score"),
             "learning_score": row.get("learning_score"),
@@ -527,6 +572,116 @@ def _exposure(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"by_sector": _rows(by_sector), "by_action": _rows(by_action), "by_option_view": _rows(by_option_view)}
 
 
+def _pct(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        val = float(value)
+        if abs(val) <= 2:
+            val *= 100.0
+        return val
+    except Exception:
+        return None
+
+
+def _position_ticker(position: dict[str, Any]) -> str:
+    return str(position.get("symbol") or position.get("ticker") or position.get("underlying") or "").upper()
+
+
+def _holding_edge(position: dict[str, Any], pm_row: dict[str, Any] | None) -> float:
+    unrealized_pct = _pct(position.get("unrealized_plpc") or position.get("unrealized_pct"))
+    if pm_row:
+        edge = _num(pm_row.get("pm_score"), 45)
+    else:
+        edge = 45.0
+    if unrealized_pct is not None:
+        edge += max(-18.0, min(12.0, unrealized_pct * 0.65))
+    return round(max(0.0, min(100.0, edge)), 1)
+
+
+def _opportunity_cost_review(recommendations: list[dict[str, Any]], positions: list[dict[str, Any]], equity: float) -> dict[str, Any]:
+    rec_by_ticker = {str(r.get("ticker") or "").upper(): r for r in recommendations if r.get("ticker")}
+    held = {_position_ticker(p) for p in positions or [] if _position_ticker(p)}
+    deployable = [
+        r for r in recommendations
+        if r.get("ticker") not in held
+        and r.get("action") in {"ACCUMULATE", "STARTER"}
+        and float(r.get("allocation_usd") or 0) > 0
+    ]
+    deployable.sort(key=lambda r: (_num(r.get("pm_score")), _num(r.get("case_score")), _num(r.get("strategy_confidence"))), reverse=True)
+    best_new = deployable[0] if deployable else None
+    reviews: list[dict[str, Any]] = []
+    replacement_candidates: list[dict[str, Any]] = []
+    trim_reviews: list[dict[str, Any]] = []
+    for position in positions or []:
+        ticker = _position_ticker(position)
+        if not ticker:
+            continue
+        pm_row = rec_by_ticker.get(ticker)
+        unrealized_pct = _pct(position.get("unrealized_plpc") or position.get("unrealized_pct"))
+        edge = _holding_edge(position, pm_row)
+        protected_winner = bool(unrealized_pct is not None and unrealized_pct >= 8 and edge >= 50)
+        action = "HOLD"
+        reason = "holding edge acceptable"
+        required_gap = 18.0 if not protected_winner else 28.0
+        if unrealized_pct is not None and unrealized_pct <= -7 and edge < 48:
+            action = "EXIT_REVIEW"
+            reason = "loser below invalidation band with weak forward edge"
+            trim_reviews.append({"ticker": ticker, "action": action, "reason": reason, "holding_edge": edge, "unrealized_pct": round(unrealized_pct, 2)})
+        elif unrealized_pct is not None and unrealized_pct <= -3 and edge < 55:
+            action = "TRIM_REVIEW"
+            reason = "weak holding can fund stronger current setup"
+            trim_reviews.append({"ticker": ticker, "action": action, "reason": reason, "holding_edge": edge, "unrealized_pct": round(unrealized_pct, 2)})
+        if best_new and ticker != best_new.get("ticker"):
+            new_edge = _num(best_new.get("pm_score")) + min(6.0, _num(best_new.get("case_score")) * 0.04) + min(4.0, _num(best_new.get("strategy_confidence")) * 4.0)
+            edge_gap = round(new_edge - edge, 1)
+            if edge_gap >= required_gap and not protected_winner:
+                action = "REPLACE_REVIEW" if action == "HOLD" else action
+                reason = f"best new setup beats holding by {edge_gap} points"
+                replacement_candidates.append({
+                    "sell_review": ticker,
+                    "buy_candidate": best_new.get("ticker"),
+                    "edge_gap": edge_gap,
+                    "holding_edge": edge,
+                    "new_pm_score": best_new.get("pm_score"),
+                    "new_case_score": best_new.get("case_score"),
+                    "new_confidence": best_new.get("strategy_confidence"),
+                })
+        reviews.append({
+            "ticker": ticker,
+            "action": action,
+            "reason": reason,
+            "holding_edge": edge,
+            "pm_score": (pm_row or {}).get("pm_score"),
+            "unrealized_pct": round(unrealized_pct, 2) if unrealized_pct is not None else None,
+            "protected_winner": protected_winner,
+            "market_value": _num(position.get("market_value")),
+        })
+    for idx, candidate in enumerate(deployable[:5]):
+        candidate["opportunity_cost"] = {
+            "rank": idx + 1,
+            "best_available": idx == 0,
+            "funding_candidates": replacement_candidates[:3] if idx == 0 else [],
+            "churn_guard": "requires_material_edge_gap_before_replacing_current_holding",
+        }
+    return {
+        "enabled": True,
+        "policy": "controlled_high_turnover",
+        "rules": {
+            "fast_loser_review_pct": -7,
+            "trim_review_pct": -3,
+            "replacement_edge_gap": 18,
+            "protected_winner_gap": 28,
+            "runner_tranche_policy": "do not replace protected winners unless edge gap is extreme",
+        },
+        "positions_reviewed": len(reviews),
+        "replacement_candidates": replacement_candidates[:8],
+        "trim_reviews": trim_reviews[:8],
+        "holding_reviews": reviews,
+        "cash_equity_basis": round(equity, 2),
+    }
+
+
 def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One PM row per ticker, with Core rows kept as the base when present."""
     merged: dict[str, dict[str, Any]] = {}
@@ -561,6 +716,12 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
         base["signals"] = list(dict.fromkeys([*(_signals(base)), *(_signals(row))]))
         base["signal_score"] = max(_num(base.get("signal_score")), _num(row.get("signal_score")))
         base["trade_score"] = max(_num(base.get("trade_score")), _num(row.get("trade_score")))
+        incoming_case = row.get("strategy_case") or {}
+        base_case = base.get("strategy_case") or {}
+        if _num(incoming_case.get("case_score")) > _num(base_case.get("case_score")):
+            base["strategy_case"] = incoming_case
+            base["case_score"] = incoming_case.get("case_score")
+            base["strategy_confidence"] = incoming_case.get("confidence")
         if not base.get("price") and row.get("price"):
             base["price"] = row.get("price")
         if not base.get("sector") and row.get("sector"):
@@ -623,6 +784,21 @@ async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO",
         profile_override = {}
     profile = _profile_for(active_mode, profile_override)
     recommendations = evaluate_rows(rows, equity=equity_basis, mode=active_mode, profile_override=profile_override, regime=regime)
+    try:
+        from . import trade_floor
+
+        live_positions = await asyncio.wait_for(trade_floor.list_positions(), timeout=5.0)
+        opportunity_cost = _opportunity_cost_review(recommendations, live_positions, equity_basis)
+    except Exception as exc:
+        live_positions = []
+        opportunity_cost = {
+            "enabled": False,
+            "reason": f"position_review_unavailable:{exc.__class__.__name__}",
+            "positions_reviewed": 0,
+            "replacement_candidates": [],
+            "trim_reviews": [],
+            "holding_reviews": [],
+        }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "scan_finished_at": (scan or {}).get("finished_at"),
@@ -643,6 +819,7 @@ async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO",
             "sec_bearish_veto_enabled": False,
         },
         "strategy_screeners": strategy_payload.get("summary") or {},
+        "opportunity_cost": opportunity_cost,
         "exposure": _exposure(recommendations),
         "recommendations": recommendations,
         "rules": {
