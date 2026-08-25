@@ -471,6 +471,21 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
             "Fresh scan completed with a new evidence fingerprint."
         ),
     }
+    try:
+        from . import candidate_ledger
+        ledger = await candidate_ledger.build_from_scan(scan_doc, include_external=False, persist=False)
+        scan_doc["candidate_ledger"] = {
+            "cycle_id": ledger.get("cycle_id"),
+            "summary": ledger.get("summary") or {},
+            "candidates": ledger.get("candidates") or [],
+        }
+    except Exception as e:
+        logger.warning("candidate ledger attach failed: %s", e)
+        scan_doc["candidate_ledger"] = {
+            "cycle_id": None,
+            "summary": {"total": len(final), "error": str(e)},
+            "candidates": [],
+        }
     await db.scan_results.insert_one(dict(scan_doc))
     try:
         from . import postgres_store

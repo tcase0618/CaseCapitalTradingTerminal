@@ -933,7 +933,7 @@ def _summary(trials: list[dict[str, Any]], context: dict[str, Any]) -> dict[str,
 
 
 async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str, Any]:
-    from . import data_quality, kronos, options_desk, portfolio_manager, scanner
+    from . import candidate_ledger, data_quality, kronos, options_desk, portfolio_manager, scanner
 
     limit = max(1, min(int(limit or MAX_TRIALS), 75))
     scan_task = _bounded("scan", scanner.latest_scan(), timeout=4.0)
@@ -943,9 +943,11 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
     qc_task = _bounded("qc", data_quality.overview(force_refresh=False), timeout=15.0)
     news_task = _bounded("news", _latest_news_rows(), timeout=3.0)
     scan, pm, options, kronos_payload, qc, news_rows = await asyncio.gather(scan_task, pm_task, options_task, kronos_task, qc_task, news_task)
+    ledger = await _bounded("candidate_ledger", candidate_ledger.latest(rebuild=True), timeout=12.0)
 
     scan_rows = _by_ticker(scan if isinstance(scan, dict) else {}, "results")
     pm_rows = _rows(pm, "recommendations")
+    pm_by_ticker = {_ticker(r.get("ticker")): r for r in pm_rows if _ticker(r.get("ticker"))}
     mode = str((pm if isinstance(pm, dict) else {}).get("mode") or "BALANCED").upper()
     options_rows = _by_ticker(options if isinstance(options, dict) else {}, "candidates")
     kronos_rows = _by_ticker(kronos_payload if isinstance(kronos_payload, dict) else {}, "forecasts")
@@ -954,11 +956,71 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
     generated_at = _now().isoformat()
     session_id = _session_id(scan_finished_at, generated_at)
 
+    docket = []
+    if isinstance(ledger, dict) and ledger.get("candidates"):
+        docket = ledger.get("candidates") or []
+    else:
+        docket = [
+            {
+                "ticker": _ticker(r.get("ticker")),
+                "sources": ["pm"],
+                "strategy_tags": [],
+                "scores": {"pm": r.get("pm_score")},
+                "rows": {"core_scan": scan_rows.get(_ticker(r.get("ticker"))) or {}},
+                "pm": r,
+            }
+            for r in pm_rows
+            if _ticker(r.get("ticker"))
+        ]
+
+    def _docket_rank(item: dict[str, Any]) -> tuple[int, float]:
+        sources = set(item.get("sources") or [])
+        pm_row = item.get("pm") or pm_by_ticker.get(_ticker(item.get("ticker"))) or {}
+        action = str(pm_row.get("action") or "").upper()
+        action_rank = {"ACCUMULATE": 6, "STARTER": 5, "WATCH": 4, "REJECT": 2}.get(action, 3)
+        multi_source = 2 if len(sources) >= 2 else 0
+        score = max([_num(v) for v in (item.get("scores") or {}).values()] or [0.0])
+        return action_rank + multi_source, score
+
+    docket = sorted(docket, key=_docket_rank, reverse=True)
+
     trials = []
-    for pm_row in pm_rows[:limit]:
-        ticker = _ticker(pm_row.get("ticker"))
-        scan_row = scan_rows.get(ticker, {"ticker": ticker, "signals": pm_row.get("signals") or [], "synthetic_from_pm": True})
-        trials.append(await _trial(scan_row, pm_row, options_rows.get(ticker), kronos_rows.get(ticker), qc if isinstance(qc, dict) else {}, scan_finished_at, news_list, session_id, mode=mode))
+    for item in docket[:limit]:
+        ticker = _ticker(item.get("ticker"))
+        if not ticker:
+            continue
+        rows_by_source = item.get("rows") or {}
+        scan_row = (
+            scan_rows.get(ticker)
+            or rows_by_source.get("core_scan")
+            or rows_by_source.get("lottery")
+            or rows_by_source.get("pharma")
+            or rows_by_source.get("options")
+            or {"ticker": ticker}
+        )
+        if not scan_row.get("signals"):
+            scan_row = {
+                **scan_row,
+                "ticker": ticker,
+                "signals": [str(s) for s in (item.get("strategy_tags") or item.get("sources") or []) if s],
+            }
+        pm_row = item.get("pm") or pm_by_ticker.get(ticker) or {
+            "ticker": ticker,
+            "action": "WATCH",
+            "pm_score": max([_num(v) for v in (item.get("scores") or {}).values()] or [0.0]),
+            "risk_reward": 0.0,
+            "price": scan_row.get("price") or scan_row.get("current_price") or scan_row.get("last"),
+            "signals": scan_row.get("signals") or [],
+            "sector": scan_row.get("sector"),
+            "option_view": "CALL_ALLOWED" if "options" in set(item.get("sources") or []) else "STOCK_PREFERRED",
+            "cautions": ["Unified candidate ledger row has not received a full PM allocation row yet."],
+        }
+        trial_doc = await _trial(scan_row, pm_row, options_rows.get(ticker), kronos_rows.get(ticker), qc if isinstance(qc, dict) else {}, scan_finished_at, news_list, session_id, mode=mode)
+        trial_doc["candidate_id"] = item.get("candidate_id")
+        trial_doc["candidate_sources"] = item.get("sources") or []
+        trial_doc["strategy_tags"] = item.get("strategy_tags") or []
+        trial_doc["candidate_quality_score"] = item.get("candidate_quality_score")
+        trials.append(trial_doc)
 
     context = {
         "scan_finished_at": scan_finished_at,
@@ -966,6 +1028,8 @@ async def run_trials(limit: int = MAX_TRIALS, persist: bool = False) -> dict[str
         "pm_error": pm.get("error") if isinstance(pm, dict) else None,
         "options_error": options.get("error") if isinstance(options, dict) else None,
         "kronos_error": kronos_payload.get("error") if isinstance(kronos_payload, dict) else None,
+        "candidate_ledger_error": ledger.get("error") if isinstance(ledger, dict) else None,
+        "candidate_ledger_count": len((ledger or {}).get("candidates") or []) if isinstance(ledger, dict) else 0,
         "qc": qc if isinstance(qc, dict) else {},
         "pm_mode": mode,
     }

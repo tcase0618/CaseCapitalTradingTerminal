@@ -123,6 +123,8 @@ export default function Dashboard() {
   const [squeezeLb, setSqueezeLb] = useState([]);
   const [fyStatus, setFyStatus] = useState({ fy_multiplier_active: false, days_to_fy_end: 0 });
   const [preview, setPreview] = useState(null);
+  const [scanTabs, setScanTabs] = useState(null);
+  const [scannerView, setScannerView] = useState("core");
   const [kronosCard, setKronosCard] = useState(null);
   const [kronosLoading, setKronosLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -152,6 +154,7 @@ export default function Dashboard() {
     axios.get(`${API}/squeeze/leaderboard/top?limit=10`).then(r => setSqueezeLb(r.data)).catch(e => console.error("squeeze:", e));
     axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
     axios.get(`${API}/scan/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
+    axios.get(`${API}/scan/tabs`).then(r => setScanTabs(r.data)).catch(e => console.error("scan-tabs:", e));
   }, []);
 
   useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
@@ -216,6 +219,25 @@ export default function Dashboard() {
     r.sort((a, b) => (b.signal_score || 0) - (a.signal_score || 0));
     return r;
   }, [scan]);
+  const ledgerCandidates = scanTabs?.ledger?.candidates || scan?.candidate_ledger?.candidates || [];
+  const scannerTabRows = {
+    core: results,
+    docket: ledgerCandidates,
+    lottery: scanTabs?.tabs?.lottery || scan?.lottery_picks || [],
+    options: scanTabs?.tabs?.options || [],
+    pharma: scanTabs?.tabs?.pharma || [],
+    earnings: Object.values(scanTabs?.tabs?.earnings?.by_day || {}).flat(),
+    court: scanTabs?.tabs?.case_court || [],
+  };
+  const scannerTabCounts = {
+    core: results.length,
+    docket: ledgerCandidates.length,
+    lottery: scannerTabRows.lottery.length,
+    options: scannerTabRows.options.length,
+    pharma: scannerTabRows.pharma.length,
+    earnings: scannerTabRows.earnings.length,
+    court: scannerTabRows.court.length,
+  };
 
   const counts = {
     insider: scan?.raw_counts?.insider_clusters || 0,
@@ -338,7 +360,9 @@ export default function Dashboard() {
           <div style={{ padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: hairlineLight }}>
             <span style={{ fontSize: 8, color: dim, letterSpacing: "0.14em" }}>ACTIVE INTELLIGENCE</span>
             <div style={{ flex: 1, height: 1, margin: "0 16px", background: "rgba(200,168,75,0.15)" }} />
-            <span style={{ fontSize: 8, color: accent, letterSpacing: "0.1em" }}>SHOWING {results.length} OF {scan?.pre_filter_passed || 0} TARGETS</span>
+            <span style={{ fontSize: 8, color: accent, letterSpacing: "0.1em" }}>
+              {scannerView === "core" ? `SHOWING ${results.length} OF ${scan?.pre_filter_passed || 0} TARGETS` : `${scannerTabCounts[scannerView] || 0} ${scannerView.toUpperCase()} ROWS`}
+            </span>
             <button data-testid="run-scan-button" onClick={runScan} disabled={scanning}
               style={{
                 marginLeft: 16, background: scanning ? "rgba(200,168,75,0.1)" : "transparent",
@@ -352,13 +376,28 @@ export default function Dashboard() {
             </button>
           </div>
 
+          <ScannerSubTabs
+            active={scannerView}
+            onChange={setScannerView}
+            counts={scannerTabCounts}
+            ledgerSummary={scanTabs?.ledger?.summary || scan?.candidate_ledger?.summary || {}}
+          />
+
+          {scannerView !== "core" && (
+            <ScannerSubtabPanel
+              view={scannerView}
+              rows={scannerTabRows[scannerView] || []}
+              errors={scanTabs?.errors || {}}
+            />
+          )}
+
           {/* Stock rows */}
-          {results.length === 0 && (
+          {scannerView === "core" && results.length === 0 && (
             <div style={{ padding: 40, textAlign: "center", color: dim, fontSize: 11 }}>
               NO TARGETS ACQUIRED — RUN SCAN TO BEGIN
             </div>
           )}
-          {results.map((r, idx) => {
+          {scannerView === "core" && results.map((r, idx) => {
             const isSel = selected === r.ticker;
             const risk = r.risk || {};
             const tg = r.targets || {};
@@ -653,6 +692,83 @@ export default function Dashboard() {
   );
 }
 
+function ScannerSubTabs({ active, onChange, counts, ledgerSummary }) {
+  const tabs = [
+    ["core", "Core"],
+    ["docket", "Unified Docket"],
+    ["lottery", "Lottery"],
+    ["options", "Options"],
+    ["pharma", "Pharma"],
+    ["earnings", "Earnings"],
+    ["court", "Case Court"],
+  ];
+  return (
+    <div style={scannerTabsWrap}>
+      <div style={scannerTabs}>
+        {tabs.map(([key, label]) => (
+          <button key={key} onClick={() => onChange(key)} style={scannerTabBtn(active === key)}>
+            <span>{label}</span>
+            <b>{counts[key] || 0}</b>
+          </button>
+        ))}
+      </div>
+      <div style={scannerLedgerLine}>
+        LEDGER {ledgerSummary.total || 0} / CORE {ledgerSummary.core || 0} / OPTIONS {ledgerSummary.options || 0} / PHARMA {ledgerSummary.pharma || 0} / LOTTERY {ledgerSummary.lottery || 0}
+      </div>
+    </div>
+  );
+}
+
+function ScannerSubtabPanel({ view, rows, errors }) {
+  const error = errors?.[view === "court" ? "case_court" : view];
+  return (
+    <div style={scannerPanel}>
+      <div style={scannerPanelHead}>
+        <span>{view === "docket" ? "UNIFIED CANDIDATE LEDGER" : `${view.toUpperCase()} SCAN VIEW`}</span>
+        <small>{error ? `DEGRADED: ${error}` : "LIVE ROUTING VIEW"}</small>
+      </div>
+      {!rows.length ? (
+        <div style={scannerEmpty}>NO ROWS LOADED FOR THIS SCAN FAMILY</div>
+      ) : (
+        <div style={scannerCompactRows}>
+          {rows.slice(0, 80).map((row, idx) => (
+            <ScannerCompactRow key={`${view}-${row.candidate_id || row.ticker || row.symbol || "row"}-${idx}`} view={view} row={row} idx={idx} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScannerCompactRow({ view, row, idx }) {
+  const ticker = row.ticker || row.underlying || row.symbol || row.rows?.core_scan?.ticker || "-";
+  const score = row.pm_score ?? row.score ?? row.signal_score ?? row.binary_event_score ?? row.candidate_quality_score ?? "-";
+  const action = row.action || row.tier || row.final_route || row.judge?.posture || row.pm_action || row.route || "-";
+  const sources = row.sources || row.candidate_sources || [];
+  const tags = row.strategy_tags || row.triggers || row.signals || row.blocked_reasons || [];
+  const detail = row.company || row.company_name || row.drug || row.strategy || row.reason || row.judge?.detail || row.thesis || row.data_quality || "";
+  const color = String(action).includes("REJECT") || String(action).includes("OBJECT") ? "#f87171"
+    : String(action).includes("WATCH") ? "#fbbf24"
+    : String(action).includes("READY") || String(action).includes("STARTER") || String(action).includes("PASS") ? "#4ade80"
+    : accent;
+  return (
+    <div style={scannerCompactRow}>
+      <div style={scannerRank}>{idx + 1}</div>
+      <div style={{ minWidth: 0 }}>
+        <Link to={`/ticker/${ticker}`} style={scannerTicker}>${ticker}</Link>
+        <span style={scannerSubText}>{detail}</span>
+      </div>
+      <div style={scannerChipWrap}>
+        {(sources.length ? sources : tags).slice(0, 4).map(x => <span key={x} style={scannerMiniChip}>{String(x).replace(/_/g, " ")}</span>)}
+      </div>
+      <div style={{ textAlign: "right" }}>
+        <div style={{ color, fontWeight: 900, fontSize: 13 }}>{action}</div>
+        <small style={{ color: labelLight }}>SCORE {typeof score === "number" ? score.toFixed(1) : score}</small>
+      </div>
+    </div>
+  );
+}
+
 function ScannerKronosBattleCard({ loading, payload, fallbackRow }) {
   const card = payload?.battle_card || {};
   const probs = card.probabilities || {};
@@ -858,6 +974,124 @@ const scannerBattleGrid = {
   display: "grid",
   gridTemplateColumns: "minmax(230px, 1fr) minmax(190px, 0.75fr) minmax(230px, 1fr)",
   gap: 12,
+};
+
+const scannerTabsWrap = {
+  borderBottom: hairlineLight,
+  background: "rgba(255,255,255,0.012)",
+};
+
+const scannerTabs = {
+  display: "grid",
+  gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+  gap: 0,
+};
+
+const scannerTabBtn = (active) => ({
+  border: "none",
+  borderRight: hairlineLight,
+  borderBottom: active ? `2px solid ${accent}` : "2px solid transparent",
+  background: active ? "rgba(200,168,75,0.08)" : "transparent",
+  color: active ? accent : labelLight,
+  padding: "10px 8px",
+  cursor: "pointer",
+  fontFamily: "JetBrains Mono, Courier New",
+  letterSpacing: "0.08em",
+  fontSize: 9,
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 8,
+});
+
+const scannerLedgerLine = {
+  padding: "7px 20px",
+  color: muted,
+  fontSize: 8,
+  letterSpacing: "0.12em",
+  borderTop: hairlineLight,
+};
+
+const scannerPanel = {
+  borderBottom: hairline,
+  background: "rgba(6,6,10,0.86)",
+};
+
+const scannerPanelHead = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 16,
+  padding: "12px 20px",
+  color: accent,
+  fontSize: 10,
+  letterSpacing: "0.14em",
+  fontWeight: 900,
+  borderBottom: hairlineLight,
+};
+
+const scannerCompactRows = {
+  display: "grid",
+  gridTemplateColumns: "1fr",
+};
+
+const scannerCompactRow = {
+  display: "grid",
+  gridTemplateColumns: "42px minmax(180px, 1fr) minmax(180px, 0.9fr) 150px",
+  alignItems: "center",
+  gap: 14,
+  padding: "10px 20px",
+  borderBottom: hairlineLight,
+  minWidth: 0,
+};
+
+const scannerRank = {
+  color: dim,
+  fontSize: 10,
+  fontWeight: 900,
+};
+
+const scannerTicker = {
+  color: "#fff",
+  textDecoration: "none",
+  fontWeight: 900,
+  fontSize: 15,
+  letterSpacing: "0.06em",
+  marginRight: 10,
+};
+
+const scannerSubText = {
+  color: muted,
+  fontSize: 10,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const scannerChipWrap = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+  minWidth: 0,
+};
+
+const scannerMiniChip = {
+  border: "0.5px solid rgba(94,234,212,0.22)",
+  color: "#5eead4",
+  background: "rgba(94,234,212,0.045)",
+  padding: "3px 7px",
+  fontSize: 8,
+  letterSpacing: "0.08em",
+  maxWidth: 150,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const scannerEmpty = {
+  color: muted,
+  fontSize: 11,
+  padding: 28,
+  textAlign: "center",
 };
 
 const scannerKronosBox = {

@@ -1500,6 +1500,48 @@ async def scan_latest():
     return s or {"results": [], "pre_filter_passed": 0, "raw_counts": {}}
 
 
+@api.get("/scan/candidate_ledger")
+async def scan_candidate_ledger(rebuild: bool = True):
+    from services import candidate_ledger
+    return await candidate_ledger.latest(rebuild=rebuild)
+
+
+@api.get("/scan/tabs")
+async def scan_tabs():
+    from services import candidate_ledger, case_court, lottery, options_desk, pharma
+    scan = await scanner.latest_scan()
+    ledger = await candidate_ledger.latest(rebuild=True)
+    lottery_board, options_payload, court_payload = await asyncio.gather(
+        lottery.board(),
+        options_desk.candidates(),
+        case_court.latest(limit=75),
+        return_exceptions=True,
+    )
+    try:
+        pharma_rows = await pharma.get_pdufa_within_days(days=90)
+    except Exception as exc:
+        pharma_rows = {"ok": False, "error": str(exc), "results": []}
+    return {
+        "ok": True,
+        "scan": scan or {"results": [], "pre_filter_passed": 0, "raw_counts": {}},
+        "ledger": ledger,
+        "tabs": {
+            "core": (scan or {}).get("results") or [],
+            "lottery": [] if isinstance(lottery_board, Exception) else lottery_board.get("candidates", []),
+            "options": [] if isinstance(options_payload, Exception) else options_payload.get("candidates", []),
+            "pharma": pharma_rows if isinstance(pharma_rows, list) else pharma_rows.get("results", []),
+            "earnings": (scan or {}).get("earnings_week") or {},
+            "case_court": [] if isinstance(court_payload, Exception) else court_payload.get("trials", []),
+        },
+        "errors": {
+            "lottery": str(lottery_board) if isinstance(lottery_board, Exception) else None,
+            "options": str(options_payload) if isinstance(options_payload, Exception) else None,
+            "case_court": str(court_payload) if isinstance(court_payload, Exception) else None,
+            "pharma": pharma_rows.get("error") if isinstance(pharma_rows, dict) else None,
+        },
+    }
+
+
 @api.get("/kronos/forecast")
 async def kronos_forecast(persist: bool = True):
     from services import kronos
