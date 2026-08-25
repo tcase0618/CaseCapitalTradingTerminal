@@ -295,10 +295,13 @@ def _top_rows(rows: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]
     return sorted(rows, key=lambda r: _num(r.get("pm_score") or r.get("signal_score") or r.get("score")), reverse=True)[:limit]
 
 
-def _option_blocker_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+def _option_blocker_counts(rows: list[dict[str, Any]], *, executable_only: bool = False) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in rows or []:
         if row.get("manual_fire_ready"):
+            continue
+        route = str(row.get("route") or "").upper()
+        if executable_only and route not in {"OPTION", "BOTH"}:
             continue
         for reason in row.get("blocked_reasons") or []:
             key = str(reason or "").strip()
@@ -405,7 +408,8 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"{_esc(k)}: <b>{v}</b>"
         for k, v in sorted(lane_counts.items(), key=lambda item: item[1], reverse=True)[:5]
     ]
-    option_blockers = _option_blocker_counts(opt_rows)
+    option_blockers = _option_blocker_counts(opt_rows, executable_only=True)
+    non_option_routed = sum(1 for row in opt_rows if str(row.get("route") or "").upper() not in {"OPTION", "BOTH"})
     option_blocker_lines = [
         f"{_esc(k)}: <b>{v}</b>"
         for k, v in list(option_blockers.items())[:6]
@@ -415,7 +419,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     pm_action_total = sum(pm_actions.values())
     blockers = (qc.get("summary") or {}).get("blockers", 0)
     qc_decision = (qc.get("trading_gate") or {}).get("decision") or "UNKNOWN"
-    severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers else "info"
+    scan_freshness = scan.get("freshness") or {}
+    stale_price_rows = int(scan_freshness.get("stale_price_rows") or 0)
+    fresh_price_rows = int(scan_freshness.get("fresh_price_rows") or 0)
+    price_rows = int(scan_freshness.get("price_rows") or 0)
+    severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers or stale_price_rows else "info"
 
     top = _top_rows(pm_rows or results, 6)
     top_lines = [
@@ -458,7 +466,8 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Routed: Equity <b>{routes['EQUITY']}</b> | Options <b>{routes['OPTION']}</b> | Both <b>{routes['BOTH']}</b> | Watch <b>{routes['WATCH']}</b> | Rejected <b>{routes['REJECT']}</b>",
         f"PM actions: <b>{pm_actions['ACCUMULATE']}</b> accumulate | <b>{pm_actions['STARTER']}</b> starter | <b>{pm_actions['WATCH']}</b> watch | <b>{pm_actions['REJECT']}</b> reject | Total <b>{pm_action_total}</b>",
         f"Options ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('total', 0)} | Routed option names: <b>{routes['OPTION'] + routes['BOTH']}</b>",
-        *([f"Options blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
+        *([f"Options execution blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
+        *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),
         "",
         "<b>CASE COURT</b>",
         f"Trials: <b>{len(court_rows)}</b> | Advisory aligned: <b>{court_counts['ready']}</b> | Needs data: <b>{court_counts['needs_data']}</b> | Rejected: <b>{court_counts['rejected']}</b>",
@@ -468,8 +477,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
         f"Execution gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> | Truth: <b>{_esc(gate.get('truth_grade') or '--')}</b>",
         f"Ticker rejects: <b>{(scan.get('ticker_hygiene') or {}).get('rejected_count', 0)}</b>",
+        *([f"Price freshness: <b>{fresh_price_rows}</b> / {price_rows} live | Stale rows: <b>{stale_price_rows}</b>"] if price_rows else []),
         *([f"Freshness: <b>CHECK</b> | {'; '.join(_esc(n) for n in alignment_notes)}"] if alignment_notes else []),
-        *([f"Scan fingerprint: <b>{_esc((scan.get('freshness') or {}).get('status'))}</b>"] if scan.get("freshness") else []),
+        *([f"Scan fingerprint: <b>{_esc(scan_freshness.get('status'))}</b>"] if scan.get("freshness") else []),
         "",
         "<b>EDGE PROOF</b>",
         f"Sample: <b>{(edge.get('edge') or {}).get('sample', 0)}</b> | Win rate: <b>{_fmt_pct((edge.get('edge') or {}).get('win_rate'))}</b> | Expectancy: <b>{_fmt_pct((edge.get('edge') or {}).get('expectancy_pct'))}</b>",
@@ -504,6 +514,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
             "edge": edge.get("edge") or {},
             "strategy_lanes": lane_counts,
             "option_blockers": option_blockers,
+            "options_not_routed_by_pm": non_option_routed,
             "options": opt_summary,
             "court": {**court_counts, "trials": len(court_rows), "postures": court_postures},
         },
