@@ -238,6 +238,7 @@ export default function Dashboard() {
     earnings: scannerTabRows.earnings.length,
     court: scannerTabRows.court.length,
   };
+  const scannerNewStats = scanTabs?.new_since_previous || {};
 
   const counts = {
     insider: scan?.raw_counts?.insider_clusters || 0,
@@ -381,6 +382,11 @@ export default function Dashboard() {
             onChange={setScannerView}
             counts={scannerTabCounts}
             ledgerSummary={scanTabs?.ledger?.summary || scan?.candidate_ledger?.summary || {}}
+          />
+
+          <ScannerNewStockGraphic
+            view={scannerView}
+            stat={scannerNewStats[scannerView] || { count: 0, tickers: [], total: scannerTabCounts[scannerView] || 0 }}
           />
 
           {scannerView !== "core" && (
@@ -689,6 +695,51 @@ export default function Dashboard() {
           </div>
       </div>
     </CrtShell>
+  );
+}
+
+function ScannerNewStockGraphic({ view, stat }) {
+  const count = Number(stat?.count || 0);
+  const total = Number(stat?.total || 0);
+  const tickers = Array.isArray(stat?.tickers) ? stat.tickers.filter(Boolean) : [];
+  const intensity = Math.min(1, count / Math.max(1, total || count || 1));
+  const railWidth = `${Math.max(count ? 18 : 4, Math.round(intensity * 100))}%`;
+  const label = view === "docket" ? "UNIFIED DOCKET" : view.toUpperCase();
+  return (
+    <div style={scannerNewGraphic}>
+      <div style={scannerNewGraphicMain}>
+        <div>
+          <div style={scannerNewLabel}>NEW SINCE LAST SCAN</div>
+          <div style={scannerNewMeta}>{label} / {total} TRACKED</div>
+        </div>
+        <div style={scannerNewCountWrap}>
+          <strong style={{ color: count ? "#5eead4" : muted, fontSize: 25, lineHeight: 1, fontWeight: 900 }}>{count}</strong>
+          <span>{count === 1 ? "NEW NAME" : "NEW NAMES"}</span>
+        </div>
+      </div>
+      <div style={scannerNewRail}>
+        <div style={{ ...scannerNewRailFill, width: railWidth, opacity: count ? 1 : 0.35 }} />
+        {[0, 1, 2, 3, 4].map(i => (
+          <span
+            key={i}
+            style={{
+              ...scannerNewDot,
+              left: `${8 + i * 21}%`,
+              opacity: count > i ? 1 : 0.22,
+              background: count > i ? "#5eead4" : "rgba(255,255,255,0.16)",
+              boxShadow: count > i ? "0 0 10px rgba(94,234,212,0.45)" : "none",
+            }}
+          />
+        ))}
+      </div>
+      <div style={scannerNewTickerWrap}>
+        {tickers.length ? tickers.slice(0, 10).map(t => (
+          <span key={t} style={scannerNewTicker}>${t}</span>
+        )) : (
+          <span style={scannerNewQuiet}>NO NEW TICKERS VERSUS PREVIOUS SCAN</span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1010,6 +1061,95 @@ const scannerLedgerLine = {
   fontSize: 8,
   letterSpacing: "0.12em",
   borderTop: hairlineLight,
+};
+
+const scannerNewGraphic = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+  gap: 16,
+  alignItems: "center",
+  padding: "12px 20px",
+  borderBottom: hairlineLight,
+  background: "linear-gradient(90deg, rgba(94,234,212,0.035), rgba(200,168,75,0.025), rgba(255,255,255,0.008))",
+  minWidth: 0,
+};
+
+const scannerNewGraphicMain = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 14,
+  minWidth: 0,
+};
+
+const scannerNewLabel = {
+  color: accent,
+  fontSize: 9,
+  letterSpacing: "0.16em",
+  fontWeight: 900,
+};
+
+const scannerNewMeta = {
+  color: muted,
+  fontSize: 8,
+  letterSpacing: "0.12em",
+  marginTop: 4,
+  overflowWrap: "anywhere",
+};
+
+const scannerNewCountWrap = {
+  display: "grid",
+  justifyItems: "end",
+  gap: 2,
+  flexShrink: 0,
+};
+
+const scannerNewRail = {
+  position: "relative",
+  height: 13,
+  background: "rgba(255,255,255,0.045)",
+  border: "0.5px solid rgba(94,234,212,0.16)",
+  overflow: "hidden",
+};
+
+const scannerNewRailFill = {
+  position: "absolute",
+  left: 0,
+  top: 0,
+  bottom: 0,
+  background: "linear-gradient(90deg, rgba(94,234,212,0.2), rgba(94,234,212,0.72), rgba(200,168,75,0.55))",
+};
+
+const scannerNewDot = {
+  position: "absolute",
+  top: 3,
+  width: 6,
+  height: 6,
+  transform: "translateX(-50%)",
+};
+
+const scannerNewTickerWrap = {
+  display: "flex",
+  flexWrap: "wrap",
+  justifyContent: "flex-end",
+  gap: 6,
+  minWidth: 0,
+};
+
+const scannerNewTicker = {
+  border: "0.5px solid rgba(94,234,212,0.26)",
+  background: "rgba(94,234,212,0.055)",
+  color: "#bffef2",
+  padding: "3px 7px",
+  fontSize: 8,
+  letterSpacing: "0.08em",
+  fontWeight: 900,
+};
+
+const scannerNewQuiet = {
+  color: muted,
+  fontSize: 8,
+  letterSpacing: "0.12em",
 };
 
 const scannerPanel = {

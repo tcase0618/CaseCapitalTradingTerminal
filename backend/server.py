@@ -1521,18 +1521,75 @@ async def scan_tabs():
         pharma_rows = await pharma.get_pdufa_within_days(days=90)
     except Exception as exc:
         pharma_rows = {"ok": False, "error": str(exc), "results": []}
+    tab_rows = {
+        "core": (scan or {}).get("results") or [],
+        "lottery": [] if isinstance(lottery_board, Exception) else lottery_board.get("candidates", []),
+        "options": [] if isinstance(options_payload, Exception) else options_payload.get("candidates", []),
+        "pharma": pharma_rows if isinstance(pharma_rows, list) else pharma_rows.get("results", []),
+        "earnings": (scan or {}).get("earnings_week") or {},
+        "case_court": [] if isinstance(court_payload, Exception) else court_payload.get("trials", []),
+    }
+
+    def _ticker_from_row(row):
+        if not isinstance(row, dict):
+            return ""
+        return str(
+            row.get("ticker")
+            or row.get("underlying")
+            or row.get("symbol")
+            or ((row.get("rows") or {}).get("core_scan") or {}).get("ticker")
+            or ""
+        ).upper()
+
+    previous = None
+    previous_tickers = set()
+    if scan and scan.get("finished_at"):
+        previous = await get_db().scan_results.find_one(
+            {"finished_at": {"$lt": scan.get("finished_at")}},
+            {"_id": 0, "results.ticker": 1, "candidate_ledger.candidates.ticker": 1},
+            sort=[("finished_at", -1)],
+        )
+        previous_tickers = {
+            _ticker_from_row(row)
+            for row in ((previous or {}).get("results") or [])
+            if _ticker_from_row(row)
+        }
+        previous_tickers.update({
+            _ticker_from_row(row)
+            for row in (((previous or {}).get("candidate_ledger") or {}).get("candidates") or [])
+            if _ticker_from_row(row)
+        })
+
+    current_docket = (ledger or {}).get("candidates") or []
+    tab_sets = {
+        "core": {_ticker_from_row(row) for row in tab_rows["core"] if _ticker_from_row(row)},
+        "docket": {_ticker_from_row(row) for row in current_docket if _ticker_from_row(row)},
+        "lottery": {_ticker_from_row(row) for row in tab_rows["lottery"] if _ticker_from_row(row)},
+        "options": {_ticker_from_row(row) for row in tab_rows["options"] if _ticker_from_row(row)},
+        "pharma": {_ticker_from_row(row) for row in tab_rows["pharma"] if _ticker_from_row(row)},
+        "earnings": {
+            _ticker_from_row(row)
+            for rows in ((tab_rows["earnings"] or {}).get("by_day") or {}).values()
+            for row in (rows or [])
+            if _ticker_from_row(row)
+        },
+        "court": {_ticker_from_row(row) for row in tab_rows["case_court"] if _ticker_from_row(row)},
+    }
+    new_since_previous = {
+        key: {
+            "count": len(sorted(tickers - previous_tickers)),
+            "tickers": sorted(tickers - previous_tickers)[:18],
+            "total": len(tickers),
+            "previous_scan_at": ((previous or {}).get("finished_at") if scan and scan.get("finished_at") else None),
+        }
+        for key, tickers in tab_sets.items()
+    }
     return {
         "ok": True,
         "scan": scan or {"results": [], "pre_filter_passed": 0, "raw_counts": {}},
         "ledger": ledger,
-        "tabs": {
-            "core": (scan or {}).get("results") or [],
-            "lottery": [] if isinstance(lottery_board, Exception) else lottery_board.get("candidates", []),
-            "options": [] if isinstance(options_payload, Exception) else options_payload.get("candidates", []),
-            "pharma": pharma_rows if isinstance(pharma_rows, list) else pharma_rows.get("results", []),
-            "earnings": (scan or {}).get("earnings_week") or {},
-            "case_court": [] if isinstance(court_payload, Exception) else court_payload.get("trials", []),
-        },
+        "tabs": tab_rows,
+        "new_since_previous": new_since_previous,
         "errors": {
             "lottery": str(lottery_board) if isinstance(lottery_board, Exception) else None,
             "options": str(options_payload) if isinstance(options_payload, Exception) else None,
