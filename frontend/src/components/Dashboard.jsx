@@ -879,12 +879,37 @@ function scannerFamilyRowModel(view, row) {
     riskLevel,
     scanner,
     strategyCase,
+    badges: Array.isArray(scanner.badges) ? scanner.badges : [],
     blocked: normalizeScannerSignals(row.blocked_reasons),
     dataQuality: row.data_quality || row.options_data_quality || row.qc_status || scanner.data_quality,
     options,
     squeeze,
     timeTarget,
     raw: row,
+  };
+}
+
+function scannerBadgeStyle(tone) {
+  const map = {
+    risk: { color: "#fbbf24", bg: "rgba(251,191,36,0.08)", bd: "rgba(251,191,36,0.32)" },
+    data: { color: "#5eead4", bg: "rgba(94,234,212,0.07)", bd: "rgba(94,234,212,0.28)" },
+    volume: { color: "#93c5fd", bg: "rgba(147,197,253,0.07)", bd: "rgba(147,197,253,0.25)" },
+    learning: { color: "#c4b5fd", bg: "rgba(196,181,253,0.08)", bd: "rgba(196,181,253,0.32)" },
+    options: { color: "#fb7185", bg: "rgba(251,113,133,0.07)", bd: "rgba(251,113,133,0.28)" },
+  };
+  const pick = map[tone] || { color: labelLight, bg: "rgba(255,255,255,0.04)", bd: "rgba(255,255,255,0.12)" };
+  return {
+    fontSize: 9,
+    padding: "3px 7px",
+    border: `0.5px solid ${pick.bd}`,
+    color: pick.color,
+    background: pick.bg,
+    letterSpacing: "0.08em",
+    fontWeight: 900,
+    maxWidth: 150,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   };
 }
 
@@ -945,6 +970,14 @@ function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kron
             );
           })}
         </div>
+
+        {m.badges.length ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, margin: "-2px 0 9px" }}>
+            {m.badges.map((b, i) => (
+              <span key={`${b.label}-${i}`} style={scannerBadgeStyle(b.tone)}>{String(b.label || "").toUpperCase()}</span>
+            ))}
+          </div>
+        ) : null}
 
         <div style={{
           fontSize: 13, color: "#e5e7eb", lineHeight: 1.7, marginBottom: 9,

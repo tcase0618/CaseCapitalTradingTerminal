@@ -37,6 +37,7 @@ class ScheduleSource:
 SOURCES: tuple[ScheduleSource, ...] = (
     ScheduleSource("latest_scan", "Core Stock Scan", "SCANNER", "00:00 / 08:00 / 12:00 / 15:00 / 18:30 ET on market days", 510, "scan_results", ("finished_at", "created_at"), sort=("finished_at", -1), critical=True, execution_scopes=("equity", "options"), repair="run_stock_scan_if_market_open", market_session_only=True),
     ScheduleSource("live_positions", "Live Position Snapshot", "EXECUTION", "Every 5 minutes from Alpaca, all sessions", 8, "bot_state", ("snapshot_at", "created_at"), query={"_id": "live_position_snapshot_latest"}, critical=True, execution_scopes=("equity", "options"), repair="repull_alpaca_positions"),
+    ScheduleSource("options_candidates", "Options Candidate Scan", "OPTIONS", "09:35 / 10:00 ET auto scan + execution preflight on market days", 390, "options_desk_candidates", ("generated_at", "created_at"), sort=("generated_at", -1), critical=True, execution_scopes=("options",), repair="refresh_options_candidates"),
     ScheduleSource("options_risk", "Options Risk Marks", "EXECUTION", "Every 5 minutes from Alpaca position authority", 8, "options_desk_risk_checks", ("checked_at", "created_at"), sort=("checked_at", -1), critical=True, execution_scopes=("options",), repair="recheck_options_positions"),
     ScheduleSource("earnings_week", "Earnings Calendar", "CATALYST", "Cached UI refresh with background repull", 180, "earnings_snapshots", ("created_at", "generated_at"), sort=("created_at", -1), repair="refresh_current_earnings_week"),
     ScheduleSource("kronos", "Kronos Forecast", "FORECAST", "Every 5 minutes, plus 09:30 ET Telegram market brief", 8, "kronos_forecast_runs", ("generated_at", "created_at"), sort=("generated_at", -1), repair="refresh_kronos_snapshot"),
@@ -208,6 +209,21 @@ async def _repair_strategy_screeners() -> dict[str, Any]:
     return {"ok": True, "outcome": "refreshed", "detail": payload.get("summary"), "generated_at": payload.get("generated_at")}
 
 
+async def _repair_options_candidates() -> dict[str, Any]:
+    market_day, reason = await _market_day_now()
+    if not market_day:
+        return {"ok": True, "outcome": "standby_market_closed", "detail": reason}
+    from . import options_desk
+
+    payload = await options_desk.build_candidates(limit=100, persist=True)
+    return {
+        "ok": True,
+        "outcome": "refreshed",
+        "detail": payload.get("summary"),
+        "generated_at": payload.get("generated_at"),
+    }
+
+
 async def _repair_research_lab() -> dict[str, Any]:
     from . import research_lab
 
@@ -246,6 +262,7 @@ def _repair_registry() -> dict[str, RepairFn]:
     return {
         "latest_scan": _repair_latest_scan,
         "live_positions": _repair_live_positions,
+        "options_candidates": _repair_options_candidates,
         "options_risk": _repair_options_risk,
         "earnings_week": _repair_earnings,
         "kronos": _repair_kronos,

@@ -73,6 +73,56 @@ STRATEGIES: dict[str, dict[str, Any]] = {
         "max_sleeve_risk_pct": 0.22,
         "invalidation": ["spread widens", "OI too thin", "delta out of band", "underlying thesis fails"],
     },
+    "options_tactical_momentum_call": {
+        "mission": "Buy directional call exposure only when underlying momentum and option liquidity line up.",
+        "ideal_setup": ["relative volume rising", "short-term trend confirms", "spread tradable", "delta in band"],
+        "risk_shape": "defined_premium_momentum",
+        "preferred_expression": "long_call_or_call_debit_spread",
+        "turnover_policy": "fast_entry_fast_invalidation_no_chasing",
+        "max_confidence": 0.82,
+        "max_sleeve_risk_pct": 0.20,
+        "invalidation": ["momentum stalls", "spread widens", "delta leaves band", "premium exceeds budget"],
+    },
+    "options_breakout_call": {
+        "mission": "Route liquid breakout candidates into options PM review for convex upside.",
+        "ideal_setup": ["new high or range break", "volume confirmation", "liquid common stock", "contract OI adequate"],
+        "risk_shape": "defined_premium_breakout",
+        "preferred_expression": "long_call_if_iv_reasonable_else_debit_spread",
+        "turnover_policy": "cancel quickly if breakout fails",
+        "max_confidence": 0.80,
+        "max_sleeve_risk_pct": 0.18,
+        "invalidation": ["failed breakout retest", "volume fades", "wide option spread"],
+    },
+    "options_leaps_trend": {
+        "mission": "Find durable trend candidates where longer dated calls can replace equity exposure.",
+        "ideal_setup": ["larger liquid company", "multi-month trend", "less binary risk", "long-dated chain available"],
+        "risk_shape": "delta_notional_long_duration",
+        "preferred_expression": "itm_leaps_or_no_trade",
+        "turnover_policy": "low_turnover_roll_before_theta_accelerates",
+        "max_confidence": 0.78,
+        "max_sleeve_risk_pct": 0.16,
+        "invalidation": ["trend breaks", "thesis weakens", "IV too high for stock replacement"],
+    },
+    "options_event_defined_risk": {
+        "mission": "Use options only when a dated event gives a defined risk/reward setup.",
+        "ideal_setup": ["dated catalyst", "known event window", "priced contract", "binary risk explicitly capped"],
+        "risk_shape": "event_defined_premium",
+        "preferred_expression": "debit_spread_or_small_long_call",
+        "turnover_policy": "exit before event unless PM approves binary hold",
+        "max_confidence": 0.76,
+        "max_sleeve_risk_pct": 0.14,
+        "invalidation": ["event date slips", "IV explodes", "contract market thins"],
+    },
+    "options_squeeze_call": {
+        "mission": "Scout high-short-interest names where call convexity may be worth the spread.",
+        "ideal_setup": ["high short interest", "attention rising", "liquid chain", "borrow/squeeze pressure plausible"],
+        "risk_shape": "defined_premium_squeeze",
+        "preferred_expression": "call_or_call_spread_only_if_contract_clean",
+        "turnover_policy": "small_size_take_profit_fast",
+        "max_confidence": 0.77,
+        "max_sleeve_risk_pct": 0.14,
+        "invalidation": ["squeeze fails", "OI thin", "spread widens", "underlying reverses"],
+    },
     "pharma_calendar": {
         "mission": "Route dated biotech catalysts into PM with binary risk explicitly sized.",
         "ideal_setup": ["dated FDA/catalyst event", "liquidity present", "run-up window active", "no near-term dilution"],
@@ -167,3 +217,80 @@ def case_score(
         "max_sleeve_risk_pct": ideology["max_sleeve_risk_pct"],
         "invalidation": ideology["invalidation"],
     }
+
+
+def apply_lottery_learning(
+    case: dict[str, Any],
+    *,
+    native_score: float,
+    row: dict[str, Any],
+    learned_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Adjust the visible Lottery case badge from closed-ticket learning.
+
+    This is deliberately modest. Learning may tune badges and confidence, but it
+    does not create order authority or bypass PM/execution gates.
+    """
+    if not learned_config:
+        return {**case, "learning_adjustment": {"active": False, "badges": ["LEARNING_ARMED"]}}
+
+    score = float(case.get("case_score") or 0)
+    confidence = float(case.get("confidence") or 0)
+    badges: list[str] = []
+    delta = 0.0
+
+    min_score = float(learned_config.get("min_ticket_score") or 60)
+    if native_score < min_score:
+        delta -= 8.0
+        confidence -= 0.05
+        badges.append(f"BELOW_LEARNED_MIN_{int(min_score)}")
+
+    strategy_id = str(case.get("strategy_id") or "")
+    retired = {str(x) for x in learned_config.get("retired_variants") or []}
+    if strategy_id in retired:
+        delta -= 20.0
+        confidence -= 0.18
+        badges.append("VARIANT_RETIRED")
+
+    score_bucket = (
+        "90+" if native_score >= 90 else
+        "80-89" if native_score >= 80 else
+        "70-79" if native_score >= 70 else
+        "60-69" if native_score >= 60 else
+        "<60"
+    )
+    triggers = {str(x).upper() for x in (row.get("triggers") or row.get("signals") or [])}
+    catalyst_class = "PHARMA_FDA" if {"PHARMA/FDA", "PDUFA", "FDA_CALENDAR"} & triggers else "ATTENTION" if {"ATTENTION", "X_FACTOR"} & triggers else "UNCLASSIFIED"
+
+    for item in learned_config.get("preferred_segments") or []:
+        dim = str(item.get("dimension") or "")
+        seg = str(item.get("segment") or "")
+        if (dim == "score_bucket" and seg == score_bucket) or (dim == "catalyst_class" and seg == catalyst_class):
+            delta += 4.0
+            confidence += 0.03
+            badges.append(f"LEARNED_EDGE_{seg}")
+
+    for item in learned_config.get("penalized_segments") or []:
+        dim = str(item.get("dimension") or "")
+        seg = str(item.get("segment") or "")
+        if (dim == "score_bucket" and seg == score_bucket) or (dim == "catalyst_class" and seg == catalyst_class):
+            delta -= 5.0
+            confidence -= 0.04
+            badges.append(f"LEARNED_DRAG_{seg}")
+
+    if not badges:
+        badges.append(str(learned_config.get("status") or "GATHERING"))
+
+    updated = {
+        **case,
+        "case_score": round(max(0.0, min(100.0, score + delta)), 1),
+        "confidence": round(max(0.15, min(float(case.get("confidence") or 0.65) + 0.12, confidence)), 2),
+        "learning_adjustment": {
+            "active": True,
+            "delta": round(delta, 1),
+            "badges": badges[:4],
+            "config_version": learned_config.get("version"),
+            "sample_count": learned_config.get("sample_count"),
+        },
+    }
+    return updated

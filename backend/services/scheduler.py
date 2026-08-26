@@ -89,41 +89,17 @@ async def _daily_scan_job():
             except Exception:
                 pass
             return
-        from . import telegram_events
-        scan_task = asyncio.create_task(scanner.run_scan(triggered_by="scheduler"))
-        lottery_task = asyncio.create_task(lottery.run_dedicated_lottery_scan(triggered_by="scheduler_cycle"))
-        scan = await scan_task
-        try:
-            lottery_result = await asyncio.wait_for(lottery_task, timeout=45.0)
-            await log_activity(
-                f"Scheduler cycle lottery scan complete: {lottery_result.get('count', 0)} candidates",
-                "info",
-                {"count": lottery_result.get("count", 0), "triggered_by": "scheduler_cycle"},
-            )
-        except Exception as exc:
-            logger.warning("lottery scan in scheduled cycle failed: %s", exc)
-        try:
-            from . import candidate_ledger, strategy_screeners
-
-            screeners = await asyncio.wait_for(strategy_screeners.run_all(scan=scan, persist=True), timeout=45.0)
-            await asyncio.wait_for(candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True), timeout=45.0)
-            await log_activity(
-                f"Strategy screeners complete: {((screeners.get('summary') or {}).get('pm_routable') or 0)} PM-routable, "
-                f"{((screeners.get('summary') or {}).get('read_only') or 0)} read-only",
-                "info",
-                screeners.get("summary") or {},
-            )
-        except Exception as exc:
-            logger.warning("strategy screener post-scan refresh failed: %s", exc)
-        try:
-            from . import pharma
-            await asyncio.wait_for(
-                pharma.run_catalyst_shock_scan(triggered_by="post_stock_scan", force_refresh=True),
-                timeout=30.0,
-            )
-        except Exception as exc:
-            logger.warning("pharma catalyst post-scan refresh failed: %s", exc)
-        await telegram_events.dispatch_scan_report(scan)
+        from . import terminal_cycle
+        result = await terminal_cycle.run_full_terminal_scan(triggered_by="scheduler")
+        await log_activity(
+            "Scheduled full terminal cycle complete",
+            "info",
+            {
+                "duration_sec": result.get("duration_sec"),
+                "stage_times": result.get("stage_times"),
+                "summary": result.get("summary"),
+            },
+        )
     except Exception as e:
         logger.exception("daily scan job failed: %s", e)
 
@@ -462,7 +438,7 @@ def start_scheduler():
         replace_existing=True,
     )
     # Options open sweep: close/refresh risk first, then submit PM-approved buys.
-    async def _options_open_auto_execute_job():
+    async def _options_auto_execute_scan_job(label: str = "9:35"):
         try:
             from . import options_desk, tail_hunter, telegram_events
 
@@ -474,19 +450,20 @@ def start_scheduler():
                 "rejected": (tail.get("summary") or {}).get("rejected", 0),
             }
             await log_activity(
-                f"Options open auto-execute 9:35: {len(result.get('submitted', []))} submitted, "
+                f"Options auto-execute scan {label}: {len(result.get('submitted', []))} submitted, "
                 f"{len(result.get('skipped', []))} skipped, tail ready={result['tail_hunter']['ready']}",
                 "success" if result.get("submitted") else "info",
                 result,
             )
             if not result.get("submitted"):
                 await telegram_events.emit_event(
-                    "options_open_no_orders",
+                    f"options_auto_scan_no_orders_{label.replace(':', '')}",
                     severity="info",
                     scope="options",
-                    title="Options open sweep complete",
+                    title=f"Options scan {label} complete",
                     summary=f"No option buys submitted; {len(result.get('skipped', []))} skipped by gate/preflight.",
                     details={
+                        "label": label,
                         "ready": result.get("ready"),
                         "skipped": (result.get("skipped") or [])[:8],
                         "pre_execution_risk_check": result.get("pre_execution_risk_check"),
@@ -494,11 +471,24 @@ def start_scheduler():
                     priority="summary",
                 )
         except Exception as e:
-            logger.warning("options open auto-execute: %s", e)
+            logger.warning("options auto-execute scan %s: %s", label, e)
+
+    async def _options_open_auto_execute_job():
+        await _options_auto_execute_scan_job("9:35")
+
+    async def _options_10am_auto_execute_job():
+        await _options_auto_execute_scan_job("10:00")
+
     _scheduler.add_job(
         _options_open_auto_execute_job,
         CronTrigger(day_of_week="mon-fri", hour=9, minute=35, timezone=ET),
         id="options_open_auto_execute_935",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _options_10am_auto_execute_job,
+        CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=ET),
+        id="options_only_auto_execute_1000",
         replace_existing=True,
     )
     # Nightly P&L refresh - 23:00 ET (also runs at 02:00 ET below)
@@ -835,7 +825,7 @@ def start_scheduler():
     _scheduler.start()
     logger.info(
         "Scheduler: stock scans 00:00/08:00/12:00/15:00/18:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
-        "+ 5m active lottery monitor + alerts/flow/P&L/learning"
+        "+ Options auto scans 09:35/10:00 + 5m active lottery monitor + alerts/flow/P&L/learning"
     )
 
 

@@ -9,6 +9,16 @@ import { DataConfidenceStrip, DataTableShell, SourceBadge } from "./Institutiona
 const { accent, accent2, dim, muted, labelLight, hairline, pageBg } = tokens;
 
 const scanCommands = [
+  {
+    id: "full_terminal",
+    label: "Full Terminal Scan",
+    endpoint: "/scan/full_terminal",
+    method: "post",
+    complete: d => {
+      const s = d.summary || {};
+      return `${s.core_results || 0} core / ${s.strategy_candidates || 0} strategy / ${s.options_candidates || 0} options / ${s.pm_routable || 0} PM`;
+    },
+  },
   { id: "main", label: "Full Signal Scan", endpoint: "/scan/run", method: "post", complete: d => `${d.results?.length || 0} targets` },
   { id: "gov", label: "Gov Contracts Scan", endpoint: "/scan/gov", method: "post", complete: d => `${d.results?.length || 0} contract plays` },
   { id: "pharma", label: "Pharma PDUFA Scan", endpoint: "/pharma/scan", method: "post", complete: d => `${d.results?.length || 0} PDUFA rows` },

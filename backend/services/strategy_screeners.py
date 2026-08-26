@@ -6,13 +6,37 @@ can have its own scanner lane without adding order authority here.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
 from .db import get_db, stamped
 from . import strategy_ideology
 
-SCREENER_VERSION = "strategy-screeners-v1.0"
+SCREENER_VERSION = "strategy-screeners-v1.1-options-badges"
+OPTIONS_FINVIZ_STRATEGY_SCREENS = {
+    "options_momentum_underlying_finviz": {
+        "url": "https://finviz.com/screener.ashx?v=111&f=sh_price_o5,sh_avgvol_o500,sh_relvol_o1.5,ta_perf_1wup&o=-relativevolume",
+        "lane": "TACTICAL_MOMENTUM_CALL",
+        "screener_id": "options_tactical_momentum_call",
+        "signals": ["OPTION_MOMENTUM", "RVOL_CONFIRM"],
+        "base_score": 58,
+    },
+    "options_breakout_underlying_finviz": {
+        "url": "https://finviz.com/screener.ashx?v=111&f=sh_price_o5,sh_avgvol_o500,ta_highlow20d_nh&o=-volume",
+        "lane": "BREAKOUT_CALL",
+        "screener_id": "options_breakout_call",
+        "signals": ["OPTION_BREAKOUT", "NEW_HIGH_CONFIRM"],
+        "base_score": 57,
+    },
+    "options_liquid_largecap_leaps_finviz": {
+        "url": "https://finviz.com/screener.ashx?v=111&f=cap_midover,sh_price_o10,sh_avgvol_o500,ta_sma200_pa&o=-marketcap",
+        "lane": "LEAPS_TREND",
+        "screener_id": "options_leaps_trend",
+        "signals": ["LEAPS_CANDIDATE", "LIQUID_UNDERLYING"],
+        "base_score": 55,
+    },
+}
 
 
 def _now() -> datetime:
@@ -69,6 +93,7 @@ def _base_row(
     pm_routable: bool = True,
     read_only: bool = False,
     notes: list[str] | None = None,
+    learned_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ticker = _ticker(row.get("ticker") or row.get("underlying") or row.get("symbol"))
     px = _num(price if price is not None else row.get("price") or row.get("last") or row.get("current_price"), 0)
@@ -94,6 +119,13 @@ def _base_row(
         family=family,
         lane=lane,
     )
+    if family == "LOTTERY":
+        strategy_case = strategy_ideology.apply_lottery_learning(
+            strategy_case,
+            native_score=score,
+            row=row,
+            learned_config=learned_config,
+        )
     return {
         "ticker": ticker,
         "company": row.get("company") or row.get("name") or ticker,
@@ -118,6 +150,7 @@ def _base_row(
             "native_score": round(score, 1),
             "case_score": strategy_case["case_score"],
             "confidence": strategy_case["confidence"],
+            "badges": _strategy_badges(strategy_case, row),
             "pm_routable": bool(pm_routable),
             "read_only": bool(read_only),
             "notes": notes or [],
@@ -133,7 +166,29 @@ def _base_row(
     }
 
 
-def _lottery_family_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _strategy_badges(strategy_case: dict[str, Any], row: dict[str, Any]) -> list[dict[str, Any]]:
+    badges = [
+        {"label": str(strategy_case.get("risk_shape") or "RISK").replace("_", " ").upper(), "tone": "risk"},
+        {"label": f"QC {strategy_case.get('data_quality', 0)}", "tone": "data"},
+        {"label": f"VOL {strategy_case.get('volume_intensity_score', 0)}", "tone": "volume"},
+    ]
+    learned = strategy_case.get("learning_adjustment") or {}
+    for badge in learned.get("badges") or []:
+        badges.append({"label": str(badge).replace("_", " ").upper(), "tone": "learning"})
+    opts = row.get("options") or {}
+    if opts.get("data_quality"):
+        badges.append({"label": str(opts.get("data_quality")).replace("_", " ").upper(), "tone": "options"})
+    return badges[:7]
+
+
+async def _lottery_learned_config() -> dict[str, Any] | None:
+    try:
+        return await get_db().ll_learned_config.find_one({"_id": "current"}, {"_id": 0})
+    except Exception:
+        return None
+
+
+def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
         ticker = _ticker(row.get("ticker"))
@@ -148,24 +203,25 @@ def _lottery_family_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 out.append(_base_row(
                     row=row,
                     screener_id="lottery_dilution_read",
-                    family="LOTTERY",
-                    lane="DILUTION_READ",
-                    score=max(score, 45),
-                    pm_routable=False,
-                    read_only=True,
-                    notes=["Dilution scan is read-only evidence in this rollout."],
-                ))
+                family="LOTTERY",
+                lane="DILUTION_READ",
+                score=max(score, 45),
+                pm_routable=False,
+                read_only=True,
+                notes=["Dilution scan is read-only evidence in this rollout."],
+                learned_config=learned_config,
+            ))
             continue
         if score >= 50:
-            out.append(_base_row(row=row, screener_id="lottery_day2_continuation", family="LOTTERY", lane="DAY2_CONTINUATION", score=score))
+            out.append(_base_row(row=row, screener_id="lottery_day2_continuation", family="LOTTERY", lane="DAY2_CONTINUATION", score=score, learned_config=learned_config))
         if _num(comps.get("structure"), 0) >= 4 or _num(row.get("change_pct"), 0) >= 8:
-            out.append(_base_row(row=row, screener_id="lottery_red_green", family="LOTTERY", lane="RED_GREEN", score=max(score, 52)))
+            out.append(_base_row(row=row, screener_id="lottery_red_green", family="LOTTERY", lane="RED_GREEN", score=max(score, 52), learned_config=learned_config))
         if _num(comps.get("rvol"), 0) >= 9 or _num(comps.get("rotation"), 0) >= 6 or "RVOL" in triggers or "ROTATION" in triggers:
-            out.append(_base_row(row=row, screener_id="lottery_supernova", family="LOTTERY", lane="SUPERNOVA", score=max(score, 56)))
+            out.append(_base_row(row=row, screener_id="lottery_supernova", family="LOTTERY", lane="SUPERNOVA", score=max(score, 56), learned_config=learned_config))
         if _num(comps.get("catalyst"), 0) > 0 or {"PHARMA/FDA", "CONTRACT", "EARNINGS"} & triggers:
-            out.append(_base_row(row=row, screener_id="lottery_catalyst_runner", family="LOTTERY", lane="CATALYST_RUNNER", score=max(score, 55)))
+            out.append(_base_row(row=row, screener_id="lottery_catalyst_runner", family="LOTTERY", lane="CATALYST_RUNNER", score=max(score, 55), learned_config=learned_config))
         if "RUNNER" in _text_blob(row) or row.get("prior_runner_events") or _num(row.get("relative_volume"), 0) >= 8:
-            out.append(_base_row(row=row, screener_id="lottery_serial_runner", family="LOTTERY", lane="SERIAL_RUNNER", score=max(score, 54)))
+            out.append(_base_row(row=row, screener_id="lottery_serial_runner", family="LOTTERY", lane="SERIAL_RUNNER", score=max(score, 54), learned_config=learned_config))
         if dilution.get("active") or any(str((p or {}).get("key") or "").lower() == "dilution" for p in (row.get("penalties") or [])):
             out.append(_base_row(
                 row=row,
@@ -176,6 +232,7 @@ def _lottery_family_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 pm_routable=False,
                 read_only=True,
                 notes=["Dilution scan is read-only evidence in this rollout."],
+                learned_config=learned_config,
             ))
     return out
 
@@ -188,11 +245,20 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
     """
     by_ticker: dict[str, dict[str, Any]] = {}
 
-    def add(ticker: Any, *, source: str, lane: str, score: float, signals: list[str] | None = None, row: dict[str, Any] | None = None) -> None:
+    def add(
+        ticker: Any,
+        *,
+        source: str,
+        lane: str,
+        score: float,
+        signals: list[str] | None = None,
+        row: dict[str, Any] | None = None,
+        screener_id: str | None = None,
+    ) -> None:
         t = _ticker(ticker)
         if not t:
             return
-        existing = by_ticker.get(t) or {"ticker": t, "signals": [], "sources": [], "option_lanes": []}
+        existing = by_ticker.get(t) or {"ticker": t, "signals": [], "sources": [], "option_lanes": [], "option_screeners": []}
         merged_signals = list(dict.fromkeys([*(existing.get("signals") or []), *(signals or []), source, lane]))
         by_ticker[t] = {
             **existing,
@@ -202,8 +268,38 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
             "sources": list(dict.fromkeys([*(existing.get("sources") or []), source])),
             "signals": merged_signals,
             "option_lanes": list(dict.fromkeys([*(existing.get("option_lanes") or []), lane])),
+            "option_screeners": list(dict.fromkeys([*(existing.get("option_screeners") or []), screener_id or f"options_{lane.lower()}"])),
             "score": max(_num(existing.get("score"), 0), float(score or 0)),
         }
+
+    try:
+        from . import lottery
+
+        async def fetch_option_screen(source: str, spec: dict[str, Any]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+            rows = await lottery._fetch_finviz_url(spec["url"], source, limit=70)
+            return source, spec, rows
+
+        tasks = [fetch_option_screen(source, spec) for source, spec in OPTIONS_FINVIZ_STRATEGY_SCREENS.items()]
+        for result in await asyncio.gather(*tasks, return_exceptions=True):
+            if isinstance(result, Exception):
+                continue
+            source, spec, rows = result
+            for row in rows:
+                change = abs(_num(row.get("change_pct") or row.get("change"), 0))
+                rel_vol = _num(row.get("relative_volume") or row.get("rel_volume"), 0)
+                volume = _num(row.get("volume"), 0)
+                score = min(82, float(spec["base_score"]) + min(10, change * 0.45) + min(8, rel_vol * 1.2) + (4 if volume >= 1_000_000 else 0))
+                add(
+                    row.get("ticker"),
+                    source=source,
+                    lane=spec["lane"],
+                    score=score,
+                    signals=spec["signals"],
+                    row=row,
+                    screener_id=spec["screener_id"],
+                )
+    except Exception:
+        pass
 
     try:
         from . import scrapers
@@ -214,10 +310,11 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
             add(
                 row.get("ticker"),
                 source="options_finviz_high_short",
-                lane="TACTICAL_MOMENTUM_CALL",
+                lane="SQUEEZE_CALL",
                 score=min(78, 54 + short_pct * 0.7),
-                signals=["HIGH_SHORT_INTEREST", "OPTION_MOMENTUM"],
+                signals=["HIGH_SHORT_INTEREST", "OPTION_SQUEEZE"],
                 row=row,
+                screener_id="options_squeeze_call",
             )
     except Exception:
         pass
@@ -233,6 +330,7 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
                 lane="TACTICAL_MOMENTUM_CALL",
                 score=56,
                 signals=["YAHOO_TRENDING", "ATTENTION"],
+                screener_id="options_tactical_momentum_call",
             )
     except Exception:
         pass
@@ -250,6 +348,7 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
                 score=max(58, _num(row.get("binary_event_score") or row.get("score") or row.get("materiality_score"), 58)),
                 signals=["PHARMA", "FDA_CALENDAR", "EVENT_DEFINED_RISK"],
                 row=row,
+                screener_id="options_event_defined_risk",
             )
     except Exception:
         pass
@@ -276,17 +375,34 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
         lanes = row.get("option_lanes") or ["TACTICAL_MOMENTUM_CALL"]
         lane = "EVENT_DEFINED_RISK" if "EVENT_DEFINED_RISK" in lanes else str(lanes[0])
         score = _num(row.get("score"), 0)
-        strategy = "LONG_CALL_EVENT_SCOUT" if lane == "EVENT_DEFINED_RISK" else "LONG_CALL_SCOUT"
-        built = _base_row(row=row, screener_id=f"options_{lane.lower()}", family="OPTIONS", lane=lane, score=max(score, 50))
+        screeners = row.get("option_screeners") or [f"options_{lane.lower()}"]
+        preferred = (
+            "options_event_defined_risk" if lane == "EVENT_DEFINED_RISK" else
+            "options_leaps_trend" if lane == "LEAPS_TREND" else
+            "options_breakout_call" if lane == "BREAKOUT_CALL" else
+            "options_squeeze_call" if lane == "SQUEEZE_CALL" else
+            "options_tactical_momentum_call"
+        )
+        screener_id = preferred if preferred in screeners else str(screeners[0])
+        strategy = (
+            "LONG_CALL_EVENT_SCOUT" if lane == "EVENT_DEFINED_RISK" else
+            "ITM_LEAPS_SCOUT" if lane == "LEAPS_TREND" else
+            "CALL_BREAKOUT_SCOUT" if lane == "BREAKOUT_CALL" else
+            "LONG_CALL_SCOUT"
+        )
+        built = _base_row(row=row, screener_id=screener_id, family="OPTIONS", lane=lane, score=max(score, 50))
         built["options"] = {
             "strategy": strategy,
             "direction": "BULL",
             "strategy_reason": "Independent options screener candidate; contract still must clear Alpaca chain and liquidity checks.",
             "iv_rank": row.get("iv_rank", 50),
             "iv_label": row.get("iv_label", "UNKNOWN"),
+            "screener_lanes": lanes,
+            "screener_sources": row.get("sources") or [],
             "data_provider": "SCREENER_ONLY",
             "data_quality": "NEEDS_CHAIN_REFRESH",
         }
+        built["strategy_scanner"]["badges"] = _strategy_badges(built["strategy_case"], {"options": built["options"], **row})
         out.append(built)
     return out
 
@@ -485,7 +601,8 @@ async def run_all(
         lottery_rows = []
 
     rows: list[dict[str, Any]] = []
-    rows.extend(_lottery_family_rows(lottery_rows))
+    learned_config = await _lottery_learned_config()
+    rows.extend(_lottery_family_rows(lottery_rows, learned_config=learned_config))
     if include_options_native:
         rows.extend(await _independent_options_rows())
     rows.extend(await _pharma_rows(scan_rows))

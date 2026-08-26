@@ -915,6 +915,18 @@ async def run_scan_now():
     return scan
 
 
+@api.post("/scan/full_terminal")
+async def full_terminal_scan():
+    """Run the operator-facing full terminal scan from Launch Control.
+
+    This refreshes discovery and decision state across the terminal. It does
+    not create a new execution authority; any orders still have to pass the
+    existing PM, execution gate, and desk-specific controls.
+    """
+    from services import terminal_cycle
+    return await terminal_cycle.run_full_terminal_scan(triggered_by="launch_control_full_terminal")
+
+
 @api.post("/scan/dispatch")
 async def scan_dispatch():
     scan = await scanner.latest_scan()
