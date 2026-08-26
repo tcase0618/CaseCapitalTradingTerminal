@@ -1545,6 +1545,17 @@ async def scan_tabs():
         "strategy_screeners": [] if isinstance(screeners_payload, Exception) else screeners_payload.get("candidates", []),
         "case_court": [],
     }
+    screener_rows = [] if isinstance(screeners_payload, Exception) else screeners_payload.get("candidates", [])
+    def _family_rows(family: str) -> list[dict[str, Any]]:
+        fam = family.upper()
+        return [r for r in screener_rows if str(r.get("scanner_family") or "").upper() == fam]
+
+    options_strategy_rows = _family_rows("OPTIONS")
+    pharma_strategy_rows = _family_rows("PHARMA")
+    if options_strategy_rows:
+        tab_rows["options"] = options_strategy_rows
+    if pharma_strategy_rows:
+        tab_rows["pharma"] = pharma_strategy_rows
 
     def _ticker_from_row(row):
         if not isinstance(row, dict):

@@ -297,6 +297,84 @@ async def _finviz_candidates() -> list[dict[str, Any]]:
         return []
 
 
+async def _short_interest_candidates() -> list[dict[str, Any]]:
+    try:
+        from . import scrapers
+
+        rows = await scrapers.fetch_finviz_high_short_interest(min_pct=10.0, limit=80)
+    except Exception as exc:
+        logger.warning("Lottery League high-short universe failed: %s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ticker = _clean_ticker(row.get("ticker"))
+        if not ticker:
+            continue
+        out.append({
+            **row,
+            "ticker": ticker,
+            "price": row.get("price"),
+            "relative_volume": row.get("relative_volume") or 0,
+            "source": "finviz_high_short_lottery_screen",
+            "signals": ["HIGH_SHORT_INTEREST", "ATTENTION"],
+        })
+    return out
+
+
+async def _attention_candidates() -> list[dict[str, Any]]:
+    try:
+        from . import x_factor
+
+        trending = await x_factor.yahoo_trending_set()
+        unusual = await x_factor.barchart_unusual_set()
+    except Exception as exc:
+        logger.warning("Lottery League attention universe failed: %s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for ticker in sorted((trending | unusual))[:80]:
+        sources = []
+        signals = ["ATTENTION"]
+        if ticker in trending:
+            sources.append("YAHOO_TRENDING")
+            signals.append("YAHOO_TRENDING")
+        if ticker in unusual:
+            sources.append("BARCHART_UNUSUAL")
+            signals.append("UNUSUAL_OPTIONS")
+        out.append({
+            "ticker": ticker,
+            "source": "attention_lottery_screen",
+            "sources": sources,
+            "signals": signals,
+            "relative_volume": 2,
+        })
+    return out
+
+
+async def _pharma_catalyst_candidates() -> list[dict[str, Any]]:
+    try:
+        from . import pharma
+
+        payload = await pharma.get_pdufa_within_days(days=90)
+        rows = payload if isinstance(payload, list) else payload.get("results") or []
+    except Exception as exc:
+        logger.warning("Lottery League pharma catalyst universe failed: %s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows[:60]:
+        ticker = _clean_ticker(row.get("ticker"))
+        if not ticker:
+            continue
+        out.append({
+            **row,
+            "ticker": ticker,
+            "source": "pharma_catalyst_lottery_screen",
+            "signals": list(dict.fromkeys([*(row.get("signals") or []), "PHARMA_PDUFA", "ATTENTION"])),
+            "relative_volume": row.get("relative_volume") or 2,
+            "change_pct": row.get("change_pct") or 0,
+        })
+    return out
+
+
 async def _latest_scan_rows() -> list[dict[str, Any]]:
     db = get_db()
     scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1}, sort=[("finished_at", -1)])
@@ -327,13 +405,18 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
     db = get_db()
     halted = await _halted_symbols()
     finviz = await _finviz_candidates()
+    high_short = await _short_interest_candidates()
+    attention = await _attention_candidates()
+    catalysts = await _pharma_catalyst_candidates()
     by_ticker: dict[str, dict[str, Any]] = {}
-    for row in finviz:
+    for row in finviz + high_short + attention + catalysts:
         ticker = _clean_ticker(row.get("ticker"))
         if not ticker:
             continue
         existing = by_ticker.get(ticker) or {}
-        by_ticker[ticker] = {**existing, **row, "ticker": ticker}
+        merged_signals = list(dict.fromkeys([*(existing.get("signals") or []), *(row.get("signals") or [])]))
+        merged_sources = list(dict.fromkeys([*(existing.get("sources") or []), row.get("source"), *(row.get("sources") or [])]))
+        by_ticker[ticker] = {**existing, **row, "ticker": ticker, "signals": merged_signals, "sources": [s for s in merged_sources if s]}
 
     candidates = []
     for row in list(by_ticker.values())[:120]:
@@ -347,7 +430,14 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
         "scanned_at": _now().isoformat(),
         "triggered_by": triggered_by,
         "rubric_version": LL_RUBRIC_VERSION,
-        "source_counts": {"finviz_low_float_screen": len(finviz), "latest_scan": 0, "deduped": len(candidates)},
+        "source_counts": {
+            "finviz_low_float_screen": len(finviz),
+            "finviz_high_short_lottery_screen": len(high_short),
+            "attention_lottery_screen": len(attention),
+            "pharma_catalyst_lottery_screen": len(catalysts),
+            "latest_scan": 0,
+            "deduped": len(candidates),
+        },
         "regime": regime,
         "candidates": candidates,
     })

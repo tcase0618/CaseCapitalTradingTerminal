@@ -394,6 +394,10 @@ export default function Dashboard() {
               view={scannerView}
               rows={scannerTabRows[scannerView] || []}
               errors={scanTabs?.errors || {}}
+              selected={selected}
+              onSelect={setSelected}
+              kronosCard={kronosCard}
+              kronosLoading={kronosLoading}
             />
           )}
 
@@ -770,7 +774,7 @@ function ScannerSubTabs({ active, onChange, counts, ledgerSummary }) {
   );
 }
 
-function ScannerSubtabPanel({ view, rows, errors }) {
+function ScannerSubtabPanel({ view, rows, errors, selected, onSelect, kronosCard, kronosLoading }) {
   const error = errors?.[view === "court" ? "case_court" : view];
   return (
     <div style={scannerPanel}>
@@ -783,8 +787,259 @@ function ScannerSubtabPanel({ view, rows, errors }) {
       ) : (
         <div style={scannerCompactRows}>
           {rows.slice(0, 80).map((row, idx) => (
-            <ScannerCompactRow key={`${view}-${row.candidate_id || row.ticker || row.symbol || "row"}-${idx}`} view={view} row={row} idx={idx} />
+            <ScannerFamilyRow
+              key={`${view}-${row.candidate_id || row.ticker || row.symbol || "row"}-${idx}`}
+              view={view}
+              row={row}
+              idx={idx}
+              selected={selected}
+              onSelect={onSelect}
+              kronosCard={kronosCard}
+              kronosLoading={kronosLoading}
+            />
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function normalizeScannerSignals(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter(Boolean).map(String);
+  if (value instanceof Set) return Array.from(value).filter(Boolean).map(String);
+  if (typeof value === "object") return Object.keys(value).filter(Boolean);
+  return [String(value)];
+}
+
+function normalizeScannerPrice(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function scannerRingScore(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return n > 10 ? Math.max(0, Math.min(10, n / 10)) : Math.max(0, Math.min(10, n));
+}
+
+function scannerDisplayScore(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  return n > 10 ? n.toFixed(1) : n.toFixed(1);
+}
+
+function scannerDisplayConfidence(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n <= 1 ? Math.round(n * 100) : Math.round(n);
+}
+
+function scannerFamilyRowModel(view, row) {
+  const ticker = row.ticker || row.underlying || row.symbol || row.rows?.core_scan?.ticker || "-";
+  const scanner = row.strategy_scanner || row.source_scan || {};
+  const strategyCase = row.strategy_case || {};
+  const options = row.options || {};
+  const targets = row.targets || {};
+  const squeeze = row.squeeze || {};
+  const timeTarget = row.time_target || {};
+  const score = row.pm_score ?? row.case_score ?? row.score ?? row.signal_score ?? row.binary_event_score ?? row.candidate_quality_score;
+  const action = row.action || row.tier || row.final_route || row.judge?.posture || row.pm_action || row.route || scanner.lane || "-";
+  const signals = [
+    ...normalizeScannerSignals(row.signals),
+    ...normalizeScannerSignals(row.triggers),
+    ...normalizeScannerSignals(row.strategy_tags),
+    ...normalizeScannerSignals(row.sources || row.candidate_sources),
+  ].filter((x, i, arr) => arr.indexOf(x) === i);
+  const detail = row.thesis || row.company || row.company_name || row.drug || row.strategy || row.reason || row.judge?.detail || row.data_quality || `${view.toUpperCase()} scanner candidate`;
+  const target = targets.target_blended ?? row.target_blended ?? row.target_price ?? row.exit_plan?.target;
+  const upside = targets.upside_blended ?? row.upside_blended ?? row.expected_return_pct ?? row.forecast_pct;
+  const entryLow = row.entry_low ?? row.entry_plan?.entry_low ?? row.price;
+  const entryHigh = row.entry_high ?? row.entry_plan?.entry_high ?? row.price;
+  const stop = row.stop_loss ?? row.stop ?? row.exit_plan?.stop ?? row.risk?.stop_loss;
+  const route = row.pm_route || row.route || row.final_route || row.instrument || scanner.family || view.toUpperCase();
+  const riskLevel = row.risk?.level || row.risk_level || (
+    String(strategyCase.risk_shape || scanner.risk_shape || "").includes("very_high") ? "EXTREME" :
+    String(strategyCase.risk_shape || scanner.risk_shape || "").includes("high") ? "HIGH" :
+    row.blocked_reasons?.length ? "HIGH" : "MEDIUM"
+  );
+  return {
+    ticker: String(ticker || "-").toUpperCase(),
+    score,
+    action: String(action || "-").replace(/_/g, " "),
+    signals,
+    detail,
+    price: normalizeScannerPrice(row.price ?? row.current_price ?? row.underlying_price),
+    target: normalizeScannerPrice(target),
+    upside,
+    entryLow: normalizeScannerPrice(entryLow),
+    entryHigh: normalizeScannerPrice(entryHigh),
+    stop: normalizeScannerPrice(stop),
+    route: String(route || view).replace(/_/g, " "),
+    riskLevel,
+    scanner,
+    strategyCase,
+    blocked: normalizeScannerSignals(row.blocked_reasons),
+    dataQuality: row.data_quality || row.options_data_quality || row.qc_status || scanner.data_quality,
+    options,
+    squeeze,
+    timeTarget,
+    raw: row,
+  };
+}
+
+function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kronosLoading }) {
+  const m = scannerFamilyRowModel(view, row);
+  const isSel = selected === m.ticker;
+  const targetColor = String(m.action).includes("REJECT") || String(m.action).includes("BLOCK") || String(m.action).includes("OBJECT")
+    ? "#f87171"
+    : String(m.action).includes("WATCH")
+      ? "#fbbf24"
+      : String(m.action).includes("READY") || String(m.action).includes("STARTER") || String(m.action).includes("ACCUMULATE") || String(m.action).includes("PASS")
+        ? "#4ade80"
+        : accent;
+  const tagList = m.signals.length ? m.signals.slice(0, 8) : [m.route];
+  return (
+    <div
+      data-testid={`scanner-family-row-${view}-${m.ticker}`}
+      onClick={() => onSelect?.(isSel ? null : m.ticker)}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "56px 1fr 130px",
+        borderBottom: hairlineLight,
+        cursor: "pointer",
+        background: isSel ? "#0f0f15" : "transparent",
+        borderLeft: isSel ? `2px solid ${accent}` : "2px solid transparent",
+        transition: "background 0.15s, border-left 0.15s",
+      }}
+      onMouseEnter={e => !isSel && (e.currentTarget.style.background = "#111118")}
+      onMouseLeave={e => !isSel && (e.currentTarget.style.background = "transparent")}
+    >
+      <div style={{ padding: "16px 0 16px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+        <ScoreRing score={scannerRingScore(m.score)} />
+        <StrengthBars score={scannerRingScore(m.score)} />
+      </div>
+
+      <div style={{ padding: "14px 12px 14px 8px", minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "baseline", minWidth: 0, flexWrap: "wrap", gap: "0 10px" }}>
+          <Link to={`/ticker/${m.ticker}`} style={{
+            fontSize: 19, color: "#fff", fontWeight: 700, letterSpacing: "0.05em",
+            textDecoration: "none", fontFamily: "Courier New",
+          }}>${m.ticker}</Link>
+          <span style={{ fontSize: 11, color: accent, letterSpacing: "0.1em", fontWeight: 900 }}>{m.route.toUpperCase()}</span>
+          <span style={{ fontSize: 13, color: labelLight, fontFamily: "Courier New" }}>{fmtPrice(m.price)}</span>
+          {m.dataQuality && <span style={{ fontSize: 10, color: muted, letterSpacing: "0.08em" }}>{String(m.dataQuality).toUpperCase()}</span>}
+        </div>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, margin: "7px 0 9px" }}>
+          {tagList.map(s => {
+            const key = String(s);
+            const tag = SIG_TAG[key] || { label: key.replace(/_/g, " "), color: muted, bg: "rgba(255,255,255,0.03)", bd: "rgba(255,255,255,0.1)" };
+            return (
+              <span key={key} style={{
+                fontSize: 10, padding: "3px 9px", border: `0.5px solid ${tag.bd}`,
+                color: tag.color, background: tag.bg,
+                letterSpacing: "0.08em", fontWeight: 700,
+                maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>{tag.label}</span>
+            );
+          })}
+        </div>
+
+        <div style={{
+          fontSize: 13, color: "#e5e7eb", lineHeight: 1.7, marginBottom: 9,
+          display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+        }}>{m.detail}</div>
+
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 10, color: dim, letterSpacing: "0.08em" }}>
+          <span>ENTRY <span style={{ color: labelLight }}>{fmtPrice(m.entryLow)}-{fmtPrice(m.entryHigh)}</span></span>
+          {m.timeTarget.target_date && <span>HOLD <span style={{ color: labelLight }}>{m.timeTarget.hold_period_low}-{m.timeTarget.hold_period_high}d</span></span>}
+          {m.squeeze.score != null && <span>SQUEEZE <span style={{ color: labelLight }}>{m.squeeze.score}/100</span></span>}
+          <span>CASE <span style={{ color: accent, fontWeight: 700 }}>{scannerDisplayScore(m.strategyCase.case_score ?? m.scanner.case_score ?? m.score)}</span></span>
+          {scannerDisplayConfidence(m.strategyCase.confidence) != null && <span>CONF <span style={{ color: "#5eead4", fontWeight: 700 }}>{scannerDisplayConfidence(m.strategyCase.confidence)}%</span></span>}
+          {m.blocked.length ? <span>BLOCKERS <span style={{ color: "#f87171", fontWeight: 700 }}>{m.blocked.length}</span></span> : null}
+        </div>
+
+        {m.options && (m.options.contract || m.options.spread || m.options.strategy === "AVOID_OPTIONS") && (
+          <div style={{
+            marginTop: 12, padding: "10px 12px",
+            background: "#0a0a10", borderLeft: `2px solid ${accent}`,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+              <span style={{ fontSize: 10, color: dim, letterSpacing: "0.14em" }}>
+                {"// OPTIONS INTEL - "}
+                <span style={{ color: accent, fontWeight: 700 }}>{m.options.strategy_name || m.options.strategy}</span>
+              </span>
+              <span style={{ fontSize: 10, color: dim, letterSpacing: "0.08em" }}>
+                IV RANK <span style={{ color: m.options.iv_rank < 30 ? "#4ade80" : m.options.iv_rank > 70 ? "#f87171" : accent, fontWeight: 700 }}>{m.options.iv_rank}%</span>
+                <span style={{ color: muted, marginLeft: 4 }}>({m.options.iv_label})</span>
+              </span>
+            </div>
+            <div style={{ fontSize: 11, color: "#d1d5db", lineHeight: 1.6, marginBottom: 8 }}>
+              {m.options.one_liner || m.options.strategy_reason}
+            </div>
+            {m.options.strategy === "AVOID_OPTIONS" ? (
+              <div style={{ fontSize: 11, color: "#f87171", fontWeight: 700, letterSpacing: "0.06em" }}>
+                DO NOT BUY OPTIONS · {m.options.crush_recommendation}
+              </div>
+            ) : m.options.contract ? (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, fontSize: 11 }}>
+                <div><span style={{ color: dim }}>BUY </span><span style={{ color: accent, fontWeight: 700 }}>${m.options.contract.strike}{m.options.contract.type}</span></div>
+                <div><span style={{ color: dim }}>EXP </span><span style={{ color: labelLight }}>{m.options.contract.expiration}</span></div>
+                <div><span style={{ color: dim }}>PREMIUM </span><span style={{ color: "#fff", fontWeight: 700 }}>${m.options.contract.premium}</span></div>
+                <div><span style={{ color: dim }}>MAX LOSS </span><span style={{ color: "#f87171", fontWeight: 700 }}>${m.options.contract.max_loss}</span></div>
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {!m.options?.contract && !m.options?.spread && (m.blocked.length || m.scanner.screener_id || m.strategyCase.preferred_expression) && (
+          <div style={{
+            marginTop: 12, padding: "10px 12px",
+            background: "#0a0a10", borderLeft: `2px solid ${targetColor}`,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 7, alignItems: "baseline" }}>
+              <span style={{ fontSize: 10, color: dim, letterSpacing: "0.14em" }}>
+                {"// SCANNER INTEL - "}
+                <span style={{ color: targetColor, fontWeight: 700 }}>{m.scanner.screener_id || view.toUpperCase()}</span>
+              </span>
+              <span style={{ fontSize: 10, color: labelLight, letterSpacing: "0.08em" }}>
+                {m.strategyCase.preferred_expression || m.route}
+              </span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 10, color: muted }}>
+              {m.blocked.length
+                ? m.blocked.slice(0, 6).map(x => <span key={x} style={{ color: "#f87171" }}>{String(x).replace(/_/g, " ")}</span>)
+                : <span>{m.strategyCase.execution_note || m.scanner.lane || "Routed into PM scoring format"}</span>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ padding: "14px 16px 14px 8px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: targetColor, fontFamily: "Courier New", letterSpacing: "0.02em", textAlign: "right" }}>
+          {m.target ? fmtPrice(m.target) : m.action.toUpperCase()}
+        </div>
+        <div style={{ fontSize: 12, color: targetColor, opacity: 0.72, fontWeight: 700 }}>
+          {m.upside != null ? fmtPct(m.upside) : `SCORE ${scannerDisplayScore(m.score)}`}
+        </div>
+        {m.timeTarget.target_date && (
+          <div style={{ fontSize: 10, color: accent, letterSpacing: "0.06em" }}>TARGET - {m.timeTarget.target_date}</div>
+        )}
+        <div style={{ fontSize: 10, color: dim, letterSpacing: "0.06em" }}>ENTRY {fmtPrice(m.entryLow)} - {fmtPrice(m.entryHigh)}</div>
+        <div style={{ fontSize: 10, color: "rgba(248,113,113,0.6)", letterSpacing: "0.06em" }}>STOP {fmtPrice(m.stop)}</div>
+        <div style={{
+          fontSize: 10, padding: "3px 9px",
+          border: `0.5px solid ${(RISK_PILL[m.riskLevel] || RISK_PILL.MEDIUM).bd}`,
+          color: (RISK_PILL[m.riskLevel] || RISK_PILL.MEDIUM).color,
+          borderRadius: 2, marginTop: 3, letterSpacing: "0.1em", fontWeight: 700,
+        }}>{m.riskLevel || "?"}</div>
+        {m.squeeze.score != null && <div style={{ fontSize: 10, color: labelLight, letterSpacing: "0.06em" }}>SQZ {m.squeeze.score}/100</div>}
+      </div>
+
+      {isSel && (
+        <div style={{ gridColumn: "1 / -1", borderTop: hairlineLight, background: "#08080d", padding: "14px 18px 18px" }}>
+          <ScannerKronosBattleCard loading={kronosLoading} payload={kronosCard} fallbackRow={{ ...m.raw, ticker: m.ticker, price: m.price }} />
         </div>
       )}
     </div>
