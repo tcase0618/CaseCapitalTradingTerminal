@@ -143,13 +143,26 @@ def _lottery_family_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         comps = row.get("components") or {}
         triggers = {str(x).upper() for x in (row.get("triggers") or [])}
         dilution = row.get("dilution") or {}
-        if score >= 50 or triggers:
+        if score < 50:
+            if dilution.get("active") or any(str((p or {}).get("key") or "").lower() == "dilution" for p in (row.get("penalties") or [])):
+                out.append(_base_row(
+                    row=row,
+                    screener_id="lottery_dilution_read",
+                    family="LOTTERY",
+                    lane="DILUTION_READ",
+                    score=max(score, 45),
+                    pm_routable=False,
+                    read_only=True,
+                    notes=["Dilution scan is read-only evidence in this rollout."],
+                ))
+            continue
+        if score >= 50:
             out.append(_base_row(row=row, screener_id="lottery_day2_continuation", family="LOTTERY", lane="DAY2_CONTINUATION", score=score))
         if _num(comps.get("structure"), 0) >= 4 or _num(row.get("change_pct"), 0) >= 8:
             out.append(_base_row(row=row, screener_id="lottery_red_green", family="LOTTERY", lane="RED_GREEN", score=max(score, 52)))
         if _num(comps.get("rvol"), 0) >= 9 or _num(comps.get("rotation"), 0) >= 6 or "RVOL" in triggers or "ROTATION" in triggers:
             out.append(_base_row(row=row, screener_id="lottery_supernova", family="LOTTERY", lane="SUPERNOVA", score=max(score, 56)))
-        if _num(comps.get("catalyst"), 0) > 0 or {"PHARMA/FDA", "CONTRACT", "EARNINGS", "ATTENTION"} & triggers:
+        if _num(comps.get("catalyst"), 0) > 0 or {"PHARMA/FDA", "CONTRACT", "EARNINGS"} & triggers:
             out.append(_base_row(row=row, screener_id="lottery_catalyst_runner", family="LOTTERY", lane="CATALYST_RUNNER", score=max(score, 55)))
         if "RUNNER" in _text_blob(row) or row.get("prior_runner_events") or _num(row.get("relative_volume"), 0) >= 8:
             out.append(_base_row(row=row, screener_id="lottery_serial_runner", family="LOTTERY", lane="SERIAL_RUNNER", score=max(score, 54)))

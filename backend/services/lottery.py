@@ -26,6 +26,13 @@ FINVIZ_URL = (
     "&f=sh_price_1to20,sh_relvol_o2,sh_short_o15"
     "&o=-volume"
 )
+FINVIZ_BROAD_UNIVERSE_SCREENS = {
+    "finviz_lottery_under20_volume": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,sh_avgvol_o100&o=-volume",
+    "finviz_lottery_relvol": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,sh_relvol_o1.5&o=-relativevolume",
+    "finviz_lottery_high_short": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,sh_short_o10&o=-shortinterestshare",
+    "finviz_lottery_smallcap": "https://finviz.com/screener.ashx?v=111&f=cap_smallunder,sh_price_u20,sh_avgvol_o100&o=-change",
+    "finviz_lottery_top_gainers": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,ta_change_u5&o=-change",
+}
 ENTRY_HAIRCUT_PCT = 1.0
 EXIT_HAIRCUT_PCT = 1.5
 ROUND_TRIP_HAIRCUT_PCT = ENTRY_HAIRCUT_PCT + EXIT_HAIRCUT_PCT
@@ -70,6 +77,23 @@ def _pct(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _parse_volume(value: Any) -> float:
+    text = str(value or "").replace(",", "").strip().upper()
+    if not text or text in {"-", "N/A"}:
+        return 0.0
+    multiplier = 1.0
+    if text.endswith("K"):
+        multiplier = 1_000.0
+        text = text[:-1]
+    elif text.endswith("M"):
+        multiplier = 1_000_000.0
+        text = text[:-1]
+    elif text.endswith("B"):
+        multiplier = 1_000_000_000.0
+        text = text[:-1]
+    return _num(text, 0) * multiplier
 
 
 def _money(value: float | None) -> str:
@@ -174,7 +198,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     price = _num(row.get("price") or row.get("last") or row.get("current_price"), 0)
     change_pct = _pct(row.get("change_pct") or row.get("day_change_pct") or row.get("change")) or 0.0
     rel_vol = _num(row.get("relative_volume") or row.get("rel_volume") or row.get("rvol"), 0)
-    volume = _num(row.get("volume"), 0)
+    volume = _parse_volume(row.get("volume"))
     float_proxy = _num(row.get("float") or row.get("float_shares") or row.get("shares_outstanding"), 0)
     high = _num(row.get("day_high") or row.get("high"), 0)
     low = _num(row.get("day_low") or row.get("low"), 0)
@@ -202,6 +226,21 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     rotation = (volume / float_proxy) if volume and float_proxy else 0.0
     rotation_score = _component_score(rotation, [(1.5, 15), (0.8, 11), (0.4, 6), (0.2, 3)])
     catalyst_score, catalyst_chips = _catalyst_score(row)
+    source_signals = {str(s).upper() for s in (row.get("signals") or [])}
+    source_set = {str(s).upper() for s in (row.get("sources") or [])}
+    source_set.add(str(row.get("source") or "").upper())
+    short_pct = _num(row.get("short_float_pct"), 0)
+    short_score = _component_score(short_pct, [(35, 10), (25, 8), (15, 6), (10, 4)])
+    attention_score = 8.0 if source_signals & {"ATTENTION", "YAHOO_TRENDING", "UNUSUAL_OPTIONS"} else 0.0
+    if source_set & {"ATTENTION_LOTTERY_SCREEN", "YAHOO_TRENDING", "BARCHART_UNUSUAL"}:
+        attention_score = max(attention_score, 8.0)
+    universe_score = 0.0
+    if any(str(src).startswith("FINVIZ_LOTTERY_") for src in source_set):
+        universe_score = 3.0
+    if source_set & {"FINVIZ_HIGH_SHORT_LOTTERY_SCREEN", "FINVIZ_LOTTERY_HIGH_SHORT"}:
+        universe_score = max(universe_score, 5.0)
+    if source_set & {"FINVIZ_LOTTERY_TOP_GAINERS", "FINVIZ_LOTTERY_RELVOL"}:
+        universe_score = max(universe_score, 5.0)
     structure_score = 0.0
     if close_position is not None:
         structure_score = _component_score(close_position, [(0.85, 10), (0.70, 7), (0.55, 4)])
@@ -223,6 +262,9 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
         "float_tier": round(float_score, 1),
         "rotation": round(rotation_score, 1),
         "catalyst": round(catalyst_score, 1),
+        "short_interest": round(short_score, 1),
+        "attention": round(attention_score, 1),
+        "universe": round(universe_score, 1),
         "structure": round(structure_score, 1),
     }
     raw = sum(components.values())
@@ -235,6 +277,12 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
         triggers.append("RVOL")
     if rotation >= 0.8:
         triggers.append("ROTATION")
+    if short_score:
+        triggers.append("HIGH_SHORT")
+    if attention_score:
+        triggers.append("ATTENTION")
+    if universe_score:
+        triggers.append("FINVIZ_UNIVERSE")
     triggers.extend(catalyst_chips)
 
     return {
@@ -256,12 +304,53 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
         "penalties": penalties,
         "triggers": list(dict.fromkeys(triggers)),
         "source": row.get("source") or "scanner_or_lottery_universe",
+        "sources": row.get("sources") or [row.get("source") or "scanner_or_lottery_universe"],
         "rubric_version": LL_RUBRIC_VERSION,
         "eligible": score >= 60 and ticker not in halted,
     }
 
 
-async def _finviz_candidates() -> list[dict[str, Any]]:
+def _finviz_row_from_cells(cells: list[str], source: str) -> dict[str, Any] | None:
+    if len(cells) < 9:
+        return None
+    ticker_idx = next((i for i, cell in enumerate(cells[:4]) if re.fullmatch(r"[A-Z]{1,5}(?:[.-][A-Z]{1,2})?", cell or "")), None)
+    if ticker_idx is None:
+        return None
+    ticker = cells[ticker_idx].upper()
+    company = cells[ticker_idx + 1] if len(cells) > ticker_idx + 1 else ticker
+    sector = cells[ticker_idx + 2] if len(cells) > ticker_idx + 2 else "-"
+    price = None
+    change_pct = None
+    volume = None
+    rel_vol = None
+    for cell in cells[ticker_idx + 1:]:
+        pct = _pct(cell) if "%" in str(cell) else None
+        if pct is not None and change_pct is None and -95 <= pct <= 500:
+            change_pct = pct
+            continue
+        vol = _parse_volume(cell)
+        if vol >= 10_000 and volume is None:
+            volume = vol
+            continue
+        num = _num(cell, 0)
+        if 0.05 <= num <= 500 and price is None:
+            price = num
+        elif 1.0 <= num <= 100 and rel_vol is None:
+            rel_vol = num
+    return {
+        "ticker": ticker,
+        "company": company,
+        "sector": sector,
+        "price": price,
+        "change_pct": change_pct,
+        "volume": volume,
+        "relative_volume": rel_vol,
+        "source": source,
+        "signals": ["FINVIZ_UNIVERSE"],
+    }
+
+
+async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[dict[str, Any]]:
     headers = {
         "User-Agent": "Mozilla/5.0 CaseCapitalTerminal/1.0",
         "Accept": "text/html,application/xhtml+xml",
@@ -273,28 +362,60 @@ async def _finviz_candidates() -> list[dict[str, Any]]:
 
     try:
         async with httpx.AsyncClient(timeout=18.0, headers=headers, follow_redirects=True) as client:
-            response = await client.get(FINVIZ_URL)
-        if response.status_code != 200:
-            return []
-        soup = BeautifulSoup(response.text, "html.parser")
+            pages = []
+            for page_start in range(1, limit + 1, 20):
+                page_url = f"{url}&r={page_start}"
+                response = await client.get(page_url)
+                if response.status_code != 200:
+                    break
+                pages.append(response.text)
+                if page_start > 1 and "screener-link-primary" not in response.text and "quote.ashx" not in response.text:
+                    break
+        seen: set[str] = set()
         rows: list[dict[str, Any]] = []
-        for table_row in soup.select("table.screener_table tr, table#screener-table tr"):
-            cells = [cell.get_text(" ", strip=True) for cell in table_row.find_all("td")]
-            if len(cells) < 9 or not cells[1].isalpha():
-                continue
-            rows.append({
-                "ticker": cells[1].upper(),
-                "company": cells[2] if len(cells) > 2 else "",
-                "sector": cells[3] if len(cells) > 3 else "",
-                "price": _num(cells[8] if len(cells) > 8 else None, 0),
-                "change_pct": _pct(cells[9] if len(cells) > 9 else None),
-                "volume": _num(cells[10] if len(cells) > 10 else None, 0),
-                "source": "finviz_low_float_screen",
-            })
-        return rows[:80]
+        for html in pages:
+            soup = BeautifulSoup(html, "html.parser")
+            for table_row in soup.select("table.screener_table tr, table#screener-table tr, tr.styled-row"):
+                cells = [cell.get_text(" ", strip=True) for cell in table_row.find_all("td")]
+                parsed = _finviz_row_from_cells(cells, source)
+                if not parsed or parsed["ticker"] in seen:
+                    continue
+                seen.add(parsed["ticker"])
+                rows.append(parsed)
+                if len(rows) >= limit:
+                    return rows
+            for anchor in soup.find_all("a", href=True):
+                href = anchor.get("href") or ""
+                if "quote.ashx" not in href and "stock.ashx" not in href:
+                    continue
+                match = re.search(r"(?:[?&]t=)([A-Za-z][A-Za-z.\-]{0,7})", href)
+                if not match:
+                    continue
+                ticker = _clean_ticker(match.group(1))
+                label = _clean_ticker(anchor.get_text(" ", strip=True))
+                if not ticker or ticker in seen or label != ticker or not re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z]{1,2})?", ticker):
+                    continue
+                seen.add(ticker)
+                rows.append({
+                    "ticker": ticker,
+                    "company": ticker,
+                    "sector": "-",
+                    "source": source,
+                    "signals": ["FINVIZ_UNIVERSE"],
+                })
+                if len(rows) >= limit:
+                    return rows
+        return rows
     except Exception as exc:
-        logger.warning("Lottery League Finviz universe failed: %s", exc)
+        logger.warning("Lottery League %s failed: %s", source, exc)
         return []
+
+
+async def _finviz_candidates() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for source, url in FINVIZ_BROAD_UNIVERSE_SCREENS.items():
+        rows.extend(await _fetch_finviz_url(url, source, limit=160))
+    return rows
 
 
 async def _short_interest_candidates() -> list[dict[str, Any]]:
@@ -375,6 +496,32 @@ async def _pharma_catalyst_candidates() -> list[dict[str, Any]]:
     return out
 
 
+async def _attach_live_price_meta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tickers = [str(row.get("ticker") or "").upper() for row in rows if row.get("ticker")]
+    if not tickers:
+        return rows
+    try:
+        from . import pricer
+
+        prices = await pricer.batch_live_price_meta(tickers, concurrency=8)
+    except Exception as exc:
+        logger.warning("Lottery League live price enrichment failed: %s", exc)
+        return rows
+    enriched = []
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        meta = prices.get(ticker) or {}
+        if meta.get("price") is not None:
+            row = {
+                **row,
+                "price": row.get("price") or meta.get("price"),
+                "quote_age_seconds": meta.get("age_seconds"),
+                "price_source": meta.get("source"),
+            }
+        enriched.append(row)
+    return enriched
+
+
 async def _latest_scan_rows() -> list[dict[str, Any]]:
     db = get_db()
     scan = await db.scan_results.find_one({}, {"_id": 0, "results": 1}, sort=[("finished_at", -1)])
@@ -418,8 +565,9 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
         merged_sources = list(dict.fromkeys([*(existing.get("sources") or []), row.get("source"), *(row.get("sources") or [])]))
         by_ticker[ticker] = {**existing, **row, "ticker": ticker, "signals": merged_signals, "sources": [s for s in merged_sources if s]}
 
+    universe_rows = await _attach_live_price_meta(list(by_ticker.values())[:220])
     candidates = []
-    for row in list(by_ticker.values())[:120]:
+    for row in universe_rows:
         candidates.append(await _enrich_candidate(row, halted))
     candidates.sort(key=lambda r: (r.get("score") or 0), reverse=True)
 
