@@ -2208,6 +2208,33 @@ async def tf_orders(status: str = "all", limit: int = 50):
     return {"orders": await trade_floor.list_orders(status=status, limit=limit)}
 
 
+@api.get("/trade_floor/24h_status")
+async def tf_24h_status(ticker: str = "SPY"):
+    from services import trade_floor
+    symbol = (ticker or "SPY").upper()
+    session = trade_floor.equity_order_session()
+    asset_status = await trade_floor.equity_24h_asset_status(symbol) if trade_floor._alpaca_ready() else {
+        "ticker": symbol,
+        "ok": False,
+        "reason": "alpaca_not_configured",
+    }
+    quote = await trade_floor.get_latest_ask_meta(symbol) if trade_floor._alpaca_ready() else None
+    return {
+        "ok": bool(session.get("tradable_now")) and (not session.get("extended_hours") or bool(asset_status.get("ok"))),
+        "ticker": symbol,
+        "session": session,
+        "asset_status": asset_status,
+        "quote": quote,
+        "execution_rules": {
+            "equities_only": True,
+            "options_overnight": False,
+            "order_type": "limit",
+            "time_in_force": "day",
+            "extended_hours_required_outside_regular": True,
+        },
+    }
+
+
 @api.post("/trade_floor/close")
 async def tf_close(ticker: str):
     from services import trade_floor

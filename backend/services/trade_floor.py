@@ -51,6 +51,13 @@ ALPACA_TRADE_BASE = os.environ.get(
 if ALPACA_TRADE_BASE.endswith("/v2"):
     ALPACA_TRADE_BASE = ALPACA_TRADE_BASE[:-3]
 ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
+ALPACA_24H_EQUITY_ENABLED = os.environ.get("ALPACA_24H_EQUITY_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+ALPACA_EXECUTION_QUOTE_FEEDS = os.environ.get(
+    "ALPACA_EXECUTION_QUOTE_FEEDS",
+    "overnight,boats,sip,iex,",
+)
 
 MAX_OPEN_POSITIONS = 10
 VIX_RED_THRESHOLD = 25.0
@@ -71,6 +78,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _feed_list(raw: str) -> list[str | None]:
+    feeds: list[str | None] = []
+    for item in (raw or "").split(","):
+        feed = item.strip().lower()
+        value = feed or None
+        if value not in feeds:
+            feeds.append(value)
+    return feeds
 
 
 def _now() -> datetime:
@@ -109,8 +126,22 @@ def _equity_24h_session_open(now: datetime | None = None) -> bool:
 def equity_order_session(now: datetime | None = None) -> dict[str, Any]:
     now = now or _now_et()
     regular = _regular_equity_session_open(now)
-    extended = (not regular) and _equity_24h_session_open(now)
+    extended = bool(ALPACA_24H_EQUITY_ENABLED and (not regular) and _equity_24h_session_open(now))
+    minutes = now.hour * 60 + now.minute
+    label = "closed"
+    if regular:
+        label = "regular"
+    elif extended and minutes < 4 * 60:
+        label = "overnight"
+    elif extended and minutes < 9 * 60 + 30:
+        label = "premarket"
+    elif extended and minutes < 20 * 60:
+        label = "afterhours"
+    elif extended:
+        label = "overnight"
     return {
+        "enabled_24h": ALPACA_24H_EQUITY_ENABLED,
+        "label": label,
         "regular_open": regular,
         "extended_24h_open": extended,
         "tradable_now": regular or extended,
@@ -127,6 +158,68 @@ def _alpaca_ready() -> bool:
 
 def paper_only() -> bool:
     return "paper-api.alpaca.markets" in ALPACA_TRADE_BASE
+
+
+async def get_asset(ticker: str) -> dict[str, Any] | None:
+    """Fetch Alpaca asset metadata used to verify 24/5 equity eligibility."""
+    if not _alpaca_ready() or not ticker:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=HEADERS) as c:
+            r = await c.get(f"{ALPACA_TRADE_BASE}/v2/assets/{ticker.upper()}")
+            if r.status_code != 200:
+                return None
+            return r.json()
+    except Exception:
+        return None
+
+
+async def equity_24h_asset_status(ticker: str) -> dict[str, Any]:
+    asset = await get_asset(ticker)
+    if not asset:
+        return {
+            "ticker": (ticker or "").upper(),
+            "ok": False,
+            "reason": "alpaca_asset_unavailable",
+            "overnight_tradable": False,
+            "overnight_halted": None,
+            "tradable": False,
+            "fractionable": False,
+        }
+    attributes = {str(item).lower() for item in (asset.get("attributes") or [])}
+    overnight_tradable = bool(asset.get("overnight_tradable")) or "overnight_tradable" in attributes
+    overnight_halted = bool(asset.get("overnight_halted")) or "overnight_halted" in attributes
+    tradable = bool(asset.get("tradable"))
+    fractionable = bool(asset.get("fractionable"))
+    ok = bool(tradable and fractionable and overnight_tradable and not overnight_halted)
+    reason = "ok"
+    if not tradable:
+        reason = "asset_not_tradable"
+    elif not fractionable:
+        reason = "asset_not_fractionable"
+    elif not overnight_tradable:
+        reason = "asset_not_overnight_tradable"
+    elif overnight_halted:
+        reason = "asset_overnight_halted"
+    return {
+        "ticker": (ticker or "").upper(),
+        "ok": ok,
+        "reason": reason,
+        "overnight_tradable": overnight_tradable,
+        "overnight_halted": overnight_halted,
+        "tradable": tradable,
+        "fractionable": fractionable,
+        "asset_class": asset.get("class"),
+        "exchange": asset.get("exchange"),
+        "raw": asset,
+    }
+
+
+async def _extended_order_asset_gate(ticker: str, session: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    if not session.get("extended_hours"):
+        return True, {"ok": True, "reason": "regular_session_no_overnight_asset_gate"}
+    status = await equity_24h_asset_status(ticker)
+    return bool(status.get("ok")), status
 
 
 # ─────── Alpaca thin client ───────
@@ -285,6 +378,14 @@ async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price:
             session=session,
             reason="outside_alpaca_equity_24h_window",
         )
+    asset_ok, asset_status = await _extended_order_asset_gate(ticker, session)
+    if not asset_ok:
+        await log_activity(
+            f"Trade Floor submit blocked by Alpaca 24/5 asset gate: {ticker}",
+            "warn",
+            {"ticker": ticker, "session": session, "asset_status": asset_status},
+        )
+        return None
     try:
         return await _submit_fractional_limit_buy_now(
             ticker,
@@ -404,6 +505,14 @@ async def flush_queued_equity_orders(limit: int = 25) -> dict[str, Any]:
             )
             skipped.append({"ticker": ticker, "reason": "held_or_pending_in_alpaca"})
             continue
+        asset_ok, asset_status = await _extended_order_asset_gate(ticker, session)
+        if not asset_ok:
+            await db.tf_queued_orders.update_one(
+                {"client_order_id": row.get("client_order_id")},
+                {"$set": {"status": "SUBMIT_FAILED_RETRYABLE", "updated_at": _now().isoformat(), "last_failure": asset_status}},
+            )
+            skipped.append({"ticker": ticker, "reason": asset_status.get("reason"), "asset_status": asset_status})
+            continue
         try:
             order = await _submit_fractional_limit_buy_now(
                 ticker,
@@ -453,28 +562,41 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
         async with httpx.AsyncClient(timeout=10.0, headers={
             "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET,
         }) as c:
-            r = await c.get(f"{ALPACA_DATA_BASE}/stocks/{ticker.upper()}/quotes/latest",
-                              params={"feed": "iex"})
-            if r.status_code != 200:
-                return None
-            q = (r.json() or {}).get("quote") or {}
-            ask = float(q.get("ap") or 0)
-            if ask <= 0:
-                return None
-            try:
-                from . import safety
-                age_s = safety.quote_age_seconds(q.get("t"))
-            except Exception:
-                age_s = None
-            return {
-                "price": ask,
-                "ts": q.get("t"),
-                "age_s": age_s,
-                "source": "alpaca_iex_latest_quote",
-                "bid": float(q.get("bp") or 0),
-                "ask": ask,
-                "raw": q,
-            }
+            preferred = os.environ.get("ALPACA_EXECUTION_QUOTE_FEED", "").strip().lower()
+            feeds = ([preferred] if preferred else []) + _feed_list(ALPACA_EXECUTION_QUOTE_FEEDS)
+            tried: list[str | None] = []
+            for feed in feeds:
+                if feed in tried:
+                    continue
+                tried.append(feed)
+                params: dict[str, str] = {}
+                if feed:
+                    params["feed"] = feed
+                r = await c.get(f"{ALPACA_DATA_BASE}/stocks/{ticker.upper()}/quotes/latest",
+                                  params=params)
+                if r.status_code != 200:
+                    continue
+                q = (r.json() or {}).get("quote") or {}
+                ask = float(q.get("ap") or 0)
+                if ask <= 0:
+                    continue
+                try:
+                    from . import safety
+                    age_s = safety.quote_age_seconds(q.get("t"))
+                except Exception:
+                    age_s = None
+                source_feed = feed or "default"
+                return {
+                    "price": ask,
+                    "ts": q.get("t"),
+                    "age_s": age_s,
+                    "source": f"alpaca_{source_feed}_latest_quote",
+                    "feed": feed,
+                    "bid": float(q.get("bp") or 0),
+                    "ask": ask,
+                    "raw": q,
+                    "tried_feeds": tried,
+                }
     except Exception:
         return None
 
