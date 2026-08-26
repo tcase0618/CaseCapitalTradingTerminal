@@ -876,6 +876,14 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
     action = pm_row.get("action")
     if action not in {"ACCUMULATE", "STARTER", "WATCH"}:
         return "PASS", ["PM did not approve active sizing."]
+    scanner = scan_row.get("strategy_scanner") or {}
+    scanner_family = str(scanner.get("family") or scan_row.get("scanner_family") or "").upper()
+    options_intent = bool(
+        opts.get("options_intent")
+        or opts.get("preferred_route") == "OPTION"
+        or scanner_family == "OPTIONS"
+        or str(pm_row.get("preferred_route") or "").upper() == "OPTION"
+    )
     if opts.get("strategy") == "AVOID_OPTIONS" or pm_row.get("option_view") == "STOCK_ONLY":
         return "EQUITY", ["Options engine says avoid options or hold stock instead."]
     iv_rank = float(opts.get("iv_rank") or 50)
@@ -885,6 +893,8 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
     event_scout = strategy in {"LONG_CALL_EVENT_SCOUT"}
     option_ok = bool(contract or spread)
     if not option_ok:
+        if options_intent:
+            return "OPTION", ["Options scanner selected this underlying, but no executable contract was built yet."]
         return "EQUITY", ["No usable option contract or spread candidate."]
     if pm_row.get("option_view") == "SPREAD_ONLY" and not spread:
         return "EQUITY", ["PM requires a defined-risk spread, but no spread candidate was built."]
@@ -897,6 +907,9 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         return "OPTION", reasons
     if action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank < 75 or event_scout):
         reasons.append("Paper scout lane: small defined-risk option allowed for PM watchlist learning.")
+        return "OPTION", reasons
+    if options_intent and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR:
+        reasons.append("Options scanner intent keeps this in options review; execution still requires contract/liquidity clearance.")
         return "OPTION", reasons
     return "EQUITY", ["Equity expression preferred under current PM thresholds."]
 

@@ -226,6 +226,13 @@ def _sizing(action: str, score: float, price: float, stop: float, equity: float,
 
 def _option_view(row: dict[str, Any], rr: float) -> str:
     opts = row.get("options") or {}
+    scanner = row.get("strategy_scanner") or {}
+    families = {
+        str(scanner.get("family") or "").upper(),
+        *(str((s or {}).get("family") or "").upper() for s in row.get("strategy_screeners") or [] if isinstance(s, dict)),
+    }
+    if opts.get("options_intent") or opts.get("preferred_route") == "OPTION" or "OPTIONS" in families:
+        return "CALL_ALLOWED"
     if opts.get("hold_stock_instead") or opts.get("strategy") == "AVOID_OPTIONS":
         return "STOCK_ONLY"
     iv_rank = _num(opts.get("iv_rank"), default=-1)
@@ -432,6 +439,9 @@ def evaluate_rows(
             "risk_usd": sizing["risk_usd"],
             "position_pct": sizing["position_pct"],
             "option_view": _option_view(row, rr),
+            "preferred_route": (row.get("options") or {}).get("preferred_route"),
+            "scanner_family": row.get("scanner_family") or (row.get("strategy_scanner") or {}).get("family"),
+            "source_scan": row.get("source_scan"),
             "signals": signals,
             "ratchet_plan": ratchet,
             "strategy_case": strategy_case,

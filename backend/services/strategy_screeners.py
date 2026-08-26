@@ -100,10 +100,20 @@ def _base_row(
     score = max(0.0, min(100.0, float(score or 0)))
     target = _num(row.get("target_blended") or (row.get("targets") or {}).get("target_blended"), 0)
     if px > 0 and target <= px:
-        target = round(px * (1.22 if family == "LOTTERY" else 1.14), 4)
+        if family == "LOTTERY":
+            target = round(px * 1.22, 4)
+        elif family == "OPTIONS":
+            target = round(px * 1.20, 4)
+        else:
+            target = round(px * 1.14, 4)
     stop = _num(row.get("stop_loss") or (row.get("risk") or {}).get("stop_loss"), 0)
     if px > 0 and stop <= 0:
-        stop = round(px * (0.72 if family == "LOTTERY" else 0.88), 4)
+        if family == "LOTTERY":
+            stop = round(px * 0.72, 4)
+        elif family == "OPTIONS":
+            stop = round(px * 0.92, 4)
+        else:
+            stop = round(px * 0.88, 4)
     raw_signals = _signals(row)
     signals = list(dict.fromkeys([
         "STRATEGY_SCANNER",
@@ -394,6 +404,8 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
         built["options"] = {
             "strategy": strategy,
             "direction": "BULL",
+            "options_intent": True,
+            "preferred_route": "OPTION",
             "strategy_reason": "Independent options screener candidate; contract still must clear Alpaca chain and liquidity checks.",
             "iv_rank": row.get("iv_rank", 50),
             "iv_label": row.get("iv_label", "UNKNOWN"),

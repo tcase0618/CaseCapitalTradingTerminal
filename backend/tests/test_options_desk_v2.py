@@ -115,6 +115,29 @@ def test_options_route_permits_pm_approved_paper_scout():
     assert reasons
 
 
+def test_options_scanner_intent_stays_option_when_contract_missing():
+    pm_row = {
+        "action": "WATCH",
+        "pm_score": 48,
+        "risk_reward": 1.3,
+        "option_view": "CALL_ALLOWED",
+    }
+    scan_row = {
+        "strategy_scanner": {"family": "OPTIONS", "screener_id": "options_tactical_momentum_call"},
+        "options": {
+            "strategy": "LONG_CALL_SCOUT",
+            "options_intent": True,
+            "preferred_route": "OPTION",
+            "iv_rank": 55,
+        },
+    }
+
+    route, reasons = options_desk._route(pm_row, scan_row)
+
+    assert route == "OPTION"
+    assert "no executable contract" in reasons[0].lower()
+
+
 def test_tail_hunter_selects_contract_in_delta_dte_budget_band():
     import pandas as pd
 

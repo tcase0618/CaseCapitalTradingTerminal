@@ -434,13 +434,33 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     price_rows = int(scan_freshness.get("price_rows") or 0)
     severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers or stale_price_rows else "info"
 
-    top = _top_rows(pm_rows or results, 6)
-    top_lines = [
-        f"${_esc(r.get('ticker'))} {_esc(_route_for_pm_row(r, opt_by_ticker))} {str(r.get('action') or r.get('route') or 'SCAN').upper()} "
-        f"{_num(r.get('pm_score') or r.get('signal_score')):.1f}"
-        for r in top
-        if r.get("ticker")
+    by_family_pm = screener_summary.get("by_pm_family") or {}
+    by_family_read = screener_summary.get("by_read_only_family") or {}
+    strategy_total = int(screener_summary.get("total") or 0)
+    strategy_pm_total = int(screener_summary.get("pm_routable") or 0)
+    terminal_docket_total = len(pm_rows)
+    family_scan_lines = [
+        f"{_esc(k)}: <b>{v}</b>"
+        for k, v in sorted(by_family_pm.items(), key=lambda item: item[0])
+        if k not in {"EARNINGS", "SEC"}
     ]
+    research_lines = [
+        f"{_esc(k)}: <b>{v}</b>"
+        for k, v in sorted(by_family_read.items(), key=lambda item: item[0])
+    ]
+
+    top = _top_rows(pm_rows or results, 6)
+    top_lines = []
+    for r in top:
+        if not r.get("ticker"):
+            continue
+        expression = _route_for_pm_row(r, opt_by_ticker)
+        action = str(r.get("action") or r.get("route") or "SCAN").upper()
+        label = action if expression == action else f"{expression} {action}"
+        top_lines.append(
+            f"${_esc(r.get('ticker'))} {_esc(label)} "
+            f"{_num(r.get('pm_score') or r.get('signal_score')):.1f}"
+        )
     family_counts = {
         k: v
         for k, v in ((screener_summary.get("by_pm_family") or {}).items())
@@ -459,7 +479,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         f"Trigger: <b>{_esc(scan.get('triggered_by') or 'unknown')}</b>",
         f"Duration: <b>{scan.get('duration_sec', '--')}s</b>",
         f"Universe: <b>{scan.get('universe_size', '--')}</b>",
-        f"Passed scanner: <b>{len(results)}</b>",
+        f"Core scanner passed: <b>{len(results)}</b>",
+        f"Strategy scanners: <b>{strategy_pm_total}</b> PM-routable / <b>{strategy_total}</b> total",
+        *([f"PM-routable families: {' | '.join(family_scan_lines)}"] if family_scan_lines else []),
+        *([f"Research-only scanners: {' | '.join(research_lines)}"] if research_lines else []),
+        f"Terminal PM docket: <b>{terminal_docket_total}</b>",
         (
             "New stocks found this scan: "
             f"<b>{new_scan['count']}</b>"

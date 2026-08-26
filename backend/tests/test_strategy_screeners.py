@@ -255,6 +255,21 @@ def test_independent_options_rows_do_not_use_core_scan(monkeypatch):
     assert {"OPTA", "OPTB", "OPTC"} <= tickers
     assert all(row.get("source_scan", "").startswith("options_") for row in rows)
     assert all((row.get("raw_source") or {}).get("source") != "latest_terminal_scan" for row in rows)
+    assert all((row.get("options") or {}).get("options_intent") is True for row in rows)
+    assert all((row.get("options") or {}).get("preferred_route") == "OPTION" for row in rows)
+
+
+def test_options_strategy_rows_have_options_rr_shape():
+    row = strategy_screeners._base_row(
+        row={"ticker": "OPTS", "price": 10, "signals": ["OPTION_MOMENTUM"]},
+        screener_id="options_tactical_momentum_call",
+        family="OPTIONS",
+        lane="TACTICAL_MOMENTUM_CALL",
+        score=70,
+    )
+
+    assert row["targets"]["target_blended"] == 12.0
+    assert row["stop_loss"] == 9.2
 
 
 def test_options_desk_build_candidates_uses_strategy_rows_not_core_scan(monkeypatch):
