@@ -605,6 +605,8 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
                     return meta
                 if best_stale is None or (age_s is not None and age_s < (best_stale.get("age_s") or 10**9)):
                     best_stale = meta
+            if best_stale is not None:
+                best_stale["tried_feeds"] = list(tried)
             return best_stale
     except Exception:
         return None
