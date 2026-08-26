@@ -1164,11 +1164,18 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             pm_score = float(pm_row.get("pm_score") or 0)
             pm_rr = float(pm_row.get("risk_reward") or 0)
             pm_action = str(pm_row.get("action") or "").upper()
+            scanner = row.get("strategy_scanner") or {}
+            options_intent = bool(
+                opts.get("options_intent")
+                or opts.get("preferred_route") == "OPTION"
+                or str(scanner.get("family") or row.get("scanner_family") or "").upper() == "OPTIONS"
+            )
             should_refresh = (
                 pm_action in {"ACCUMULATE", "STARTER", "WATCH"}
                 and (
                     (pm_action == "WATCH" and pm_score >= OPTIONS_WATCH_MIN_SCORE and pm_rr >= OPTIONS_WATCH_MIN_RR)
                     or (pm_action in {"ACCUMULATE", "STARTER"} and pm_score >= OPTIONS_PM_MIN_SCORE and pm_rr >= OPTIONS_PM_MIN_RR)
+                    or (options_intent and pm_score >= OPTIONS_WATCH_MIN_SCORE)
                 )
             )
             if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:

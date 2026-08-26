@@ -142,7 +142,11 @@ async def _alpaca_chain_page(client: httpx.AsyncClient, ticker: str, params: dic
     return r.json() or {}
 
 
-async def _fetch_alpaca_options_data(ticker: str, catalyst_date: str | None = None) -> dict[str, Any] | None:
+async def _fetch_alpaca_options_data(
+    ticker: str,
+    catalyst_date: str | None = None,
+    spot_hint: float | None = None,
+) -> dict[str, Any] | None:
     """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
     if not _alpaca_options_configured():
         return None
@@ -150,7 +154,7 @@ async def _fetch_alpaca_options_data(ticker: str, catalyst_date: str | None = No
         import pandas as pd
 
         ticker = ticker.upper()
-        spot = await _alpaca_stock_price(ticker)
+        spot = _safe_float(spot_hint) or await _alpaca_stock_price(ticker)
         if not spot or spot <= 0:
             return None
         target_lo, target_hi = _option_expiration_target(catalyst_date)
@@ -264,10 +268,14 @@ async def _fetch_alpaca_options_data(ticker: str, catalyst_date: str | None = No
 
 
 # ---------------- chain fetcher (Part 2) ----------------
-async def get_options_data(ticker: str, catalyst_date: str | None = None) -> dict[str, Any] | None:
+async def get_options_data(
+    ticker: str,
+    catalyst_date: str | None = None,
+    spot_hint: float | None = None,
+) -> dict[str, Any] | None:
     """Returns chain dataframes + ATM IV + iv_rank, or None if fetch fails."""
     ticker = ticker.upper()
-    alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date)
+    alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date, spot_hint=spot_hint)
     if alpaca_chain:
         return alpaca_chain
     try:
@@ -792,7 +800,13 @@ async def analyze_ticker(stock: dict, budget: float = 300.0) -> dict | None:
         if not ticker:
             return None
         catalyst = stock.get("time_target", {}).get("target_date") or stock.get("catalyst_date")
-        chain = await get_options_data(ticker, catalyst)
+        spot_hint = (
+            _safe_float(stock.get("price"))
+            or _safe_float(stock.get("current_price"))
+            or _safe_float(stock.get("last"))
+            or _safe_float(stock.get("spot"))
+        )
+        chain = await get_options_data(ticker, catalyst, spot_hint=spot_hint)
         if not chain:
             return None
 

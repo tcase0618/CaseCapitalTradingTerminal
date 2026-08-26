@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,22 @@ def test_pm_option_view_allows_named_option_strategies():
     row = {"options": {"strategy": "LONG_CALL_SCOUT", "iv_rank": 62}}
 
     assert portfolio_manager._option_view(row, rr=1.25) == "CALL_ALLOWED"
+
+
+def test_options_engine_uses_scanner_price_as_spot_hint(monkeypatch):
+    seen = {}
+
+    async def fake_get_options_data(ticker, catalyst_date=None, spot_hint=None):
+        seen["ticker"] = ticker
+        seen["spot_hint"] = spot_hint
+        return None
+
+    monkeypatch.setattr(options_engine, "get_options_data", fake_get_options_data)
+
+    result = asyncio.run(options_engine.analyze_ticker({"ticker": "OPTX", "price": 12.34}))
+
+    assert result is None
+    assert seen == {"ticker": "OPTX", "spot_hint": 12.34}
 
 
 def test_options_route_permits_pm_approved_paper_scout():

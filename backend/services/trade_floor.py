@@ -566,6 +566,7 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
             preferred = os.environ.get("ALPACA_EXECUTION_QUOTE_FEED", "").strip().lower()
             feeds = ([preferred] if preferred else []) + _feed_list(ALPACA_EXECUTION_QUOTE_FEEDS)
             tried: list[str | None] = []
+            best_stale: dict[str, Any] | None = None
             for feed in feeds:
                 if feed in tried:
                     continue
@@ -584,10 +585,12 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
                 try:
                     from . import safety
                     age_s = safety.quote_age_seconds(q.get("t"))
+                    fresh, _ = safety.quote_is_fresh({"ts": q.get("t")})
                 except Exception:
                     age_s = None
+                    fresh = True
                 source_feed = feed or "default"
-                return {
+                meta = {
                     "price": ask,
                     "ts": q.get("t"),
                     "age_s": age_s,
@@ -596,8 +599,13 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
                     "bid": float(q.get("bp") or 0),
                     "ask": ask,
                     "raw": q,
-                    "tried_feeds": tried,
+                    "tried_feeds": list(tried),
                 }
+                if fresh:
+                    return meta
+                if best_stale is None or (age_s is not None and age_s < (best_stale.get("age_s") or 10**9)):
+                    best_stale = meta
+            return best_stale
     except Exception:
         return None
 
