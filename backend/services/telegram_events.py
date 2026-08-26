@@ -512,7 +512,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         "<b>PM ROUTING</b>",
         f"Routed: Equity <b>{routes['EQUITY']}</b> | Options <b>{routes['OPTION']}</b> | Both <b>{routes['BOTH']}</b> | Watch <b>{routes['WATCH']}</b> | Rejected <b>{routes['REJECT']}</b>",
         f"PM actions: <b>{pm_actions['ACCUMULATE']}</b> accumulate | <b>{pm_actions['STARTER']}</b> starter | <b>{pm_actions['WATCH']}</b> watch | <b>{pm_actions['REJECT']}</b> reject | Total <b>{pm_action_total}</b>",
-        f"Options ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('total', 0)} | Routed option names: <b>{routes['OPTION'] + routes['BOTH']}</b>",
+        f"Options contracts ready: <b>{opt_summary.get('ready', 0)}</b> / {opt_summary.get('routed', routes['OPTION'] + routes['BOTH'])} routed | Contracts selected: <b>{opt_summary.get('contract_selected', 0)}</b> | Execution-grade: <b>{opt_summary.get('execution_grade', 0)}</b>",
         f"Turnover engine: <b>{opp.get('positions_reviewed', 0)}</b> holdings reviewed | Replace: <b>{len(opp.get('replacement_candidates') or [])}</b> | Trim/exit: <b>{len(opp.get('trim_reviews') or [])}</b>",
         *([f"Options execution blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
         *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),

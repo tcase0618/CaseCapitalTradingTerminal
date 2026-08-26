@@ -25,6 +25,23 @@ def test_spread_cost_context_uses_mid_basis():
     assert context["spread_cost_pct"] == 5.0
 
 
+def test_options_summary_distinguishes_routed_names_from_contract_readiness():
+    rows = [
+        {"route": "OPTION", "manual_fire_ready": False, "instrument": {"symbol": "A"}, "quality_state": "RESEARCH_ONLY", "blocked_reasons": ["missing data"]},
+        {"route": "BOTH", "manual_fire_ready": True, "instrument": {"contractSymbol": "B"}, "quality_state": "EXECUTION_GRADE", "blocked_reasons": []},
+        {"route": "EQUITY", "manual_fire_ready": False, "instrument": {}, "quality_state": "RESEARCH_ONLY", "blocked_reasons": ["equity"]},
+    ]
+
+    summary = options_desk._summary(rows)
+
+    assert summary["total"] == 3
+    assert summary["routed"] == 2
+    assert summary["ready"] == 1
+    assert summary["contract_selected"] == 2
+    assert summary["execution_grade"] == 1
+    assert summary["blocked"] == 1
+
+
 def test_spread_gate_computes_spread_from_bid_ask():
     tight = {"bid": 2.0, "ask": 2.12, "premium": 2.12}
     wide = {"bid": 2.0, "ask": 2.3, "premium": 2.3}

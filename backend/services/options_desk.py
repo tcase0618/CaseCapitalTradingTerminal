@@ -715,6 +715,7 @@ def _signals(row: dict[str, Any]) -> list[str]:
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    routed = [x for x in rows if x.get("route") in {"OPTION", "BOTH"}]
     return {
         "total": len(rows),
         "equity": sum(1 for x in rows if x.get("route") == "EQUITY"),
@@ -722,6 +723,10 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, int]:
         "both": sum(1 for x in rows if x.get("route") == "BOTH"),
         "pass": sum(1 for x in rows if x.get("route") == "PASS"),
         "ready": sum(1 for x in rows if x.get("manual_fire_ready")),
+        "routed": len(routed),
+        "contract_selected": sum(1 for x in routed if (x.get("instrument") or {}).get("symbol") or (x.get("instrument") or {}).get("contractSymbol")),
+        "execution_grade": sum(1 for x in routed if x.get("quality_state") == "EXECUTION_GRADE"),
+        "blocked": sum(1 for x in routed if x.get("blocked_reasons")),
     }
 
 
