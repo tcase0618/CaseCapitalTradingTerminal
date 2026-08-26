@@ -422,6 +422,7 @@ async def execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_ord
     if not _alpaca_ready():
         result["reason"] = "missing_alpaca_key_or_secret"
         return result
+
     account = await get_account()
     if not account:
         result["reason"] = "alpaca_account_unauthorized_or_unreachable"
@@ -818,6 +819,49 @@ async def _risk_pct(score: float, instrument: str) -> float:
 
 
 # ─────── Execution gates ───────
+async def _merge_pm_routable_strategy_rows(scan_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add specialist PM-routable rows to the execution review.
+
+    The PM remains the allocation authority. This only ensures the Trade Floor
+    evaluates the same combined opportunity set shown in the scan report.
+    """
+    if not scan_results:
+        return scan_results
+    if any((row.get("strategy_scanner") or row.get("source_scan")) for row in scan_results):
+        return scan_results
+    try:
+        from . import portfolio_manager, strategy_screeners
+
+        scan_doc = {
+            "results": scan_results,
+            "finished_at": scan_results[0].get("scan_finished_at") or scan_results[0].get("finished_at"),
+        }
+        strategy_payload = await strategy_screeners.pm_rows(scan=scan_doc, persist=True)
+        strategy_rows = strategy_payload.get("rows") or []
+        if not strategy_rows:
+            return scan_results
+        merged = portfolio_manager._merge_strategy_rows(scan_results, strategy_rows)
+        await log_activity(
+            f"Trade Floor PM input merged: {len(scan_results)} core + {len(strategy_rows)} strategy PM rows -> {len(merged)} tickers",
+            "info",
+            {
+                "core_rows": len(scan_results),
+                "strategy_pm_rows": len(strategy_rows),
+                "merged_rows": len(merged),
+                "strategy_summary": strategy_payload.get("summary") or {},
+            },
+        )
+        return merged
+    except Exception as exc:
+        logger.warning("strategy PM merge failed: %s", exc)
+        await log_activity(
+            f"Trade Floor strategy PM merge failed; using core rows only: {exc.__class__.__name__}",
+            "warn",
+            {"error": str(exc)[:220]},
+        )
+        return scan_results
+
+
 async def _gate_check(scan_row: dict[str, Any], *,
                        held_tickers: set[str] | None = None,
                        pending_tickers: set[str] | None = None,
@@ -911,6 +955,8 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
             "execution_gate": gate_root,
         }
 
+    execution_rows = await _merge_pm_routable_strategy_rows(scan_results)
+
     account = await get_account()
     if not account:
         await log_activity("Trade Floor: cannot reach Alpaca account", "warn")
@@ -942,7 +988,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     ruleset = await pm_rules.get_ruleset()
     profile_override = await pm_rules.profile_override_for(pm_mode)
     pm_rows = portfolio_manager.evaluate_rows(
-        scan_results,
+        execution_rows,
         equity=equity,
         mode=pm_mode,
         profile_override=profile_override,
@@ -950,7 +996,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     )
     pm_by_ticker = {r["ticker"]: r for r in pm_rows}
 
-    for row in scan_results:
+    for row in execution_rows:
         ticker = (row.get("ticker") or "").upper()
         if not ticker:
             continue
@@ -1174,10 +1220,12 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
                           "order_id": order.get("id"),
                           "queued": order_queued})
 
-    compression = (len(executed) / max(1, len(scan_results)))
+    compression = (len(executed) / max(1, len(execution_rows)))
     finished = _now()
     await db.tf_scan_log.insert_one(stamped({
-        "scanned": len(scan_results),
+        "scanned": len(execution_rows),
+        "core_rows": len(scan_results),
+        "strategy_rows_included": max(0, len(execution_rows) - len(scan_results)),
         "executed": len(executed),
         "rejected": len(rejected),
         "rejection_details": rejected,
@@ -1195,6 +1243,9 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     )
     return {"executed": executed, "rejected": rejected,
              "compression_ratio": round(compression, 3),
+             "total_scanned": len(execution_rows),
+             "core_rows": len(scan_results),
+             "strategy_rows_included": max(0, len(execution_rows) - len(scan_results)),
              "started_at": started.isoformat(), "alpaca_ready": True}
 
 

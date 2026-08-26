@@ -1,4 +1,6 @@
-from services import portfolio_manager, strategy_ideology, strategy_screeners
+import asyncio
+
+from services import portfolio_manager, strategy_ideology, strategy_screeners, trade_floor
 
 
 def test_sec_bearish_filing_is_read_only_and_not_pm_routable():
@@ -146,6 +148,39 @@ def test_pm_merge_preserves_core_and_adds_strategy_signals():
     assert "lottery_supernova" in merged[0]["scanner_sources"]
     assert merged[0]["case_score"] == strategy[0]["case_score"]
     assert merged[0]["strategy_confidence"] == strategy[0]["strategy_confidence"]
+
+
+def test_trade_floor_execution_input_includes_pm_routable_strategy_rows(monkeypatch):
+    core = [{
+        "ticker": "CORE",
+        "price": 100,
+        "signal_score": 4,
+        "trade_score": 20,
+        "signals": ["CORE_SIGNAL"],
+        "targets": {"target_blended": 120},
+        "risk": {"score": 30, "stop_loss": 92},
+    }]
+    strategy = [strategy_screeners._base_row(
+        row={"ticker": "LOTTO", "price": 5, "signals": ["LOTTERY_SIGNAL"]},
+        screener_id="lottery_day2_continuation",
+        family="LOTTERY",
+        lane="DAY2_CONTINUATION",
+        score=75,
+    )]
+
+    async def fake_pm_rows(scan=None, persist=True):
+        return {"rows": strategy, "summary": {"pm_routable": 1}}
+
+    async def fake_log_activity(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(strategy_screeners, "pm_rows", fake_pm_rows)
+    monkeypatch.setattr(trade_floor, "log_activity", fake_log_activity)
+
+    merged = asyncio.run(trade_floor._merge_pm_routable_strategy_rows(core))
+
+    assert {row["ticker"] for row in merged} == {"CORE", "LOTTO"}
+    assert any(row.get("strategy_scanner", {}).get("screener_id") == "lottery_day2_continuation" for row in merged)
 
 
 def test_opportunity_cost_flags_weak_holding_for_replacement():
