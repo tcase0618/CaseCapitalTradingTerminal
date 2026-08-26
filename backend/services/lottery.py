@@ -327,10 +327,8 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
     db = get_db()
     halted = await _halted_symbols()
     finviz = await _finviz_candidates()
-    latest = await _latest_scan_rows()
-
     by_ticker: dict[str, dict[str, Any]] = {}
-    for row in finviz + latest:
+    for row in finviz:
         ticker = _clean_ticker(row.get("ticker"))
         if not ticker:
             continue
@@ -349,7 +347,7 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
         "scanned_at": _now().isoformat(),
         "triggered_by": triggered_by,
         "rubric_version": LL_RUBRIC_VERSION,
-        "source_counts": {"finviz": len(finviz), "latest_scan": len(latest), "deduped": len(candidates)},
+        "source_counts": {"finviz_low_float_screen": len(finviz), "latest_scan": 0, "deduped": len(candidates)},
         "regime": regime,
         "candidates": candidates,
     })

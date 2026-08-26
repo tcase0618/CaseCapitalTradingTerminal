@@ -1117,11 +1117,12 @@ def _contract_risk(instrument: dict[str, Any]) -> float:
 
 
 async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, Any]:
-    from . import portfolio_manager
+    from . import portfolio_manager, strategy_screeners
 
     db = get_db()
     scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
-    rows = (scan or {}).get("results") or []
+    strategy_payload = await strategy_screeners.pm_rows(scan=scan, persist=True)
+    rows = strategy_payload.get("rows") or []
     pm_rows = portfolio_manager.evaluate_rows(rows, equity=portfolio_manager.DEFAULT_EQUITY, mode="BALANCED")
     by_ticker = {r["ticker"]: r for r in pm_rows}
     rows = sorted(
@@ -1220,7 +1221,7 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
         else:
             blocked.append("PM route is EQUITY")
         ticket = {
-            "candidate_id": f"opt-{ticker}-{str((scan or {}).get('finished_at') or _now())[:19]}",
+            "candidate_id": f"opt-{ticker}-{str((scan or {}).get('finished_at') or strategy_payload.get('generated_at') or _now())[:19]}",
             "ticker": ticker,
             "route": route,
             "pm_action": pm_row.get("action"),
@@ -1279,6 +1280,7 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
             "blocked_reasons": blocked,
             "route_reasons": route_reasons,
             "scan_finished_at": (scan or {}).get("finished_at"),
+            "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
             "generated_at": _now(),
         }
         out.append(ticket)
@@ -1301,6 +1303,7 @@ async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, A
     return {
         "generated_at": _now(),
         "scan_finished_at": (scan or {}).get("finished_at"),
+        "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
         "options_equity_basis": OPTIONS_EQUITY,
         "options_data_policy": _options_data_policy(alpaca_refreshes),
         "summary": _summary(out),

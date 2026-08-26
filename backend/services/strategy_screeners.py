@@ -167,19 +167,114 @@ def _lottery_family_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _core_options_rows(scan_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
+    """Build option strategy candidates from option-specific discovery sources.
+
+    This intentionally does not read the Core Scan. Core can still reach PM on
+    its own, but the Options scanner has to discover its own names.
+    """
+    by_ticker: dict[str, dict[str, Any]] = {}
+
+    def add(ticker: Any, *, source: str, lane: str, score: float, signals: list[str] | None = None, row: dict[str, Any] | None = None) -> None:
+        t = _ticker(ticker)
+        if not t:
+            return
+        existing = by_ticker.get(t) or {"ticker": t, "signals": [], "sources": [], "option_lanes": []}
+        merged_signals = list(dict.fromkeys([*(existing.get("signals") or []), *(signals or []), source, lane]))
+        by_ticker[t] = {
+            **existing,
+            **(row or {}),
+            "ticker": t,
+            "source": source,
+            "sources": list(dict.fromkeys([*(existing.get("sources") or []), source])),
+            "signals": merged_signals,
+            "option_lanes": list(dict.fromkeys([*(existing.get("option_lanes") or []), lane])),
+            "score": max(_num(existing.get("score"), 0), float(score or 0)),
+        }
+
+    try:
+        from . import scrapers
+
+        high_short = await scrapers.fetch_finviz_high_short_interest(min_pct=10.0, limit=35)
+        for row in high_short:
+            short_pct = _num(row.get("short_float_pct"), 10)
+            add(
+                row.get("ticker"),
+                source="options_finviz_high_short",
+                lane="TACTICAL_MOMENTUM_CALL",
+                score=min(78, 54 + short_pct * 0.7),
+                signals=["HIGH_SHORT_INTEREST", "OPTION_MOMENTUM"],
+                row=row,
+            )
+    except Exception:
+        pass
+
+    try:
+        from . import x_factor
+
+        trending = sorted(await x_factor.yahoo_trending_set())
+        for ticker in trending[:25]:
+            add(
+                ticker,
+                source="options_yahoo_trending",
+                lane="TACTICAL_MOMENTUM_CALL",
+                score=56,
+                signals=["YAHOO_TRENDING", "ATTENTION"],
+            )
+    except Exception:
+        pass
+
+    try:
+        from . import pharma
+
+        payload = await pharma.get_pdufa_within_days(days=90)
+        rows = payload if isinstance(payload, list) else payload.get("results") or []
+        for row in rows[:25]:
+            add(
+                row.get("ticker"),
+                source="options_pharma_calendar",
+                lane="EVENT_DEFINED_RISK",
+                score=max(58, _num(row.get("binary_event_score") or row.get("score") or row.get("materiality_score"), 58)),
+                signals=["PHARMA", "FDA_CALENDAR", "EVENT_DEFINED_RISK"],
+                row=row,
+            )
+    except Exception:
+        pass
+
+    rows = list(by_ticker.values())[:limit]
+    try:
+        from . import pricer
+
+        prices = await pricer.batch_live_price_meta([r["ticker"] for r in rows], concurrency=8)
+        for row in rows:
+            meta = prices.get(row["ticker"]) or {}
+            if meta.get("price") is not None:
+                row["price"] = meta.get("price")
+                row["quote_age_seconds"] = meta.get("age_seconds")
+                row["price_source"] = meta.get("source")
+    except Exception:
+        pass
+
     out: list[dict[str, Any]] = []
-    for row in scan_rows:
+    for row in rows:
         ticker = _ticker(row.get("ticker"))
         if not ticker:
             continue
-        opts = row.get("options") or {}
-        text = _text_blob(row)
-        optionish = bool(opts and opts.get("strategy") not in {None, "", "AVOID_OPTIONS"}) or "OPTION" in text or "CHEAP_IV" in text
-        if not optionish:
-            continue
-        score = max(_num(row.get("signal_score"), 0) * 10, _num(row.get("trade_score"), 0) * 2.5, _num(opts.get("score"), 0))
-        out.append(_base_row(row=row, screener_id="options_native", family="OPTIONS", lane=str(opts.get("strategy") or "PM_OPTION_REVIEW"), score=max(score, 50)))
+        lanes = row.get("option_lanes") or ["TACTICAL_MOMENTUM_CALL"]
+        lane = "EVENT_DEFINED_RISK" if "EVENT_DEFINED_RISK" in lanes else str(lanes[0])
+        score = _num(row.get("score"), 0)
+        strategy = "LONG_CALL_EVENT_SCOUT" if lane == "EVENT_DEFINED_RISK" else "LONG_CALL_SCOUT"
+        built = _base_row(row=row, screener_id=f"options_{lane.lower()}", family="OPTIONS", lane=lane, score=max(score, 50))
+        built["options"] = {
+            "strategy": strategy,
+            "direction": "BULL",
+            "strategy_reason": "Independent options screener candidate; contract still must clear Alpaca chain and liquidity checks.",
+            "iv_rank": row.get("iv_rank", 50),
+            "iv_label": row.get("iv_label", "UNKNOWN"),
+            "data_provider": "SCREENER_ONLY",
+            "data_quality": "NEEDS_CHAIN_REFRESH",
+        }
+        out.append(built)
     return out
 
 
@@ -202,7 +297,16 @@ async def _pharma_rows(scan_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out.append(_base_row(row=row, screener_id="pharma_calendar", family="PHARMA", lane=str(row.get("event_type") or "FDA_CALENDAR"), score=score, notes=notes))
     for row in scan_rows:
         if "PHARMA" in _text_blob(row) or "PDUFA" in _text_blob(row) or row.get("pharma"):
-            out.append(_base_row(row=row, screener_id="pharma_core_overlap", family="PHARMA", lane="CORE_PHARMA_SIGNAL", score=max(_num(row.get("signal_score"), 0) * 10, 55)))
+            out.append(_base_row(
+                row=row,
+                screener_id="pharma_core_overlap",
+                family="PHARMA",
+                lane="CORE_PHARMA_SIGNAL",
+                score=max(_num(row.get("signal_score"), 0) * 10, 55),
+                pm_routable=False,
+                read_only=True,
+                notes=["Core pharma overlap is evidence-only; pharma PM routing comes from the FDA/catalyst screener."],
+            ))
     return out
 
 
@@ -370,7 +474,7 @@ async def run_all(
     rows: list[dict[str, Any]] = []
     rows.extend(_lottery_family_rows(lottery_rows))
     if include_options_native:
-        rows.extend(_core_options_rows(scan_rows))
+        rows.extend(await _independent_options_rows())
     rows.extend(await _pharma_rows(scan_rows))
     rows.extend(await _earnings_rows(scan_rows))
     rows.extend(await _sec_rows())
