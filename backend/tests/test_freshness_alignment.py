@@ -81,6 +81,23 @@ def test_data_truth_persistence_quota_error_is_explicit_blocker():
     assert "storage quota" in row["detail"].lower()
 
 
+def test_fully_stale_scan_prices_block_new_entries():
+    row = data_truth._scan_price_freshness_status(38, 0, 38)
+    assert row["key"] == "scan_prices_fully_stale"
+    assert row["blocks_trading"] is True
+    assert row["execution_scopes"] == ["equity", "options"]
+
+
+def test_partially_stale_scan_prices_warn_without_global_block():
+    row = data_truth._scan_price_freshness_status(38, 37, 1)
+    assert row["key"] == "scan_prices_partially_stale"
+    assert row["blocks_trading"] is False
+
+
+def test_fresh_scan_prices_have_no_staleness_status():
+    assert data_truth._scan_price_freshness_status(38, 38, 0) is None
+
+
 def test_execution_gate_uses_fresh_cached_truth_before_refresh(monkeypatch):
     cached = {
         "decision": "PASS",

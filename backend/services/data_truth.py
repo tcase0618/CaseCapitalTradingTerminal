@@ -85,6 +85,28 @@ def _freshness_warning(key: str, label: str, detail: str) -> dict[str, Any]:
     }
 
 
+def _scan_price_freshness_status(
+    price_rows: int,
+    fresh_price_rows: int,
+    stale_price_rows: int,
+) -> dict[str, Any] | None:
+    """Translate scan price evidence into a gate-worthy status."""
+    if price_rows and fresh_price_rows == 0:
+        return _freshness_blocker(
+            "scan_prices_fully_stale",
+            "Scan Prices Fully Stale",
+            f"The latest scan has 0 fresh prices across {price_rows} priced rows; research may continue, but new entries are blocked until a live price source advances.",
+            ["equity", "options"],
+        )
+    if stale_price_rows:
+        return _freshness_warning(
+            "scan_prices_partially_stale",
+            "Scan Prices Partially Stale",
+            f"{stale_price_rows} of {price_rows} priced rows are stale; affected names must be rejected at execution-time.",
+        )
+    return None
+
+
 def _persistence_blocker(error: Exception) -> dict[str, Any]:
     detail = str(error)[:500]
     label = "Database Persistence Block"
@@ -156,6 +178,15 @@ async def overview(force_refresh: bool = False, persist: bool = True) -> dict[st
     court_scan_at = (court.get("summary") or {}).get("scan_finished_at")
     options_scan_at = options.get("scan_finished_at") or (options.get("summary") or {}).get("scan_finished_at")
     critical_freshness: list[dict[str, Any]] = []
+    scan_freshness = (latest_scan or {}).get("freshness") or {}
+    scan_price_rows = int(scan_freshness.get("price_rows") or 0)
+    scan_fresh_price_rows = int(scan_freshness.get("fresh_price_rows") or 0)
+    scan_stale_price_rows = int(scan_freshness.get("stale_price_rows") or 0)
+    scan_price_status = _scan_price_freshness_status(
+        scan_price_rows, scan_fresh_price_rows, scan_stale_price_rows,
+    )
+    if scan_price_status:
+        critical_freshness.append(scan_price_status)
     if latest_scan_at and not _same_scan(pm_scan_at, latest_scan_at):
         critical_freshness.append(_freshness_blocker(
             "pm_scan_mismatch",
