@@ -613,7 +613,8 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
                     fresh, _ = safety.quote_is_fresh({"ts": q.get("t")})
                 except Exception:
                     age_s = None
-                    fresh = True
+                    # Unknown timestamps are never safe execution evidence.
+                    fresh = False
                 source_feed = feed or "default"
                 meta = {
                     "price": ask,
@@ -625,6 +626,7 @@ async def get_latest_ask_meta(ticker: str) -> dict[str, Any] | None:
                     "ask": ask,
                     "raw": q,
                     "tried_feeds": list(tried),
+                    "execution_eligible": bool(fresh),
                 }
                 if fresh:
                     return meta
@@ -945,7 +947,13 @@ async def _gate_check(scan_row: dict[str, Any], *,
 
 
 # ─────── Main execution ───────
-async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers: set[str] | None = None) -> dict[str, Any]:
+async def evaluate_and_execute(
+    scan_results: list[dict[str, Any]],
+    only_tickers: set[str] | None = None,
+    *,
+    pm_rows: list[dict[str, Any]] | None = None,
+    pm_scan_finished_at: str | None = None,
+) -> dict[str, Any]:
     """Walk scan results, apply gates, execute limit DAY orders for any
     candidate that clears every gate.
 
@@ -1022,13 +1030,18 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     pm_mode = portfolio_manager._mode_from_regime(regime)
     ruleset = await pm_rules.get_ruleset()
     profile_override = await pm_rules.profile_override_for(pm_mode)
-    pm_rows = portfolio_manager.evaluate_rows(
-        execution_rows,
-        equity=equity,
-        mode=pm_mode,
-        profile_override=profile_override,
-        regime=regime,
-    )
+    if pm_rows is None:
+        pm_rows = portfolio_manager.evaluate_rows(
+            execution_rows,
+            equity=equity,
+            mode=pm_mode,
+            profile_override=profile_override,
+            regime=regime,
+        )
+    else:
+        # An empty PM result is authoritative. It means PM approved nothing;
+        # never silently recompute a different decision set at the desk.
+        pm_rows = list(pm_rows)
     pm_by_ticker = {r["ticker"]: r for r in pm_rows}
 
     for row in execution_rows:

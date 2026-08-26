@@ -401,7 +401,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     alignment_notes: list[str] = []
     if not _same_scan(pm.get("scan_finished_at"), scan.get("finished_at")):
         alignment_notes.append("pm_scan_mismatch")
-    screeners = await strategy_screeners.run_all(scan=scan, persist=True)
+    screeners = scan.get("strategy_payload")
+    if not isinstance(screeners, dict):
+        screeners = await strategy_screeners.run_all(scan=scan, persist=True)
     screener_summary = screeners.get("summary") or {}
     if not _same_scan(screeners.get("scan_finished_at"), scan.get("finished_at")):
         alignment_notes.append("strategy_screeners_scan_mismatch")

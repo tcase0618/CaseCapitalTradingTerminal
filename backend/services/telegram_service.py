@@ -121,20 +121,20 @@ async def _should_skip_outbound(text: str) -> tuple[bool, str]:
     except DuplicateKeyError:
         return True, f"{kind}_cooldown"
     except Exception as exc:
-        logger.warning("Telegram outbound guard lock failed open for %s: %s", kind, exc)
-        return False, digest
+        logger.error("Telegram outbound guard unavailable; suppressing %s: %s", kind, exc)
+        return True, "telegram_guard_unavailable"
 
     if not (result.upserted_id or result.modified_count):
         return True, f"{kind}_cooldown"
     return False, lock_id
 
 
-async def _mark_outbound_sent(digest: str | None, text: str, sent: bool) -> None:
-    if not digest or digest.endswith("_cooldown"):
+async def _mark_outbound_sent(lock_id: str | None, text: str, sent: bool) -> None:
+    if not lock_id or lock_id.endswith("_cooldown"):
         return
     try:
         await get_db().telegram_outbound_guard.update_one(
-            {"_id": digest},
+            {"_id": lock_id},
             {"$set": {"sent": bool(sent), "sent_at": datetime.now(timezone.utc).isoformat()}},
         )
     except Exception as exc:

@@ -48,6 +48,9 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     pharma_shock_result = family_results[2] if not isinstance(family_results[2], Exception) else {"ok": False, "error": str(family_results[2])}
 
     strategy_payload = await timed("strategy_screeners", strategy_screeners.run_all(scan=scan, persist=True))
+    # Keep the exact specialist output attached to this cycle. Reporting and
+    # execution must consume this result rather than recomputing it later.
+    scan["strategy_payload"] = strategy_payload
     ledger_payload = await timed("candidate_ledger", candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True))
     options_payload = await timed("options_desk_candidates", options_desk.build_candidates(limit=100, persist=True))
     pm_payload = await timed("portfolio_manager", portfolio_manager.latest_portfolio_plan())
@@ -55,7 +58,17 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
     if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
         from . import trade_floor
-        equity_execution = await timed("equity_execution", trade_floor.evaluate_and_execute(scan.get("results") or []))
+        if pm_payload.get("scan_finished_at") != scan.get("finished_at"):
+            equity_execution = {"skipped": True, "reason": "pm_scan_mismatch", "executed": [], "rejected": []}
+        else:
+            equity_execution = await timed(
+                "equity_execution",
+                trade_floor.evaluate_and_execute(
+                    scan.get("results") or [],
+                    pm_rows=pm_payload.get("recommendations") or [],
+                    pm_scan_finished_at=pm_payload.get("scan_finished_at"),
+                ),
+            )
 
     options_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_OPTIONS_EXECUTION is off"}
     if options_desk.options_execution_enabled():

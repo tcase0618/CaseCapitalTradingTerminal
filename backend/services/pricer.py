@@ -1,7 +1,7 @@
-"""Unified price fetcher — Massive API (Polygon.io rebrand) primary,
-yfinance fallback. All functions are async and never raise.
+"""Unified price fetcher — Alpaca extended/24h feeds primary,
+with provider fallbacks. All functions are async and never raise.
 
-Massive endpoints used (work on the free plan we have):
+Fallback endpoints used when Alpaca is unavailable:
 - /v2/aggs/ticker/{ticker}/prev        → previous trading day OHLC (latest close)
 - /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}  → daily aggregates
 
@@ -89,7 +89,7 @@ def _scanner_alpaca_feeds() -> list[str | None]:
     Trader Plus. SIP/IEX cover regular and premarket/after-hours depending on
     account permissions. An empty item means "try Alpaca default feed".
     """
-    raw = os.environ.get("ALPACA_SCANNER_FEEDS", "overnight,boats,sip,iex,").split(",")
+    raw = os.environ.get("ALPACA_SCANNER_FEEDS", "overnight,boats,delayed_sip,sip,iex,").split(",")
     feeds: list[str | None] = []
     for item in raw:
         feed = item.strip().lower()
@@ -129,7 +129,8 @@ async def _alpaca_trade_meta(ticker: str, *, feed: str | None = None) -> dict[st
             if not price:
                 return None
             age_s = _age_seconds(trade.get("t"))
-            max_age = _live_price_max_age_seconds()
+            is_delayed = (feed or "").lower() == "delayed_sip"
+            max_age = int(os.environ.get("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200")) if is_delayed else _live_price_max_age_seconds()
             source = "alpaca_latest_trade"
             if feed:
                 source = f"{source}_{feed}"
@@ -140,6 +141,8 @@ async def _alpaca_trade_meta(ticker: str, *, feed: str | None = None) -> dict[st
                 "age_seconds": round(age_s, 2) if age_s is not None else None,
                 "fresh": bool(age_s is not None and age_s <= max_age),
                 "max_age_seconds": max_age,
+                "delayed": is_delayed,
+                "execution_eligible": bool(not is_delayed and age_s is not None and age_s <= max_age),
                 "raw": trade,
             }
     except Exception:
@@ -186,8 +189,8 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
             continue
         meta.update({
             "ticker": ticker,
-            "premarket_confirmed": bool(meta.get("fresh")),
-            "warning": None if meta.get("fresh") else "alpaca_trade_timestamp_stale",
+            "premarket_confirmed": bool(meta.get("fresh") and not meta.get("delayed")),
+            "warning": "alpaca_delayed_sip_15m" if meta.get("delayed") else (None if meta.get("fresh") else "alpaca_trade_timestamp_stale"),
         })
         if meta.get("fresh"):
             return meta
@@ -207,6 +210,8 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
             "age_seconds": 0,
             "fresh": True,
             "premarket_confirmed": False,
+            "delayed": True,
+            "execution_eligible": False,
             "warning": "not_confirmed_24h_market",
         }
 

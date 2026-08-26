@@ -40,6 +40,9 @@ class _OutboundGuard:
 
     async def update_one(self, query, update, upsert=False):
         lock_id = query["_id"]
+        if "$or" not in query:
+            self.docs.setdefault(lock_id, {"_id": lock_id}).update(update["$set"])
+            return _UpdateResult(modified_count=1)
         existing = self.docs.get(lock_id)
         expires_at = (existing or {}).get("expires_at")
         now_limit = query["$or"][0]["expires_at"]["$lte"]
@@ -100,3 +103,16 @@ async def test_telegram_outbound_guard_has_ttl_index(monkeypatch):
     await telegram_service.ensure_telegram_outbound_indexes()
 
     assert ("expires_at", {"expireAfterSeconds": 0}) in db.telegram_outbound_guard.indexes
+
+
+@pytest.mark.asyncio
+async def test_telegram_sent_marker_updates_acquired_lock(monkeypatch):
+    db = _Db()
+    monkeypatch.setattr(telegram_service, "get_db", lambda: db)
+    message = "<b>CASE CAPITAL | SCAN REPORT</b>\nSCAN..."
+
+    skip, lock_id = await telegram_service._should_skip_outbound(message)
+    assert skip is False
+    await telegram_service._mark_outbound_sent(lock_id, message, True)
+
+    assert db.telegram_outbound_guard.docs[lock_id]["sent"] is True

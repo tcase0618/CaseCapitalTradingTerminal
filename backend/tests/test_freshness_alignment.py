@@ -132,7 +132,7 @@ def test_execution_gate_uses_fresh_cached_truth_before_refresh(monkeypatch):
     assert result["truth"]["gate_source"] == "fresh_cached_truth"
 
 
-def test_execution_gate_force_refresh_timeout_uses_recent_cached_truth(monkeypatch):
+def test_execution_gate_force_refresh_timeout_blocks_cached_truth(monkeypatch):
     cached = {
         "decision": "PASS",
         "truth_grade": "B",
@@ -167,7 +167,8 @@ def test_execution_gate_force_refresh_timeout_uses_recent_cached_truth(monkeypat
         return await execution_gate.check(scope="options", force_refresh=True, record=False)
 
     result = asyncio.run(run())
-    assert result["decision"] == "PASS"
+    assert result["decision"] == "BLOCK"
+    assert "truth_refresh_failed" in result["blockers"]
     assert result["truth"]["gate_source"] == "cached_truth_after_refresh_error"
     assert result["truth"]["refresh_error"] == "TimeoutError"
 
@@ -176,6 +177,39 @@ def test_scanner_alpaca_feed_order_includes_24h_feeds(monkeypatch):
     monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "overnight,boats,sip,iex,")
 
     assert pricer._scanner_alpaca_feeds() == ["overnight", "boats", "sip", "iex", None]
+
+
+def test_scanner_default_includes_delayed_sip_for_free_tier_research(monkeypatch):
+    monkeypatch.delenv("ALPACA_SCANNER_FEEDS", raising=False)
+    assert pricer._scanner_alpaca_feeds() == ["overnight", "boats", "delayed_sip", "sip", "iex", None]
+
+
+def test_delayed_sip_is_never_execution_eligible(monkeypatch):
+    monkeypatch.setenv("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200")
+
+    async def fake_alpaca(ticker, *, feed=None):
+        if feed == "delayed_sip":
+            return {
+                "price": 101.25,
+                "source": "alpaca_latest_trade_delayed_sip",
+                "provider_ts": "2026-08-24T04:01:00Z",
+                "age_seconds": 300,
+                "fresh": True,
+                "delayed": True,
+                "execution_eligible": False,
+            }
+        return None
+
+    import asyncio
+
+    monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "delayed_sip")
+    monkeypatch.delenv("ALPACA_STOCK_FEED", raising=False)
+    monkeypatch.setattr(pricer, "_alpaca_trade_meta", fake_alpaca)
+    meta = asyncio.run(pricer.live_price_meta("SPY"))
+    assert meta["fresh"] is True
+    assert meta["delayed"] is True
+    assert meta["execution_eligible"] is False
+    assert meta["warning"] == "alpaca_delayed_sip_15m"
 
 
 def test_live_price_meta_prefers_fresh_alpaca_feed(monkeypatch):

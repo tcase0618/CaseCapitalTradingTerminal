@@ -129,7 +129,8 @@ async def run(force_refresh: bool = False, persist: bool = True) -> dict[str, An
     score = round(max(0.0, 100.0 - len(blockers) * 22.0 - len(warnings) * 6.0), 1)
     decision = "BLOCK" if blockers else "WATCH" if warnings else "READY"
     payload = {
-        "ok": not blockers,
+        # WATCH means reportable, not ready for trading.
+        "ok": decision == "READY",
         "decision": decision,
         "score": score,
         "generated_at": _now_iso(),

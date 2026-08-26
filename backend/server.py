@@ -658,6 +658,7 @@ async def system_health():
 async def admin_backend_refresh():
     from services import pricer
     from services import system_health as health_svc
+    from services import integration_status as integration_svc
 
     health = await health_svc.overview()
     integrations = await integration_svc.integration_status()
@@ -2275,6 +2276,7 @@ async def tf_orders(status: str = "all", limit: int = 50):
 @api.get("/trade_floor/24h_status")
 async def tf_24h_status(ticker: str = "SPY"):
     from services import trade_floor
+    from services import pricer
     symbol = (ticker or "SPY").upper()
     session = trade_floor.equity_order_session()
     asset_status = await trade_floor.equity_24h_asset_status(symbol) if trade_floor._alpaca_ready() else {
@@ -2283,12 +2285,25 @@ async def tf_24h_status(ticker: str = "SPY"):
         "reason": "alpaca_not_configured",
     }
     quote = await trade_floor.get_latest_ask_meta(symbol) if trade_floor._alpaca_ready() else None
+    research_price = await pricer.live_price_meta(symbol)
+    execution_quote_fresh = bool(quote and quote.get("execution_eligible"))
+    research_price_ready = bool(research_price.get("price") is not None and research_price.get("fresh"))
     return {
-        "ok": bool(session.get("tradable_now")) and (not session.get("extended_hours") or bool(asset_status.get("ok"))),
+        "ok": bool(session.get("tradable_now")) and bool(asset_status.get("ok")) and research_price_ready,
         "ticker": symbol,
         "session": session,
         "asset_status": asset_status,
         "quote": quote,
+        "research_price": research_price,
+        "price_data_ready": research_price_ready,
+        "execution_quote_fresh": execution_quote_fresh,
+        "execution_ready": bool(session.get("tradable_now")) and bool(asset_status.get("ok")) and execution_quote_fresh,
+        "price_data_policy": {
+            "delayed_sip_allowed_for_research": True,
+            "delayed_sip_minutes": 15,
+            "delayed_sip_execution_allowed": False,
+            "research_max_age_seconds": int(os.environ.get("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200")),
+        },
         "execution_rules": {
             "equities_only": True,
             "options_overnight": False,

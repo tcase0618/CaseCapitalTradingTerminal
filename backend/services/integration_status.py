@@ -380,7 +380,7 @@ async def integration_status() -> list[dict[str, Any]]:
 def scheduled_jobs() -> list[dict[str, str]]:
     return [
         {"id": "main_scans", "name": "Main Scan",
-         "cron": "00:00, 08:00, 13:00, 18:00 ET daily"},
+         "cron": "00:00, 08:00, 12:00, 15:00, 18:30 ET daily"},
         {"id": "regime_gate", "name": "Regime Gate",
          "cron": "Every 30 min (Mon-Fri, 09:00-16:30 ET)"},
         {"id": "position_monitor", "name": "Position Monitor",

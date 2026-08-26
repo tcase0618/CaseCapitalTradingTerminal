@@ -146,6 +146,10 @@ async def check(
         blockers.append("sector_kill_list_match")
 
     truth = truth if truth is not None else await _truth_snapshot(force_refresh=force_refresh)
+    # Cached truth after a failed refresh is diagnostic evidence only, never
+    # sufficient authorization for a new order.
+    if truth.get("refresh_error"):
+        blockers.append("truth_refresh_failed")
     truth_decision = str(truth.get("decision") or "UNKNOWN").upper()
     truth_grade = str(truth.get("truth_grade") or "UNKNOWN").upper()
     scoped_qc = ((truth.get("qc") or {}).get("scoped_blockers") or {})
