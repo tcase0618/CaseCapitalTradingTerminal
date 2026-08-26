@@ -23,6 +23,8 @@ INFO_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_INFO_COOLDOWN_MINUTES", "60
 WATCH_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_WATCH_COOLDOWN_MINUTES", "30") or 30)
 SCAN_REPORT_THROTTLE_MINUTES = int(os.environ.get("TELEGRAM_SCAN_REPORT_THROTTLE_MINUTES", "10") or 10)
 PHARMA_ALERT_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_PHARMA_ALERT_COOLDOWN_MINUTES", "360") or 360)
+PHARMA_SHOCK_BATCH_MAX = int(os.environ.get("TELEGRAM_PHARMA_SHOCK_BATCH_MAX", "20") or 20)
+TELEGRAM_TEXT_LIMIT = 3900
 
 
 def _now() -> datetime:
@@ -61,6 +63,13 @@ def _fmt_pct(value: Any) -> str:
         return f"{'+' if f >= 0 else ''}{f:.2f}%"
     except (TypeError, ValueError):
         return "--"
+
+
+def _short_text(value: Any, limit: int = 110) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _gain_line(label: str, row: dict[str, Any] | None) -> str:
@@ -646,9 +655,45 @@ async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_
     skipped: list[dict[str, Any]] = []
     cutoff = _now() - timedelta(minutes=max(1, PHARMA_ALERT_COOLDOWN_MINUTES))
 
-    from . import pharma
+    def row_rank(row: dict[str, Any]) -> tuple[float, int, float]:
+        ticker = str(row.get("ticker") or "").upper()
+        title = str(row.get("title") or "").upper()
+        explicit_title_match = 1 if ticker and (f"({ticker})" in title or f"${ticker}" in title) else 0
+        age = _num(row.get("age_minutes"), 999999)
+        return (_num(row.get("shock_score")), explicit_title_match, -age)
 
-    for row in hot[:5]:
+    by_article: dict[str, dict[str, Any]] = {}
+    for row in hot:
+        article_key = hashlib.sha1(str(row.get("url") or row.get("title") or row.get("ticker") or "").encode("utf-8")).hexdigest()[:16]
+        current = by_article.get(article_key)
+        if current is None or row_rank(row) > row_rank(current):
+            by_article[article_key] = row
+
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in by_article.values():
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        current = by_ticker.get(ticker)
+        if current is None or row_rank(row) > row_rank(current):
+            by_ticker[ticker] = row
+
+    batch_rows = sorted(by_ticker.values(), key=lambda r: row_rank(r), reverse=True)[: max(1, PHARMA_SHOCK_BATCH_MAX)]
+    if not batch_rows:
+        return {"ok": True, "sent": False, "count": 0, "reason": "no_deduped_pharma_shocks"}
+
+    events: list[dict[str, Any]] = []
+    dedupe_keys: list[str] = []
+    message_parts: list[str] = [
+        "<b>CASE CAPITAL | PHARMA CATALYST SHOCKS</b>",
+        f"<code>{_now_et()}</code>",
+        "",
+        f"Hot tickers: <b>{len(batch_rows)}</b>"
+        + (f" / {len(hot)} raw alerts" if len(hot) != len(batch_rows) else ""),
+        "",
+    ]
+
+    for idx, row in enumerate(batch_rows, start=1):
         ticker = str(row.get("ticker") or "").upper()
         url_key = hashlib.sha1(str(row.get("url") or row.get("title") or "").encode("utf-8")).hexdigest()[:12]
         dedupe_key = f"pharma_shock:{ticker}:{url_key}"
@@ -664,6 +709,7 @@ async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_
         if recent:
             skipped.append({"ticker": ticker, "reason": "cooldown", "dedupe_key": dedupe_key})
             continue
+        dedupe_keys.append(dedupe_key)
         event = await emit_event(
             "pharma_catalyst_shock",
             severity="watch",
@@ -684,28 +730,60 @@ async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_
             },
             priority="summary",
         )
-        text = pharma.format_pharma_shock_alert(row)
-        sent = await _send(text)
-        await _record_delivery(
-            "pharma_shock_alert",
-            "Case Capital Pharma Catalyst Shock",
-            text,
-            [event],
-            sent,
-            metadata={
-                "dedupe_key": dedupe_key,
-                "ticker": ticker,
-                "shock_score": row.get("shock_score"),
-                "direction": row.get("direction"),
-                "triggered_by": triggered_by,
-                "cooldown_minutes": PHARMA_ALERT_COOLDOWN_MINUTES,
-            },
+        events.append(event)
+        terms = [*row.get("bullish_terms", []), *row.get("bearish_terms", [])][:3]
+        source = row.get("source") or "news"
+        price = _fmt_money(row.get("current_price")) if row.get("current_price") not in {None, ""} else "--"
+        title = _short_text(row.get("title") or "Clinical/FDA catalyst detected", 125)
+        line = (
+            f"{idx}. <b>${_esc(ticker)}</b> · <code>{_num(row.get('shock_score')):.0f}/100</code> · "
+            f"<b>{_esc(row.get('direction') or 'WATCH')}</b>\n"
+            f"{_esc(title)}\n"
+            f"Price: <b>{_esc(price)}</b> · Evidence: {_esc(', '.join(terms) or 'pharma catalyst terms')} · "
+            f"Source: {_esc(source)}"
         )
-        sent_rows.append({"ticker": ticker, "sent": sent, "dedupe_key": dedupe_key})
+        if row.get("url"):
+            line += f" · <a href=\"{_esc(row.get('url'))}\">source</a>"
+        message_parts.extend([line, ""])
+        sent_rows.append({"ticker": ticker, "sent": None, "dedupe_key": dedupe_key})
+
+    if not events:
+        return {
+            "ok": True,
+            "sent": False,
+            "count": 0,
+            "sent_rows": sent_rows,
+            "skipped": skipped,
+            "reason": "all_hot_pharma_shocks_in_cooldown",
+        }
+
+    message_parts.append("<i>Research alert only: clinical shocks require PM confirmation before execution.</i>")
+    text = "\n".join(message_parts).strip()
+    if len(text) > TELEGRAM_TEXT_LIMIT:
+        footer = "\n\n<i>Message truncated for Telegram length. Open Pharma tab for the full shock tape.</i>"
+        text = text[: TELEGRAM_TEXT_LIMIT - len(footer)].rstrip() + footer
+    sent = await _send(text)
+    await _record_delivery(
+        "pharma_shock_alert",
+        "Case Capital Pharma Catalyst Shocks",
+        text,
+        events,
+        sent,
+        metadata={
+            "dedupe_keys": dedupe_keys,
+            "tickers": [r.get("ticker") for r in sent_rows],
+            "raw_count": len(hot),
+            "batched_count": len(events),
+            "triggered_by": triggered_by,
+            "cooldown_minutes": PHARMA_ALERT_COOLDOWN_MINUTES,
+        },
+    )
+    for row in sent_rows:
+        row["sent"] = sent
 
     return {
         "ok": True,
-        "sent": any(r.get("sent") for r in sent_rows),
+        "sent": sent,
         "count": len(sent_rows),
         "sent_rows": sent_rows,
         "skipped": skipped,

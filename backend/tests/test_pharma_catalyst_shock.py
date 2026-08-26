@@ -405,18 +405,44 @@ async def test_pharma_shock_dispatch_formats_and_records(monkeypatch):
             "ticker": "MRNA",
             "shock_score": 91,
             "direction": "BULLISH",
-            "title": "Moderna cancer vaccine phase 3 trial met primary endpoint",
+            "title": "Moderna (MRNA) cancer vaccine phase 3 trial met primary endpoint",
             "source": "Google News",
             "url": "https://example.test/mrna",
             "bullish_terms": ["phase 3", "primary endpoint"],
             "bearish_terms": [],
             "current_price": 63.5,
-        }
+        },
+        {
+            "ticker": "MRNA",
+            "shock_score": 82,
+            "direction": "BULLISH",
+            "title": "Duplicate Moderna cancer vaccine phase 3 headline",
+            "source": "Google News",
+            "url": "https://example.test/mrna-duplicate",
+            "bullish_terms": ["phase 3"],
+            "bearish_terms": [],
+            "current_price": 63.5,
+        },
+        {
+            "ticker": "ZYME",
+            "shock_score": 80,
+            "direction": "BULLISH",
+            "title": "Zymeworks (ZYME) FDA approval triggers milestone payment",
+            "source": "Google News",
+            "url": "https://example.test/zyme",
+            "bullish_terms": ["fda approval"],
+            "bearish_terms": [],
+            "current_price": 27.4,
+        },
     ], triggered_by="test")
 
     assert result["sent"] is True
-    assert sends and "PHARMA CATALYST SHOCK" in sends[0]
+    assert len(sends) == 1
+    assert "PHARMA CATALYST SHOCKS" in sends[0]
     assert "$MRNA" in sends[0]
+    assert "$ZYME" in sends[0]
+    assert sends[0].count("$MRNA") == 1
     assert records[0]["batch_type"] == "pharma_shock_alert"
-    assert records[0]["metadata"]["dedupe_key"].startswith("pharma_shock:MRNA:")
+    assert records[0]["metadata"]["dedupe_keys"][0].startswith("pharma_shock:MRNA:")
+    assert records[0]["metadata"]["batched_count"] == 2
     assert events[0]["scope"] == "pharma"
