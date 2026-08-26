@@ -2286,7 +2286,16 @@ async def tf_24h_status(ticker: str = "SPY"):
     }
     quote = await trade_floor.get_latest_ask_meta(symbol) if trade_floor._alpaca_ready() else None
     research_price = await pricer.live_price_meta(symbol)
-    execution_quote_fresh = bool(quote and quote.get("execution_eligible"))
+    delayed_execution_allowed = bool(
+        session.get("extended_hours")
+        and os.environ.get("ALPACA_ALLOW_DELAYED_24H_EXECUTION", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and quote
+        and str(quote.get("feed") or "").lower() == "delayed_sip"
+        and quote.get("age_s") is not None
+        and float(quote.get("age_s") or 0) <= int(os.environ.get("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200"))
+    )
+    execution_quote_fresh = bool(quote and (quote.get("execution_eligible") or delayed_execution_allowed))
     research_price_ready = bool(research_price.get("price") is not None and research_price.get("fresh"))
     return {
         "ok": bool(session.get("tradable_now")) and bool(asset_status.get("ok")) and research_price_ready,
@@ -2301,7 +2310,7 @@ async def tf_24h_status(ticker: str = "SPY"):
         "price_data_policy": {
             "delayed_sip_allowed_for_research": True,
             "delayed_sip_minutes": 15,
-            "delayed_sip_execution_allowed": False,
+            "delayed_sip_execution_allowed": True,
             "research_max_age_seconds": int(os.environ.get("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200")),
         },
         "execution_rules": {

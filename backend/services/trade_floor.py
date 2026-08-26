@@ -56,8 +56,11 @@ ALPACA_24H_EQUITY_ENABLED = os.environ.get("ALPACA_24H_EQUITY_ENABLED", "true").
 }
 ALPACA_EXECUTION_QUOTE_FEEDS = os.environ.get(
     "ALPACA_EXECUTION_QUOTE_FEEDS",
-    "overnight,boats,sip,iex,",
+    "overnight,boats,delayed_sip,sip,iex,",
 )
+ALPACA_ALLOW_DELAYED_24H_EXECUTION = os.environ.get(
+    "ALPACA_ALLOW_DELAYED_24H_EXECUTION", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 MAX_OPEN_POSITIONS = 10
 VIX_RED_THRESHOLD = 25.0
@@ -1027,6 +1030,7 @@ async def evaluate_and_execute(
     queued_orders = await active_queued_equity_orders()
     pending_tickers |= {(q.get("ticker") or q.get("symbol") or "").upper() for q in queued_orders}
     regime = await regime_status()
+    session = equity_order_session()
     pm_mode = portfolio_manager._mode_from_regime(regime)
     ruleset = await pm_rules.get_ruleset()
     profile_override = await pm_rules.profile_override_for(pm_mode)
@@ -1109,6 +1113,17 @@ async def evaluate_and_execute(
             continue
         fresh, age_s = safety.quote_is_fresh(quote_meta)
         quote_meta["age_s"] = age_s
+        delayed_24h = bool(
+            session.get("extended_hours")
+            and ALPACA_ALLOW_DELAYED_24H_EXECUTION
+            and str(quote_meta.get("feed") or "").lower() == "delayed_sip"
+            and age_s is not None
+            and age_s <= int(os.environ.get("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200"))
+        )
+        if delayed_24h:
+            fresh = True
+            quote_meta["execution_eligible"] = True
+            quote_meta["execution_data_mode"] = "delayed_sip_15m_limit_only"
         if not fresh:
             rejected.append({"ticker": ticker, "score": score,
                               "reason": "stale_quote", "quote_meta": quote_meta})
