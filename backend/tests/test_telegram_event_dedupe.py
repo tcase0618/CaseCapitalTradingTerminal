@@ -18,6 +18,15 @@ def test_scan_report_throttle_allows_explicit_admin_dispatches():
     assert not telegram_events._scan_report_throttle_enabled("telegram_command")
 
 
+def test_scheduler_core_scan_report_is_suppressed_without_full_terminal_variant():
+    assert telegram_events._scan_report_suppressed_reason({"triggered_by": "scheduler"}) == "scheduled_core_scan_report_suppressed"
+    assert telegram_events._scan_report_suppressed_reason({
+        "triggered_by": "scheduler",
+        "telegram_report_variant": "full_terminal",
+    }) is None
+    assert telegram_events._scan_report_suppressed_reason({"triggered_by": "admin_dashboard"}) is None
+
+
 class _UpdateResult:
     def __init__(self, *, upserted_id=None, modified_count=0):
         self.upserted_id = upserted_id

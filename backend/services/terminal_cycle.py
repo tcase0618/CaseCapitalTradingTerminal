@@ -51,6 +51,7 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     telegram_result: dict[str, Any] = {"skipped": True, "reason": "telegram_env_missing"}
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
         from . import telegram_events
+        scan["telegram_report_variant"] = "full_terminal"
         telegram_result = await timed("telegram_dispatch", telegram_events.dispatch_scan_report(scan))
 
     finished = _now()

@@ -170,6 +170,14 @@ def _scan_report_throttle_enabled(triggered_by: Any) -> bool:
     return False
 
 
+def _scan_report_suppressed_reason(scan: dict[str, Any]) -> str | None:
+    trigger = str(scan.get("triggered_by") or "").strip().lower()
+    variant = str(scan.get("telegram_report_variant") or "").strip().lower()
+    if trigger == "scheduler" and variant != "full_terminal":
+        return "scheduled_core_scan_report_suppressed"
+    return None
+
+
 async def _scan_report_dedupe_reason(scan_id: str, triggered_by: Any) -> str | None:
     db = get_db()
     if scan_id:
@@ -535,6 +543,18 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
 
 
 async def dispatch_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
+    suppressed_reason = _scan_report_suppressed_reason(scan)
+    if suppressed_reason:
+        await log_activity(
+            f"Telegram scan report suppressed: {suppressed_reason}",
+            "info",
+            {
+                "scan_id": str(scan.get("finished_at") or scan.get("created_at") or _now_iso()),
+                "triggered_by": scan.get("triggered_by"),
+                "telegram_report_variant": scan.get("telegram_report_variant"),
+            },
+        )
+        return {"ok": True, "sent": False, "suppressed": True, "reason": suppressed_reason}
     report = await build_scan_report(scan)
     dedupe_reason = await _scan_report_dedupe_reason(report["scan_id"], scan.get("triggered_by"))
     if dedupe_reason:
