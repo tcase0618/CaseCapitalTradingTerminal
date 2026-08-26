@@ -388,6 +388,24 @@ async def ibkr_status():
     return await asyncio.to_thread(ibkr_research.status)
 
 
+@api.get("/robinhood/status")
+async def robinhood_status():
+    """Return Robinhood MCP connection and safety state without mutating orders."""
+    from services import robinhood_mcp
+    return await robinhood_mcp.status()
+
+
+@api.post("/robinhood/probe")
+async def robinhood_probe():
+    """Run MCP tools/list only; no account mutation or order operation is attempted."""
+    from services import robinhood_mcp
+    try:
+        async with robinhood_mcp.RobinhoodMCPClient() as client:
+            return await client.probe_read_only()
+    except robinhood_mcp.RobinhoodMCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @api.get("/ibkr/applications")
 async def ibkr_applications():
     from services import ibkr_terminal
