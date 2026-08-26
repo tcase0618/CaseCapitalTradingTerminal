@@ -327,6 +327,15 @@ def _option_blocker_counts(rows: list[dict[str, Any]], *, executable_only: bool 
     return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
 
 
+def _reason_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows or []:
+        key = str(row.get("reason") or row.get("status") or "unknown").strip()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
+
+
 def _route_for_pm_row(row: dict[str, Any], opt_by_ticker: dict[str, dict[str, Any]]) -> str:
     ticker = str(row.get("ticker") or "").upper()
     opt_route = str((opt_by_ticker.get(ticker) or {}).get("route") or "").upper()
@@ -433,6 +442,11 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     fresh_price_rows = int(scan_freshness.get("fresh_price_rows") or 0)
     price_rows = int(scan_freshness.get("price_rows") or 0)
     severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers or stale_price_rows else "info"
+    exec_summary = scan.get("execution_summary") or {}
+    equity_reasons = _reason_counts(exec_summary.get("equity_rejected_sample") or [])
+    equity_reason_line = " | ".join(f"{_esc(k)}: <b>{v}</b>" for k, v in list(equity_reasons.items())[:4])
+    option_skip_reasons = _reason_counts(exec_summary.get("options_skipped_sample") or [])
+    option_skip_line = " | ".join(f"{_esc(k)}: <b>{v}</b>" for k, v in list(option_skip_reasons.items())[:4])
 
     by_family_pm = screener_summary.get("by_pm_family") or {}
     by_family_read = screener_summary.get("by_read_only_family") or {}
@@ -503,17 +517,23 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         *([f"Options execution blockers: {' | '.join(option_blocker_lines)}"] if option_blocker_lines else []),
         *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),
         "",
+        "<b>EXECUTION OUTCOME</b>",
+        f"Equity submitted: <b>{exec_summary.get('equity_executed', 0)}</b> | Rejected: <b>{exec_summary.get('equity_rejected', 0)}</b>",
+        *([f"Equity rejection sample: {equity_reason_line}"] if equity_reason_line else []),
+        f"Options submitted: <b>{exec_summary.get('options_submitted', 0)}</b> | Ready: <b>{exec_summary.get('options_ready', opt_summary.get('ready', 0))}</b> | Skipped: <b>{exec_summary.get('options_skipped', 0)}</b>",
+        *([f"Options skip sample: {option_skip_line}"] if option_skip_line else []),
+        "",
         "<b>SCANNER FAMILIES</b>",
         f"PM-routable strategy candidates: <b>{screener_summary.get('pm_routable', 0)}</b>",
         *([f"Families: {' | '.join(screener_lines)}"] if screener_lines else []),
-        "Earnings + SEC: <b>RESEARCH-ONLY</b> | PM: <b>OFF</b> | Telegram: <b>OFF</b>",
+        "Earnings + SEC: <b>RESEARCH-ONLY</b> | PM routing: <b>OFF</b> | Detail digest: <b>OFF</b>",
         "Case Court: <b>OFF ACTIVE ROUTING</b>",
         "",
         "<b>QC</b>",
         f"Decision: <b>{_esc(qc_decision)}</b> | Score: <b>{qc.get('score', '--')}</b> | Blockers: <b>{blockers}</b>",
         f"Execution gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> | Truth: <b>{_esc(gate.get('truth_grade') or '--')}</b>",
         f"Ticker rejects: <b>{(scan.get('ticker_hygiene') or {}).get('rejected_count', 0)}</b>",
-        *([f"Price freshness: <b>{fresh_price_rows}</b> / {price_rows} live | Stale rows: <b>{stale_price_rows}</b>"] if price_rows else []),
+        *([f"Core display price freshness: <b>{fresh_price_rows}</b> / {price_rows} live | Stale rows: <b>{stale_price_rows}</b>"] if price_rows else []),
         *([f"Freshness: <b>CHECK</b> | {'; '.join(_esc(n) for n in alignment_notes)}"] if alignment_notes else []),
         *([f"Scan fingerprint: <b>{_esc(scan_freshness.get('status'))}</b>"] if scan.get("freshness") else []),
         "",
