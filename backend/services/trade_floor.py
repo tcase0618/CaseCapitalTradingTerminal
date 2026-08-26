@@ -448,8 +448,33 @@ async def execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_ord
     if not result["paper_only"]:
         result["reason"] = "refusing_test_order_on_non_paper_base_url"
         return result
-    cli_id = f"tf-probe-{ticker}-{int(_now().timestamp())}"
+    from . import execution_safety
+
+    cli_id = execution_safety.stable_client_order_id(
+        "execution_probe",
+        ticker,
+        "buy",
+        round(notional, 2),
+        _now().date().isoformat(),
+        prefix="tf-probe",
+    )
+    claim = await execution_safety.claim_execution_intent(
+        scope="equity_execution_probe",
+        client_order_id=cli_id,
+        symbol=ticker,
+        side="buy",
+        metadata={"notional": notional, "source": "execution_probe"},
+    )
+    if not claim.get("ok"):
+        result["reason"] = claim.get("reason")
+        result["client_order_id"] = cli_id
+        return result
     order = await submit_fractional_limit_buy(ticker, notional, round(float(ask), 4), client_order_id=cli_id)
+    await execution_safety.mark_execution_intent(
+        cli_id,
+        "submitted" if order else "broker_rejected",
+        {"ticker": ticker, "order_id": (order or {}).get("id"), "source": "execution_probe"},
+    )
     if not order:
         result["reason"] = "alpaca_test_order_rejected"
         return result
@@ -928,7 +953,7 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
     orders happens immediately before EVERY single submit attempt. A
     ticker that already has a position or a queued/working order will
     never receive a duplicate order."""
-    from . import execution_gate, portfolio_manager, pm_rules, safety, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
+    from . import execution_gate, execution_safety, portfolio_manager, pm_rules, safety, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -1141,10 +1166,39 @@ async def evaluate_and_execute(scan_results: list[dict[str, Any]], only_tickers:
                               "reason": "ticker_has_pending_open_order (final check)"})
             continue
 
-        cli_id = f"tf-{ticker}-{int(_now().timestamp())}"
         limit_price = round(ask, 4)
+        cli_id = execution_safety.stable_client_order_id(
+            "pm_equity",
+            ticker,
+            round(notional, 2),
+            limit_price,
+            pm_row.get("action") or row.get("route") or row.get("action"),
+            prefix="tf",
+        )
+        claim = await execution_safety.claim_execution_intent(
+            scope="equity_pm",
+            client_order_id=cli_id,
+            symbol=ticker,
+            side="buy",
+            metadata={
+                "notional": notional,
+                "limit_price": limit_price,
+                "pm_action": pm_row.get("action"),
+                "source": "evaluate_and_execute",
+            },
+        )
+        if not claim.get("ok"):
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": claim.get("reason") or "duplicate_execution_intent",
+                              "client_order_id": cli_id})
+            continue
         order = await submit_fractional_limit_buy(
             ticker, notional, limit_price=limit_price, client_order_id=cli_id,
+        )
+        await execution_safety.mark_execution_intent(
+            cli_id,
+            "submitted" if order else "broker_rejected",
+            {"ticker": ticker, "order_id": (order or {}).get("id"), "source": "evaluate_and_execute"},
         )
         if not order:
             rejected.append({"ticker": ticker, "score": score,

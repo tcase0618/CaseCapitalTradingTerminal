@@ -139,7 +139,10 @@ def test_extended_order_payload_sets_extended_hours(monkeypatch):
 
 
 def test_execution_quote_falls_back_to_boats_feed(monkeypatch):
+    from datetime import timezone
+
     calls = []
+    fresh_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     class Response:
         def __init__(self, status_code, payload):
@@ -165,7 +168,7 @@ def test_execution_quote_falls_back_to_boats_feed(monkeypatch):
             if feed == "overnight":
                 return Response(403, {})
             if feed == "boats":
-                return Response(200, {"quote": {"ap": 101.25, "bp": 101.2, "t": "2026-08-25T12:00:00Z"}})
+                return Response(200, {"quote": {"ap": 101.25, "bp": 101.2, "t": fresh_ts}})
             raise AssertionError("fresh BOATS quote should short-circuit")
 
     monkeypatch.setattr(trade_floor, "_alpaca_ready", lambda: True)

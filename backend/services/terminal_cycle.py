@@ -18,6 +18,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _row_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
 async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
     started = _now()
     stage_times: dict[str, float] = {}
@@ -66,10 +70,10 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
             "equity_rejected": len(equity_execution.get("rejected") or []),
             "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],
             "options_ready": options_execution.get("ready"),
-            "options_submitted": len(options_execution.get("submitted") or []),
-            "options_skipped": len(options_execution.get("skipped") or []),
+            "options_submitted": _row_count(options_execution.get("submitted")),
+            "options_skipped": _row_count(options_execution.get("skipped")),
             "options_submitted_rows": options_execution.get("submitted") or [],
-            "options_skipped_sample": (options_execution.get("skipped") or [])[:8],
+            "options_skipped_sample": (options_execution.get("skipped") if isinstance(options_execution.get("skipped"), list) else [])[:8],
         }
         telegram_result = await timed("telegram_dispatch", telegram_events.dispatch_scan_report(scan))
 
@@ -85,8 +89,8 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
         "pm_actions": (pm_payload.get("summary") or {}),
         "equity_executed": len(equity_execution.get("executed") or []),
         "equity_rejected": len(equity_execution.get("rejected") or []),
-        "options_submitted": len(options_execution.get("submitted") or []),
-        "options_skipped": len(options_execution.get("skipped") or []),
+        "options_submitted": _row_count(options_execution.get("submitted")),
+        "options_skipped": _row_count(options_execution.get("skipped")),
         "pharma_rows": len(pharma_result.get("results") or []) if isinstance(pharma_result, dict) else None,
         "pharma_shocks": pharma_shock_result.get("candidate_count") if isinstance(pharma_shock_result, dict) else None,
     }

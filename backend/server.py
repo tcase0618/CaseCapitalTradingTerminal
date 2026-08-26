@@ -2159,6 +2159,12 @@ async def on_startup():
             await pnl_tracker.ensure_first_seen_backfill()
     except Exception as e:
         logger.warning("first_seen backfill failed: %s", e)
+    try:
+        if db_ready:
+            from services import execution_safety
+            await execution_safety.ensure_execution_indexes()
+    except Exception as e:
+        logger.warning("execution safety index init failed: %s", e)
     scheduler_enabled = os.environ.get("ENABLE_SCHEDULER", "true").strip().lower() not in {"0", "false", "no", "off"}
     if scheduler_enabled:
         scheduler.start_scheduler()
@@ -2291,9 +2297,12 @@ async def tf_reconcile_positions():
 
 @api.post("/trade_floor/execute_pm_ticker")
 async def tf_execute_pm_ticker(ticker: str):
-    from services import trade_floor
+    from services import execution_safety, trade_floor
     from services.db import get_db
     t = ticker.upper()
+    allowed, guard = await execution_safety.add_risk_allowed("api_equity_execute_pm_ticker")
+    if not allowed:
+        return {"ok": False, "reason": "safety_halt", "ticker": t, "guard": guard}
     scan = await get_db().scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
     rows = [r for r in ((scan or {}).get("results") or []) if str(r.get("ticker") or "").upper() == t]
     if not rows:
@@ -2304,7 +2313,11 @@ async def tf_execute_pm_ticker(ticker: str):
 
 @api.post("/trade_floor/execution_probe")
 async def tf_execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_order: bool = False):
-    from services import trade_floor
+    from services import execution_safety, trade_floor
+    if place_order:
+        allowed, guard = await execution_safety.add_risk_allowed("api_equity_execution_probe")
+        if not allowed:
+            return {"ok": False, "reason": "safety_halt", "guard": guard, "place_order": place_order}
     return await trade_floor.execution_probe(ticker=ticker, notional=notional, place_order=place_order)
 
 
@@ -2332,10 +2345,13 @@ async def tf_manual_send(ticker: str, risk_dollars: float, source: str = "manual
     no scan gates, no recalc. Still enforces: (a) dedup vs Alpaca open
     positions AND open orders; (b) limit DAY order at current ask;
     (c) absolute risk hard cap by score tier; (d) analytical stop engine."""
-    from services import trade_floor, stop_engine, trade_floor_learning as tfle
+    from services import execution_safety, trade_floor, stop_engine, trade_floor_learning as tfle
     if not trade_floor._alpaca_ready():
         return {"ok": False, "reason": "alpaca_not_configured"}
     ticker = ticker.upper()
+    allowed, guard = await execution_safety.add_risk_allowed("api_equity_manual_send")
+    if not allowed:
+        return {"ok": False, "reason": "safety_halt", "ticker": ticker, "guard": guard}
     # Dedup
     held = {p.get("symbol", "").upper() for p in await trade_floor.list_positions()}
     pending = {o.get("symbol", "").upper() for o in await trade_floor.list_orders(status="open")}
@@ -2362,9 +2378,31 @@ async def tf_manual_send(ticker: str, risk_dollars: float, source: str = "manual
     notional = round(min(float(risk_dollars), hard_cap), 2)
     if notional < 1.0:
         return {"ok": False, "reason": f"notional_too_small (cap=${hard_cap})"}
-    cli = f"tf-manual-{ticker}-{int(datetime.now(timezone.utc).timestamp())}"
+    cli = execution_safety.stable_client_order_id(
+        "manual_send",
+        ticker,
+        "buy",
+        round(notional, 2),
+        source,
+        datetime.now(timezone.utc).date().isoformat(),
+        prefix="tf-manual",
+    )
+    claim = await execution_safety.claim_execution_intent(
+        scope="equity_manual_send",
+        client_order_id=cli,
+        symbol=ticker,
+        side="buy",
+        metadata={"source": source, "notional": notional},
+    )
+    if not claim.get("ok"):
+        return {"ok": False, "reason": claim.get("reason"), "client_order_id": cli, "intent": claim}
     order = await trade_floor.submit_fractional_limit_buy(
         ticker, notional, limit_price=round(ask, 4), client_order_id=cli,
+    )
+    await execution_safety.mark_execution_intent(
+        cli,
+        "submitted" if order else "broker_rejected",
+        {"order_id": (order or {}).get("id"), "ticker": ticker},
     )
     if order:
         from services.db import get_db, stamped
@@ -2593,7 +2631,10 @@ class OptionsDeskExecutePayload(BaseModel):
 
 @api.post("/options_desk/execute")
 async def options_desk_execute(payload: OptionsDeskExecutePayload):
-    from services import options_desk
+    from services import execution_safety, options_desk
+    allowed, guard = await execution_safety.add_risk_allowed("api_options_execute")
+    if not allowed:
+        return {"ok": False, "reason": "safety_halt", "guard": guard}
     return await options_desk.execute(
         candidate_id=payload.candidate_id,
         qty=payload.qty,
@@ -2603,7 +2644,10 @@ async def options_desk_execute(payload: OptionsDeskExecutePayload):
 
 @api.post("/options_desk/auto_execute_latest")
 async def options_desk_auto_execute_latest(limit: int | None = None):
-    from services import options_desk
+    from services import execution_safety, options_desk
+    allowed, guard = await execution_safety.add_risk_allowed("api_options_auto_execute")
+    if not allowed:
+        return {"ok": False, "reason": "safety_halt", "guard": guard, "submitted": [], "skipped": []}
     return await options_desk.auto_execute_latest(limit=limit)
 
 
@@ -2686,7 +2730,10 @@ async def options_desk_tail_refresh(limit: int = 25):
 
 @api.post("/options_desk/tail/execute")
 async def options_desk_tail_execute(payload: OptionsDeskExecutePayload):
-    from services import tail_hunter
+    from services import execution_safety, tail_hunter
+    allowed, guard = await execution_safety.add_risk_allowed("api_options_tail_execute")
+    if not allowed:
+        return {"ok": False, "reason": "safety_halt", "guard": guard}
     return await tail_hunter.execute_tail(payload.candidate_id)
 
 
