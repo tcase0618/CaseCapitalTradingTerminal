@@ -32,7 +32,7 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     await log_activity(f"Full terminal scan started ({triggered_by})", "info")
     from . import candidate_ledger, lottery, options_desk, pharma, portfolio_manager, scanner, strategy_screeners
 
-    core_task = asyncio.create_task(timed("core_scan", scanner.run_scan(triggered_by=triggered_by)))
+    core_task = asyncio.create_task(timed("core_scan", scanner.run_scan(triggered_by=triggered_by, auto_execute=False)))
     lottery_task = asyncio.create_task(timed("lottery_scan", lottery.run_dedicated_lottery_scan(triggered_by=triggered_by)))
     pharma_task = asyncio.create_task(timed("pharma_scan", pharma.run_pharma_scan(triggered_by=triggered_by)))
     shock_task = asyncio.create_task(timed("pharma_shock_scan", pharma.run_catalyst_shock_scan(triggered_by=triggered_by, force_refresh=True)))
@@ -47,6 +47,15 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     ledger_payload = await timed("candidate_ledger", candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True))
     options_payload = await timed("options_desk_candidates", options_desk.build_candidates(limit=100, persist=True))
     pm_payload = await timed("portfolio_manager", portfolio_manager.latest_portfolio_plan())
+
+    equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
+    if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        from . import trade_floor
+        equity_execution = await timed("equity_execution", trade_floor.evaluate_and_execute(scan.get("results") or []))
+
+    options_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_OPTIONS_EXECUTION is off"}
+    if options_desk.options_execution_enabled():
+        options_execution = await timed("options_execution", options_desk.auto_execute_latest())
 
     telegram_result: dict[str, Any] = {"skipped": True, "reason": "telegram_env_missing"}
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
@@ -64,6 +73,10 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
         "ledger_candidates": (ledger_payload.get("summary") or {}).get("total") or len(ledger_payload.get("candidates") or []),
         "options_candidates": len(options_payload.get("candidates") or []),
         "pm_actions": (pm_payload.get("summary") or {}),
+        "equity_executed": len(equity_execution.get("executed") or []),
+        "equity_rejected": len(equity_execution.get("rejected") or []),
+        "options_submitted": len(options_execution.get("submitted") or []),
+        "options_skipped": len(options_execution.get("skipped") or []),
         "pharma_rows": len(pharma_result.get("results") or []) if isinstance(pharma_result, dict) else None,
         "pharma_shocks": pharma_shock_result.get("candidate_count") if isinstance(pharma_shock_result, dict) else None,
     }
@@ -88,5 +101,7 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
         "candidate_ledger": ledger_payload.get("summary") or {},
         "options_desk": options_payload.get("summary") or {},
         "portfolio_manager": pm_payload.get("summary") or {},
+        "equity_execution": equity_execution,
+        "options_execution": options_execution,
         "telegram": telegram_result,
     }

@@ -155,7 +155,7 @@ def _merge_congress_signals(by_ticker: dict[str, dict[str, Any]],
     return by_ticker
 
 
-async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
+async def run_scan(triggered_by: str = "manual", auto_execute: bool = True) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     await log_activity(f"Scan started ({triggered_by})", "info")
 
@@ -517,17 +517,19 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
         asyncio.create_task(_sec.poll_edgar_filings())
     except Exception as e:
         logger.warning("SEC poll dispatch failed: %s", e)
-    if _execution_enabled():
+    if auto_execute and _execution_enabled():
         try:
             from . import trade_floor as _tf
             asyncio.create_task(_tf.evaluate_and_execute(final))
         except Exception as e:
             logger.warning("Trade Floor dispatch failed: %s", e)
+    elif not auto_execute:
+        await log_activity("Scan execution dispatch deferred to full terminal cycle", "info")
     else:
         await log_activity("Scan execution dispatch skipped; ENABLE_TRADE_EXECUTION is off", "info")
     try:
         from . import options_desk as _od
-        if _od.options_execution_enabled():
+        if auto_execute and _od.options_execution_enabled():
             async def _options_post_scan_execute() -> None:
                 try:
                     result = await _od.refresh_and_auto_execute_latest()
@@ -545,6 +547,8 @@ async def run_scan(triggered_by: str = "manual") -> dict[str, Any]:
                     logger.warning("Options Desk post-scan auto-execute failed: %s", exc)
                     await log_activity(f"Options Desk post-scan auto-execute failed: {exc}", "warning")
             asyncio.create_task(_options_post_scan_execute())
+        elif not auto_execute:
+            await log_activity("Options Desk auto-execute deferred to full terminal cycle", "info")
         else:
             await log_activity("Options Desk auto-execute skipped; ENABLE_OPTIONS_EXECUTION is off", "info")
     except Exception as e:
