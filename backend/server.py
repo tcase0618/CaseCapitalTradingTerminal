@@ -2165,6 +2165,11 @@ async def on_startup():
             await execution_safety.ensure_execution_indexes()
     except Exception as e:
         logger.warning("execution safety index init failed: %s", e)
+    try:
+        if db_ready:
+            await telegram_service.ensure_telegram_outbound_indexes()
+    except Exception as e:
+        logger.warning("telegram outbound index init failed: %s", e)
     scheduler_enabled = os.environ.get("ENABLE_SCHEDULER", "true").strip().lower() not in {"0", "false", "no", "off"}
     if scheduler_enabled:
         scheduler.start_scheduler()

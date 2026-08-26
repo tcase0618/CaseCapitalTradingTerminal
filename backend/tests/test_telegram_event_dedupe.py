@@ -36,6 +36,7 @@ class _UpdateResult:
 class _OutboundGuard:
     def __init__(self):
         self.docs = {}
+        self.indexes = []
 
     async def update_one(self, query, update, upsert=False):
         lock_id = query["_id"]
@@ -48,6 +49,10 @@ class _OutboundGuard:
         doc = {"_id": lock_id, **update["$set"]}
         self.docs[lock_id] = doc
         return _UpdateResult(upserted_id=lock_id if existing is None else None, modified_count=0 if existing is None else 1)
+
+    async def create_index(self, spec, **kwargs):
+        self.indexes.append((spec, kwargs))
+        return str(spec)
 
 
 class _Db:
@@ -85,3 +90,13 @@ async def test_non_scan_alerts_lock_by_exact_digest(monkeypatch):
 
     assert first_skip is False
     assert second_skip is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_outbound_guard_has_ttl_index(monkeypatch):
+    db = _Db()
+    monkeypatch.setattr(telegram_service, "get_db", lambda: db)
+
+    await telegram_service.ensure_telegram_outbound_indexes()
+
+    assert ("expires_at", {"expireAfterSeconds": 0}) in db.telegram_outbound_guard.indexes

@@ -48,6 +48,12 @@ OUTBOUND_TEXT_REPLACEMENTS = {
 }
 
 
+async def ensure_telegram_outbound_indexes() -> None:
+    db = get_db()
+    await db.telegram_outbound_guard.create_index("expires_at", expireAfterSeconds=0)
+    await db.telegram_outbound_guard.create_index([("kind", 1), ("sent", 1), ("created_at", -1)])
+
+
 def _normalize_outbound_text(text: str) -> str:
     cleaned = text
     for old, new in OUTBOUND_TEXT_REPLACEMENTS.items():
@@ -94,6 +100,7 @@ async def _should_skip_outbound(text: str) -> tuple[bool, str]:
             {
                 "_id": lock_id,
                 "$or": [
+                    {"expires_at": {"$lte": now}},
                     {"expires_at": {"$lte": now.isoformat()}},
                     {"expires_at": {"$exists": False}},
                 ],
@@ -103,8 +110,8 @@ async def _should_skip_outbound(text: str) -> tuple[bool, str]:
                     "kind": kind,
                     "digest": digest,
                     "sent": False,
-                    "created_at": now.isoformat(),
-                    "expires_at": expires_at.isoformat(),
+                    "created_at": now,
+                    "expires_at": expires_at,
                     "cooldown_seconds": int(cooldown.total_seconds()),
                     "preview": text[:220],
                 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from datetime import datetime
 
 import httpx
@@ -22,7 +23,13 @@ def _now_iso():
 
 logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
+_scheduler_start_lock = threading.Lock()
 ET = pytz.timezone("America/New_York")
+SCHEDULER_JOB_DEFAULTS = {
+    "max_instances": 1,
+    "coalesce": True,
+    "misfire_grace_time": 300,
+}
 STOCK_SCAN_CADENCE_ET = [
     ("midnight_scan", 0, 0),
     ("morning_scan", 8, 0),
@@ -356,9 +363,10 @@ async def persist_live_position_snapshot(triggered_by: str = "scheduler_15m", ma
 
 def start_scheduler():
     global _scheduler
-    if _scheduler and _scheduler.running:
-        return
-    _scheduler = AsyncIOScheduler(timezone=ET)
+    with _scheduler_start_lock:
+        if _scheduler:
+            return
+        _scheduler = AsyncIOScheduler(timezone=ET, job_defaults=SCHEDULER_JOB_DEFAULTS)
     # Coordinated stock-scan cadence, restricted to market-session days by the
     # runtime guard in _daily_scan_job. The job runs the core scanner and
     # specialist scan families together before PM/Telegram publication.
