@@ -183,6 +183,38 @@ async def integration_status() -> list[dict[str, Any]]:
     ))
 
     try:
+        from . import finance_toolkit_source
+
+        fmp_status = finance_toolkit_source.status()
+        fmp_ok = bool(fmp_status.get("configured"))
+        out.append(_row(
+            "finance_toolkit_fmp",
+            "FinanceToolkit / FMP Research Data",
+            fmp_ok,
+            last=_now_iso() if fmp_ok else None,
+            detail={
+                "provider": fmp_status.get("provider"),
+                "adapter": fmp_status.get("adapter"),
+                "env_key": fmp_status.get("env_key"),
+                "key_state": fmp_status.get("key_state"),
+                "data_role": fmp_status.get("data_role"),
+                "wired_to_pm": fmp_status.get("wired_to_pm"),
+                "wired_to_execution": fmp_status.get("wired_to_execution"),
+                "coverage": fmp_status.get("coverage"),
+            },
+            quality="configured" if fmp_ok else "optional",
+            reason=None if fmp_ok else "missing FMP/FinanceToolkit API key",
+        ))
+    except Exception as exc:
+        out.append(_row(
+            "finance_toolkit_fmp",
+            "FinanceToolkit / FMP Research Data",
+            False,
+            quality="down",
+            reason=str(exc)[:160],
+        ))
+
+    try:
         from . import pricer
 
         label = pricer.source_label()

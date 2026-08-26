@@ -107,7 +107,7 @@ async def overview() -> dict[str, Any]:
         "claude_disabled": os.environ.get("DISABLE_CLAUDE_ANALYSIS", "").lower() == "true",
         "fred": _mask(os.environ.get("FRED_API_KEY")),
         "alpha_vantage": _mask(os.environ.get("ALPHA_VANTAGE_API_KEY")),
-        "fmp": _mask(os.environ.get("FMP_API_KEY")),
+        "fmp": _mask(os.environ.get("FMP_API_KEY") or os.environ.get("FINANCIAL_MODELING_PREP_API_KEY") or os.environ.get("FINANCETOOLKIT_API_KEY")),
         "telegram": _mask(os.environ.get("TELEGRAM_BOT_TOKEN")),
     }
 

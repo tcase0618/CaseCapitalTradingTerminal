@@ -898,6 +898,18 @@ async def free_data_fred_latest(series_id: str):
     return await free_data.fred_latest(series_id)
 
 
+@api.get("/data/finance-toolkit/status")
+async def finance_toolkit_status():
+    from services import finance_toolkit_source
+    return finance_toolkit_source.status()
+
+
+@api.get("/data/finance-toolkit/profile/{ticker}")
+async def finance_toolkit_profile(ticker: str):
+    from services import finance_toolkit_source
+    return await finance_toolkit_source.company_profile(ticker)
+
+
 @api.post("/scan/run")
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
