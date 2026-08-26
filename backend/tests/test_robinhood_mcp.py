@@ -32,7 +32,8 @@ async def test_tools_list_uses_mcp_json_rpc_and_never_places_order(tmp_path):
     async def handler(request: httpx.Request) -> httpx.Response:
         seen["body"] = json.loads(request.content)
         seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": seen["body"]["id"], "result": {"tools": [{"name": "get_equity_quotes"}]}})
+        result = {"capabilities": {}} if seen["body"]["method"] == "initialize" else {"tools": [{"name": "get_equity_quotes"}]}
+        return httpx.Response(200, headers={"mcp-session-id": "session-test"}, json={"jsonrpc": "2.0", "id": seen["body"]["id"], "result": result})
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:

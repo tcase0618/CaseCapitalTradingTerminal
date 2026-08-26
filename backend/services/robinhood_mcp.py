@@ -134,6 +134,8 @@ class RobinhoodMCPClient:
         self._http = http_client
         self._owned_http = http_client is None
         self._tokens = load_tokens(self.cfg)
+        self._session_id: str | None = None
+        self._initialized = False
 
     async def __aenter__(self) -> "RobinhoodMCPClient":
         if self._owned_http:
@@ -155,12 +157,16 @@ class RobinhoodMCPClient:
 
     async def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         client = self._require_transport()
+        headers = {"Accept": "application/json, text/event-stream", **_bearer(self._tokens)}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
         response = await client.post(
             self.cfg.mcp_url,
-            headers={"Accept": "application/json, text/event-stream", **_bearer(self._tokens)},
+            headers=headers,
             json=_json_rpc(method, params),
         )
         response.raise_for_status()
+        self._session_id = response.headers.get("mcp-session-id") or self._session_id
         try:
             payload = response.json()
         except ValueError as exc:
@@ -170,7 +176,22 @@ class RobinhoodMCPClient:
         return payload if isinstance(payload, dict) else {"result": payload}
 
     async def tools_list(self) -> dict[str, Any]:
+        await self.initialize()
         return await self.call("tools/list")
+
+    async def initialize(self) -> dict[str, Any]:
+        if self._initialized:
+            return {"ok": True, "already_initialized": True}
+        result = await self.call(
+            "initialize",
+            {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "case-capital-readonly", "version": "0.1"},
+            },
+        )
+        self._initialized = True
+        return result
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.call("tools/call", {"name": name, "arguments": arguments or {}})
