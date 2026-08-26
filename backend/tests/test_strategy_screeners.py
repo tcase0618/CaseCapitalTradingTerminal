@@ -149,6 +149,34 @@ def test_pm_merge_preserves_core_and_adds_strategy_signals():
     assert "lottery_supernova" in merged[0]["scanner_sources"]
     assert merged[0]["case_score"] == strategy[0]["case_score"]
     assert merged[0]["strategy_confidence"] == strategy[0]["strategy_confidence"]
+    assert merged[0]["strategy_views"][0]["screener_id"] == "lottery_supernova"
+    assert merged[0]["strategy_views"][0]["case_score"] == strategy[0]["case_score"]
+
+
+def test_pm_merge_keeps_all_strategy_views_for_one_ticker():
+    rows = [
+        strategy_screeners._base_row(
+            row={"ticker": "SAME", "price": 10, "signals": ["A"]},
+            screener_id="lottery_day2_continuation",
+            family="LOTTERY",
+            lane="DAY2_CONTINUATION",
+            score=70,
+        ),
+        strategy_screeners._base_row(
+            row={"ticker": "SAME", "price": 10, "signals": ["B"]},
+            screener_id="lottery_supernova",
+            family="LOTTERY",
+            lane="SUPERNOVA",
+            score=80,
+        ),
+    ]
+
+    merged = portfolio_manager._merge_strategy_rows([], rows)
+
+    assert len(merged) == 1
+    assert {v["screener_id"] for v in merged[0]["strategy_views"]} == {
+        "lottery_day2_continuation", "lottery_supernova",
+    }
 
 
 def test_trade_floor_execution_input_includes_pm_routable_strategy_rows(monkeypatch):

@@ -447,6 +447,8 @@ def evaluate_rows(
             "strategy_case": strategy_case,
             "case_score": _num(row.get("case_score") or strategy_case.get("case_score")),
             "strategy_confidence": _num(row.get("strategy_confidence") or strategy_case.get("confidence")),
+            "strategy_views": row.get("strategy_views") or [],
+            "scanner_sources": row.get("scanner_sources") or [],
             "sizing_multipliers": sizing.get("sizing_multipliers") or {},
             "trade_score": row.get("trade_score"),
             "signal_score": row.get("signal_score"),
@@ -703,6 +705,7 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
             **row,
             "strategy_screeners": list(row.get("strategy_screeners") or []),
             "scanner_sources": list(row.get("scanner_sources") or ["core_scan"]),
+            "strategy_views": list(row.get("strategy_views") or []),
         }
     for row in strategy_rows or []:
         ticker = str(row.get("ticker") or "").upper()
@@ -715,10 +718,12 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
                 **row,
                 "strategy_screeners": [scanner],
                 "scanner_sources": [screener_id],
+                "strategy_views": [_strategy_view(row, scanner)],
             }
             continue
         base = merged[ticker]
         base.setdefault("strategy_screeners", []).append(scanner)
+        base.setdefault("strategy_views", []).append(_strategy_view(row, scanner))
         sources = list(base.get("scanner_sources") or [])
         if screener_id not in sources:
             sources.append(screener_id)
@@ -741,6 +746,22 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
             base["stop_loss"] = row.get("stop_loss")
         base["strategy_scanner_overlay"] = True
     return list(merged.values())
+
+
+def _strategy_view(row: dict[str, Any], scanner: dict[str, Any]) -> dict[str, Any]:
+    """Keep each specialist opinion visible after ticker-level PM merging."""
+    case = row.get("strategy_case") or {}
+    return {
+        "screener_id": scanner.get("screener_id") or row.get("source_scan"),
+        "family": scanner.get("family") or row.get("scanner_family"),
+        "lane": scanner.get("lane"),
+        "native_score": scanner.get("native_score"),
+        "case_score": row.get("case_score") or case.get("case_score"),
+        "confidence": row.get("strategy_confidence") or case.get("confidence"),
+        "badges": scanner.get("badges") or [],
+        "pm_routable": bool(scanner.get("pm_routable", row.get("pm_routable", True))),
+        "read_only": bool(scanner.get("read_only", row.get("read_only", False))),
+    }
 
 
 async def _account_equity() -> tuple[float | None, str]:
