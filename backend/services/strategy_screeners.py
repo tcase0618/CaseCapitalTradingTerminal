@@ -246,6 +246,7 @@ def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, A
             built = _base_row(row=row, screener_id=screener_id, family="LOTTERY", lane=lane, score=score, learned_config=learned_config)
             built["signal_groups"] = signal_groups
             built["independent_signal_count"] = signal_count
+            built["signal_band"] = f"{signal_count} SIGNALS" if signal_count < 5 else "5+ SIGNALS"
             built["signal_gate"] = "PASS_2_PLUS"
             built["strategy_fits"] = strategy_fits
             out.append(built)

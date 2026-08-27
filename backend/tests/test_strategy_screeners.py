@@ -127,6 +127,30 @@ def test_lottery_requires_two_independent_signal_groups_and_classifies_lane():
     assert any(item["strategy_scanner"]["lane"] == "DAY2_CONTINUATION" for item in built)
 
 
+def test_lottery_signal_bands_cap_at_five_plus_without_changing_score():
+    row = {
+        "ticker": "CONFLUENCE",
+        "components": {
+            "gap_surge": 10,
+            "rvol": 10,
+            "rotation": 6,
+            "catalyst": 10,
+            "short_interest": 4,
+            "attention": 8,
+            "structure": 4,
+        },
+        "triggers": ["GAP/SURGE", "RVOL", "ROTATION", "HIGH_SHORT", "ATTENTION", "PHARMA/FDA"],
+        "score": 52,
+    }
+
+    annotated = lottery.annotate_lottery_candidate(row)
+
+    assert annotated["independent_signal_count"] == 7
+    assert annotated["signal_band"] == "5+ SIGNALS"
+    assert annotated["signal_gate"] == "PASS_2_PLUS"
+    assert annotated["score"] == 52
+
+
 def test_lottery_pm_profile_allows_bounded_starter_for_qualified_setup():
     row = strategy_screeners._base_row(
         row={

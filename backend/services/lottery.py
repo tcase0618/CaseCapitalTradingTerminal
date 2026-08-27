@@ -84,6 +84,7 @@ def annotate_lottery_candidate(row: dict[str, Any]) -> dict[str, Any]:
     groups = lottery_signal_groups(annotated)
     annotated["signal_groups"] = groups
     annotated["independent_signal_count"] = len(groups)
+    annotated["signal_band"] = f"{len(groups)} SIGNALS" if len(groups) < 5 else "5+ SIGNALS"
     annotated["signal_gate"] = "PASS_2_PLUS" if len(groups) >= 2 else "WATCH_1_SIGNAL"
     annotated["strategy_fits"] = lottery_strategy_fits(annotated, groups)
     return annotated

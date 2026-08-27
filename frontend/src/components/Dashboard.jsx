@@ -235,7 +235,11 @@ export default function Dashboard() {
   const scannerTabRows = {
     core: results,
     docket: ledgerCandidates,
-    lottery: scanTabs?.tabs?.lottery || scan?.lottery_picks || [],
+    lottery: [...(scanTabs?.tabs?.lottery || scan?.lottery_picks || [])].sort((a, b) => {
+      const signalDelta = Number(b.independent_signal_count || 0) - Number(a.independent_signal_count || 0);
+      if (signalDelta) return signalDelta;
+      return Number(b.score ?? b.signal_score ?? 0) - Number(a.score ?? a.signal_score ?? 0);
+    }),
     options: scanTabs?.tabs?.options || [],
     pharma: scanTabs?.tabs?.pharma || [],
     earnings: Object.values(scanTabs?.tabs?.earnings?.by_day || {}).flat(),
@@ -858,6 +862,11 @@ function scannerFamilyRowModel(view, row) {
   const score = row.pm_score ?? row.case_score ?? row.score ?? row.signal_score ?? row.binary_event_score ?? row.candidate_quality_score;
   const lotteryGate = view === "lottery" && row.signal_gate;
   const lotteryFits = normalizeScannerSignals(row.strategy_fits);
+  const signalBand = row.signal_band || (
+    row.independent_signal_count != null
+      ? `${Number(row.independent_signal_count) >= 5 ? "5+" : Number(row.independent_signal_count)} SIGNALS`
+      : null
+  );
   const action = row.action || (
     lotteryGate
       ? (row.signal_gate === "PASS_2_PLUS" ? (lotteryFits[0] || "2+ SIGNALS") : "1 SIGNAL WATCH")
@@ -898,6 +907,7 @@ function scannerFamilyRowModel(view, row) {
     riskLevel,
     signalGroups: normalizeScannerSignals(row.signal_groups),
     independentSignalCount: row.independent_signal_count,
+    signalBand,
     signalGate: row.signal_gate,
     strategyFits: lotteryFits,
     scanner,
@@ -949,7 +959,7 @@ function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kron
         ? "#4ade80"
         : accent;
   const tagList = [
-    ...(m.signalGate === "PASS_2_PLUS" ? [`${m.independentSignalCount || 2}+ SIGNALS`] : []),
+    ...(m.signalBand ? [m.signalBand] : []),
     ...m.strategyFits,
     ...m.signalGroups,
     ...m.signals,
