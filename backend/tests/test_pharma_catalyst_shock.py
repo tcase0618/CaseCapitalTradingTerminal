@@ -399,6 +399,7 @@ async def test_pharma_shock_dispatch_formats_and_records(monkeypatch):
     monkeypatch.setattr(telegram_events, "_send", fake_send)
     monkeypatch.setattr(telegram_events, "_record_delivery", fake_record)
     monkeypatch.setattr(telegram_events, "emit_event", fake_emit)
+    monkeypatch.setattr(telegram_events, "STANDALONE_PHARMA_ALERTS_ENABLED", True)
 
     result = await telegram_events.dispatch_pharma_shock_alerts([
         {
@@ -446,3 +447,23 @@ async def test_pharma_shock_dispatch_formats_and_records(monkeypatch):
     assert records[0]["metadata"]["dedupe_keys"][0].startswith("pharma_shock:MRNA:")
     assert records[0]["metadata"]["batched_count"] == 2
     assert events[0]["scope"] == "pharma"
+
+
+@pytest.mark.asyncio
+async def test_pharma_shock_standalone_dispatch_is_disabled_by_default(monkeypatch):
+    sends = []
+
+    async def fake_send(text):
+        sends.append(text)
+        return True
+
+    monkeypatch.setattr(telegram_events, "_send", fake_send)
+    monkeypatch.setattr(telegram_events, "STANDALONE_PHARMA_ALERTS_ENABLED", False)
+
+    result = await telegram_events.dispatch_pharma_shock_alerts([
+        {"ticker": "MRNA", "shock_score": 91, "direction": "BULLISH"},
+    ], triggered_by="api")
+
+    assert result["sent"] is False
+    assert result["suppressed"] is True
+    assert sends == []

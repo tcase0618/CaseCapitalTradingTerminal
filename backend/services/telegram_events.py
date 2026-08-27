@@ -24,6 +24,9 @@ WATCH_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_WATCH_COOLDOWN_MINUTES", "
 SCAN_REPORT_THROTTLE_MINUTES = int(os.environ.get("TELEGRAM_SCAN_REPORT_THROTTLE_MINUTES", "10") or 10)
 PHARMA_ALERT_COOLDOWN_MINUTES = int(os.environ.get("TELEGRAM_PHARMA_ALERT_COOLDOWN_MINUTES", "360") or 360)
 PHARMA_SHOCK_BATCH_MAX = int(os.environ.get("TELEGRAM_PHARMA_SHOCK_BATCH_MAX", "20") or 20)
+# Standalone pharma alerts are opt-in.  Normal operation publishes pharma data
+# inside the consolidated terminal scan report instead of sending a second feed.
+STANDALONE_PHARMA_ALERTS_ENABLED = os.environ.get("TELEGRAM_STANDALONE_PHARMA_ALERTS", "false").strip().lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TEXT_LIMIT = 3900
 
 
@@ -797,7 +800,7 @@ async def dispatch_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
 
 
 async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
-    if _scheduled_standalone_alert_suppressed(triggered_by):
+    if not STANDALONE_PHARMA_ALERTS_ENABLED or _scheduled_standalone_alert_suppressed(triggered_by):
         await log_activity("Standalone scheduled pharma alert suppressed; included in terminal scan report", "info", {
             "triggered_by": triggered_by,
             "count": len(rows or []),
@@ -876,7 +879,7 @@ async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: st
 
 
 async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
-    if _scheduled_standalone_alert_suppressed(triggered_by):
+    if not STANDALONE_PHARMA_ALERTS_ENABLED or _scheduled_standalone_alert_suppressed(triggered_by):
         await log_activity("Standalone scheduled pharma shock suppressed; included in terminal scan report", "info", {
             "triggered_by": triggered_by,
             "count": len(rows or []),
