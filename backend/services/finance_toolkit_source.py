@@ -182,13 +182,23 @@ def _research_metrics(data: dict[str, Any]) -> dict[str, Any]:
     cash = _number(latest_balance, "cashAndCashEquivalents", "cashAndShortTermInvestments", "cashAndShortTermInvestmentsTotal")
     fcf = _number(latest_cashflow, "freeCashFlow", "freeCashFlowPerShare")
     debt = _number(latest_balance, "totalDebt", "netDebt")
+    revenue = _number(latest_income, "revenue", "salesRevenue")
+    gross_profit = _number(latest_income, "grossProfit")
+    operating_income = _number(latest_income, "operatingIncome")
+    net_income = _number(latest_income, "netIncome")
+    operating_cash_flow = _number(latest_cashflow, "operatingCashFlow", "netCashProvidedByOperatingActivities")
+    capital_expenditure = _number(latest_cashflow, "capitalExpenditure", "capitalExpenditures")
+    free_cash_flow = fcf if fcf is not None else (
+        operating_cash_flow - abs(capital_expenditure)
+        if operating_cash_flow is not None and capital_expenditure is not None else None
+    )
     return {
         "revenue_cagr": revenue_cagr,
-        "latest_revenue": _number(latest_income, "revenue", "salesRevenue"),
-        "latest_gross_margin": _number(latest_income, "grossProfitRatio", "grossMargin"),
-        "latest_operating_margin": _number(latest_income, "operatingIncomeRatio", "operatingMargin"),
-        "latest_net_margin": _number(latest_income, "netIncomeRatio", "netMargin"),
-        "latest_free_cash_flow": fcf,
+        "latest_revenue": revenue,
+        "latest_gross_margin": _number(latest_income, "grossProfitRatio", "grossMargin") or (gross_profit / revenue if gross_profit is not None and revenue else None),
+        "latest_operating_margin": _number(latest_income, "operatingIncomeRatio", "operatingMargin") or (operating_income / revenue if operating_income is not None and revenue else None),
+        "latest_net_margin": _number(latest_income, "netIncomeRatio", "netMargin") or (net_income / revenue if net_income is not None and revenue else None),
+        "latest_free_cash_flow": free_cash_flow,
         "cash_balance": cash,
         "total_debt": debt,
         "cash_runway_proxy_years": (cash / abs(fcf)) if cash is not None and fcf is not None and fcf < 0 else None,
