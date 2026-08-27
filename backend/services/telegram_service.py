@@ -73,6 +73,13 @@ def _outbound_kind(text: str) -> str:
     return "generic"
 
 
+def _single_consolidated_scan_only() -> bool:
+    """Return whether production Telegram is restricted to the scan digest."""
+    return os.environ.get("TELEGRAM_SINGLE_CONSOLIDATED_SCAN_ONLY", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _outbound_cooldown(kind: str) -> timedelta:
     if kind == "scan_report":
         return timedelta(minutes=int(os.environ.get("TELEGRAM_SCAN_REPORT_THROTTLE_MINUTES", "10") or 10))
@@ -158,6 +165,13 @@ async def send_message(text: str, chat_id: str | None = None, parse_mode: str = 
     if not _has_token():
         return False
     text = _normalize_outbound_text(str(text or ""))
+    outbound_kind = _outbound_kind(text)
+    if _single_consolidated_scan_only() and outbound_kind != "scan_report":
+        await log_activity(
+            f"Telegram outbound suppressed by consolidated-scan policy: {outbound_kind}",
+            "info",
+        )
+        return False
     chat_id = chat_id or _default_chat_id()
     if not chat_id:
         return False

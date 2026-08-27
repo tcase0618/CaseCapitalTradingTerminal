@@ -69,6 +69,24 @@ def test_full_terminal_report_has_one_ordered_consolidated_scan_digest():
     assert "Options: <b>1</b> · by strategy: <b>1L</b>" in text
 
 
+@pytest.mark.asyncio
+async def test_single_consolidated_policy_suppresses_non_scan_outbound(monkeypatch):
+    calls = []
+    monkeypatch.setenv("TELEGRAM_SINGLE_CONSOLIDATED_SCAN_ONLY", "true")
+    monkeypatch.setattr(telegram_service, "_has_token", lambda: True)
+    monkeypatch.setattr(telegram_service, "_default_chat_id", lambda: "chat")
+    monkeypatch.setattr(telegram_service, "log_activity", lambda *args, **kwargs: calls.append(args))
+
+    sent = await telegram_service.send_message("<b>CASE CAPITAL | PHARMA CATALYST SHOCK</b>\nMRNA")
+
+    assert sent is False
+    assert calls
+
+
+def test_single_consolidated_policy_identifies_scan_report():
+    assert telegram_service._outbound_kind("<b>CASE CAPITAL | SCAN REPORT</b>\nSCAN") == "scan_report"
+
+
 class _UpdateResult:
     def __init__(self, *, upserted_id=None, modified_count=0):
         self.upserted_id = upserted_id
