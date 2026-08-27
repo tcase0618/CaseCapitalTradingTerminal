@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from .options_policy import get_policy
 
 logger = logging.getLogger(__name__)
 
@@ -422,10 +423,11 @@ def _approx_delta(strike: float, spot: float, is_call: bool) -> float:
 
 
 def _liquidity_flag(oi: int, spread: float, premium: float = 0.0, volume: int = 0) -> str:
+    policy = get_policy()
     spread_pct = spread / premium if premium > 0 else 1.0
-    bad_oi = oi < 300
-    bad_spread = spread > 0.75 or spread_pct > 0.12
-    thin = oi < 300 and volume < 100
+    bad_oi = oi < policy.min_open_interest
+    bad_spread = spread > policy.max_spread_abs or spread_pct > policy.max_spread_pct
+    thin = oi < policy.min_open_interest and volume < policy.min_volume_when_low_oi
     if thin:
         return "POOR"
     if bad_oi and bad_spread:
@@ -501,13 +503,14 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         pool = affordable if len(affordable) else df
         pool = pool.copy()
         pool["spread_pct"] = pool["spread_safe"] / pool["premium_safe"].replace(0, 0.01)
-        target_delta = 0.55
+        policy = get_policy()
+        target_delta = policy.target_delta
         pool["delta_penalty"] = (pool["delta_safe"] - target_delta).abs()
         pool["expiry_penalty"] = (pool["days_to_exp"] - 35).abs() / 35
         pool["liquidity_penalty"] = (
-            (pool["oi_safe"] < 300).astype(int) * 4
-            + (pool["volume_safe"] < 100).astype(int) * 2
-            + ((pool["spread_safe"] > 0.75) | (pool["spread_pct"] > 0.12)).astype(int) * 4
+            (pool["oi_safe"] < policy.min_open_interest).astype(int) * 4
+            + (pool["volume_safe"] < policy.min_volume_when_low_oi).astype(int) * 2
+            + ((pool["spread_safe"] > policy.max_spread_abs) | (pool["spread_pct"] > policy.max_spread_pct)).astype(int) * 4
             + (pool["ask_safe"] <= 0).astype(int) * 10
             + (pool["bid_safe"] <= 0).astype(int) * 2
         )

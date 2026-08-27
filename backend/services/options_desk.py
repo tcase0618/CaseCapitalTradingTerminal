@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from .db import get_db, log_activity, stamped
+from .options_policy import get_policy
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +60,16 @@ OPTION_ACTIVE_STATUSES = {
     "tail_dte_exit_close_submitted",
     "pending_protective_close_market_closed",
 }
-MIN_OPEN_INTEREST = int(os.environ.get("OPTIONS_MIN_OPEN_INTEREST", "300") or 300)
-MIN_VOLUME_WHEN_LOW_OI = int(os.environ.get("OPTIONS_MIN_VOLUME_WHEN_LOW_OI", "100") or 100)
-MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "100") or 100)
-MAX_SPREAD_ABS = float(os.environ.get("OPTIONS_MAX_SPREAD_ABS", "0.75") or 0.75)
-MAX_SPREAD_PCT = float(os.environ.get("OPTIONS_MAX_SPREAD_PCT", "0.12") or 0.12)
-MAX_INDICATIVE_SPREAD_PCT = float(os.environ.get("OPTIONS_MAX_INDICATIVE_SPREAD_PCT", "0.25") or 0.25)
-MIN_OPTION_PREMIUM = float(os.environ.get("OPTIONS_MIN_PREMIUM", "0.05") or 0.05)
-MIN_ABS_DELTA = float(os.environ.get("OPTIONS_MIN_ABS_DELTA", "0.35") or 0.35)
-MAX_ABS_DELTA = float(os.environ.get("OPTIONS_MAX_ABS_DELTA", "0.75") or 0.75)
+OPTIONS_POLICY = get_policy()
+MIN_OPEN_INTEREST = OPTIONS_POLICY.min_open_interest
+MIN_VOLUME_WHEN_LOW_OI = OPTIONS_POLICY.min_volume_when_low_oi
+MIN_OPTION_VOLUME_IF_OI_UNKNOWN = OPTIONS_POLICY.min_volume_if_oi_unknown
+MAX_SPREAD_ABS = OPTIONS_POLICY.max_spread_abs
+MAX_SPREAD_PCT = OPTIONS_POLICY.max_spread_pct
+MAX_INDICATIVE_SPREAD_PCT = OPTIONS_POLICY.max_indicative_spread_pct
+MIN_OPTION_PREMIUM = OPTIONS_POLICY.min_premium
+MIN_ABS_DELTA = OPTIONS_POLICY.min_abs_delta
+MAX_ABS_DELTA = OPTIONS_POLICY.max_abs_delta
 AUTO_MAX_ORDERS_PER_SCAN = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_SCAN", "2") or 2)
 AUTO_MAX_ORDERS_PER_DAY = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_DAY", "5") or 5)
 OPTIONS_ALPACA_REFRESH_LIMIT = int(os.environ.get("OPTIONS_ALPACA_REFRESH_LIMIT", "60") or 60)

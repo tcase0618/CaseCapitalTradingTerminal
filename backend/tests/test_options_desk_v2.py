@@ -13,6 +13,26 @@ from services import options_engine  # noqa: E402
 from services import portfolio_manager  # noqa: E402
 from services import tail_hunter  # noqa: E402
 from services import options_contract_learning  # noqa: E402
+from services import options_policy  # noqa: E402
+
+
+def test_shared_policy_paper_scout_profile_is_explicit(monkeypatch):
+    monkeypatch.setenv("OPTIONS_FILTER_POLICY", "paper_scout")
+    monkeypatch.setenv("OPTIONS_APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+    monkeypatch.setenv("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "true")
+    policy = options_policy.get_policy()
+    assert policy.min_open_interest == 100
+    assert policy.min_volume_when_low_oi == 50
+    assert policy.max_indicative_spread_pct == 0.30
+    assert policy.min_abs_delta == 0.25
+    assert options_policy.paper_scout_allowed() is True
+
+
+def test_paper_scout_profile_cannot_be_used_on_live_endpoint(monkeypatch):
+    monkeypatch.setenv("OPTIONS_FILTER_POLICY", "paper_scout")
+    monkeypatch.setenv("OPTIONS_APCA_API_BASE_URL", "https://api.alpaca.markets")
+    monkeypatch.setenv("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "true")
+    assert options_policy.paper_scout_allowed() is False
 
 
 def test_spread_cost_context_uses_mid_basis():
