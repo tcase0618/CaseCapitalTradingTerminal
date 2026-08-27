@@ -46,18 +46,23 @@ const RISK_PILL = {
   EXTREME: { color: "#f87171", bd: "rgba(248,113,113,0.3)" },
 };
 
-function ScoreRing({ score = 0 }) {
-  const color = score >= 7 ? "#c8a84b" : score >= 5 ? "#fb923c" : "#6b7280";
+function ScoreRing({ score = 0, max = 10 }) {
+  const rawScore = Number(score);
+  const safeScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(max, rawScore)) : 0;
+  const normalized = max > 0 ? safeScore / max : 0;
+  const color = normalized >= 0.7 ? "#c8a84b" : normalized >= 0.5 ? "#fb923c" : "#6b7280";
   const r = 18, c = 2 * Math.PI * r;
-  const offset = c - (Math.max(0, Math.min(10, score)) / 10) * c;
+  const offset = c - normalized * c;
+  const label = max === 100 ? safeScore.toFixed(0) : safeScore.toFixed(1);
   return (
-    <svg width="40" height="40" viewBox="0 0 40 40" style={{ transform: "rotate(-90deg)" }}>
+    <svg width="40" height="40" viewBox="0 0 40 40" role="img" aria-label={`grade ${label} out of ${max}`}>
       <circle cx="20" cy="20" r={r} stroke="rgba(255,255,255,0.08)" strokeWidth="2" fill="none" />
       <circle cx="20" cy="20" r={r} stroke={color} strokeWidth="2" fill="none"
-        strokeDasharray={c} strokeDashoffset={offset} style={{ transition: "stroke-dashoffset 0.4s" }} />
+        strokeDasharray={c} strokeDashoffset={offset}
+        style={{ transform: "rotate(-90deg)", transformOrigin: "20px 20px", transition: "stroke-dashoffset 0.4s" }} />
       <text x="20" y="20" textAnchor="middle" dominantBaseline="central" fill={color}
-        fontSize="14" fontWeight="700" fontFamily="Courier New" style={{ transform: "rotate(90deg)", transformOrigin: "20px 20px" }}>
-        {score}
+        fontSize={max === 100 ? "10" : "12"} fontWeight="700" fontFamily="Courier New">
+        {label}
       </text>
     </svg>
   );
@@ -981,7 +986,7 @@ function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kron
       onMouseLeave={e => !isSel && (e.currentTarget.style.background = "transparent")}
     >
       <div style={{ padding: "16px 0 16px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-        <ScoreRing score={scannerRingScore(m.score)} />
+        <ScoreRing score={m.score} max={Number(m.score) > 10 ? 100 : 10} />
         <StrengthBars score={scannerRingScore(m.score)} />
       </div>
 
