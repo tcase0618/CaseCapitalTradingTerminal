@@ -2743,6 +2743,22 @@ async def portfolio_manager_options_learning_status(limit: int = 200):
     return await options_desk.learning_status(limit=limit)
 
 
+@api.get("/portfolio_manager/options/learning/contracts")
+async def portfolio_manager_options_contract_learning(limit: int = 200):
+    from services import options_contract_learning
+    return await options_contract_learning.status(limit=limit)
+
+
+@api.post("/portfolio_manager/options/learning/contracts/resolve")
+async def portfolio_manager_options_contract_resolve(payload: dict[str, Any]):
+    from services import options_contract_learning
+    return await options_contract_learning.resolve_selection(
+        str(payload.get("selection_id") or ""),
+        float(payload.get("selected_exit")),
+        payload.get("alternative_exits") or {},
+    )
+
+
 @api.get("/portfolio_manager/options/backtest")
 async def portfolio_manager_options_backtest(limit_scans: int = 120):
     from services import options_desk

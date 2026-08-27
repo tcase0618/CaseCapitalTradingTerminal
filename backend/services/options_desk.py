@@ -6,6 +6,7 @@ OPTIONS_* credentials and executes only PM-approved options tickets.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import html
@@ -16,6 +17,8 @@ from typing import Any
 import httpx
 
 from .db import get_db, log_activity, stamped
+
+logger = logging.getLogger(__name__)
 
 OPTIONS_EQUITY = 20_000.0
 MAX_RISK_PCT = 0.05
@@ -56,26 +59,25 @@ OPTION_ACTIVE_STATUSES = {
     "tail_dte_exit_close_submitted",
     "pending_protective_close_market_closed",
 }
-MIN_OPEN_INTEREST = 500
-MIN_VOLUME_WHEN_LOW_OI = 200
-MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "200") or 200)
-MAX_SPREAD_ABS = 0.75
-MAX_SPREAD_PCT = 0.08
-MAX_INDICATIVE_SPREAD_PCT = 0.20
-MIN_INDICATIVE_OPTION_VOLUME = 250
-MIN_OPTION_PREMIUM = 1.00
-MIN_ABS_DELTA = 0.45
-MAX_ABS_DELTA = 0.70
+MIN_OPEN_INTEREST = int(os.environ.get("OPTIONS_MIN_OPEN_INTEREST", "300") or 300)
+MIN_VOLUME_WHEN_LOW_OI = int(os.environ.get("OPTIONS_MIN_VOLUME_WHEN_LOW_OI", "100") or 100)
+MIN_OPTION_VOLUME_IF_OI_UNKNOWN = int(os.environ.get("OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN", "100") or 100)
+MAX_SPREAD_ABS = float(os.environ.get("OPTIONS_MAX_SPREAD_ABS", "0.75") or 0.75)
+MAX_SPREAD_PCT = float(os.environ.get("OPTIONS_MAX_SPREAD_PCT", "0.12") or 0.12)
+MAX_INDICATIVE_SPREAD_PCT = float(os.environ.get("OPTIONS_MAX_INDICATIVE_SPREAD_PCT", "0.25") or 0.25)
+MIN_OPTION_PREMIUM = float(os.environ.get("OPTIONS_MIN_PREMIUM", "0.05") or 0.05)
+MIN_ABS_DELTA = float(os.environ.get("OPTIONS_MIN_ABS_DELTA", "0.35") or 0.35)
+MAX_ABS_DELTA = float(os.environ.get("OPTIONS_MAX_ABS_DELTA", "0.75") or 0.75)
 AUTO_MAX_ORDERS_PER_SCAN = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_SCAN", "2") or 2)
 AUTO_MAX_ORDERS_PER_DAY = int(os.environ.get("OPTIONS_AUTO_MAX_ORDERS_PER_DAY", "5") or 5)
 OPTIONS_ALPACA_REFRESH_LIMIT = int(os.environ.get("OPTIONS_ALPACA_REFRESH_LIMIT", "60") or 60)
 OPTIONS_EXECUTION_ENABLED = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
 OPTIONS_ALLOW_INDICATIVE_EXECUTION = os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
 OPTIONS_MAX_QUOTE_AGE_SECONDS = int(os.environ.get("OPTIONS_MAX_QUOTE_AGE_SECONDS", "900") or 900)
-OPTIONS_PM_MIN_SCORE = float(os.environ.get("OPTIONS_PM_MIN_SCORE", "56") or 56)
-OPTIONS_PM_MIN_RR = float(os.environ.get("OPTIONS_PM_MIN_RR", "1.20") or 1.20)
-OPTIONS_WATCH_MIN_SCORE = float(os.environ.get("OPTIONS_WATCH_MIN_SCORE", "45") or 45)
-OPTIONS_WATCH_MIN_RR = float(os.environ.get("OPTIONS_WATCH_MIN_RR", "1.15") or 1.15)
+OPTIONS_PM_MIN_SCORE = float(os.environ.get("OPTIONS_PM_MIN_SCORE", "52") or 52)
+OPTIONS_PM_MIN_RR = float(os.environ.get("OPTIONS_PM_MIN_RR", "1.10") or 1.10)
+OPTIONS_WATCH_MIN_SCORE = float(os.environ.get("OPTIONS_WATCH_MIN_SCORE", "40") or 40)
+OPTIONS_WATCH_MIN_RR = float(os.environ.get("OPTIONS_WATCH_MIN_RR", "1.05") or 1.05)
 ALPACA_DATA_BASE = "https://data.alpaca.markets"
 ALPACA_OPTIONS_FEED = os.environ.get("OPTIONS_APCA_DATA_FEED", "indicative").strip() or "indicative"
 OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
@@ -1091,7 +1093,12 @@ def _spread_is_too_wide(instrument: dict[str, Any]) -> bool:
         spread = ask - bid
     premium = ask
     spread_pct = spread / premium if premium > 0 else 1.0
-    return spread > MAX_SPREAD_ABS or spread_pct > MAX_SPREAD_PCT
+    max_spread_pct = (
+        MAX_INDICATIVE_SPREAD_PCT
+        if str(instrument.get("data_quality") or "").upper() == "INDICATIVE"
+        else MAX_SPREAD_PCT
+    )
+    return spread > MAX_SPREAD_ABS or spread_pct > max_spread_pct
 
 
 def _indicative_execution_too_thin(instrument: dict[str, Any]) -> bool:
@@ -1102,9 +1109,8 @@ def _indicative_execution_too_thin(instrument: dict[str, Any]) -> bool:
     spread = _safe_float(instrument.get("spread"))
     if bid <= 0 or ask < MIN_OPTION_PREMIUM:
         return True
-    spread_pct = spread / ask if ask > 0 else 1.0
-    if spread_pct > MAX_INDICATIVE_SPREAD_PCT:
-        return True
+    # Spread percentage is enforced centrally by _spread_is_too_wide(). Keep
+    # this function focused on whether the indicative quote is populated.
     # The Basic snapshot schema does not guarantee daily volume or quote size.
     # Only reject an explicitly empty market; missing fields are unknown, not 0.
     bid_size = instrument.get("bid_size")
@@ -1116,9 +1122,17 @@ def _indicative_execution_too_thin(instrument: dict[str, Any]) -> bool:
 
 def _open_interest_is_too_low(instrument: dict[str, Any]) -> bool:
     if instrument.get("open_interest_source") == "unavailable" and instrument.get("data_provider") == "ALPACA_OPTIONS":
-        # Option snapshots do not promise OI. Do not convert an omitted field
-        # into zero and reject every Basic-plan contract.
-        return False
+        # Basic snapshots may omit OI. Require an independent liquidity signal.
+        volume = _safe_int(instrument.get("volume"))
+        bid_size = instrument.get("bid_size")
+        ask_size = instrument.get("ask_size")
+        quote_sizes_valid = (
+            bid_size is not None
+            and ask_size is not None
+            and _safe_int(bid_size) > 0
+            and _safe_int(ask_size) > 0
+        )
+        return volume < MIN_OPTION_VOLUME_IF_OI_UNKNOWN and not quote_sizes_valid
     oi = int(instrument.get("open_interest") or 0)
     volume = int(instrument.get("volume") or 0)
     return oi < MIN_OPEN_INTEREST and volume < MIN_VOLUME_WHEN_LOW_OI
@@ -1243,8 +1257,8 @@ async def build_candidates(
                         "option_view": portfolio_manager._option_view(row, float(pm_row.get("risk_reward") or 0)),
                     }
                 alpaca_refreshes += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("options chain refresh failed for %s: %s", ticker, exc)
         route, route_reasons = _route(pm_row, row)
         instrument = _selected_instrument(opts)
         score = float(pm_row.get("pm_score") or 0)
@@ -1355,6 +1369,14 @@ async def build_candidates(
             "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
             "generated_at": _now(),
         }
+        try:
+            from . import options_contract_learning
+            learning_record = await options_contract_learning.record_selection(ticket)
+            if learning_record:
+                ticket["contract_selection_id"] = learning_record["selection_id"]
+                ticket["contract_selection_mode"] = "shadow_only"
+        except Exception as exc:
+            logger.warning("options contract learning record failed for %s: %s", ticker, exc)
         out.append(ticket)
     out.sort(key=lambda x: (x["manual_fire_ready"], x["route"] == "BOTH", x.get("pm_score") or 0), reverse=True)
     out = out[:limit]
@@ -2967,6 +2989,8 @@ async def learning_status(limit: int = 200) -> dict[str, Any]:
     db = get_db()
     rows = await db.options_desk_orders.find({}, {"_id": 0}).sort("submitted_at", -1).to_list(limit)
     candidates = await db.options_desk_candidates.find({}, {"_id": 0}).to_list(200)
+    from . import options_contract_learning
+    contract_learning = await options_contract_learning.status(limit=limit)
     return {
         "generated_at": _now(),
         "phase": "paper_data_collection" if rows else "pre_execution",
@@ -2979,6 +3003,7 @@ async def learning_status(limit: int = 200) -> dict[str, Any]:
             "PASS": sum(1 for c in candidates if c.get("route") == "PASS"),
         },
         "latest_decisions": candidates[:12],
+        "contract_selection_learning": contract_learning,
         "recommendations": ["Collect manual-fire paper outcomes before promoting any autonomous options behavior."],
     }
 

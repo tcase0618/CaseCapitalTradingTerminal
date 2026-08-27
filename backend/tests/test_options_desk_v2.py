@@ -12,6 +12,7 @@ from services import options_desk  # noqa: E402
 from services import options_engine  # noqa: E402
 from services import portfolio_manager  # noqa: E402
 from services import tail_hunter  # noqa: E402
+from services import options_contract_learning  # noqa: E402
 
 
 def test_spread_cost_context_uses_mid_basis():
@@ -45,11 +46,17 @@ def test_options_summary_distinguishes_routed_names_from_contract_readiness():
 def test_spread_gate_computes_spread_from_bid_ask():
     tight = {"bid": 2.0, "ask": 2.12, "premium": 2.12}
     wide = {"bid": 2.0, "ask": 2.3, "premium": 2.3}
-    cheap = {"bid": 0.5, "ask": 0.65, "premium": 0.65}
+    cheap = {"bid": 0.01, "ask": 0.05, "premium": 0.05}
 
     assert options_desk._spread_is_too_wide(tight) is False
     assert options_desk._spread_is_too_wide(wide) is True
     assert options_desk._spread_is_too_wide(cheap) is True
+
+
+def test_low_premium_is_allowed_when_spread_is_usable():
+    instrument = {"bid": 0.045, "ask": 0.05, "premium": 0.05, "spread": 0.005}
+
+    assert options_desk._spread_is_too_wide(instrument) is False
 
 
 def test_execution_delta_requires_provider_delta_and_grind_band():
@@ -76,7 +83,7 @@ def test_basic_indicative_policy_uses_quote_checks_and_does_not_require_oi(monke
         "ask": 1.10,
         "spread": 0.10,
         "open_interest_source": "unavailable",
-        "volume": 0,
+        "volume": 125,
         "delta": 0.55,
         "delta_estimated": True,
         "provider_delta_present": False,
@@ -85,6 +92,29 @@ def test_basic_indicative_policy_uses_quote_checks_and_does_not_require_oi(monke
     assert options_desk._open_interest_is_too_low(instrument) is False
     assert options_desk._provider_delta_missing(instrument) is False
     assert options_desk._indicative_execution_too_thin(instrument) is False
+
+
+def test_indicative_spread_uses_wider_paper_threshold():
+    instrument = {
+        "data_provider": "ALPACA_OPTIONS",
+        "data_quality": "INDICATIVE",
+        "bid": 1.00,
+        "ask": 1.22,
+        "spread": 0.22,
+    }
+
+    assert options_desk._spread_is_too_wide(instrument) is False
+
+
+def test_unknown_oi_requires_volume_or_two_sided_quote():
+    base = {
+        "data_provider": "ALPACA_OPTIONS",
+        "open_interest_source": "unavailable",
+        "volume": 0,
+    }
+    assert options_desk._open_interest_is_too_low(base) is True
+    assert options_desk._open_interest_is_too_low({**base, "volume": 100}) is False
+    assert options_desk._open_interest_is_too_low({**base, "bid_size": 2, "ask_size": 3}) is False
 
 
 def test_indicative_policy_never_allows_non_paper(monkeypatch):
@@ -153,6 +183,107 @@ def test_options_engine_uses_scanner_price_as_spot_hint(monkeypatch):
 
     assert result is None
     assert seen == {"ticker": "OPTX", "spot_hint": 12.34}
+
+
+def test_options_engine_keeps_estimated_delta_for_indicative_paper_scout():
+    import pandas as pd
+
+    chain = {
+        "price": 10.0,
+        "data_provider": "ALPACA_OPTIONS",
+        "data_feed": "indicative",
+        "data_quality": "INDICATIVE",
+        "expiration": "2026-09-18",
+        "atm_iv": 0.55,
+        "calls": pd.DataFrame([
+            {
+                "contractSymbol": "TEST260918C00010000",
+                "strike": 10.0,
+                "bid": 1.00,
+                "ask": 1.20,
+                "lastPrice": 1.10,
+                "openInterest": 0,
+                "volume": 125,
+                "expiration": "2026-09-18",
+                "impliedVolatility": 0.55,
+            }
+        ]),
+    }
+
+    contract = options_engine.find_best_contract(chain, "BULL", budget=300)
+
+    assert contract is not None
+    assert contract["delta_estimated"] is True
+    assert contract["provider_delta_present"] is False
+    assert contract["delta"] > 0
+
+
+def test_contract_selection_record_tracks_alternatives_in_shadow_mode():
+    candidate = {
+        "candidate_id": "opt-TEST-1",
+        "ticker": "TEST",
+        "route": "OPTION",
+        "strategy": "LONG_CALL_SCOUT",
+        "strategy_lane": {"lane": "TACTICAL_MOMENTUM_CALL"},
+        "pm_score": 62,
+        "risk_budget": 200,
+        "data_quality": "INDICATIVE",
+        "data_feed": "indicative",
+        "instrument": {
+            "symbol": "TEST260918C00010000",
+            "strike": 10,
+            "expiration": "2026-09-18",
+            "bid": 1.00,
+            "ask": 1.20,
+            "premium": 1.10,
+            "spread": 0.20,
+            "delta": 0.52,
+            "selection_alternatives": [
+                {"symbol": "TEST260918C00010500", "strike": 10.5, "bid": 0.8, "ask": 1.0, "premium": 0.9, "delta": 0.45, "selection_score": 1.2}
+            ],
+        },
+    }
+    record = options_contract_learning.build_selection_record(candidate)
+
+    assert record["learning_mode"] == "shadow_only"
+    assert record["selected"]["entry_mid"] == 1.1
+    assert record["alternatives"][0]["symbol"] == "TEST260918C00010500"
+
+
+def test_contract_selection_resolution_compares_selected_to_alternatives():
+    record = {
+        "selected": {"entry_mid": 1.0},
+        "alternatives": [{"symbol": "ALT", "bid": 0.8, "ask": 1.0}],
+        "status": "PENDING",
+    }
+    resolved = options_contract_learning.resolve_record(record, 1.5, {"ALT": 1.2})
+
+    assert resolved["selected_return_pct"] == 50.0
+    assert resolved["counterfactuals"][0]["return_pct"] == 33.3333
+
+
+def test_contract_learning_promotion_requires_100_and_clear_alpha_at_150():
+    shadow = options_contract_learning.promotion_state([
+        {"status": "RESOLVED", "selected_return_pct": 10.0, "best_counterfactual_return_pct": 4.0}
+        for _ in range(99)
+    ])
+    assert shadow["mode"] == "shadow_only"
+    assert shadow["live_eligible"] is False
+
+    advisory = options_contract_learning.promotion_state([
+        {"status": "RESOLVED", "selected_return_pct": 10.0, "best_counterfactual_return_pct": 4.0}
+        for _ in range(100)
+    ])
+    assert advisory["mode"] == "advisory"
+    assert advisory["advisory_ready"] is True
+    assert advisory["live_eligible"] is False
+
+    eligible = options_contract_learning.promotion_state([
+        {"status": "RESOLVED", "selected_return_pct": 10.0, "best_counterfactual_return_pct": 4.0}
+        for _ in range(150)
+    ])
+    assert eligible["mode"] == "advisory"
+    assert eligible["live_eligible"] is True
 
 
 def test_options_route_permits_pm_approved_paper_scout():

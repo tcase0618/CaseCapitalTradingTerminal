@@ -423,9 +423,9 @@ def _approx_delta(strike: float, spot: float, is_call: bool) -> float:
 
 def _liquidity_flag(oi: int, spread: float, premium: float = 0.0, volume: int = 0) -> str:
     spread_pct = spread / premium if premium > 0 else 1.0
-    bad_oi = oi < 500
-    bad_spread = spread > 0.75 or spread_pct > 0.08
-    thin = oi < 500 and volume < 200
+    bad_oi = oi < 300
+    bad_spread = spread > 0.75 or spread_pct > 0.12
+    thin = oi < 300 and volume < 100
     if thin:
         return "POOR"
     if bad_oi and bad_spread:
@@ -505,9 +505,9 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         pool["delta_penalty"] = (pool["delta_safe"] - target_delta).abs()
         pool["expiry_penalty"] = (pool["days_to_exp"] - 35).abs() / 35
         pool["liquidity_penalty"] = (
-            (pool["oi_safe"] < 500).astype(int) * 4
-            + (pool["volume_safe"] < 200).astype(int) * 2
-            + ((pool["spread_safe"] > 0.75) | (pool["spread_pct"] > 0.08)).astype(int) * 4
+            (pool["oi_safe"] < 300).astype(int) * 4
+            + (pool["volume_safe"] < 100).astype(int) * 2
+            + ((pool["spread_safe"] > 0.75) | (pool["spread_pct"] > 0.12)).astype(int) * 4
             + (pool["ask_safe"] <= 0).astype(int) * 10
             + (pool["bid_safe"] <= 0).astype(int) * 2
         )
@@ -519,7 +519,8 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
             + pool["delta_penalty"] * 2
             + (pool["dist"] / max(spot, 1.0))
         )
-        df = pool.sort_values(["score", "dist"]).head(1)
+        ranked = pool.sort_values(["score", "dist"])
+        df = ranked.head(1)
         if not len(df):
             return None
         row = df.iloc[0]
@@ -537,11 +538,32 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         premium = ((bid + ask) / 2 if bid > 0 and ask > 0 else ask or last)
         if premium <= 0:
             return None
-        provider_delta = _safe_float(row.get("delta"))
-        if provider_delta == 0:
+        provider_delta = _safe_float(row.get("delta")) if bool(row.get("provider_delta_present")) else 0.0
+        if provider_delta == 0 and not bool(row.get("delta_estimated")):
             return None
-        delta = provider_delta
+        # Indicative Basic-plan snapshots may omit provider greeks. The
+        # moneyness estimate is permitted for paper-only scouting; the desk's
+        # execution guard still rejects it for any non-paper account.
+        delta = _safe_float(row.get("delta"))
         affordable = max(0, int(budget // (premium * 100))) if premium > 0 else 0
+        alternatives = []
+        for _, alt in ranked.head(5).iterrows():
+            alt_bid = _safe_float(alt.get("bid"))
+            alt_ask = _safe_float(alt.get("ask"))
+            alt_premium = _safe_float(alt.get("premium_safe"))
+            alternatives.append({
+                "symbol": str(alt.get("contractSymbol") or ""),
+                "strike": _safe_float(alt.get("strike")),
+                "expiration": str(alt.get("expiration") or ""),
+                "bid": alt_bid,
+                "ask": alt_ask,
+                "premium": alt_premium,
+                "delta": _safe_float(alt.get("delta")),
+                "spread_pct": (_safe_float(alt.get("spread_safe")) / alt_premium * 100) if alt_premium > 0 else 100.0,
+                "volume": _safe_int(alt.get("volume")),
+                "open_interest": _safe_int(alt.get("openInterest")),
+                "selection_score": _safe_float(alt.get("score")),
+            })
         return {
             "symbol": str(row.get("contractSymbol") or ""),
             "contractSymbol": str(row.get("contractSymbol") or ""),
@@ -567,6 +589,9 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
             "max_loss": round(premium * 100, 2),
             "liquidity": _liquidity_flag(oi, spread, premium, volume),
             "type": "C" if is_call else "P",
+            "selection_method": "heuristic_v1",
+            "selection_alternatives": alternatives,
+            "selection_score": _safe_float(row.get("score")),
         }
     except Exception as e:
         logger.warning("find_best_contract failed: %s", e)
