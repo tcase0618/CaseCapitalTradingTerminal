@@ -20,6 +20,19 @@ from services import options_policy  # noqa: E402
 @pytest.fixture(autouse=True)
 def standard_options_policy_by_default(monkeypatch):
     """Keep unit tests deterministic; individual tests may opt into paper_scout."""
+    for name in (
+        "OPTIONS_MIN_OPEN_INTEREST",
+        "OPTIONS_MIN_VOLUME_WHEN_LOW_OI",
+        "OPTIONS_MIN_VOLUME_IF_OI_UNKNOWN",
+        "OPTIONS_MAX_SPREAD_ABS",
+        "OPTIONS_MAX_SPREAD_PCT",
+        "OPTIONS_MAX_INDICATIVE_SPREAD_PCT",
+        "OPTIONS_MIN_PREMIUM",
+        "OPTIONS_MIN_ABS_DELTA",
+        "OPTIONS_MAX_ABS_DELTA",
+        "OPTIONS_TARGET_DELTA",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPTIONS_FILTER_POLICY", "standard")
     monkeypatch.setenv("OPTIONS_APCA_API_BASE_URL", "https://api.alpaca.markets")
     monkeypatch.setenv("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false")
