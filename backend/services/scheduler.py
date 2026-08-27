@@ -33,6 +33,10 @@ SCHEDULER_JOB_DEFAULTS = {
 STOCK_SCAN_CADENCE_ET = [
     ("midnight_scan", 0, 0),
     ("morning_scan", 8, 0),
+    # Full coordinated pass after the first market-hour options window. This
+    # is a terminal scan, not a standalone options refresh, so every family
+    # reaches its PM and the single consolidated Telegram report together.
+    ("ten_am_scan", 10, 0),
     ("midday_scan", 12, 0),
     ("afternoon_scan", 15, 0),
     ("evening_scan", 18, 30),
@@ -488,19 +492,10 @@ def start_scheduler():
     async def _options_open_auto_execute_job():
         await _options_auto_execute_scan_job("9:35")
 
-    async def _options_10am_auto_execute_job():
-        await _options_auto_execute_scan_job("10:00")
-
     _scheduler.add_job(
         _options_open_auto_execute_job,
         CronTrigger(day_of_week="mon-fri", hour=9, minute=35, timezone=ET),
         id="options_open_auto_execute_935",
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _options_10am_auto_execute_job,
-        CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=ET),
-        id="options_only_auto_execute_1000",
         replace_existing=True,
     )
     # Nightly P&L refresh - 23:00 ET (also runs at 02:00 ET below)
@@ -836,7 +831,7 @@ def start_scheduler():
     )
     _scheduler.start()
     logger.info(
-        "Scheduler: stock scans 00:00/08:00/12:00/15:00/18:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
+        "Scheduler: stock scans 00:00/08:00/10:00/12:00/15:00/18:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
         "+ Options auto scans 09:35/10:00 + 5m active lottery monitor + alerts/flow/P&L/learning"
     )
 
