@@ -13,6 +13,8 @@ ENV_KEYS = (
     "FINANCETOOLKIT_API_KEY",
 )
 DEFAULT_BASE_URL = "https://financialmodelingprep.com"
+DEFAULT_SECTIONS = ("profile", "income", "balance", "cashflow", "ratios", "metrics")
+ALLOWED_SECTIONS = frozenset(DEFAULT_SECTIONS + ("estimates", "earnings"))
 
 
 def _now() -> str:
@@ -63,6 +65,7 @@ def status() -> dict[str, Any]:
         "env_key": _configured_env_key(),
         "key_state": _mask(api_key),
         "base_url": base_url(),
+        "enabled": os.environ.get("FINANCE_TOOLKIT_RESEARCH_ENABLED", "true").lower() not in {"0", "false", "no"},
         "data_role": "research_data_only",
         "wired_to_pm": False,
         "wired_to_execution": False,
@@ -131,6 +134,134 @@ async def company_profile(ticker: str) -> dict[str, Any]:
         out["reason"] = f"http_{out.get('status_code')}"
         out["detail"] = last_detail
         return out
+    except Exception as exc:
+        out["reason"] = _redact(str(exc)[:220])
+        return out
+
+
+def _symbol(ticker: str) -> str:
+    return "".join(ch for ch in ticker.upper().strip() if ch.isalnum() or ch in {".", "-"})
+
+
+def _latest(rows: Any) -> dict[str, Any] | None:
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        return rows[0]
+    if isinstance(rows, dict):
+        return rows
+    return None
+
+
+def _number(row: dict[str, Any] | None, *keys: str) -> float | None:
+    if not row:
+        return None
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _cagr(first: float | None, last: float | None, periods: int) -> float | None:
+    if first is None or last is None or periods <= 0 or first <= 0 or last <= 0:
+        return None
+    return (last / first) ** (1 / periods) - 1
+
+
+def _research_metrics(data: dict[str, Any]) -> dict[str, Any]:
+    income = data.get("income") if isinstance(data.get("income"), list) else []
+    latest_income = _latest(income)
+    latest_balance = _latest(data.get("balance"))
+    latest_cashflow = _latest(data.get("cashflow"))
+    latest_ratios = _latest(data.get("ratios"))
+    latest_metrics = _latest(data.get("metrics"))
+    revenue_values = [
+        row.get("revenue") for row in reversed(income)
+        if isinstance(row, dict) and isinstance(row.get("revenue"), (int, float)) and row.get("revenue") > 0
+    ]
+    revenue_cagr = _cagr(revenue_values[0], revenue_values[-1], len(revenue_values) - 1) if len(revenue_values) > 1 else None
+    cash = _number(latest_balance, "cashAndCashEquivalents", "cashAndShortTermInvestments", "cashAndShortTermInvestmentsTotal")
+    fcf = _number(latest_cashflow, "freeCashFlow", "freeCashFlowPerShare")
+    debt = _number(latest_balance, "totalDebt", "netDebt")
+    return {
+        "revenue_cagr": revenue_cagr,
+        "latest_revenue": _number(latest_income, "revenue", "salesRevenue"),
+        "latest_gross_margin": _number(latest_income, "grossProfitRatio", "grossMargin"),
+        "latest_operating_margin": _number(latest_income, "operatingIncomeRatio", "operatingMargin"),
+        "latest_net_margin": _number(latest_income, "netIncomeRatio", "netMargin"),
+        "latest_free_cash_flow": fcf,
+        "cash_balance": cash,
+        "total_debt": debt,
+        "cash_runway_proxy_years": (cash / abs(fcf)) if cash is not None and fcf is not None and fcf < 0 else None,
+        "current_ratio": _number(latest_ratios, "currentRatio"),
+        "return_on_equity": _number(latest_ratios, "returnOnEquity", "roe"),
+        "return_on_invested_capital": _number(latest_metrics, "roic", "returnOnInvestedCapital"),
+        "statement_period": (latest_income or {}).get("date"),
+    }
+
+
+async def _fetch_section(client: httpx.AsyncClient, symbol: str, section: str, api_key: str) -> tuple[Any, dict[str, Any]]:
+    paths = {
+        "profile": ("profile", {"symbol": symbol}),
+        "income": ("income-statement", {"symbol": symbol, "period": "annual", "limit": 5}),
+        "balance": ("balance-sheet-statement", {"symbol": symbol, "period": "annual", "limit": 5}),
+        "cashflow": ("cash-flow-statement", {"symbol": symbol, "period": "annual", "limit": 5}),
+        "ratios": ("ratios", {"symbol": symbol, "period": "annual", "limit": 5}),
+        "metrics": ("key-metrics", {"symbol": symbol, "period": "annual", "limit": 5}),
+        "estimates": ("analyst-estimates", {"symbol": symbol, "period": "annual", "limit": 5}),
+        "earnings": ("earnings-surprises", {"symbol": symbol, "limit": 8}),
+    }
+    path, params = paths[section]
+    params["apikey"] = api_key
+    response = await client.get(f"{base_url()}/api/v3/{path}/{symbol}" if section in {"profile"} else f"{base_url()}/api/v3/{path}", params=params)
+    if response.status_code != 200:
+        return None, {"ok": False, "status_code": response.status_code, "detail": _redact((response.text or "")[:180])}
+    try:
+        return response.json(), {"ok": True, "status_code": response.status_code}
+    except ValueError:
+        return None, {"ok": False, "status_code": response.status_code, "detail": "invalid_json"}
+
+
+async def research_bundle(ticker: str, sections: str | None = None) -> dict[str, Any]:
+    """Fetch cached-quality fundamental research; this function has no trading inputs or outputs."""
+    symbol = _symbol(ticker)
+    selected = tuple(dict.fromkeys(s.strip().lower() for s in (sections or ",".join(DEFAULT_SECTIONS)).split(",") if s.strip()))
+    out: dict[str, Any] = {
+        "ok": False,
+        "configured": bool(_api_key()),
+        "research_only": True,
+        "decision_authority": "NONE",
+        "provider": "Financial Modeling Prep",
+        "adapter": "FinanceToolkit/FMP research adapter",
+        "symbol": symbol,
+        "sections_requested": list(selected),
+        "data": {},
+        "metrics": {},
+        "section_status": {},
+        "generated_at": _now(),
+    }
+    if not symbol:
+        out["reason"] = "missing_symbol"
+        return out
+    if not _api_key():
+        out["reason"] = "missing_fmp_api_key"
+        return out
+    invalid = [section for section in selected if section not in ALLOWED_SECTIONS]
+    if invalid:
+        out["reason"] = "invalid_sections"
+        out["invalid_sections"] = invalid
+        return out
+    try:
+        async with httpx.AsyncClient(timeout=float(os.environ.get("FMP_TIMEOUT_SECONDS", "8"))) as client:
+            for section in selected:
+                payload, section_status = await _fetch_section(client, symbol, section, _api_key())
+                out["section_status"][section] = section_status
+                if section_status.get("ok"):
+                    out["data"][section] = payload
+            out["metrics"] = _research_metrics(out["data"])
+            out["ok"] = any(item.get("ok") for item in out["section_status"].values())
+            if not out["ok"]:
+                out["reason"] = "all_sections_failed"
+            return out
     except Exception as exc:
         out["reason"] = _redact(str(exc)[:220])
         return out

@@ -1,7 +1,7 @@
 import sys
+import asyncio
 from pathlib import Path
 
-import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -35,12 +35,61 @@ def test_status_accepts_legacy_fmp_key(monkeypatch):
     assert status["env_key"] == "FMP_API_KEY"
 
 
-@pytest.mark.asyncio
-async def test_profile_returns_not_configured_without_key(monkeypatch):
+def test_research_bundle_is_research_only(monkeypatch):
+    monkeypatch.setenv("FINANCIAL_MODELING_PREP_API_KEY", "research-token")
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, params=None):
+            if "income-statement" in url:
+                return Response([{"date": "2025-12-31", "revenue": 120, "grossProfitRatio": 0.5, "netIncomeRatio": 0.1}])
+            if "balance-sheet" in url:
+                return Response([{"cashAndCashEquivalents": 40, "totalDebt": 10, "currentRatio": 2.0}])
+            if "cash-flow" in url:
+                return Response([{"freeCashFlow": 8}])
+            return Response([])
+
+    monkeypatch.setattr(finance_toolkit_source.httpx, "AsyncClient", lambda **kwargs: Client())
+    result = asyncio.run(finance_toolkit_source.research_bundle("AAPL", "income,balance,cashflow"))
+
+    assert result["ok"] is True
+    assert result["research_only"] is True
+    assert result["decision_authority"] == "NONE"
+    assert result["metrics"]["latest_revenue"] == 120.0
+    assert result["metrics"]["cash_balance"] == 40.0
+    assert result["metrics"]["latest_free_cash_flow"] == 8.0
+    assert not {"buy", "sell", "route", "size", "gate"}.intersection(result)
+
+
+def test_research_bundle_rejects_unknown_sections(monkeypatch):
+    monkeypatch.setenv("FMP_API_KEY", "research-token")
+    result = asyncio.run(finance_toolkit_source.research_bundle("AAPL", "income,orders"))
+
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_sections"
+    assert result["invalid_sections"] == ["orders"]
+
+
+def test_profile_returns_not_configured_without_key(monkeypatch):
     for key in finance_toolkit_source.ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
 
-    result = await finance_toolkit_source.company_profile("AAPL")
+    result = asyncio.run(finance_toolkit_source.company_profile("AAPL"))
 
     assert result["ok"] is False
     assert result["configured"] is False

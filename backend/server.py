@@ -930,6 +930,13 @@ async def finance_toolkit_profile(ticker: str):
     return await finance_toolkit_source.company_profile(ticker)
 
 
+@api.get("/data/finance-toolkit/research/{ticker}")
+async def finance_toolkit_research(ticker: str, sections: str | None = None):
+    """Return fundamental research only; this endpoint cannot create or alter a trading decision."""
+    from services import finance_toolkit_source
+    return await finance_toolkit_source.research_bundle(ticker, sections=sections)
+
+
 @api.post("/scan/run")
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
