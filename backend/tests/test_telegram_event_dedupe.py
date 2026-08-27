@@ -27,6 +27,48 @@ def test_scheduler_core_scan_report_is_suppressed_without_full_terminal_variant(
     assert telegram_events._scan_report_suppressed_reason({"triggered_by": "admin_dashboard"}) is None
 
 
+def test_full_terminal_report_has_one_ordered_consolidated_scan_digest():
+    text = telegram_events._consolidated_scan_report_text(
+        {
+            "triggered_by": "scheduler",
+            "finished_at": "2026-08-26T12:00:00+00:00",
+            "universe_size": 697,
+            "duration_sec": 31.2,
+            "freshness": {"fresh_price_rows": 10, "price_rows": 10, "stale_price_rows": 0},
+        },
+        results=[{"ticker": "CORE", "pm_score": 82}],
+        lottery={"ok": True, "candidates": [{"ticker": "LOT", "score": 91, "tier": "A"}]},
+        pharma={"ok": True, "results": [{"ticker": "PHR", "binary_event_score": 88, "tier": "HOT"}]},
+        shocks={"ok": True, "results": [{"ticker": "SHK", "shock_score": 90, "direction": "BULLISH"}], "hot_count": 1},
+        screener_summary={"total": 12, "pm_routable": 8, "read_only": 4},
+        new_scan={"count": 1, "display": ["CORE"]},
+        pm={},
+        pm_rows=[],
+        routes={"EQUITY": 1, "OPTION": 1, "BOTH": 0, "WATCH": 2, "REJECT": 0},
+        pm_actions={"ACCUMULATE": 1, "STARTER": 1, "WATCH": 2, "REJECT": 0},
+        opt_summary={"contract_selected": 1, "ready": 1, "execution_grade": 1},
+        gate={"decision": "PASS"},
+        qc={"trading_gate": {"decision": "ALLOW"}},
+        edge={"edge": {"sample": 100, "alpha_grade": "POSITIVE"}},
+        blockers=0,
+        execution_summary={
+            "equity_submitted_rows": [{"ticker": "CORE", "strategy": "CORE"}, {"ticker": "LOT", "strategy": "LOTTERY"}],
+            "options_submitted_rows": [{"ticker": "PHR", "strategy": "LONG_CALL"}],
+        },
+    )
+
+    assert text.count("<b>CORE SCAN</b>") == 1
+    assert text.count("<b>LOTTERY SCAN</b>") == 1
+    assert text.count("<b>PHARMA SCAN</b>") == 1
+    assert text.count("<b>TOTAL SUMMARY</b>") == 1
+    assert text.index("<b>CORE SCAN</b>") < text.index("<b>LOTTERY SCAN</b>")
+    assert text.index("<b>LOTTERY SCAN</b>") < text.index("<b>PHARMA SCAN</b>")
+    assert text.index("<b>PHARMA SCAN</b>") < text.index("<b>TOTAL SUMMARY</b>")
+    assert "$CORE" in text and "$LOT" in text and "$PHR" in text and "$SHK" in text
+    assert "Equities: <b>2</b> · by strategy: <b>1C / 1L</b>" in text
+    assert "Options: <b>1</b> · by strategy: <b>1L</b>" in text
+
+
 class _UpdateResult:
     def __init__(self, *, upserted_id=None, modified_count=0):
         self.upserted_id = upserted_id

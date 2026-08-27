@@ -218,6 +218,134 @@ async def _send(text: str) -> bool:
     return await telegram_service.send_message(text)
 
 
+def _section_rows(rows: Any, *, score_keys: tuple[str, ...], limit: int = 5) -> list[str]:
+    """Render a short, bounded ticker list for the consolidated scan digest."""
+    if not isinstance(rows, list):
+        return []
+    usable = [row for row in rows if isinstance(row, dict) and row.get("ticker")]
+    usable.sort(key=lambda row: max((_num(row.get(key), -1) for key in score_keys), default=-1), reverse=True)
+    lines: list[str] = []
+    for row in usable[:limit]:
+        score = next((row.get(key) for key in score_keys if row.get(key) is not None), None)
+        detail = row.get("tier") or row.get("action") or row.get("direction") or row.get("status")
+        suffix = f" · {_esc(detail)}" if detail else ""
+        score_text = f" · {_num(score):.1f}" if score is not None else ""
+        lines.append(f"${_esc(str(row.get('ticker')).upper())}{score_text}{suffix}")
+    return lines
+
+
+def _strategy_code(row: dict[str, Any]) -> str:
+    """Return the first-letter strategy code used in execution summaries."""
+    strategy = row.get("strategy") or row.get("strategy_label") or row.get("source_scan")
+    scanner = row.get("strategy_scanner")
+    if not strategy and isinstance(scanner, dict):
+        strategy = scanner.get("screener_id") or scanner.get("family")
+    if not strategy:
+        strategy_views = row.get("strategy_views") or row.get("strategy_scanners")
+        if isinstance(strategy_views, list) and strategy_views:
+            first = strategy_views[0]
+            if isinstance(first, dict):
+                strategy = first.get("screener_id") or first.get("family") or first.get("strategy")
+    value = str(strategy or "CORE").strip().upper()
+    return value[:1] if value else "C"
+
+
+def _execution_breakdown(rows: Any) -> str:
+    if not isinstance(rows, list):
+        return "none"
+    counts: dict[str, int] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            code = _strategy_code(row)
+            counts[code] = counts.get(code, 0) + 1
+    return " / ".join(f"{count}{code}" for code, count in sorted(counts.items())) or "none"
+
+
+def _consolidated_scan_report_text(
+    scan: dict[str, Any],
+    *,
+    results: list[dict[str, Any]],
+    lottery: dict[str, Any],
+    pharma: dict[str, Any],
+    shocks: dict[str, Any],
+    screener_summary: dict[str, Any],
+    new_scan: dict[str, Any],
+    pm: dict[str, Any],
+    pm_rows: list[dict[str, Any]],
+    routes: dict[str, int],
+    pm_actions: dict[str, int],
+    opt_summary: dict[str, Any],
+    gate: dict[str, Any],
+    qc: dict[str, Any],
+    edge: dict[str, Any],
+    blockers: int,
+    execution_summary: dict[str, Any],
+) -> str:
+    """Build exactly one scheduled digest from the same-cycle payloads."""
+    lottery_rows = lottery.get("candidates") or []
+    pharma_rows = pharma.get("results") or []
+    shock_rows = shocks.get("results") or []
+    core_tickers = {str(row.get("ticker") or "").upper() for row in results if row.get("ticker")}
+    all_tickers = core_tickers | {
+        str(row.get("ticker") or "").upper()
+        for row in [*lottery_rows, *pharma_rows, *shock_rows]
+        if isinstance(row, dict) and row.get("ticker")
+    }
+    freshness = scan.get("freshness") or {}
+    stale = int(freshness.get("stale_price_rows") or 0)
+    price_rows = int(freshness.get("price_rows") or 0)
+    fresh = int(freshness.get("fresh_price_rows") or 0)
+    scan_status = "FRESH" if not stale else "CHECK"
+    family_total = int(screener_summary.get("total") or 0)
+    family_pm = int(screener_summary.get("pm_routable") or 0)
+    research_only = int(screener_summary.get("read_only") or 0)
+    top_core = _section_rows(results, score_keys=("pm_score", "signal_score", "score"), limit=5)
+    top_lottery = _section_rows(lottery_rows, score_keys=("score", "pm_score"), limit=5)
+    top_pharma = _section_rows(pharma_rows, score_keys=("binary_event_score", "score"), limit=5)
+    top_shocks = _section_rows(shock_rows, score_keys=("shock_score", "score"), limit=4)
+    equity_orders = execution_summary.get("equity_submitted_rows") or []
+    options_orders = execution_summary.get("options_submitted_rows") or []
+    equity_codes = _execution_breakdown(equity_orders)
+    options_codes = _execution_breakdown(options_orders)
+    lines = [
+        "<b>CASE CAPITAL | SCHEDULED TERMINAL REPORT</b>",
+        f"<code>{_now_et()}</code>",
+        f"Trigger: <b>{_esc(scan.get('triggered_by') or 'scheduler')}</b> · Cycle: <b>{_esc(scan.get('finished_at') or '--')}</b>",
+        "",
+        "<b>CORE SCAN</b>",
+        f"Universe: <b>{scan.get('universe_size', '--')}</b> · Passed: <b>{len(results)}</b> · New: <b>{new_scan.get('count', 0)}</b>",
+        f"Status: <b>{scan_status}</b> · Duration: <b>{scan.get('duration_sec', '--')}s</b>",
+        *( [f"New tickers: {', '.join('$' + _esc(t) for t in new_scan.get('display') or [])}"] if new_scan.get('display') else [] ),
+        *( ["Top: " + " | ".join(top_core)] if top_core else ["Top: none"] ),
+        "",
+        "<b>LOTTERY SCAN</b>",
+        f"Status: <b>{'OK' if lottery.get('ok', True) else 'FAILED'}</b> · Candidates: <b>{len(lottery_rows)}</b> · Sources: <b>{len(lottery.get('source_counts') or (lottery.get('scan') or {}).get('source_counts') or {})}</b>",
+        *( ["Top: " + " | ".join(top_lottery)] if top_lottery else ["Top: none"] ),
+        "",
+        "<b>PHARMA SCAN</b>",
+        f"Calendar: <b>{len(pharma_rows)}</b> · Catalyst shocks: <b>{len(shock_rows)}</b> · Hot shocks: <b>{shocks.get('hot_count', 0)}</b>",
+        f"Calendar status: <b>{'OK' if pharma.get('results') is not None else 'FAILED'}</b> · Shock status: <b>{'OK' if shocks.get('ok', True) else 'FAILED'}</b>",
+        *( ["Calendar top: " + " | ".join(top_pharma)] if top_pharma else ["Calendar top: none"] ),
+        *( ["Shock top: " + " | ".join(top_shocks)] if top_shocks else [] ),
+        "",
+        "<b>BUY ORDERS SENT</b>",
+        f"Equities: <b>{len(equity_orders)}</b> · by strategy: <b>{equity_codes}</b>",
+        f"Options: <b>{len(options_orders)}</b> · by strategy: <b>{options_codes}</b>",
+        "Code = first letter of the originating strategy.",
+        "",
+        "<b>TOTAL SUMMARY</b>",
+        f"Scan observations: <b>{len(results) + len(lottery_rows) + len(pharma_rows) + len(shock_rows)}</b> · Unique tickers: <b>{len(all_tickers)}</b>",
+        f"Strategy scanners: <b>{family_pm}</b> PM-routable / <b>{family_total}</b> total · Research-only: <b>{research_only}</b>",
+        f"PM routes: Equity <b>{routes['EQUITY']}</b> · Options <b>{routes['OPTION']}</b> · Both <b>{routes['BOTH']}</b> · Watch <b>{routes['WATCH']}</b> · Reject <b>{routes['REJECT']}</b>",
+        f"PM actions: <b>{pm_actions['ACCUMULATE']}</b> accumulate · <b>{pm_actions['STARTER']}</b> starter · <b>{pm_actions['WATCH']}</b> watch · <b>{pm_actions['REJECT']}</b> reject · Docket <b>{len(pm_rows)}</b>",
+        f"Options: <b>{opt_summary.get('contract_selected', 0)}</b> selected · <b>{opt_summary.get('ready', 0)}</b> ready · <b>{opt_summary.get('execution_grade', 0)}</b> execution-grade",
+        f"QC: <b>{_esc((qc.get('trading_gate') or {}).get('decision') or 'UNKNOWN')}</b> · Gate: <b>{_esc(gate.get('decision') or 'UNKNOWN')}</b> · Blockers: <b>{blockers}</b>",
+        f"Price freshness: <b>{fresh}</b> / {price_rows} live · Stale: <b>{stale}</b> · Edge sample: <b>{(edge.get('edge') or {}).get('sample', 0)}</b> · Alpha: <b>{_esc((edge.get('edge') or {}).get('alpha_grade') or 'UNPROVEN')}</b>",
+        "<i>One message represents this scheduled cycle. Detail views retain the full scan outputs.</i>",
+    ]
+    return "\n".join(lines)
+
+
 async def send_event_immediate(event: dict[str, Any]) -> dict[str, Any]:
     if await _recently_sent(event.get("fingerprint", ""), event.get("severity", "info")):
         return {"ok": True, "sent": False, "deduped": True}
@@ -397,7 +525,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     results = scan.get("results") or []
     scan_id = str(scan.get("finished_at") or scan.get("created_at") or _now_iso())
     new_scan = await _new_scan_tickers(scan, results)
-    pm = await portfolio_manager.latest_portfolio_plan()
+    pm = scan.get("pm_payload")
+    if not isinstance(pm, dict):
+        pm = await portfolio_manager.latest_portfolio_plan()
     alignment_notes: list[str] = []
     if not _same_scan(pm.get("scan_finished_at"), scan.get("finished_at")):
         alignment_notes.append("pm_scan_mismatch")
@@ -410,7 +540,9 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     qc = await data_quality.overview(force_refresh=False, record_event=False)
     gate = await execution_gate.overview(force_refresh=False)
     edge = await edge_dashboard.overview()
-    options = await options_desk.candidates()
+    options = scan.get("options_payload")
+    if not isinstance(options, dict):
+        options = await options_desk.candidates()
     pm_rows = _pm_rows(pm)
     opt_summary = options.get("summary") or {}
     opt_rows = options.get("candidates") or []
@@ -549,6 +681,26 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         "<b>TOP DOCKET</b>",
         "\n".join(top_lines) or "No PM rows yet.",
     ])
+    if str(scan.get("telegram_report_variant") or "").strip().lower() == "full_terminal":
+        text = _consolidated_scan_report_text(
+            scan,
+            results=results,
+            lottery=scan.get("lottery_result") if isinstance(scan.get("lottery_result"), dict) else {},
+            pharma=scan.get("pharma_result") if isinstance(scan.get("pharma_result"), dict) else {},
+            shocks=scan.get("pharma_shock_result") if isinstance(scan.get("pharma_shock_result"), dict) else {},
+            screener_summary=screener_summary,
+            new_scan=new_scan,
+            pm=pm,
+            pm_rows=pm_rows,
+            routes=routes,
+            pm_actions=pm_actions,
+            opt_summary=opt_summary,
+            gate=gate,
+            qc=qc,
+            edge=edge,
+            blockers=blockers,
+            execution_summary=exec_summary,
+        )
     return {
         "batch_type": "scan_report",
         "scan_id": scan_id,

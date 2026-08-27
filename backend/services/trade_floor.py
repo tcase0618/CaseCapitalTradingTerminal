@@ -1307,6 +1307,9 @@ async def evaluate_and_execute(
         executed.append({"ticker": ticker, "notional": notional,
                           "score": score, "pm_score": pm_row.get("pm_score"),
                           "pm_action": pm_row.get("action"),
+                          "strategy": ((row.get("strategy_scanner") or {}).get("screener_id")
+                                       or (row.get("strategy_scanner") or {}).get("family")
+                                       or row.get("source_scan") or "CORE"),
                           "limit_price": limit_price,
                           "stop_price": stop_price, "stop_pct": stop_calc["stop_pct"],
                           "order_id": order.get("id"),

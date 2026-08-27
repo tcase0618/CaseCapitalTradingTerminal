@@ -38,8 +38,11 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
 
     core_task = asyncio.create_task(timed("core_scan", scanner.run_scan(triggered_by=triggered_by, auto_execute=False)))
     lottery_task = asyncio.create_task(timed("lottery_scan", lottery.run_dedicated_lottery_scan(triggered_by=triggered_by)))
-    pharma_task = asyncio.create_task(timed("pharma_scan", pharma.run_pharma_scan(triggered_by=triggered_by)))
-    shock_task = asyncio.create_task(timed("pharma_shock_scan", pharma.run_catalyst_shock_scan(triggered_by=triggered_by, force_refresh=True)))
+    # The full-cycle report owns scheduled Telegram delivery.  The underlying
+    # scanners still persist and return their findings, but must not fan out
+    # separate alert messages for the same cycle.
+    pharma_task = asyncio.create_task(timed("pharma_scan", pharma.run_pharma_scan(triggered_by=triggered_by, notify=False)))
+    shock_task = asyncio.create_task(timed("pharma_shock_scan", pharma.run_catalyst_shock_scan(triggered_by=triggered_by, force_refresh=True, notify=False)))
 
     scan = await core_task
     family_results = await asyncio.gather(lottery_task, pharma_task, shock_task, return_exceptions=True)
@@ -51,9 +54,14 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     # Keep the exact specialist output attached to this cycle. Reporting and
     # execution must consume this result rather than recomputing it later.
     scan["strategy_payload"] = strategy_payload
+    scan["lottery_result"] = lottery_result
+    scan["pharma_result"] = pharma_result
+    scan["pharma_shock_result"] = pharma_shock_result
     ledger_payload = await timed("candidate_ledger", candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True))
     options_payload = await timed("options_desk_candidates", options_desk.build_candidates(limit=100, persist=True))
     pm_payload = await timed("portfolio_manager", portfolio_manager.latest_portfolio_plan())
+    scan["options_payload"] = options_payload
+    scan["pm_payload"] = pm_payload
 
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
     if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
@@ -82,6 +90,7 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
             "equity_executed": len(equity_execution.get("executed") or []),
             "equity_rejected": len(equity_execution.get("rejected") or []),
             "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],
+            "equity_submitted_rows": equity_execution.get("executed") or [],
             "options_ready": options_execution.get("ready"),
             "options_submitted": _row_count(options_execution.get("submitted")),
             "options_skipped": _row_count(options_execution.get("skipped")),

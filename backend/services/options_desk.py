@@ -1806,6 +1806,7 @@ async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any
                 "ticker": ticket.get("ticker"),
                 "symbol": symbol,
                 "route": ticket.get("route"),
+                "strategy": ticket.get("strategy") or ((ticket.get("strategy_lane") or {}).get("lane")),
                 "contracts": ticket.get("contracts"),
                 "risk_budget": ticket.get("risk_budget"),
                 "order_id": result.get("order", {}).get("id"),

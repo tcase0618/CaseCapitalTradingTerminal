@@ -1410,7 +1410,12 @@ async def _cached_pdufa(force_refresh: bool = False) -> list[dict[str, Any]]:
     return entries or (cache.get("entries") if cache else [])
 
 
-async def run_pharma_scan(triggered_by: str = "manual", force_calendar_refresh: bool = False) -> dict[str, Any]:
+async def run_pharma_scan(
+    triggered_by: str = "manual",
+    force_calendar_refresh: bool = False,
+    *,
+    notify: bool = True,
+) -> dict[str, Any]:
     """Complete pharma pipeline. Returns enriched PDUFA entries with scores +
     persists to MongoDB."""
     started = _now()
@@ -1620,14 +1625,16 @@ async def run_pharma_scan(triggered_by: str = "manual", force_calendar_refresh: 
         "success",
     )
 
-    # Fire telegram alerts for score ≥ 70
-    try:
-        from . import telegram_events
-        hot = [r for r in enriched if r["binary_event_score"] >= TELEGRAM_THRESHOLD]
-        if hot:
-            await telegram_events.dispatch_pharma_alerts(hot, triggered_by=triggered_by)
-    except Exception as e:
-        logger.warning("Pharma telegram dispatch failed: %s", e)
+    # Scheduled full-terminal cycles render one consolidated Telegram report.
+    # Standalone/manual pharma scans retain their existing alert behavior.
+    if notify:
+        try:
+            from . import telegram_events
+            hot = [r for r in enriched if r["binary_event_score"] >= TELEGRAM_THRESHOLD]
+            if hot:
+                await telegram_events.dispatch_pharma_alerts(hot, triggered_by=triggered_by)
+        except Exception as e:
+            logger.warning("Pharma telegram dispatch failed: %s", e)
 
     return {
         "started_at": started.isoformat(),
@@ -1638,7 +1645,12 @@ async def run_pharma_scan(triggered_by: str = "manual", force_calendar_refresh: 
     }
 
 
-async def run_catalyst_shock_scan(triggered_by: str = "manual", force_refresh: bool = True) -> dict[str, Any]:
+async def run_catalyst_shock_scan(
+    triggered_by: str = "manual",
+    force_refresh: bool = True,
+    *,
+    notify: bool = True,
+) -> dict[str, Any]:
     """Detect same-day clinical/FDA catalyst shocks outside the PDUFA calendar."""
     started = _now()
     await log_activity(f"Pharma catalyst shock scan started ({triggered_by})", "info")
@@ -1688,12 +1700,13 @@ async def run_catalyst_shock_scan(triggered_by: str = "manual", force_refresh: b
         await _mirror_pg("pharma_catalyst_shocks", row)
 
     hot = [r for r in candidates if (r.get("shock_score") or 0) >= CATALYST_SHOCK_THRESHOLD]
-    try:
-        if hot:
-            from . import telegram_events
-            await telegram_events.dispatch_pharma_shock_alerts(hot, triggered_by=triggered_by)
-    except Exception as exc:
-        logger.warning("Pharma shock telegram dispatch failed: %s", exc)
+    if notify:
+        try:
+            if hot:
+                from . import telegram_events
+                await telegram_events.dispatch_pharma_shock_alerts(hot, triggered_by=triggered_by)
+        except Exception as exc:
+            logger.warning("Pharma shock telegram dispatch failed: %s", exc)
 
     finished = _now()
     duration = round((finished - started).total_seconds(), 2)
