@@ -35,7 +35,7 @@ class ScheduleSource:
 
 
 SOURCES: tuple[ScheduleSource, ...] = (
-    ScheduleSource("latest_scan", "Core Stock Scan", "SCANNER", "00:00 / 08:00 / 12:00 / 15:00 / 18:30 ET on market days", 510, "scan_results", ("finished_at", "created_at"), sort=("finished_at", -1), critical=True, execution_scopes=("equity", "options"), repair="run_stock_scan_if_market_open", market_session_only=True),
+    ScheduleSource("latest_scan", "Core Stock Scan", "SCANNER", "00:00 / 08:00 / 10:00 / 12:00 / 15:00 / 18:30 ET on market days", 510, "scan_results", ("finished_at", "created_at"), sort=("finished_at", -1), critical=True, execution_scopes=("equity", "options"), repair="run_stock_scan_if_market_open", market_session_only=True),
     ScheduleSource("live_positions", "Live Position Snapshot", "EXECUTION", "Every 5 minutes from Alpaca, all sessions", 8, "bot_state", ("snapshot_at", "created_at"), query={"_id": "live_position_snapshot_latest"}, critical=True, execution_scopes=("equity", "options"), repair="repull_alpaca_positions"),
     ScheduleSource("options_candidates", "Options Candidate Scan", "OPTIONS", "09:35 / 10:00 ET auto scan + execution preflight on market days", 390, "options_desk_candidates", ("generated_at", "created_at"), sort=("generated_at", -1), critical=True, execution_scopes=("options",), repair="refresh_options_candidates"),
     ScheduleSource("options_risk", "Options Risk Marks", "EXECUTION", "Every 5 minutes from Alpaca position authority", 8, "options_desk_risk_checks", ("checked_at", "created_at"), sort=("checked_at", -1), critical=True, execution_scopes=("options",), repair="recheck_options_positions"),
