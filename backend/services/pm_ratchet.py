@@ -34,11 +34,12 @@ def compute_active_levels(entry: float, current: float, plan: dict[str, Any], pr
     if trigger_step > 0:
         ratchet_level = min(max_ratchets, max(0, int(gain_pct // trigger_step)))
     initial_stop_pct = _num(plan.get("initial_stop_pct"), 10.0)
+    no_capped_tp = bool(plan.get("no_capped_tp"))
     initial_target_pct = _num(plan.get("initial_target_pct"), 15.0)
     stop_gain_pct = -initial_stop_pct + ratchet_level * _num(plan.get("stop_raise_pct"), 5.0)
-    target_gain_pct = initial_target_pct + ratchet_level * _num(plan.get("target_raise_pct"), 10.0)
+    target_gain_pct = None if no_capped_tp else initial_target_pct + ratchet_level * _num(plan.get("target_raise_pct"), 10.0)
     active_stop = round(entry * (1 + stop_gain_pct / 100.0), 4)
-    active_target = round(entry * (1 + target_gain_pct / 100.0), 4)
+    active_target = None if target_gain_pct is None else round(entry * (1 + target_gain_pct / 100.0), 4)
     if previous_stop > 0:
         active_stop = max(previous_stop, active_stop)
     return {
@@ -48,7 +49,7 @@ def compute_active_levels(entry: float, current: float, plan: dict[str, Any], pr
         "active_stop": active_stop,
         "active_target": active_target,
         "stop_gain_pct": round(((active_stop - entry) / entry) * 100.0, 2),
-        "target_gain_pct": round(target_gain_pct, 2),
+        "target_gain_pct": round(target_gain_pct, 2) if target_gain_pct is not None else None,
     }
 
 

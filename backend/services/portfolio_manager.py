@@ -389,7 +389,16 @@ def _ratchet_profile(action: str, upside_pct: float, rr: float, signals: list[st
     return profile
 
 
-def _ratchet_plan(action: str, price: float, target: float, stop: float, upside_pct: float, rr: float, signals: list[str]) -> dict[str, Any]:
+def _ratchet_plan(
+    action: str,
+    price: float,
+    target: float,
+    stop: float,
+    upside_pct: float,
+    rr: float,
+    signals: list[str],
+    no_capped_tp: bool = False,
+) -> dict[str, Any]:
     if action not in {"ACCUMULATE", "STARTER"} or price <= 0:
         return {"enabled": False}
     profile = _ratchet_profile(action, upside_pct, rr, signals)
@@ -398,13 +407,13 @@ def _ratchet_plan(action: str, price: float, target: float, stop: float, upside_
         initial_stop_pct = round(((price - stop) / price) * 100.0, 1)
         initial_stop_pct = min(profile["initial_sl_pct"], max(5.0, initial_stop_pct))
     initial_tp_pct = min(max(profile["initial_tp_pct"], 6.0), max(6.0, upside_pct))
-    if target > price:
+    if target > price and not no_capped_tp:
         initial_tp_pct = min(initial_tp_pct, round(((target - price) / price) * 100.0, 1))
     levels = []
     for level in range(1, int(profile["max_ratchets"]) + 1):
         trigger_pct = round(level * profile["trigger_step_pct"], 1)
         stop_pct = round(-initial_stop_pct + level * profile["stop_raise_pct"], 1)
-        target_pct = round(initial_tp_pct + level * profile["target_raise_pct"], 1)
+        target_pct = None if no_capped_tp else round(initial_tp_pct + level * profile["target_raise_pct"], 1)
         levels.append({
             "level": level,
             "trigger_gain_pct": trigger_pct,
@@ -414,16 +423,22 @@ def _ratchet_plan(action: str, price: float, target: float, stop: float, upside_
     return {
         "enabled": True,
         "profile": profile["name"],
-        "initial_target_pct": round(initial_tp_pct, 1),
+        "initial_target_pct": None if no_capped_tp else round(initial_tp_pct, 1),
         "initial_stop_pct": round(initial_stop_pct, 1),
-        "initial_target_price": round(price * (1 + initial_tp_pct / 100.0), 2),
+        "initial_target_price": None if no_capped_tp else round(price * (1 + initial_tp_pct / 100.0), 2),
         "initial_stop_price": round(price * (1 - initial_stop_pct / 100.0), 2),
         "trigger_step_pct": profile["trigger_step_pct"],
         "stop_raise_pct": profile["stop_raise_pct"],
         "target_raise_pct": profile["target_raise_pct"],
         "max_ratchets": profile["max_ratchets"],
         "levels": levels,
-        "notes": "PM-owned dynamic exit ladder; stop only moves favorably.",
+        "no_capped_tp": bool(no_capped_tp),
+        "exit_policy": "STOP_RATCHET_ONLY" if no_capped_tp else "TARGET_AND_STOP_RATCHET",
+        "notes": (
+            "PM-owned stop ratchet; no take-profit cap, position exits only on protective/risk rules."
+            if no_capped_tp
+            else "PM-owned dynamic exit ladder; stop only moves favorably."
+        ),
     }
 
 
@@ -504,7 +519,16 @@ def evaluate_rows(
         if regime_note:
             cautions.append(regime_note)
         sizing = _sizing(action, score, price, stop, equity, row_profile, row)
-        ratchet = _ratchet_plan(action, price, target, stop, upside, rr, signals)
+        ratchet = _ratchet_plan(
+            action,
+            price,
+            target,
+            stop,
+            upside,
+            rr,
+            signals,
+            no_capped_tp=_is_lottery_row(row),
+        )
         strategy_case = row.get("strategy_case") or {}
         out.append({
             "ticker": ticker,

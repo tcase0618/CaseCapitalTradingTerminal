@@ -1,6 +1,6 @@
 import asyncio
 
-from services import options_desk, pharma, portfolio_manager, pricer, scrapers, strategy_ideology, strategy_screeners, trade_floor, x_factor
+from services import options_desk, pharma, pm_ratchet, portfolio_manager, pricer, scrapers, strategy_ideology, strategy_screeners, trade_floor, x_factor
 from services import lottery
 
 
@@ -129,6 +129,27 @@ def test_lottery_pm_profile_allows_bounded_starter_for_qualified_setup():
     assert result["action"] in {"STARTER", "ACCUMULATE"}
     assert result["allocation_usd"] > 0
     assert result["risk_usd"] <= 1000 * portfolio_manager.LOTTERY_PROFILES["BALANCED"]["max_single_name_risk_pct"]
+
+
+def test_lottery_ratchet_has_no_capped_take_profit():
+    row = strategy_screeners._base_row(
+        row={"ticker": "LOTTO", "price": 10, "signals": ["GAP_SURGE", "RVOL", "ROTATION"]},
+        screener_id="lottery_supernova",
+        family="LOTTERY",
+        lane="SUPERNOVA",
+        score=72,
+    )
+
+    result = portfolio_manager.evaluate_rows([row], equity=1000, mode="BALANCED", regime={"status": "green"})[0]
+    plan = result["ratchet_plan"]
+    levels = pm_ratchet.compute_active_levels(10, 25, plan)
+
+    assert plan["no_capped_tp"] is True
+    assert plan["exit_policy"] == "STOP_RATCHET_ONLY"
+    assert plan["initial_target_price"] is None
+    assert all(level["target_gain_pct"] is None for level in plan["levels"])
+    assert levels["active_target"] is None
+    assert levels["active_stop"] > 0
 
 
 def test_merged_core_lottery_row_uses_lottery_profile():

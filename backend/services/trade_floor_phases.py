@@ -265,6 +265,7 @@ async def process_phase_exits() -> dict[str, Any]:
             continue
         phases_hit = dict(t.get("phases_hit") or {})
         params = _params_for(t.get("signal_combo") or [], all_params)
+        no_capped_tp = bool((t.get("pm_ratchet_plan") or {}).get("no_capped_tp"))
 
         # ── Hard stop check (any phase) ──
         cur_stop = float(t.get("current_stop") or t.get("stop_price") or 0)
@@ -282,7 +283,7 @@ async def process_phase_exits() -> dict[str, Any]:
 
         # ── Phase 1 ──
         p1_target = float(t.get("pm_active_target") or t.get("phase1_target") or 0)
-        if phase == 1 and p1_target and cur >= p1_target:
+        if not no_capped_tp and phase == 1 and p1_target and cur >= p1_target:
             if not await _claim_exit_lock(cli, "phase1_target_hit"):
                 continue
             qty_sell = round(qty_total * float(params["phase1_close_pct"]), 9)
@@ -336,7 +337,7 @@ async def process_phase_exits() -> dict[str, Any]:
 
         # ── Phase 2 ──
         p2_target = float(t.get("pm_active_target") or t.get("phase2_target") or 0)
-        if phase == 2 and p2_target and cur >= p2_target and qty_rem > 0:
+        if not no_capped_tp and phase == 2 and p2_target and cur >= p2_target and qty_rem > 0:
             if not await _claim_exit_lock(cli, "phase2_target_hit"):
                 continue
             qty_sell = round(qty_total * float(params["phase2_close_pct"]), 9)
