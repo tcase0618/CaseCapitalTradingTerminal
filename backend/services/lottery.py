@@ -63,6 +63,11 @@ def _num(value: Any, default: float = 0.0) -> float:
             value = value.replace("$", "").replace(",", "").replace("%", "").strip()
             if value in {"", "-", "N/A"}:
                 return default
+            # Finviz may return threshold values such as ">10" when the
+            # exact short-interest percentage is hidden. Treat the threshold
+            # as a conservative lower bound instead of silently converting it
+            # to zero and erasing the signal.
+            value = value.lstrip("><=~")
         return float(value)
     except Exception:
         return default
@@ -313,7 +318,19 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
 def _finviz_row_from_cells(cells: list[str], source: str) -> dict[str, Any] | None:
     if len(cells) < 9:
         return None
-    ticker_idx = next((i for i, cell in enumerate(cells[:4]) if re.fullmatch(r"[A-Z]{1,5}(?:[.-][A-Z]{1,2})?", cell or "")), None)
+    ticker_idx = None
+    for i, cell in enumerate(cells[:4]):
+        text = str(cell or "").upper().strip()
+        if re.fullmatch(r"[A-Z]{1,5}(?:[.-][A-Z]{1,2})?", text):
+            ticker_idx = i
+            break
+        # The current Finviz renderer prefixes the ticker with a logo
+        # character, e.g. "C CHRN". Recover only the validated ticker token.
+        match = re.search(r"\b([A-Z]{1,5}(?:[.-][A-Z]{1,2})?)$", text)
+        if match:
+            cells[i] = match.group(1)
+            ticker_idx = i
+            break
     if ticker_idx is None:
         return None
     ticker = cells[ticker_idx].upper()
@@ -386,14 +403,15 @@ async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[
                     return rows
             for anchor in soup.find_all("a", href=True):
                 href = anchor.get("href") or ""
-                if "quote.ashx" not in href and "stock.ashx" not in href:
+                parsed = httpx.URL(href)
+                if parsed.path not in {"/quote", "/stock", "/quote.ashx", "/stock.ashx", "quote", "stock", "quote.ashx", "stock.ashx"}:
                     continue
                 match = re.search(r"(?:[?&]t=)([A-Za-z][A-Za-z.\-]{0,7})", href)
                 if not match:
                     continue
                 ticker = _clean_ticker(match.group(1))
-                label = _clean_ticker(anchor.get_text(" ", strip=True))
-                if not ticker or ticker in seen or label != ticker or not re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z]{1,2})?", ticker):
+                label = anchor.get_text(" ", strip=True).upper()
+                if not ticker or ticker in seen or ticker not in label or not re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z]{1,2})?", ticker):
                     continue
                 seen.add(ticker)
                 rows.append({

@@ -79,6 +79,72 @@ def test_strategy_row_carries_case_score_and_confidence():
     assert row["strategy_confidence"] == row["strategy_scanner"]["confidence"]
 
 
+def test_lottery_default_risk_plan_can_clear_pm_starter_floor():
+    row = strategy_screeners._base_row(
+        row={"ticker": "LOTTO", "price": 10},
+        screener_id="lottery_day2_continuation",
+        family="LOTTERY",
+        lane="DAY2_CONTINUATION",
+        score=70,
+    )
+
+    assert row["targets"]["target_blended"] == 14.0
+    assert row["stop_loss"] == 8.0
+    assert (row["targets"]["target_blended"] - 10) / (10 - row["stop_loss"]) == 2.0
+
+
+def test_lottery_evidence_candidate_is_routed_to_pm():
+    row = {
+        "ticker": "LOTTO",
+        "price": 4,
+        "score": 42,
+        "eligible": False,
+        "components": {"gap_surge": 20},
+        "triggers": ["GAP/SURGE"],
+    }
+
+    built = strategy_screeners._lottery_family_rows([row])
+
+    assert built
+    assert any(item["pm_routable"] and not item["read_only"] for item in built)
+
+
+def test_portfolio_plan_does_not_skip_strategy_payload(monkeypatch):
+    strategy_row = strategy_screeners._base_row(
+        row={"ticker": "LOTTO", "price": 4},
+        screener_id="lottery_day2_continuation",
+        family="LOTTERY",
+        lane="DAY2_CONTINUATION",
+        score=70,
+    )
+
+    async def fake_pm_rows(**kwargs):
+        return {"rows": [strategy_row], "summary": {"pm_rows": 1}}
+
+    async def fake_account_equity():
+        return 1000.0, "test"
+
+    class Collection:
+        async def find_one(self, *args, **kwargs):
+            return None
+
+    class DB:
+        scan_results = Collection()
+
+    monkeypatch.setattr(portfolio_manager, "get_db", lambda: DB())
+    monkeypatch.setattr(strategy_screeners, "pm_rows", fake_pm_rows)
+    monkeypatch.setattr(portfolio_manager, "_account_equity", fake_account_equity)
+    monkeypatch.setattr(portfolio_manager, "_opportunity_cost_review", lambda *args: {
+        "enabled": False, "reason": "test", "positions_reviewed": 0,
+        "replacement_candidates": [], "trim_reviews": [], "holding_reviews": [],
+    })
+
+    plan = asyncio.run(portfolio_manager.latest_portfolio_plan(scan={"results": []}))
+
+    assert plan["input_rows"]["strategy_pm"] == 1
+    assert plan["input_rows"]["merged"] == 1
+
+
 def test_strategy_ideology_unknown_has_safe_defaults():
     case = strategy_ideology.case_score(
         strategy_id="missing_strategy",
@@ -259,12 +325,85 @@ def test_dedicated_lottery_scan_does_not_merge_latest_core_scan(monkeypatch):
     assert payload["scan"]["source_counts"]["latest_scan"] == 0
 
 
+def test_lottery_threshold_short_interest_is_not_discarded():
+    assert lottery._num(">10") == 10
+    assert lottery._num("<25.5") == 25.5
+
+
+def test_lottery_high_short_rows_keep_finviz_market_fields(monkeypatch):
+    html = '''<table><tr><td>1</td><td><a href="stock?t=LOTTO">L LOTTO</a></td><td>Lottery Corp</td><td>Technology</td><td>Software</td><td>USA</td><td>25M</td><td>22.5</td><td>4.00</td><td>12.0%</td><td>2.5M</td></tr></table>'''
+
+    class Response:
+        status_code = 200
+        text = html
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(scrapers.httpx, "AsyncClient", lambda *args, **kwargs: Client())
+    rows = asyncio.run(scrapers.fetch_finviz_high_short_interest(limit=1))
+
+    assert rows[0]["ticker"] == "LOTTO"
+    assert rows[0]["price"] == 4.0
+    assert rows[0]["volume"] == "2.5M"
+
+
+def test_strategy_run_uses_attached_lottery_result(monkeypatch):
+    lottery_row = {
+        "ticker": "LOTTO",
+        "price": 4.0,
+        "score": 78,
+        "eligible": True,
+        "components": {"rvol": 12, "rotation": 8, "structure": 7},
+        "triggers": ["RVOL", "ROTATION"],
+    }
+
+    async def unexpected_latest():
+        raise AssertionError("same-cycle Lottery result must not re-read mutable current state")
+
+    monkeypatch.setattr(lottery, "latest_dedicated_lottery", unexpected_latest)
+    monkeypatch.setattr(strategy_screeners, "_independent_options_rows", lambda: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(strategy_screeners, "_pharma_rows", lambda rows: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(strategy_screeners, "_earnings_rows", lambda rows: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(strategy_screeners, "_sec_rows", lambda: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(strategy_screeners, "_lottery_learned_config", lambda: asyncio.sleep(0, result=None))
+
+    class Collection:
+        async def find_one(self, *args, **kwargs):
+            return None
+
+        async def update_one(self, *args, **kwargs):
+            return None
+
+    class DB:
+        strategy_screeners = Collection()
+
+    monkeypatch.setattr(strategy_screeners, "get_db", lambda: DB())
+    payload = asyncio.run(strategy_screeners.run_all(
+        scan={"results": []},
+        lottery_result={"candidates": [lottery_row]},
+    ))
+
+    assert payload["summary"]["by_pm_family"]["LOTTERY"] >= 1
+    assert any(row["ticker"] == "LOTTO" for row in payload["candidates"])
+
+
 def test_independent_options_rows_do_not_use_core_scan(monkeypatch):
     async def fake_batch_live_price_meta(tickers, concurrency=8):
         return {t: {"price": 10.0, "age_seconds": 1, "source": "test_live"} for t in tickers}
 
     async def fake_high_short(min_pct=10.0, limit=35):
         return [{"ticker": "OPTA", "short_float_pct": 22, "source": "FINVIZ_HIGH_SHORT"}]
+
+    async def fake_option_finviz(*args, **kwargs):
+        return []
 
     async def fake_trending():
         return {"OPTB"}
@@ -273,6 +412,7 @@ def test_independent_options_rows_do_not_use_core_scan(monkeypatch):
         return [{"ticker": "OPTC", "binary_event_score": 71, "event_type": "PDUFA"}]
 
     monkeypatch.setattr(scrapers, "fetch_finviz_high_short_interest", fake_high_short)
+    monkeypatch.setattr(lottery, "_fetch_finviz_url", fake_option_finviz)
     monkeypatch.setattr(x_factor, "yahoo_trending_set", fake_trending)
     monkeypatch.setattr(pharma, "get_pdufa_within_days", fake_pdufa)
     monkeypatch.setattr(pricer, "batch_live_price_meta", fake_batch_live_price_meta)

@@ -101,7 +101,10 @@ def _base_row(
     target = _num(row.get("target_blended") or (row.get("targets") or {}).get("target_blended"), 0)
     if px > 0 and target <= px:
         if family == "LOTTERY":
-            target = round(px * 1.22, 4)
+            # Lottery candidates need a defined-risk plan that can clear the
+            # PM starter floor. The old 22% target / 28% stop produced RR
+            # 0.79, so every otherwise-valid Lottery proposal became WATCH.
+            target = round(px * 1.40, 4)
         elif family == "OPTIONS":
             target = round(px * 1.20, 4)
         else:
@@ -109,7 +112,7 @@ def _base_row(
     stop = _num(row.get("stop_loss") or (row.get("risk") or {}).get("stop_loss"), 0)
     if px > 0 and stop <= 0:
         if family == "LOTTERY":
-            stop = round(px * 0.72, 4)
+            stop = round(px * 0.80, 4)
         elif family == "OPTIONS":
             stop = round(px * 0.92, 4)
         else:
@@ -208,7 +211,15 @@ def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, A
         comps = row.get("components") or {}
         triggers = {str(x).upper() for x in (row.get("triggers") or [])}
         dilution = row.get("dilution") or {}
-        if score < 50:
+        evidence_score = max(
+            _num(comps.get("gap_surge"), 0),
+            _num(comps.get("rvol"), 0),
+            _num(comps.get("rotation"), 0),
+            _num(comps.get("catalyst"), 0),
+            _num(comps.get("short_interest"), 0),
+        )
+        eligible = bool(row.get("eligible")) or (score >= 35 and evidence_score > 0)
+        if not eligible:
             if dilution.get("active") or any(str((p or {}).get("key") or "").lower() == "dilution" for p in (row.get("penalties") or [])):
                 out.append(_base_row(
                     row=row,
@@ -222,8 +233,7 @@ def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, A
                 learned_config=learned_config,
             ))
             continue
-        if score >= 50:
-            out.append(_base_row(row=row, screener_id="lottery_day2_continuation", family="LOTTERY", lane="DAY2_CONTINUATION", score=score, learned_config=learned_config))
+        out.append(_base_row(row=row, screener_id="lottery_day2_continuation", family="LOTTERY", lane="DAY2_CONTINUATION", score=score, learned_config=learned_config))
         if _num(comps.get("structure"), 0) >= 4 or _num(row.get("change_pct"), 0) >= 8:
             out.append(_base_row(row=row, screener_id="lottery_red_green", family="LOTTERY", lane="RED_GREEN", score=max(score, 52), learned_config=learned_config))
         if _num(comps.get("rvol"), 0) >= 9 or _num(comps.get("rotation"), 0) >= 6 or "RVOL" in triggers or "ROTATION" in triggers:
@@ -598,6 +608,7 @@ async def run_all(
     *,
     persist: bool = False,
     include_options_native: bool = True,
+    lottery_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     db = get_db()
     if scan is None:
@@ -605,12 +616,21 @@ async def run_all(
     scan = scan or {}
     scan_rows = scan.get("results") or []
     lottery_rows: list[dict[str, Any]] = []
-    try:
-        from . import lottery
+    # Prefer the result produced by this cycle. Re-reading the mutable
+    # `current` document here allowed a concurrent scheduler run to replace a
+    # fresh Lottery result before PM routing consumed it.
+    attached_lottery = lottery_result
+    if attached_lottery is None and isinstance(scan.get("lottery_result"), dict):
+        attached_lottery = scan.get("lottery_result")
+    if isinstance(attached_lottery, dict):
+        lottery_rows = attached_lottery.get("candidates") or []
+    else:
+        try:
+            from . import lottery
 
-        lottery_rows = await lottery.latest_dedicated_lottery()
-    except Exception:
-        lottery_rows = []
+            lottery_rows = await lottery.latest_dedicated_lottery()
+        except Exception:
+            lottery_rows = []
 
     rows: list[dict[str, Any]] = []
     learned_config = await _lottery_learned_config()
@@ -635,8 +655,18 @@ async def run_all(
     return payload
 
 
-async def pm_rows(scan: dict[str, Any] | None = None, *, persist: bool = True) -> dict[str, Any]:
-    payload = await run_all(scan=scan, persist=persist, include_options_native=True)
+async def pm_rows(
+    scan: dict[str, Any] | None = None,
+    *,
+    persist: bool = True,
+    lottery_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = await run_all(
+        scan=scan,
+        persist=persist,
+        include_options_native=True,
+        lottery_result=lottery_result,
+    )
     rows = [r for r in payload.get("candidates") or [] if r.get("pm_routable") and not r.get("read_only")]
     payload["rows"] = rows
     payload["summary"] = {**(payload.get("summary") or {}), "pm_rows": len(rows)}

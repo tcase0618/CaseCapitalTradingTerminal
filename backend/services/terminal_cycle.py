@@ -50,7 +50,10 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     pharma_result = family_results[1] if not isinstance(family_results[1], Exception) else {"ok": False, "error": str(family_results[1])}
     pharma_shock_result = family_results[2] if not isinstance(family_results[2], Exception) else {"ok": False, "error": str(family_results[2])}
 
-    strategy_payload = await timed("strategy_screeners", strategy_screeners.run_all(scan=scan, persist=True))
+    strategy_payload = await timed(
+        "strategy_screeners",
+        strategy_screeners.run_all(scan=scan, persist=True, lottery_result=lottery_result),
+    )
     # Keep the exact specialist output attached to this cycle. Reporting and
     # execution must consume this result rather than recomputing it later.
     scan["strategy_payload"] = strategy_payload
@@ -59,7 +62,20 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     scan["pharma_shock_result"] = pharma_shock_result
     ledger_payload = await timed("candidate_ledger", candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True))
     options_payload = await timed("options_desk_candidates", options_desk.build_candidates(limit=100, persist=True))
-    pm_payload = await timed("portfolio_manager", portfolio_manager.latest_portfolio_plan())
+    pm_payload = await timed(
+        "portfolio_manager",
+        portfolio_manager.latest_portfolio_plan(
+            scan=scan,
+            strategy_payload={
+                **strategy_payload,
+                "rows": [
+                    row for row in strategy_payload.get("candidates") or []
+                    if row.get("pm_routable") and not row.get("read_only")
+                ],
+            },
+            lottery_result=lottery_result,
+        ),
+    )
     scan["options_payload"] = options_payload
     scan["pm_payload"] = pm_payload
 

@@ -775,16 +775,31 @@ async def _account_equity() -> tuple[float | None, str]:
     return None, "fallback"
 
 
-async def latest_portfolio_plan(equity: float | None = None, mode: str = "AUTO", ruleset_id: str | None = None) -> dict[str, Any]:
+async def latest_portfolio_plan(
+    equity: float | None = None,
+    mode: str = "AUTO",
+    ruleset_id: str | None = None,
+    *,
+    scan: dict[str, Any] | None = None,
+    strategy_payload: dict[str, Any] | None = None,
+    lottery_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     db = get_db()
-    scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+    if scan is None:
+        scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
     core_rows = (scan or {}).get("results") or []
-    strategy_payload: dict[str, Any] = {}
+    strategy_payload: dict[str, Any] | None = None
     strategy_rows: list[dict[str, Any]] = []
     try:
-        from . import strategy_screeners
+        if strategy_payload is None:
+            from . import strategy_screeners
 
-        strategy_payload = await strategy_screeners.pm_rows(scan=scan, persist=True)
+            strategy_payload = await strategy_screeners.pm_rows(
+                scan=scan,
+                persist=True,
+                lottery_result=lottery_result,
+            )
+        strategy_payload = strategy_payload or {}
         strategy_rows = strategy_payload.get("rows") or []
     except Exception as exc:
         strategy_payload = {

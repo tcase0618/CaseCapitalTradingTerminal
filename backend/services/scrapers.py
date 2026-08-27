@@ -123,7 +123,7 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
     """Finviz screener pre-filtered for short_float>10%. Paginates."""
     base = (
         "https://finviz.com/screener.ashx?"
-        "v=152&f=sh_short_o10,sh_avgvol_o100&o=-shortinterestshare&c=0,1,65"
+        "v=111&f=sh_short_o10,sh_avgvol_o100&o=-shortinterestshare"
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -147,23 +147,68 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                 soup = BeautifulSoup(resp_text, "lxml")
                 added = 0
                 for a in soup.find_all("a", href=True):
-                    t = _finviz_anchor_ticker(a)
+                    # Finviz now renders row links as stock?t=... and places
+                    # a logo letter before the ticker. The old exact-label
+                    # parser therefore returned no reliable row metrics.
+                    href = a.get("href") or ""
+                    parsed = urlparse(href)
+                    ticker_param = (parse_qs(parsed.query).get("t") or [""])[0].upper().strip()
+                    t = ticker_param if parsed.path in {"/stock", "stock"} and TICKER_RE.match(ticker_param) else _finviz_anchor_ticker(a)
                     if not t or t in seen:
                         continue
                     short_pct = None
                     tr = a.find_parent("tr")
+                    cells: list[str] = []
                     if tr:
-                        for cell in tr.find_all("td"):
-                            txt = cell.get_text(strip=True)
-                            m = re.match(r"^(\d{1,2}(?:\.\d+)?)%$", txt)
-                            if m:
-                                v = float(m.group(1))
-                                if 5.0 <= v <= 100.0:
-                                    short_pct = v
-                                    break
+                        cells = [cell.get_text(" ", strip=True) for cell in tr.find_all("td")]
+                        percent_cells = [cell.get_text(strip=True) for cell in tr.find_all("td")]
+                        percent_cells = [text for text in percent_cells if re.fullmatch(r"[+-]?[\d.]+%", text)]
+                        # The current free Finviz layout does not expose the
+                        # exact short-interest column. Never mistake the
+                        # final daily-change percentage for short interest.
+                        # The screener filter itself guarantees the lower
+                        # bound, which is safer than inventing precision.
+                        if len(percent_cells) > 1:
+                            candidate = percent_cells[0].replace("%", "")
+                            try:
+                                value = float(candidate)
+                                if value >= 0:
+                                    short_pct = value
+                            except ValueError:
+                                pass
                     seen.add(t)
+                    # Default Finviz row layout changes with the selected
+                    # columns. Locate the final percent cell and infer the
+                    # price immediately before it; any numeric cell after it
+                    # is the displayed volume. This avoids treating P/E or
+                    # market cap as the price when optional columns move.
+                    pct_index = next(
+                        (i for i in range(len(cells) - 1, -1, -1) if re.fullmatch(r"[+-]?[\d.]+%", cells[i])),
+                        None,
+                    )
+                    def cell_number(index: int) -> float | None:
+                        if index is None or index < 0 or index >= len(cells):
+                            return None
+                        text = cells[index].replace(",", "").strip()
+                        try:
+                            return float(text.replace("%", ""))
+                        except ValueError:
+                            return None
+
+                    price = cell_number(pct_index - 1) if pct_index is not None else None
+                    volume = (
+                        cells[pct_index + 1]
+                        if pct_index is not None and pct_index + 1 < len(cells)
+                        and re.fullmatch(r"[\d,.]+[KMB]?", cells[pct_index + 1], re.I)
+                        else None
+                    )
                     out.append({
                         "ticker": t,
+                        "company": cells[2] if len(cells) > 2 else t,
+                        "sector": cells[3] if len(cells) > 3 else "-",
+                        "price": price,
+                        "change_pct": cell_number(pct_index),
+                        "volume": volume,
                         "short_float_pct": short_pct if short_pct is not None else f">{min_pct:.0f}",
                         "source": "FINVIZ_HIGH_SHORT",
                     })
