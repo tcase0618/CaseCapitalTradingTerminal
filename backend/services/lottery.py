@@ -76,6 +76,17 @@ def lottery_strategy_fits(row: dict[str, Any], groups: list[str] | None = None) 
     if not fits and len(groups) >= 2:
         fits.append("SIGNAL_CONFLUENCE")
     return list(dict.fromkeys(fits))
+
+
+def annotate_lottery_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    """Attach confluence metadata to both new and previously persisted rows."""
+    annotated = dict(row)
+    groups = lottery_signal_groups(annotated)
+    annotated["signal_groups"] = groups
+    annotated["independent_signal_count"] = len(groups)
+    annotated["signal_gate"] = "PASS_2_PLUS" if len(groups) >= 2 else "WATCH_1_SIGNAL"
+    annotated["strategy_fits"] = lottery_strategy_fits(annotated, groups)
+    return annotated
 FINVIZ_URL = (
     "https://finviz.com/screener.ashx?v=111"
     "&f=sh_price_1to20,sh_relvol_o2,sh_short_o15"
@@ -617,12 +628,7 @@ async def _enrich_candidate(candidate: dict[str, Any], halted: set[str]) -> dict
         scored["halt_status"] = "HALTED"
     else:
         scored["halt_status"] = "CLEAR"
-    signal_groups = lottery_signal_groups(scored)
-    scored["signal_groups"] = signal_groups
-    scored["independent_signal_count"] = len(signal_groups)
-    scored["signal_gate"] = "PASS_2_PLUS" if len(signal_groups) >= 2 else "WATCH_1_SIGNAL"
-    scored["strategy_fits"] = lottery_strategy_fits(scored, signal_groups)
-    return scored
+    return annotate_lottery_candidate(scored)
 
 
 async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str, Any]:
@@ -677,9 +683,9 @@ async def latest_dedicated_lottery() -> list[dict[str, Any]]:
     db = get_db()
     doc = await db.ll_scans.find_one({"_id": "current"}, {"_id": 0})
     if doc:
-        return doc.get("candidates") or []
+        return [annotate_lottery_candidate(row) for row in (doc.get("candidates") or [])]
     legacy = await db.lottery_dedicated_scan.find_one({"_id": "current"}, {"_id": 0})
-    return legacy.get("candidates", []) if legacy else []
+    return [annotate_lottery_candidate(row) for row in (legacy.get("candidates", []) if legacy else [])]
 
 
 async def evaluate_for_scan(scan_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -935,7 +941,7 @@ async def board() -> dict[str, Any]:
         "rubric_version": LL_RUBRIC_VERSION,
         "generated_at": _now().isoformat(),
         "scan": scan,
-        "candidates": scan.get("candidates") or [],
+        "candidates": [annotate_lottery_candidate(row) for row in (scan.get("candidates") or [])],
         "tickets": active,
         "all_tickets": tickets[:300],
         "jackpot_board": _aggregate_grades(tickets),
@@ -963,7 +969,7 @@ async def board() -> dict[str, Any]:
 async def league_candidates() -> dict[str, Any]:
     db = get_db()
     scan = await db.ll_scans.find_one({"_id": "current"}, {"_id": 0}) or {}
-    return {"ok": True, "scan": scan, "candidates": scan.get("candidates") or []}
+    return {"ok": True, "scan": scan, "candidates": [annotate_lottery_candidate(row) for row in (scan.get("candidates") or [])]}
 
 
 async def league_tickets(active_only: bool = False) -> dict[str, Any]:
