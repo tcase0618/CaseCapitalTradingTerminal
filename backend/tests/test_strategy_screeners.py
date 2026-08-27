@@ -109,6 +109,60 @@ def test_lottery_evidence_candidate_is_routed_to_pm():
     assert any(item["pm_routable"] and not item["read_only"] for item in built)
 
 
+def test_lottery_pm_profile_allows_bounded_starter_for_qualified_setup():
+    row = strategy_screeners._base_row(
+        row={
+            "ticker": "LOTTO",
+            "price": 10,
+            "signals": ["GAP_SURGE", "RVOL", "ROTATION"],
+            "components": {"gap_surge": 12, "rvol": 10, "rotation": 8},
+        },
+        screener_id="lottery_supernova",
+        family="LOTTERY",
+        lane="SUPERNOVA",
+        score=72,
+    )
+
+    result = portfolio_manager.evaluate_rows([row], equity=1000, mode="BALANCED", regime={"status": "green"})[0]
+
+    assert result["strategy_profile"] == "LOTTERY_BALANCED"
+    assert result["action"] in {"STARTER", "ACCUMULATE"}
+    assert result["allocation_usd"] > 0
+    assert result["risk_usd"] <= 1000 * portfolio_manager.LOTTERY_PROFILES["BALANCED"]["max_single_name_risk_pct"]
+
+
+def test_merged_core_lottery_row_uses_lottery_profile():
+    core = [{"ticker": "MIX", "price": 10, "signals": ["CORE_SIGNAL"], "risk": {"score": 30}}]
+    lottery = strategy_screeners._base_row(
+        row={"ticker": "MIX", "price": 10, "signals": ["RVOL", "ROTATION"]},
+        screener_id="lottery_day2_continuation",
+        family="LOTTERY",
+        lane="DAY2_CONTINUATION",
+        score=70,
+    )
+
+    merged = portfolio_manager._merge_strategy_rows(core, [lottery])[0]
+    result = portfolio_manager.evaluate_rows([merged], equity=1000, mode="BALANCED", regime={"status": "green"})[0]
+
+    assert result["strategy_profile"] == "LOTTERY_BALANCED"
+
+
+def test_lottery_profile_does_not_bypass_unknown_regime():
+    row = strategy_screeners._base_row(
+        row={"ticker": "LOTTO", "price": 10, "signals": ["GAP_SURGE", "RVOL", "ROTATION"]},
+        screener_id="lottery_supernova",
+        family="LOTTERY",
+        lane="SUPERNOVA",
+        score=90,
+    )
+
+    result = portfolio_manager.evaluate_rows([row], equity=1000, mode="BALANCED", regime={"status": "unknown"})[0]
+
+    assert result["action"] == "WATCH"
+    assert result["allocation_usd"] == 0
+    assert any("regime unknown" in caution for caution in result["cautions"])
+
+
 def test_portfolio_plan_does_not_skip_strategy_payload(monkeypatch):
     strategy_row = strategy_screeners._base_row(
         row={"ticker": "LOTTO", "price": 4},

@@ -59,6 +59,57 @@ MODE_PROFILES = {
     },
 }
 
+# Lottery is a high-variance sleeve, so it gets its own admissibility and
+# sizing profile instead of inheriting the broad Core Scan thresholds. The
+# profile increases qualified starter participation without bypassing data,
+# regime, liquidity, or portfolio caps.
+LOTTERY_PROFILES = {
+    "RISK_OFF": {
+        "max_position_pct": 0.02,
+        "max_single_name_risk_pct": 0.003,
+        "max_gross_deployment_pct": 0.08,
+        "max_sector_deployment_pct": 0.10,
+        "accumulate_score": 84,
+        "accumulate_rr": 2.4,
+        "starter_score": 76,
+        "starter_rr": 1.9,
+        "watch_score": 55,
+    },
+    "CONSERVATIVE": {
+        "max_position_pct": 0.035,
+        "max_single_name_risk_pct": 0.005,
+        "max_gross_deployment_pct": 0.12,
+        "max_sector_deployment_pct": 0.15,
+        "accumulate_score": 78,
+        "accumulate_rr": 2.0,
+        "starter_score": 58,
+        "starter_rr": 1.3,
+        "watch_score": 40,
+    },
+    "BALANCED": {
+        "max_position_pct": 0.05,
+        "max_single_name_risk_pct": 0.006,
+        "max_gross_deployment_pct": 0.15,
+        "max_sector_deployment_pct": 0.18,
+        "accumulate_score": 72,
+        "accumulate_rr": 1.8,
+        "starter_score": 52,
+        "starter_rr": 1.15,
+        "watch_score": 38,
+    },
+    "AGGRESSIVE": {
+        "max_position_pct": 0.07,
+        "max_single_name_risk_pct": 0.008,
+        "max_gross_deployment_pct": 0.20,
+        "max_sector_deployment_pct": 0.20,
+        "accumulate_score": 66,
+        "accumulate_rr": 1.55,
+        "starter_score": 48,
+        "starter_rr": 1.05,
+        "watch_score": 35,
+    },
+}
+
 
 def _num(v: Any, default: float = 0.0) -> float:
     try:
@@ -74,6 +125,21 @@ def _signals(row: dict[str, Any]) -> list[str]:
     if isinstance(sigs, dict):
         return sorted(str(k) for k, v in sigs.items() if v)
     return sorted(str(s) for s in sigs)
+
+
+def _is_lottery_row(row: dict[str, Any]) -> bool:
+    """Detect Lottery evidence even after Core/strategy rows are merged."""
+    families = {
+        str(row.get("scanner_family") or "").upper(),
+        str((row.get("strategy_scanner") or {}).get("family") or "").upper(),
+    }
+    for scanner in row.get("strategy_screeners") or []:
+        if isinstance(scanner, dict):
+            families.add(str(scanner.get("family") or "").upper())
+    for view in row.get("strategy_views") or []:
+        if isinstance(view, dict):
+            families.add(str(view.get("family") or "").upper())
+    return "LOTTERY" in families
 
 
 def _target(row: dict[str, Any]) -> float:
@@ -259,7 +325,8 @@ def _has_anchor_signal(signals: list[str], row: dict[str, Any]) -> bool:
 
 
 def _regime_adjusted_action(action: str, score: float, rr: float, signals: list[str],
-                            row: dict[str, Any], regime: dict[str, Any] | None) -> tuple[str, str | None]:
+                            row: dict[str, Any], regime: dict[str, Any] | None,
+                            profile: dict[str, Any] | None = None) -> tuple[str, str | None]:
     status = str((regime or {}).get("status") or "green").lower()
     if action not in {"ACCUMULATE", "STARTER"}:
         return action, None
@@ -272,6 +339,8 @@ def _regime_adjusted_action(action: str, score: float, rr: float, signals: list[
     if status == "downtrend":
         if _has_anchor_signal(signals, row):
             return action, "downtrend: anchored thesis allowed"
+        if _is_lottery_row(row) and score >= float((profile or {}).get("starter_score", 58)) + 10 and rr >= 1.8:
+            return "STARTER", "downtrend: Lottery evidence cleared elevated starter bar"
         if score >= 84 and rr >= 2.2:
             return "STARTER", "downtrend: raised long bar met"
         return "WATCH", "downtrend whitelist: unanchored longs stay watch-only"
@@ -279,7 +348,8 @@ def _regime_adjusted_action(action: str, score: float, rr: float, signals: list[
 
 
 def _ratchet_profile(action: str, upside_pct: float, rr: float, signals: list[str]) -> dict[str, Any]:
-    high_vol = "high_short_interest" in signals or "UNUSUAL_FLOW" in signals
+    normalized = {str(signal).upper() for signal in signals}
+    high_vol = bool({"HIGH_SHORT_INTEREST", "UNUSUAL_FLOW", "OPTION_SQUEEZE"} & normalized)
     if upside_pct >= 60 or (high_vol and upside_pct >= 35):
         profile = {
             "name": "RUNNER",
@@ -390,6 +460,21 @@ def _profile_for(mode: str, profile_override: dict[str, Any] | None = None) -> d
     return {**profile, **{k: v for k, v in profile_override.items() if v is not None}}
 
 
+def _profile_for_row(
+    mode: str,
+    row: dict[str, Any],
+    profile_override: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    base = _profile_for(mode, profile_override)
+    if not _is_lottery_row(row):
+        return base, f"CORE_{(mode or 'BALANCED').upper()}"
+    lottery = {**LOTTERY_PROFILES.get((mode or "BALANCED").upper(), LOTTERY_PROFILES["BALANCED"])}
+    # Explicit PM rules remain authoritative over the sleeve defaults.
+    if profile_override:
+        lottery.update({k: v for k, v in profile_override.items() if v is not None})
+    return lottery, f"LOTTERY_{(mode or 'BALANCED').upper()}"
+
+
 def evaluate_rows(
     rows: list[dict[str, Any]],
     equity: float = DEFAULT_EQUITY,
@@ -398,13 +483,13 @@ def evaluate_rows(
     regime: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     mode = (mode or "BALANCED").upper()
-    profile = _profile_for(mode, profile_override)
     out: list[dict[str, Any]] = []
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
         if not ticker:
             continue
         price = _num(row.get("price"))
+        row_profile, strategy_profile = _profile_for_row(mode, row, profile_override)
         target = _target(row)
         stop = _stop(row, price)
         upside = _upside_pct(price, target)
@@ -412,13 +497,13 @@ def evaluate_rows(
         rr = _rr(upside, downside)
         score, breakdown = _pm_score(row, price, target, stop)
         risk_score = _num((row.get("risk") or {}).get("score"))
-        action = _action(score, rr, len(set(_signals(row))), risk_score, profile)
+        action = _action(score, rr, len(set(_signals(row))), risk_score, row_profile)
         reasons, cautions = _reasons(row, action, rr, upside, risk_score)
         signals = _signals(row)
-        action, regime_note = _regime_adjusted_action(action, score, rr, signals, row, regime)
+        action, regime_note = _regime_adjusted_action(action, score, rr, signals, row, regime, row_profile)
         if regime_note:
             cautions.append(regime_note)
-        sizing = _sizing(action, score, price, stop, equity, profile, row)
+        sizing = _sizing(action, score, price, stop, equity, row_profile, row)
         ratchet = _ratchet_plan(action, price, target, stop, upside, rr, signals)
         strategy_case = row.get("strategy_case") or {}
         out.append({
@@ -441,6 +526,7 @@ def evaluate_rows(
             "option_view": _option_view(row, rr),
             "preferred_route": (row.get("options") or {}).get("preferred_route"),
             "scanner_family": row.get("scanner_family") or (row.get("strategy_scanner") or {}).get("family"),
+            "strategy_profile": strategy_profile,
             "source_scan": row.get("source_scan"),
             "signals": signals,
             "ratchet_plan": ratchet,
@@ -460,8 +546,12 @@ def evaluate_rows(
             "cautions": cautions,
         })
     out.sort(key=lambda r: (r["action"] == "ACCUMULATE", r["action"] == "STARTER", r["pm_score"]), reverse=True)
-    remaining_deploy = equity * profile["max_gross_deployment_pct"]
-    max_sector_deploy = equity * float(profile.get("max_sector_deployment_pct") or 0.25)
+    # The outer cap remains the broad PM account cap. Per-sleeve caps are
+    # enforced during sizing, while this pass prevents the merged docket from
+    # exceeding the account-wide deployment limit.
+    account_profile = _profile_for(mode, profile_override)
+    remaining_deploy = equity * account_profile["max_gross_deployment_pct"]
+    max_sector_deploy = equity * float(account_profile.get("max_sector_deployment_pct") or 0.25)
     sector_used: dict[str, float] = {}
     for row in out:
         if row["action"] not in {"ACCUMULATE", "STARTER"}:
@@ -788,7 +878,6 @@ async def latest_portfolio_plan(
     if scan is None:
         scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
     core_rows = (scan or {}).get("results") or []
-    strategy_payload: dict[str, Any] | None = None
     strategy_rows: list[dict[str, Any]] = []
     try:
         if strategy_payload is None:
