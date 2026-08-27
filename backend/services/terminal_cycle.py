@@ -75,7 +75,6 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     scan["pharma_result"] = pharma_result
     scan["pharma_shock_result"] = pharma_shock_result
     ledger_payload = await timed("candidate_ledger", candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True))
-    options_payload = await timed("options_desk_candidates", options_desk.build_candidates(limit=100, persist=True))
     pm_payload = await timed(
         "portfolio_manager",
         portfolio_manager.latest_portfolio_plan(
@@ -88,6 +87,17 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
                 ],
             },
             lottery_result=lottery_result,
+        ),
+    )
+    # The Options Desk consumes this cycle's authoritative PM recommendations.
+    # It selects and validates contracts, but must not recompute PM routing.
+    options_payload = await timed(
+        "options_desk_candidates",
+        options_desk.build_candidates(
+            limit=100,
+            persist=True,
+            scan=scan,
+            pm_recommendations=pm_payload.get("recommendations") or [],
         ),
     )
     scan["options_payload"] = options_payload
@@ -111,7 +121,10 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
 
     options_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_OPTIONS_EXECUTION is off"}
     if options_desk.options_execution_enabled():
-        options_execution = await timed("options_execution", options_desk.auto_execute_latest())
+        options_execution = await timed(
+            "options_execution",
+            options_desk.auto_execute_latest(candidate_set=options_payload),
+        )
 
     scan["execution_summary"] = {
         "equity_status": "SKIPPED" if equity_execution.get("skipped") else "ATTEMPTED",

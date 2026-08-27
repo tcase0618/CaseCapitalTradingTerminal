@@ -1155,14 +1155,40 @@ def _contract_risk(instrument: dict[str, Any]) -> float:
     return max_loss
 
 
-async def build_candidates(limit: int = 25, persist: bool = True) -> dict[str, Any]:
+async def build_candidates(
+    limit: int = 25,
+    persist: bool = True,
+    *,
+    scan: dict[str, Any] | None = None,
+    pm_recommendations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     from . import portfolio_manager, strategy_screeners
 
     db = get_db()
-    scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
-    strategy_payload = await strategy_screeners.pm_rows(scan=scan, persist=True)
-    rows = strategy_payload.get("rows") or []
-    pm_rows = portfolio_manager.evaluate_rows(rows, equity=portfolio_manager.DEFAULT_EQUITY, mode="BALANCED")
+    authoritative_pm = pm_recommendations is not None
+    if scan is None:
+        scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+    if authoritative_pm:
+        # The coordinated terminal cycle already made the PM decision. Keep
+        # the Options Desk from silently making a second decision with a
+        # different universe, account basis, or strategy merge.
+        strategy_payload = (scan or {}).get("strategy_payload") or {}
+        rows = strategy_payload.get("candidates") or strategy_payload.get("rows") or []
+        pm_rows = pm_recommendations or []
+        row_by_ticker = {
+            str(row.get("ticker") or "").upper(): row
+            for row in (list((scan or {}).get("results") or []) + list(rows))
+            if row.get("ticker")
+        }
+        rows = [
+            {**(row_by_ticker.get(str(pm.get("ticker") or "").upper()) or {}), **pm}
+            for pm in pm_rows
+            if pm.get("ticker")
+        ]
+    else:
+        strategy_payload = await strategy_screeners.pm_rows(scan=scan, persist=True)
+        rows = strategy_payload.get("rows") or []
+        pm_rows = portfolio_manager.evaluate_rows(rows, equity=portfolio_manager.DEFAULT_EQUITY, mode="BALANCED")
     by_ticker = {r["ticker"]: r for r in pm_rows}
     rows = sorted(
         rows,
@@ -1718,7 +1744,11 @@ async def _release_auto_execute_lock() -> None:
         pass
 
 
-async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
+async def auto_execute_latest(
+    limit: int | None = None,
+    *,
+    candidate_set: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """PM-controlled automated options execution.
 
     The Options Desk does not re-decide the trade. It submits PM-ready tickets
@@ -1737,14 +1767,18 @@ async def auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
             "submitted": [],
             "skipped": [],
             "summary": {},
-        }
+    }
     try:
-        return await _auto_execute_latest_locked(limit=limit)
+        return await _auto_execute_latest_locked(limit=limit, candidate_set=candidate_set)
     finally:
         await _release_auto_execute_lock()
 
 
-async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any]:
+async def _auto_execute_latest_locked(
+    limit: int | None = None,
+    *,
+    candidate_set: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from . import execution_gate, safety
 
     enabled, safety_status = await safety.trading_enabled(scope="options_auto")
@@ -1780,7 +1814,9 @@ async def _auto_execute_latest_locked(limit: int | None = None) -> dict[str, Any
         }
     db = get_db()
     rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
-    if rows and not await _cached_candidates_stale(rows):
+    if candidate_set is not None:
+        pass
+    elif rows and not await _cached_candidates_stale(rows):
         rows = [_normalize_candidate_execution_state(x) for x in rows]
         candidate_set = {
             "generated_at": _now(),
