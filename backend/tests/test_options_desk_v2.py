@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import pytest
 from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,6 +15,14 @@ from services import portfolio_manager  # noqa: E402
 from services import tail_hunter  # noqa: E402
 from services import options_contract_learning  # noqa: E402
 from services import options_policy  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def standard_options_policy_by_default(monkeypatch):
+    """Keep unit tests deterministic; individual tests may opt into paper_scout."""
+    monkeypatch.setenv("OPTIONS_FILTER_POLICY", "standard")
+    monkeypatch.setenv("OPTIONS_APCA_API_BASE_URL", "https://api.alpaca.markets")
+    monkeypatch.setenv("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false")
 
 
 def test_shared_policy_paper_scout_profile_is_explicit(monkeypatch):
