@@ -768,7 +768,19 @@ async def _cached_candidates_stale(rows: list[dict[str, Any]]) -> bool:
 
 
 def _options_data_policy(alpaca_refreshes_used: int | None = None) -> dict[str, Any]:
+    policy = get_policy()
     return {
+        "filter_policy": policy.mode,
+        "min_open_interest": policy.min_open_interest,
+        "min_volume_when_low_oi": policy.min_volume_when_low_oi,
+        "min_volume_if_oi_unknown": policy.min_volume_if_oi_unknown,
+        "max_spread_abs": policy.max_spread_abs,
+        "max_spread_pct": policy.max_spread_pct,
+        "max_indicative_spread_pct": policy.max_indicative_spread_pct,
+        "min_option_premium": policy.min_premium,
+        "min_abs_delta": policy.min_abs_delta,
+        "max_abs_delta": policy.max_abs_delta,
+        "target_delta": policy.target_delta,
         "alpaca_refresh_limit": OPTIONS_ALPACA_REFRESH_LIMIT,
         "alpaca_refreshes_used": alpaca_refreshes_used,
         "refresh_order": "PM score descending",
