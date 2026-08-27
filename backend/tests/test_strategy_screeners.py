@@ -163,6 +163,33 @@ def test_lottery_profile_does_not_bypass_unknown_regime():
     assert any("regime unknown" in caution for caution in result["cautions"])
 
 
+def test_qualified_lottery_rows_get_budget_priority_over_generic_rows():
+    lottery = strategy_screeners._base_row(
+        row={"ticker": "LOTTO", "price": 10, "signals": ["GAP_SURGE", "RVOL", "ROTATION"]},
+        screener_id="lottery_supernova",
+        family="LOTTERY",
+        lane="SUPERNOVA",
+        score=72,
+    )
+    generic = {
+        "ticker": "GENERIC",
+        "price": 10,
+        "targets": {"target_blended": 14},
+        "stop_loss": 8,
+        "signals": ["A", "B", "C"],
+        "signal_score": 8,
+        "trade_score": 35,
+        "risk": {"score": 20},
+    }
+
+    results = portfolio_manager.evaluate_rows(
+        [generic, lottery], equity=100, mode="BALANCED", regime={"status": "green"}
+    )
+
+    assert results[0]["ticker"] == "LOTTO"
+    assert results[0]["allocation_usd"] > 0
+
+
 def test_portfolio_plan_does_not_skip_strategy_payload(monkeypatch):
     strategy_row = strategy_screeners._base_row(
         row={"ticker": "LOTTO", "price": 4},

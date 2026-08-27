@@ -545,7 +545,16 @@ def evaluate_rows(
             "reasons": reasons,
             "cautions": cautions,
         })
-    out.sort(key=lambda r: (r["action"] == "ACCUMULATE", r["action"] == "STARTER", r["pm_score"]), reverse=True)
+    # Lottery is the designated high-alpha sleeve. Once a Lottery row has
+    # already cleared its own PM gates, give it priority within the account
+    # deployment budget; this prevents generic higher scores from consuming
+    # all cash before the specialist sleeve is considered.
+    out.sort(key=lambda r: (
+        r["action"] == "ACCUMULATE",
+        r["action"] == "STARTER",
+        _is_lottery_row(r),
+        r["pm_score"],
+    ), reverse=True)
     # The outer cap remains the broad PM account cap. Per-sleeve caps are
     # enforced during sizing, while this pass prevents the merged docket from
     # exceeding the account-wide deployment limit.
