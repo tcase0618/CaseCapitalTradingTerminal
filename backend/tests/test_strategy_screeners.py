@@ -4,6 +4,12 @@ from services import options_desk, pharma, pm_ratchet, portfolio_manager, pricer
 from services import lottery
 
 
+def test_options_finviz_screeners_require_optionable_filter():
+    assert len(strategy_screeners.OPTIONS_FINVIZ_STRATEGY_SCREENS) == 3
+    for spec in strategy_screeners.OPTIONS_FINVIZ_STRATEGY_SCREENS.values():
+        assert "sh_opt_option" in spec["url"]
+
+
 def test_sec_bearish_filing_is_read_only_and_not_pm_routable():
     row = {
         "ticker": "ABC",

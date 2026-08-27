@@ -16,21 +16,21 @@ from . import strategy_ideology
 SCREENER_VERSION = "strategy-screeners-v1.1-options-badges"
 OPTIONS_FINVIZ_STRATEGY_SCREENS = {
     "options_momentum_underlying_finviz": {
-        "url": "https://finviz.com/screener.ashx?v=111&f=sh_price_o5,sh_avgvol_o500,sh_relvol_o1.5,ta_perf_1wup&o=-relativevolume",
+        "url": "https://finviz.com/screener.ashx?v=111&f=sh_opt_option,sh_price_o5,sh_avgvol_o500,sh_relvol_o1.5,ta_perf_1wup&o=-relativevolume",
         "lane": "TACTICAL_MOMENTUM_CALL",
         "screener_id": "options_tactical_momentum_call",
         "signals": ["OPTION_MOMENTUM", "RVOL_CONFIRM"],
         "base_score": 58,
     },
     "options_breakout_underlying_finviz": {
-        "url": "https://finviz.com/screener.ashx?v=111&f=sh_price_o5,sh_avgvol_o500,ta_highlow20d_nh&o=-volume",
+        "url": "https://finviz.com/screener.ashx?v=111&f=sh_opt_option,sh_price_o5,sh_avgvol_o500,ta_highlow20d_nh&o=-volume",
         "lane": "BREAKOUT_CALL",
         "screener_id": "options_breakout_call",
         "signals": ["OPTION_BREAKOUT", "NEW_HIGH_CONFIRM"],
         "base_score": 57,
     },
     "options_liquid_largecap_leaps_finviz": {
-        "url": "https://finviz.com/screener.ashx?v=111&f=cap_midover,sh_price_o10,sh_avgvol_o500,ta_sma200_pa&o=-marketcap",
+        "url": "https://finviz.com/screener.ashx?v=111&f=cap_midover,sh_opt_option,sh_price_o10,sh_avgvol_o500,ta_sma200_pa&o=-marketcap",
         "lane": "LEAPS_TREND",
         "screener_id": "options_leaps_trend",
         "signals": ["LEAPS_CANDIDATE", "LIQUID_UNDERLYING"],
