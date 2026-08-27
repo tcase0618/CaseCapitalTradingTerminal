@@ -859,7 +859,10 @@ async def _risk_pct(score: float, instrument: str) -> float:
 
 
 # ─────── Execution gates ───────
-async def _merge_pm_routable_strategy_rows(scan_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _merge_pm_routable_strategy_rows(
+    scan_results: list[dict[str, Any]],
+    strategy_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Add specialist PM-routable rows to the execution review.
 
     The PM remains the allocation authority. This only ensures the Trade Floor
@@ -872,12 +875,19 @@ async def _merge_pm_routable_strategy_rows(scan_results: list[dict[str, Any]]) -
     try:
         from . import portfolio_manager, strategy_screeners
 
-        scan_doc = {
-            "results": scan_results,
-            "finished_at": scan_results[0].get("scan_finished_at") or scan_results[0].get("finished_at"),
-        }
-        strategy_payload = await strategy_screeners.pm_rows(scan=scan_doc, persist=True)
-        strategy_rows = strategy_payload.get("rows") or []
+        strategy_payload: dict[str, Any] = {}
+        if strategy_rows is None:
+            scan_doc = {
+                "results": scan_results,
+                "finished_at": scan_results[0].get("scan_finished_at") or scan_results[0].get("finished_at"),
+            }
+            strategy_payload = await strategy_screeners.pm_rows(scan=scan_doc, persist=True)
+            strategy_rows = strategy_payload.get("rows") or []
+        else:
+            # Full terminal cycles pass the immutable specialist rows that
+            # already fed PM. Do not rebuild a different strategy universe at
+            # the execution boundary.
+            strategy_rows = list(strategy_rows)
         if not strategy_rows:
             return scan_results
         merged = portfolio_manager._merge_strategy_rows(scan_results, strategy_rows)
@@ -955,6 +965,7 @@ async def evaluate_and_execute(
     only_tickers: set[str] | None = None,
     *,
     pm_rows: list[dict[str, Any]] | None = None,
+    strategy_rows: list[dict[str, Any]] | None = None,
     pm_scan_finished_at: str | None = None,
 ) -> dict[str, Any]:
     """Walk scan results, apply gates, execute limit DAY orders for any
@@ -1001,7 +1012,7 @@ async def evaluate_and_execute(
             "execution_gate": gate_root,
         }
 
-    execution_rows = await _merge_pm_routable_strategy_rows(scan_results)
+    execution_rows = await _merge_pm_routable_strategy_rows(scan_results, strategy_rows)
 
     account = await get_account()
     if not account:
@@ -1315,6 +1326,8 @@ async def evaluate_and_execute(
                           "order_id": order.get("id"),
                           "queued": order_queued})
 
+    from collections import Counter
+    rejection_reason_counts = dict(Counter(str(item.get("reason") or "unknown") for item in rejected))
     compression = (len(executed) / max(1, len(execution_rows)))
     finished = _now()
     await db.tf_scan_log.insert_one(stamped({
@@ -1324,6 +1337,7 @@ async def evaluate_and_execute(
         "executed": len(executed),
         "rejected": len(rejected),
         "rejection_details": rejected,
+        "rejection_reason_counts": rejection_reason_counts,
         "execution_details": executed,
         "pm_mode": pm_mode,
         "pm_ruleset_id": ruleset.get("ruleset_id"),
@@ -1335,12 +1349,14 @@ async def evaluate_and_execute(
     await log_activity(
         f"Trade Floor: {len(executed)} executed / {len(rejected)} rejected "
         f"(compression {compression*100:.0f}%)", "info",
+        {"rejection_reason_counts": rejection_reason_counts},
     )
     return {"executed": executed, "rejected": rejected,
              "compression_ratio": round(compression, 3),
              "total_scanned": len(execution_rows),
              "core_rows": len(scan_results),
              "strategy_rows_included": max(0, len(execution_rows) - len(scan_results)),
+             "rejection_reason_counts": rejection_reason_counts,
              "started_at": started.isoformat(), "alpaca_ready": True}
 
 

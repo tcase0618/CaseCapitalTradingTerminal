@@ -577,7 +577,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
     price_rows = int(scan_freshness.get("price_rows") or 0)
     severity = "critical" if qc_decision == "BLOCK" or alignment_notes else "watch" if blockers or stale_price_rows else "info"
     exec_summary = scan.get("execution_summary") or {}
-    equity_reasons = _reason_counts(exec_summary.get("equity_rejected_sample") or [])
+    equity_reasons = exec_summary.get("equity_rejection_reason_counts") or _reason_counts(exec_summary.get("equity_rejected_sample") or [])
     equity_reason_line = " | ".join(f"{_esc(k)}: <b>{v}</b>" for k, v in list(equity_reasons.items())[:4])
     option_skip_reasons = _reason_counts(exec_summary.get("options_skipped_sample") or [])
     option_skip_line = " | ".join(f"{_esc(k)}: <b>{v}</b>" for k, v in list(option_skip_reasons.items())[:4])
@@ -653,7 +653,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         "",
         "<b>EXECUTION OUTCOME</b>",
         f"Equity submitted: <b>{exec_summary.get('equity_executed', 0)}</b> | Rejected: <b>{exec_summary.get('equity_rejected', 0)}</b>",
-        *([f"Equity rejection sample: {equity_reason_line}"] if equity_reason_line else []),
+        *([f"Equity rejection reasons: {equity_reason_line}"] if equity_reason_line else []),
         f"Options submitted: <b>{exec_summary.get('options_submitted', 0)}</b> | Ready: <b>{exec_summary.get('options_ready', opt_summary.get('ready', 0))}</b> | Skipped: <b>{exec_summary.get('options_skipped', 0)}</b>",
         *([f"Options skip sample: {option_skip_line}"] if option_skip_line else []),
         "",

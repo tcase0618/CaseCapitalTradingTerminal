@@ -22,6 +22,16 @@ def _row_count(value: Any) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
+def _reason_counts(rows: Any) -> dict[str, int]:
+    if not isinstance(rows, list):
+        return {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        reason = str((row or {}).get("reason") or "unknown") if isinstance(row, dict) else "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
 async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
     started = _now()
     stage_times: dict[str, float] = {}
@@ -57,6 +67,10 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     # Keep the exact specialist output attached to this cycle. Reporting and
     # execution must consume this result rather than recomputing it later.
     scan["strategy_payload"] = strategy_payload
+    strategy_pm_rows = [
+        row for row in strategy_payload.get("candidates") or []
+        if row.get("pm_routable") and not row.get("read_only")
+    ]
     scan["lottery_result"] = lottery_result
     scan["pharma_result"] = pharma_result
     scan["pharma_shock_result"] = pharma_shock_result
@@ -90,6 +104,7 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
                 trade_floor.evaluate_and_execute(
                     scan.get("results") or [],
                     pm_rows=pm_payload.get("recommendations") or [],
+                    strategy_rows=strategy_pm_rows,
                     pm_scan_finished_at=pm_payload.get("scan_finished_at"),
                 ),
             )
@@ -98,21 +113,24 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
     if options_desk.options_execution_enabled():
         options_execution = await timed("options_execution", options_desk.auto_execute_latest())
 
+    scan["execution_summary"] = {
+        "equity_status": "SKIPPED" if equity_execution.get("skipped") else "ATTEMPTED",
+        "equity_skip_reason": equity_execution.get("reason") if equity_execution.get("skipped") else None,
+        "equity_executed": len(equity_execution.get("executed") or []),
+        "equity_rejected": len(equity_execution.get("rejected") or []),
+        "equity_rejection_reason_counts": equity_execution.get("rejection_reason_counts") or _reason_counts(equity_execution.get("rejected")),
+        "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],
+        "equity_submitted_rows": equity_execution.get("executed") or [],
+        "options_ready": options_execution.get("ready"),
+        "options_submitted": _row_count(options_execution.get("submitted")),
+        "options_skipped": _row_count(options_execution.get("skipped")),
+        "options_submitted_rows": options_execution.get("submitted") or [],
+        "options_skipped_sample": (options_execution.get("skipped") if isinstance(options_execution.get("skipped"), list) else [])[:8],
+    }
     telegram_result: dict[str, Any] = {"skipped": True, "reason": "telegram_env_missing"}
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
         from . import telegram_events
         scan["telegram_report_variant"] = "full_terminal"
-        scan["execution_summary"] = {
-            "equity_executed": len(equity_execution.get("executed") or []),
-            "equity_rejected": len(equity_execution.get("rejected") or []),
-            "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],
-            "equity_submitted_rows": equity_execution.get("executed") or [],
-            "options_ready": options_execution.get("ready"),
-            "options_submitted": _row_count(options_execution.get("submitted")),
-            "options_skipped": _row_count(options_execution.get("skipped")),
-            "options_submitted_rows": options_execution.get("submitted") or [],
-            "options_skipped_sample": (options_execution.get("skipped") if isinstance(options_execution.get("skipped"), list) else [])[:8],
-        }
         telegram_result = await timed("telegram_dispatch", telegram_events.dispatch_scan_report(scan))
 
     finished = _now()
