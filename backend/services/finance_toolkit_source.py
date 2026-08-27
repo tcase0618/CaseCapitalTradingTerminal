@@ -212,7 +212,9 @@ async def _fetch_section(client: httpx.AsyncClient, symbol: str, section: str, a
     }
     path, params = paths[section]
     params["apikey"] = api_key
-    response = await client.get(f"{base_url()}/api/v3/{path}/{symbol}" if section in {"profile"} else f"{base_url()}/api/v3/{path}", params=params)
+    # FMP's current account surface is the stable API. Keep the provider path
+    # isolated here so a provider migration cannot touch any trading code.
+    response = await client.get(f"{base_url()}/stable/{path}", params=params)
     if response.status_code != 200:
         return None, {"ok": False, "status_code": response.status_code, "detail": _redact((response.text or "")[:180])}
     try:
