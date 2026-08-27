@@ -13,6 +13,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Request
@@ -1549,6 +1550,102 @@ async def fy_status():
 async def scan_latest():
     s = await scanner.latest_scan()
     return s or {"results": [], "pre_filter_passed": 0, "raw_counts": {}}
+
+
+@api.get("/scan/funnel/today")
+async def scan_funnel_today():
+    """Return a unique, day-scoped funnel across Core and specialist routing."""
+    db = get_db()
+    et = ZoneInfo("America/New_York")
+    today = datetime.now(et).date()
+    start = datetime.combine(today, datetime.min.time(), tzinfo=et).astimezone(timezone.utc).isoformat()
+    end = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=et).astimezone(timezone.utc).isoformat()
+
+    scans = await db.scan_results.find(
+        {"finished_at": {"$gte": start, "$lt": end}},
+        {"_id": 0, "finished_at": 1, "started_at": 1, "triggered_by": 1, "duration_sec": 1, "results": 1, "pre_filter_passed": 1},
+    ).sort("finished_at", 1).to_list(100)
+    strategy_history = await db.strategy_screeners_history.find(
+        {"generated_at": {"$gte": start, "$lt": end}},
+        {"_id": 0, "generated_at": 1, "scan_finished_at": 1, "candidates": 1, "summary": 1},
+    ).sort("generated_at", 1).to_list(100)
+    pm_history = await db.portfolio_manager_history.find(
+        {"generated_at": {"$gte": start, "$lt": end}},
+        {"_id": 0, "generated_at": 1, "scan_finished_at": 1, "recommendations": 1},
+    ).sort("generated_at", 1).to_list(100)
+
+    def ticker(row: dict[str, Any]) -> str:
+        return str(row.get("ticker") or row.get("symbol") or row.get("underlying") or "").replace("$", "").upper()
+
+    core_tickers = {ticker(row) for scan in scans for row in (scan.get("results") or []) if ticker(row)}
+    strategy_by_ticker: dict[str, dict[str, Any]] = {}
+    family_counts: dict[str, int] = {}
+    for history in strategy_history:
+        for row in history.get("candidates") or []:
+            t = ticker(row)
+            if not t:
+                continue
+            scanner = row.get("strategy_scanner") or {}
+            family = str(scanner.get("family") or row.get("scanner_family") or "UNKNOWN").upper()
+            family_counts[family] = family_counts.get(family, 0) + 1
+            key = f"{t}:{scanner.get('screener_id') or row.get('source_scan') or family}"
+            strategy_by_ticker[key] = {"ticker": t, "family": family}
+
+    pm_latest: dict[str, dict[str, Any]] = {}
+    for history in pm_history:
+        for row in history.get("recommendations") or []:
+            t = ticker(row)
+            if t:
+                pm_latest[t] = row
+    pm_counts = {"approved": 0, "watch": 0, "rejected": 0}
+    for row in pm_latest.values():
+        action = str(row.get("action") or "").upper()
+        if action in {"ACCUMULATE", "STARTER"}:
+            pm_counts["approved"] += 1
+        elif action == "WATCH":
+            pm_counts["watch"] += 1
+        elif action == "REJECT":
+            pm_counts["rejected"] += 1
+
+    execution_rows = await db.tf_trades.find(
+        {"submitted_at": {"$gte": start, "$lt": end}},
+        {"_id": 0, "ticker": 1, "instrument": 1, "status": 1, "order_id": 1},
+    ).to_list(500)
+    option_order_rows = await db.options_desk_orders.find(
+        {"submitted_at": {"$gte": start, "$lt": end}},
+        {"_id": 0, "ticker": 1, "symbol": 1, "status": 1, "order": 1},
+    ).to_list(500)
+    executed = len([row for row in execution_rows if row.get("order_id") or str(row.get("status") or "").upper() in {"OPEN", "SUBMITTED", "QUEUED"}])
+    executed += len([row for row in option_order_rows if row.get("order") or str(row.get("status") or "").lower() in {"submitted", "auto_submitted", "filled"}])
+    approved = pm_counts["approved"]
+    gated = approved if approved and not execution_rows and not option_order_rows else len(execution_rows) + len(option_order_rows)
+    scanned = len(core_tickers)
+    strategy_tickers = {row["ticker"] for row in strategy_by_ticker.values()}
+    routed = core_tickers | strategy_tickers
+    rejected = pm_counts["rejected"]
+    watch = pm_counts["watch"]
+    return {
+        "ok": True,
+        "date_et": today.isoformat(),
+        "scans": [{k: row.get(k) for k in ("finished_at", "started_at", "triggered_by", "duration_sec", "pre_filter_passed")} for row in scans],
+        "counts": {
+            "scanned": scanned,
+            "core_scanned": scanned,
+            "strategy_candidates": len(strategy_by_ticker),
+            "strategy_tickers": len(strategy_tickers),
+            "routed": len(routed),
+            "pm_approved": approved,
+            "pm_watch": watch,
+            "pm_rejected": rejected,
+            "gated": gated,
+            "executed": executed,
+            "unclassified": max(0, len(routed) - approved - watch - rejected),
+        },
+        "families": family_counts,
+        "latest_scan_at": scans[-1].get("finished_at") if scans else None,
+        "latest_pm_at": pm_history[-1].get("generated_at") if pm_history else None,
+        "history_rows": {"core": len(scans), "strategy": len(strategy_history), "pm": len(pm_history)},
+    }
 
 
 @api.get("/scan/candidate_ledger")

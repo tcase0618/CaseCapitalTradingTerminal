@@ -197,6 +197,7 @@ function normalizeEvent(row) {
 export default function CommandCenterPage() {
   const [status, setStatus] = useState(null);
   const [scan, setScan] = useState(null);
+  const [scanFunnel, setScanFunnel] = useState(null);
   const [admin, setAdmin] = useState(null);
   const [health, setHealth] = useState(null);
   const [executionGate, setExecutionGate] = useState(null);
@@ -218,6 +219,7 @@ export default function CommandCenterPage() {
     const calls = [
       axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => {}),
       axios.get(`${API}/scan/latest`).then(r => setScan(r.data)).catch(() => {}),
+      axios.get(`${API}/scan/funnel/today`).then(r => setScanFunnel(r.data)).catch(() => {}),
       axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {}),
       axios.get(`${API}/system/health`).then(r => setHealth(r.data)).catch(() => {}),
       axios.get(`${API}/execution_gate/overview`).then(r => setExecutionGate(r.data)).catch(() => setExecutionGate({ ok: false, decision: "UNKNOWN" })),
@@ -329,7 +331,7 @@ export default function CommandCenterPage() {
 
       <div className="command-control-grid command-center-grid" style={commandGrid}>
         <OpsPanel title="SCAN FUNNEL" sub="TODAY" action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={tinyButton(accent2)}>{backendRefreshing ? "SYNC" : "REFRESH"}</button>}>
-          <ScanFunnel scan={scan} pmSummary={pmSummary} gateDecision={gateDecision} livePositions={livePositions} />
+          <ScanFunnel scan={scan} scanFunnel={scanFunnel} pmSummary={pmSummary} gateDecision={gateDecision} livePositions={livePositions} />
         </OpsPanel>
 
         <OpsPanel title="LIVE POSITIONS RISK HEAT" action={<Link to="/trade-floor" style={tinyLink}>RISK VIEW</Link>}>
@@ -410,17 +412,19 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
   );
 }
 
-function ScanFunnel({ scan, pmSummary, gateDecision, livePositions }) {
-  const scanned = Number(scan?.pre_filter_passed || scan?.results_count || scan?.results?.length || 0);
+function ScanFunnel({ scan, scanFunnel, pmSummary, gateDecision, livePositions }) {
+  const counts = scanFunnel?.counts || {};
+  const scanned = Number(counts.scanned ?? scan?.pre_filter_passed ?? scan?.results_count ?? scan?.results?.length ?? 0);
   const accumulate = Number(pmSummary?.accumulate || 0);
   const starter = Number(pmSummary?.starter || 0);
-  const watch = Number(pmSummary?.watch || 0);
-  const rejected = Number(pmSummary?.reject || pmSummary?.rejected || 0);
-  const approved = Number(pmSummary?.approved ?? pmSummary?.active_count ?? (accumulate + starter));
+  const watch = Number(counts.pm_watch ?? pmSummary?.watch ?? 0);
+  const rejected = Number(counts.pm_rejected ?? pmSummary?.reject ?? pmSummary?.rejected ?? 0);
+  const approved = Number(counts.pm_approved ?? pmSummary?.approved ?? pmSummary?.active_count ?? (accumulate + starter));
   const reviewed = approved + watch + rejected;
-  const unclassified = Math.max(0, scanned - reviewed);
-  const gated = ["PASS", "ALLOW"].includes(gateDecision) ? approved : 0;
-  const executed = livePositions?.length || 0;
+  const routed = Number(counts.routed ?? reviewed);
+  const unclassified = Number(counts.unclassified ?? Math.max(0, routed - reviewed));
+  const gated = Number(counts.gated ?? (["PASS", "ALLOW"].includes(gateDecision) ? approved : 0));
+  const executed = Number(counts.executed ?? livePositions?.length ?? 0);
   const bars = [
     ["Approved", approved, "#4ade80"],
     ["Watch", watch, "#fbbf24"],
@@ -442,11 +446,18 @@ function ScanFunnel({ scan, pmSummary, gateDecision, livePositions }) {
       <div style={{ display: "grid", gap: 5 }}>
         {bars.map(([label, raw, color]) => {
           const value = Math.round(Number(raw || 0));
-          const pct = scanned ? value / scanned * 100 : 0;
+          const pct = routed ? value / routed * 100 : 0;
           return <BarRow key={label} label={label} value={value} pct={pct} color={color} />;
         })}
       </div>
-      <div style={totalRejected}>TOTAL PM REJECTED <span>{rejected} ({scanned ? (rejected / scanned * 100).toFixed(1) : "0.0"}%)</span></div>
+      <div style={{ marginTop: 9, color: muted, fontSize: 8, letterSpacing: "0.08em", display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <span>FULL TERMINAL ROUTED</span>
+        <span style={{ color: accent2 }}>{routed} UNIQUE · {scanFunnel?.history_rows?.core || 0} CORE CYCLES</span>
+      </div>
+      <div style={{ marginTop: 6, color: muted, fontSize: 8, lineHeight: 1.7 }}>
+        {Object.entries(scanFunnel?.families || {}).map(([family, value]) => `${family} ${value}`).join("  ·  ") || "STRATEGY HISTORY SYNCING"}
+      </div>
+      <div style={totalRejected}>TOTAL PM REJECTED <span>{rejected} ({routed ? (rejected / routed * 100).toFixed(1) : "0.0"}%)</span></div>
     </div>
   );
 }

@@ -650,7 +650,14 @@ async def run_all(
         "candidates": rows,
     })
     if persist:
-        await db.strategy_screeners.update_one({"_id": "latest"}, {"$set": {k: v for k, v in payload.items() if k != "_id"}}, upsert=True)
+        stored_payload = {k: v for k, v in payload.items() if k != "_id"}
+        await db.strategy_screeners.update_one({"_id": "latest"}, {"$set": stored_payload}, upsert=True)
+        history_key = f"strategy:{scan.get('finished_at') or payload['generated_at']}"
+        await db.strategy_screeners_history.update_one(
+            {"_id": history_key},
+            {"$set": {**stored_payload, "history_key": history_key}},
+            upsert=True,
+        )
     payload.pop("_id", None)
     return payload
 

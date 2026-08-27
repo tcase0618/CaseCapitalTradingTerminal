@@ -952,6 +952,21 @@ async def latest_portfolio_plan(
         profile_override = {}
     profile = _profile_for(active_mode, profile_override)
     recommendations = evaluate_rows(rows, equity=equity_basis, mode=active_mode, profile_override=profile_override, regime=regime)
+    if scan and scan.get("finished_at"):
+        try:
+            await db.portfolio_manager_history.update_one(
+                {"_id": f"pm:{scan['finished_at']}"},
+                {"$set": {
+                    "scan_finished_at": scan.get("finished_at"),
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "summary": _summary(recommendations, equity_basis, active_mode, equity_source, regime),
+                    "recommendations": recommendations,
+                }},
+                upsert=True,
+            )
+        except Exception:
+            # Historical funnel telemetry must never block PM recommendations.
+            pass
     try:
         from . import trade_floor
 
