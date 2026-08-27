@@ -392,6 +392,9 @@ def test_pm_merge_keeps_all_strategy_views_for_one_ticker():
 def test_trade_floor_execution_input_includes_pm_routable_strategy_rows(monkeypatch):
     core = [{
         "ticker": "CORE",
+        # Core provenance must not be mistaken for an already-merged
+        # specialist universe at the Trade Floor boundary.
+        "source_scan": "core_scan",
         "price": 100,
         "signal_score": 4,
         "trade_score": 20,

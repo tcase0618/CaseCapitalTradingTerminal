@@ -870,7 +870,13 @@ async def _merge_pm_routable_strategy_rows(
     """
     if not scan_results:
         return scan_results
-    if any((row.get("strategy_scanner") or row.get("source_scan")) for row in scan_results):
+    # Core scanner rows may carry ``source_scan`` for provenance.  That does
+    # not mean specialist rows are already present.  The previous guard used
+    # source_scan as a combined-universe marker, so the dedicated Lottery
+    # rows were silently dropped before PM-approved execution was evaluated.
+    # Only an explicit strategy_scanner marker means the input is already
+    # merged.
+    if any(row.get("strategy_scanner") for row in scan_results):
         return scan_results
     try:
         from . import portfolio_manager, strategy_screeners

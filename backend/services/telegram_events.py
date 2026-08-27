@@ -27,6 +27,12 @@ PHARMA_SHOCK_BATCH_MAX = int(os.environ.get("TELEGRAM_PHARMA_SHOCK_BATCH_MAX", "
 TELEGRAM_TEXT_LIMIT = 3900
 
 
+def _scheduled_standalone_alert_suppressed(triggered_by: Any) -> bool:
+    """Keep scheduled scan output on the consolidated terminal report only."""
+    trigger = str(triggered_by or "").strip().lower()
+    return trigger.startswith(("scheduler", "full_terminal", "launch_control_full_terminal"))
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -791,6 +797,12 @@ async def dispatch_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
 
 
 async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
+    if _scheduled_standalone_alert_suppressed(triggered_by):
+        await log_activity("Standalone scheduled pharma alert suppressed; included in terminal scan report", "info", {
+            "triggered_by": triggered_by,
+            "count": len(rows or []),
+        })
+        return {"ok": True, "sent": False, "suppressed": True, "count": 0, "reason": "consolidated_terminal_report"}
     hot = [r for r in rows if _num(r.get("binary_event_score")) >= 70]
     if not hot:
         return {"ok": True, "sent": False, "count": 0, "reason": "no_hot_pharma"}
@@ -864,6 +876,12 @@ async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: st
 
 
 async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
+    if _scheduled_standalone_alert_suppressed(triggered_by):
+        await log_activity("Standalone scheduled pharma shock suppressed; included in terminal scan report", "info", {
+            "triggered_by": triggered_by,
+            "count": len(rows or []),
+        })
+        return {"ok": True, "sent": False, "suppressed": True, "count": 0, "reason": "consolidated_terminal_report"}
     hot = [r for r in rows if _num(r.get("shock_score")) >= 75]
     if not hot:
         return {"ok": True, "sent": False, "count": 0, "reason": "no_hot_pharma_shocks"}

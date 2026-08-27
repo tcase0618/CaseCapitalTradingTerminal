@@ -164,6 +164,10 @@ async def _pharma_catalyst_shock_job():
         result = await pharma.run_catalyst_shock_scan(
             triggered_by="scheduler_pharma_shock",
             force_refresh=True,
+            # Full terminal scan is the only scheduled Telegram publisher.
+            # This job refreshes the data for the Pharma tab and consolidated
+            # report; it must not fan out a second standalone alert.
+            notify=False,
         )
         await log_activity(
             f"Pharma catalyst shock refresh: {result.get('candidate_count', 0)} candidates, "
