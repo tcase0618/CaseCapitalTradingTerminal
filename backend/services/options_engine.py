@@ -194,6 +194,7 @@ async def _fetch_alpaca_options_data(
             ask = _safe_float(quote.get("ap"))
             last = _safe_float(trade.get("p")) or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
             volume = _safe_int(daily.get("v") or trade.get("s") or 0)
+            provider_delta = _safe_float(greeks.get("delta"))
             rows.append({
                 "contractSymbol": symbol,
                 "strike": parsed["strike"],
@@ -203,7 +204,8 @@ async def _fetch_alpaca_options_data(
                 "impliedVolatility": _safe_float(snap.get("impliedVolatility")),
                 "openInterest": _safe_int(snap.get("openInterest"), -1),
                 "volume": volume,
-                "delta": _safe_float(greeks.get("delta")),
+                "delta": provider_delta,
+                "deltaSource": "alpaca_greeks" if provider_delta else "unavailable",
                 "gamma": _safe_float(greeks.get("gamma")),
                 "theta": _safe_float(greeks.get("theta")),
                 "vega": _safe_float(greeks.get("vega")),
@@ -482,9 +484,15 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         else:
             df["days_to_exp"] = 30
         if "delta" not in df.columns:
-            return None
+            df["delta"] = 0.0
         df["provider_delta_present"] = df["delta"].apply(lambda v: _safe_float(v) != 0)
-        df = df[df["provider_delta_present"]].copy()
+        # Basic-plan indicative snapshots can omit greeks. Mark and use a
+        # moneyness estimate for paper contract selection only.
+        df["delta_estimated"] = ~df["provider_delta_present"]
+        df.loc[df["delta_estimated"], "delta"] = df.loc[df["delta_estimated"]].apply(
+            lambda r: _approx_delta(_safe_float(r.get("strike")), spot, is_call), axis=1
+        )
+        df = df[df["delta"].apply(_safe_float) != 0].copy()
         if len(df) == 0:
             return None
         df["delta_safe"] = df["delta"].apply(_safe_float).abs()
@@ -549,7 +557,9 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
             "ask": round(ask, 2),
             "iv": round(iv, 4),
             "delta": round(delta, 3),
-            "provider_delta_present": True,
+            "provider_delta_present": bool(row.get("provider_delta_present")),
+            "delta_estimated": bool(row.get("delta_estimated")),
+            "delta_source": "alpaca_greeks" if bool(row.get("provider_delta_present")) else "moneyness_estimate_paper_only",
             "open_interest": max(0, oi),
             "volume": volume,
             "spread": round(spread, 2),

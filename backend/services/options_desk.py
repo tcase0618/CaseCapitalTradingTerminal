@@ -267,7 +267,14 @@ def _quote_age_seconds(snapshot: dict[str, Any]) -> int | None:
 def _execution_grade_allowed(data_quality: str | None) -> bool:
     if str(data_quality or "").upper() == "EXECUTION_GRADE":
         return True
-    return bool(OPTIONS_ALLOW_INDICATIVE_EXECUTION)
+    # Delayed indicative data is explicitly limited to the paper options
+    # account. It is not a claim that the Basic feed is OPRA-grade.
+    allow = os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION")
+    if allow is None:
+        allow = OPTIONS_ALLOW_INDICATIVE_EXECUTION
+    else:
+        allow = str(allow).strip().lower() in {"1", "true", "yes", "on"}
+    return bool(allow and paper_only())
 
 
 async def _telegram_send(text: str) -> bool:
@@ -528,6 +535,7 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
         mid = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else 0.0
         mark = bid or mid or last
         data_quality = "INDICATIVE" if ALPACA_OPTIONS_FEED == "indicative" else "EXECUTION_GRADE"
+        provider_delta = _safe_float(greeks.get("delta"))
         return {
             "ok": True,
             "symbol": symbol,
@@ -537,8 +545,10 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
             "last": round(last, 2),
             "mark": round(mark, 2),
             "theta": _safe_float(greeks.get("theta")),
-            "delta": _safe_float(greeks.get("delta")),
-            "provider_delta_present": bool(_safe_float(greeks.get("delta"))),
+            "delta": provider_delta,
+            "provider_delta_present": bool(provider_delta),
+            "delta_estimated": False,
+            "delta_source": "alpaca_greeks" if provider_delta else "unavailable",
             "gamma": _safe_float(greeks.get("gamma")),
             "vega": _safe_float(greeks.get("vega")),
             "quote_time": quote.get("t"),
@@ -548,6 +558,8 @@ async def _option_snapshot(symbol: str) -> dict[str, Any]:
             "volume": _safe_int(daily_bar.get("v")),
             "open_interest": _safe_int(snap.get("openInterest")),
             "open_interest_source": "reported" if snap.get("openInterest") is not None else "unavailable",
+            "bid_size": quote.get("bs"),
+            "ask_size": quote.get("as"),
         }
     except Exception as exc:
         return {"ok": False, "symbol": symbol, "reason": exc.__class__.__name__}
@@ -1088,16 +1100,25 @@ def _indicative_execution_too_thin(instrument: dict[str, Any]) -> bool:
     bid = _safe_float(instrument.get("bid"))
     ask = _safe_float(instrument.get("ask") or instrument.get("premium"))
     spread = _safe_float(instrument.get("spread"))
-    volume = _safe_int(instrument.get("volume"))
     if bid <= 0 or ask < MIN_OPTION_PREMIUM:
         return True
     spread_pct = spread / ask if ask > 0 else 1.0
-    return spread_pct > MAX_INDICATIVE_SPREAD_PCT or volume < MIN_INDICATIVE_OPTION_VOLUME
+    if spread_pct > MAX_INDICATIVE_SPREAD_PCT:
+        return True
+    # The Basic snapshot schema does not guarantee daily volume or quote size.
+    # Only reject an explicitly empty market; missing fields are unknown, not 0.
+    bid_size = instrument.get("bid_size")
+    ask_size = instrument.get("ask_size")
+    if bid_size is not None and ask_size is not None:
+        return _safe_int(bid_size) <= 0 or _safe_int(ask_size) <= 0
+    return False
 
 
 def _open_interest_is_too_low(instrument: dict[str, Any]) -> bool:
     if instrument.get("open_interest_source") == "unavailable" and instrument.get("data_provider") == "ALPACA_OPTIONS":
-        return int(instrument.get("volume") or 0) < MIN_OPTION_VOLUME_IF_OI_UNKNOWN
+        # Option snapshots do not promise OI. Do not convert an omitted field
+        # into zero and reject every Basic-plan contract.
+        return False
     oi = int(instrument.get("open_interest") or 0)
     volume = int(instrument.get("volume") or 0)
     return oi < MIN_OPEN_INTEREST and volume < MIN_VOLUME_WHEN_LOW_OI
@@ -1114,7 +1135,7 @@ def _provider_delta_missing(instrument: dict[str, Any]) -> bool:
     if instrument.get("provider_delta_present") is True:
         return False
     if instrument.get("provider_delta_present") is False:
-        return True
+        return not (instrument.get("delta_estimated") is True and _execution_grade_allowed(instrument.get("data_quality")))
     return _safe_float(instrument.get("delta")) <= 0
 
 
@@ -1488,7 +1509,7 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
     if quote_age > OPTIONS_MAX_QUOTE_AGE_SECONDS:
         return {"ok": False, "reason": "fresh_quote_stale", "quote_age_seconds": quote_age, "snapshot": snap}
     if not _execution_grade_allowed(snap.get("data_quality")):
-        return {"ok": False, "reason": "fresh_quote_not_execution_grade", "snapshot": snap}
+        return {"ok": False, "reason": "indicative_execution_not_enabled_for_paper_account", "snapshot": snap}
 
     fresh = {**instrument}
     fresh.update({
@@ -1499,9 +1520,13 @@ async def _fresh_execution_preflight(ticket: dict[str, Any]) -> dict[str, Any]:
         "spread": round(_safe_float(snap.get("ask")) - _safe_float(snap.get("bid")), 2),
         "delta": snap.get("delta") or instrument.get("delta"),
         "provider_delta_present": bool(_safe_float(snap.get("delta"))),
+        "delta_estimated": bool(instrument.get("delta_estimated")) and not bool(_safe_float(snap.get("delta"))),
+        "delta_source": "alpaca_greeks" if bool(_safe_float(snap.get("delta"))) else instrument.get("delta_source"),
         "volume": snap.get("volume") or instrument.get("volume"),
         "open_interest": snap.get("open_interest") or instrument.get("open_interest"),
         "open_interest_source": snap.get("open_interest_source") or instrument.get("open_interest_source"),
+        "bid_size": snap.get("bid_size"),
+        "ask_size": snap.get("ask_size"),
         "data_provider": "ALPACA_OPTIONS",
         "data_feed": snap.get("data_feed"),
         "data_quality": snap.get("data_quality"),

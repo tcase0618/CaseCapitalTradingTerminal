@@ -66,6 +66,33 @@ def test_execution_delta_requires_provider_delta_and_grind_band():
     assert options_desk._delta_out_of_band(event_scout, "LONG_CALL_EVENT_SCOUT") is False
 
 
+def test_basic_indicative_policy_uses_quote_checks_and_does_not_require_oi(monkeypatch):
+    monkeypatch.setenv("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "true")
+    monkeypatch.setenv("OPTIONS_APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+    instrument = {
+        "data_provider": "ALPACA_OPTIONS",
+        "data_quality": "INDICATIVE",
+        "bid": 1.00,
+        "ask": 1.10,
+        "spread": 0.10,
+        "open_interest_source": "unavailable",
+        "volume": 0,
+        "delta": 0.55,
+        "delta_estimated": True,
+        "provider_delta_present": False,
+    }
+    assert options_desk._execution_grade_allowed("INDICATIVE") is True
+    assert options_desk._open_interest_is_too_low(instrument) is False
+    assert options_desk._provider_delta_missing(instrument) is False
+    assert options_desk._indicative_execution_too_thin(instrument) is False
+
+
+def test_indicative_policy_never_allows_non_paper(monkeypatch):
+    monkeypatch.setenv("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "true")
+    monkeypatch.setenv("OPTIONS_APCA_API_BASE_URL", "https://api.alpaca.markets")
+    assert options_desk._execution_grade_allowed("INDICATIVE") is False
+
+
 def test_risk_budget_uses_options_fund_lanes():
     assert options_desk._risk_budget("EQUITY", "ACCUMULATE", 99) == 0.0
     assert options_desk._risk_budget("OPTION", "WATCH", 52) == 200.0
