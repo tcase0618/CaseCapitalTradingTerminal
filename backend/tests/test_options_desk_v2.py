@@ -238,6 +238,62 @@ def test_options_engine_keeps_estimated_delta_for_indicative_paper_scout():
     assert contract["delta"] > 0
 
 
+def test_options_engine_prefers_policy_eligible_affordable_contract(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setenv("OPTIONS_FILTER_POLICY", "paper_scout")
+
+    chain = {
+        "price": 10.0,
+        "data_provider": "ALPACA_OPTIONS",
+        "data_quality": "INDICATIVE",
+        "calls": pd.DataFrame([
+            {
+                "contractSymbol": "TEST260918C00010000",
+                "strike": 10.0, "bid": 1.00, "ask": 1.20,
+                "lastPrice": 1.10, "openInterest": 0, "volume": 0,
+                "expiration": "2026-09-18", "delta": 0.50,
+            },
+            {
+                "contractSymbol": "TEST260918C00010500",
+                "strike": 10.5, "bid": 0.70, "ask": 0.80,
+                "lastPrice": 0.75, "openInterest": 0, "volume": 75,
+                "expiration": "2026-09-18", "delta": 0.30,
+            },
+        ]),
+    }
+
+    contract = options_engine.find_best_contract(chain, "BULL", budget=300)
+
+    assert contract is not None
+    assert contract["symbol"] == "TEST260918C00010500"
+    assert contract["selection_tier"] == "POLICY_ELIGIBLE"
+
+
+def test_options_engine_keeps_affordable_fallback_when_no_contract_passes_policy(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setenv("OPTIONS_FILTER_POLICY", "paper_scout")
+    chain = {
+        "price": 10.0,
+        "data_quality": "INDICATIVE",
+        "calls": pd.DataFrame([
+            {
+                "contractSymbol": "TEST260918C00010000",
+                "strike": 10.0, "bid": 0.10, "ask": 0.20,
+                "lastPrice": 0.15, "openInterest": 0, "volume": 0,
+                "expiration": "2026-09-18", "delta": 0.50,
+            },
+        ]),
+    }
+
+    contract = options_engine.find_best_contract(chain, "BULL", budget=300)
+
+    assert contract is not None
+    assert contract["selection_tier"] == "AFFORDABLE_FALLBACK"
+    assert contract["selection_fallback"] == "no_contract_met_all_active_policy_gates"
+
+
 def test_contract_selection_record_tracks_alternatives_in_shadow_mode():
     candidate = {
         "candidate_id": "opt-TEST-1",

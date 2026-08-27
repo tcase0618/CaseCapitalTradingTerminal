@@ -448,6 +448,30 @@ def _premium_from_quote(row: dict | Any) -> float:
     return last
 
 
+def _policy_eligible(row: Any, policy: Any, budget: float, data_quality: str | None) -> bool:
+    """Return whether a row satisfies the active paper/live selection policy."""
+    premium = _safe_float(row.get("premium_safe"))
+    spread = _safe_float(row.get("spread_safe"))
+    spread_pct = spread / premium if premium > 0 else 1.0
+    max_spread_pct = (
+        policy.max_indicative_spread_pct
+        if str(data_quality or "").upper() == "INDICATIVE"
+        else policy.max_spread_pct
+    )
+    oi = _safe_int(row.get("openInterest"))
+    volume = _safe_int(row.get("volume"))
+    liquidity_ok = oi >= policy.min_open_interest or volume >= policy.min_volume_when_low_oi
+    delta = abs(_safe_float(row.get("delta")))
+    return (
+        premium >= policy.min_premium
+        and premium * 100 <= float(budget)
+        and spread <= policy.max_spread_abs
+        and spread_pct <= max_spread_pct
+        and liquidity_ok
+        and policy.min_abs_delta <= delta <= policy.max_abs_delta
+    )
+
+
 def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) -> dict | None:
     """Returns the recommended single-leg contract dict for BULL or BEAR.
     Never raises — returns None on any data issue."""
@@ -502,8 +526,17 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         affordable = df[df["max_loss_safe"] <= float(budget)]
         pool = affordable if len(affordable) else df
         pool = pool.copy()
-        pool["spread_pct"] = pool["spread_safe"] / pool["premium_safe"].replace(0, 0.01)
         policy = get_policy()
+        data_quality = chain_data.get("data_quality") or "FALLBACK_RESEARCH"
+        pool["policy_eligible"] = pool.apply(
+            lambda r: _policy_eligible(r, policy, budget, data_quality), axis=1
+        )
+        # Prefer contracts that can actually pass the desk's current policy.
+        # If none qualify, retain the best affordable/cheapest fallback for
+        # diagnostics instead of returning no contract context.
+        if bool(pool["policy_eligible"].any()):
+            pool = pool[pool["policy_eligible"]].copy()
+        pool["spread_pct"] = pool["spread_safe"] / pool["premium_safe"].replace(0, 0.01)
         target_delta = policy.target_delta
         pool["delta_penalty"] = (pool["delta_safe"] - target_delta).abs()
         pool["expiry_penalty"] = (pool["days_to_exp"] - 35).abs() / 35
@@ -593,6 +626,8 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
             "liquidity": _liquidity_flag(oi, spread, premium, volume),
             "type": "C" if is_call else "P",
             "selection_method": "heuristic_v1",
+            "selection_tier": "POLICY_ELIGIBLE" if bool(row.get("policy_eligible")) else ("AFFORDABLE_FALLBACK" if premium * 100 <= float(budget) else "CHEAPEST_FALLBACK"),
+            "selection_fallback": None if bool(row.get("policy_eligible")) else "no_contract_met_all_active_policy_gates",
             "selection_alternatives": alternatives,
             "selection_score": _safe_float(row.get("score")),
         }
