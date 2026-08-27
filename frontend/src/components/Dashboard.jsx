@@ -25,6 +25,18 @@ const SIG_TAG = {
   UNUSUAL_FLOW:         { label: "UNUSUAL FLOW",    color: "#2dd4bf", bg: "rgba(45,212,191,0.07)",  bd: "rgba(45,212,191,0.35)" },
   CALL_SWEEP:           { label: "CALL SWEEP",      color: "#5eead4", bg: "rgba(94,234,212,0.10)",  bd: "rgba(94,234,212,0.45)" },
   IV_CRUSH:             { label: "IV CRUSH RISK",   color: "#f87171", bg: "rgba(248,113,113,0.07)", bd: "rgba(248,113,113,0.35)" },
+  "2+ SIGNALS":       { label: "2+ SIGNALS",      color: "#4ade80", bg: "rgba(74,222,128,0.08)",  bd: "rgba(74,222,128,0.35)" },
+  DAY2_CONTINUATION:   { label: "DAY 2",           color: "#4ade80", bg: "rgba(74,222,128,0.07)",  bd: "rgba(74,222,128,0.30)" },
+  SUPERNOVA:           { label: "SUPERNOVA",       color: "#fbbf24", bg: "rgba(251,191,36,0.08)",  bd: "rgba(251,191,36,0.32)" },
+  RED_GREEN:           { label: "RED/GREEN",       color: "#60a5fa", bg: "rgba(96,165,250,0.07)",  bd: "rgba(96,165,250,0.32)" },
+  CATALYST_RUNNER:     { label: "CATALYST RUNNER", color: "#c084fc", bg: "rgba(192,132,252,0.07)", bd: "rgba(192,132,252,0.32)" },
+  SERIAL_RUNNER:       { label: "SERIAL RUNNER",   color: "#2dd4bf", bg: "rgba(45,212,191,0.07)",  bd: "rgba(45,212,191,0.32)" },
+  MOMENTUM:            { label: "MOMENTUM",        color: "#c8a84b", bg: "rgba(200,168,75,0.07)",  bd: "rgba(200,168,75,0.30)" },
+  VOLUME:              { label: "VOLUME",           color: "#93c5fd", bg: "rgba(147,197,253,0.07)",  bd: "rgba(147,197,253,0.25)" },
+  ROTATION:            { label: "ROTATION",         color: "#5eead4", bg: "rgba(94,234,212,0.07)",  bd: "rgba(94,234,212,0.28)" },
+  CATALYST:            { label: "CATALYST",         color: "#c084fc", bg: "rgba(192,132,252,0.07)", bd: "rgba(192,132,252,0.28)" },
+  SHORT:               { label: "SHORT",            color: "#f87171", bg: "rgba(248,113,113,0.07)", bd: "rgba(248,113,113,0.28)" },
+  ATTENTION:           { label: "ATTENTION",        color: "#fbbf24", bg: "rgba(251,191,36,0.07)",  bd: "rgba(251,191,36,0.28)" },
 };
 
 const RISK_PILL = {
@@ -844,12 +856,19 @@ function scannerFamilyRowModel(view, row) {
   const squeeze = row.squeeze || {};
   const timeTarget = row.time_target || {};
   const score = row.pm_score ?? row.case_score ?? row.score ?? row.signal_score ?? row.binary_event_score ?? row.candidate_quality_score;
-  const action = row.action || row.tier || row.final_route || row.judge?.posture || row.pm_action || row.route || scanner.lane || "-";
+  const lotteryGate = view === "lottery" && row.signal_gate;
+  const lotteryFits = normalizeScannerSignals(row.strategy_fits);
+  const action = row.action || (
+    lotteryGate
+      ? (row.signal_gate === "PASS_2_PLUS" ? (lotteryFits[0] || "2+ SIGNALS") : "1 SIGNAL WATCH")
+      : null
+  ) || row.tier || row.final_route || row.judge?.posture || row.pm_action || row.route || scanner.lane || "-";
   const signals = [
     ...normalizeScannerSignals(row.signals),
     ...normalizeScannerSignals(row.triggers),
     ...normalizeScannerSignals(row.strategy_tags),
     ...normalizeScannerSignals(row.sources || row.candidate_sources),
+    ...lotteryFits,
   ].filter((x, i, arr) => arr.indexOf(x) === i);
   const detail = row.thesis || row.company || row.company_name || row.drug || row.strategy || row.reason || row.judge?.detail || row.data_quality || `${view.toUpperCase()} scanner candidate`;
   const target = targets.target_blended ?? row.target_blended ?? row.target_price ?? row.exit_plan?.target;
@@ -877,6 +896,10 @@ function scannerFamilyRowModel(view, row) {
     stop: normalizeScannerPrice(stop),
     route: String(route || view).replace(/_/g, " "),
     riskLevel,
+    signalGroups: normalizeScannerSignals(row.signal_groups),
+    independentSignalCount: row.independent_signal_count,
+    signalGate: row.signal_gate,
+    strategyFits: lotteryFits,
     scanner,
     strategyCase,
     badges: Array.isArray(scanner.badges) ? scanner.badges : [],
@@ -916,14 +939,21 @@ function scannerBadgeStyle(tone) {
 function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kronosLoading }) {
   const m = scannerFamilyRowModel(view, row);
   const isSel = selected === m.ticker;
-  const targetColor = String(m.action).includes("REJECT") || String(m.action).includes("BLOCK") || String(m.action).includes("OBJECT")
-    ? "#f87171"
+  const targetColor = (view === "lottery" && m.signalGate === "WATCH_1_SIGNAL")
+    ? "#fbbf24"
+    : String(m.action).includes("REJECT") || String(m.action).includes("BLOCK") || String(m.action).includes("OBJECT")
+      ? "#f87171"
     : String(m.action).includes("WATCH")
       ? "#fbbf24"
       : String(m.action).includes("READY") || String(m.action).includes("STARTER") || String(m.action).includes("ACCUMULATE") || String(m.action).includes("PASS")
         ? "#4ade80"
         : accent;
-  const tagList = m.signals.length ? m.signals.slice(0, 8) : [m.route];
+  const tagList = [
+    ...(m.signalGate === "PASS_2_PLUS" ? [`${m.independentSignalCount || 2}+ SIGNALS`] : []),
+    ...m.strategyFits,
+    ...m.signalGroups,
+    ...m.signals,
+  ].filter((s, i, arr) => arr.indexOf(s) === i).slice(0, 8);
   return (
     <div
       data-testid={`scanner-family-row-${view}-${m.ticker}`}

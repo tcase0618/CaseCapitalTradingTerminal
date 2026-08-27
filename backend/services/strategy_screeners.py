@@ -203,6 +203,7 @@ async def _lottery_learned_config() -> dict[str, Any] | None:
 
 def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    from .lottery import lottery_signal_groups, lottery_strategy_fits
     for row in rows:
         ticker = _ticker(row.get("ticker"))
         if not ticker:
@@ -218,7 +219,11 @@ def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, A
             _num(comps.get("catalyst"), 0),
             _num(comps.get("short_interest"), 0),
         )
-        eligible = bool(row.get("eligible")) or (score >= 35 and evidence_score > 0)
+        signal_groups = row.get("signal_groups") or lottery_signal_groups(row)
+        signal_count = len(signal_groups)
+        strategy_fits = row.get("strategy_fits") or lottery_strategy_fits(row, signal_groups)
+        has_confluence = signal_count >= 2
+        eligible = has_confluence and (bool(row.get("eligible")) or (score >= 35 and evidence_score > 0))
         if not eligible:
             if dilution.get("active") or any(str((p or {}).get("key") or "").lower() == "dilution" for p in (row.get("penalties") or [])):
                 out.append(_base_row(
@@ -233,15 +238,17 @@ def _lottery_family_rows(rows: list[dict[str, Any]], learned_config: dict[str, A
                 learned_config=learned_config,
             ))
             continue
-        out.append(_base_row(row=row, screener_id="lottery_day2_continuation", family="LOTTERY", lane="DAY2_CONTINUATION", score=score, learned_config=learned_config))
-        if _num(comps.get("structure"), 0) >= 4 or _num(row.get("change_pct"), 0) >= 8:
-            out.append(_base_row(row=row, screener_id="lottery_red_green", family="LOTTERY", lane="RED_GREEN", score=max(score, 52), learned_config=learned_config))
-        if _num(comps.get("rvol"), 0) >= 9 or _num(comps.get("rotation"), 0) >= 6 or "RVOL" in triggers or "ROTATION" in triggers:
-            out.append(_base_row(row=row, screener_id="lottery_supernova", family="LOTTERY", lane="SUPERNOVA", score=max(score, 56), learned_config=learned_config))
-        if _num(comps.get("catalyst"), 0) > 0 or {"PHARMA/FDA", "CONTRACT", "EARNINGS"} & triggers:
-            out.append(_base_row(row=row, screener_id="lottery_catalyst_runner", family="LOTTERY", lane="CATALYST_RUNNER", score=max(score, 55), learned_config=learned_config))
-        if "RUNNER" in _text_blob(row) or row.get("prior_runner_events") or _num(row.get("relative_volume"), 0) >= 8:
-            out.append(_base_row(row=row, screener_id="lottery_serial_runner", family="LOTTERY", lane="SERIAL_RUNNER", score=max(score, 54), learned_config=learned_config))
+        lanes = [lane for lane in strategy_fits if lane in {"DAY2_CONTINUATION", "SUPERNOVA", "RED_GREEN", "CATALYST_RUNNER", "SERIAL_RUNNER"}]
+        if not lanes:
+            lanes = ["SIGNAL_CONFLUENCE"]
+        for lane in lanes:
+            screener_id = f"lottery_{lane.lower()}"
+            built = _base_row(row=row, screener_id=screener_id, family="LOTTERY", lane=lane, score=score, learned_config=learned_config)
+            built["signal_groups"] = signal_groups
+            built["independent_signal_count"] = signal_count
+            built["signal_gate"] = "PASS_2_PLUS"
+            built["strategy_fits"] = strategy_fits
+            out.append(built)
         if dilution.get("active") or any(str((p or {}).get("key") or "").lower() == "dilution" for p in (row.get("penalties") or [])):
             out.append(_base_row(
                 row=row,

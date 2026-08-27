@@ -93,7 +93,7 @@ def test_lottery_default_risk_plan_can_clear_pm_starter_floor():
     assert (row["targets"]["target_blended"] - 10) / (10 - row["stop_loss"]) == 2.0
 
 
-def test_lottery_evidence_candidate_is_routed_to_pm():
+def test_lottery_single_signal_candidate_stays_out_of_pm():
     row = {
         "ticker": "LOTTO",
         "price": 4,
@@ -105,8 +105,26 @@ def test_lottery_evidence_candidate_is_routed_to_pm():
 
     built = strategy_screeners._lottery_family_rows([row])
 
+    assert built == []
+
+
+def test_lottery_requires_two_independent_signal_groups_and_classifies_lane():
+    row = {
+        "ticker": "LOTTO",
+        "price": 4,
+        "score": 42,
+        "eligible": False,
+        "components": {"gap_surge": 20, "rvol": 10},
+        "triggers": ["GAP/SURGE", "RVOL", "FINVIZ_UNIVERSE"],
+    }
+
+    built = strategy_screeners._lottery_family_rows([row])
+
     assert built
-    assert any(item["pm_routable"] and not item["read_only"] for item in built)
+    assert all(item["pm_routable"] and not item["read_only"] for item in built)
+    assert all(item["signal_gate"] == "PASS_2_PLUS" for item in built)
+    assert all(item["independent_signal_count"] == 2 for item in built)
+    assert any(item["strategy_scanner"]["lane"] == "DAY2_CONTINUATION" for item in built)
 
 
 def test_lottery_pm_profile_allows_bounded_starter_for_qualified_setup():

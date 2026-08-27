@@ -21,6 +21,61 @@ from .db import get_db, log_activity, stamped
 logger = logging.getLogger(__name__)
 
 LL_RUBRIC_VERSION = "lottery-league-v2.0-moonshot-desk"
+
+# These are evidence families, not source names.  Multiple Finviz screens can
+# report the same observation, so source/provenance labels must never count as
+# independent confirmation.
+LOTTERY_SIGNAL_GROUPS = {
+    "MOMENTUM": {"gap_surge", "GAP/SURGE"},
+    "VOLUME": {"rvol", "RVOL"},
+    "ROTATION": {"rotation", "ROTATION"},
+    "CATALYST": {"catalyst", "PHARMA/FDA", "CONTRACT", "EARNINGS"},
+    "SHORT": {"short_interest", "HIGH_SHORT"},
+    "ATTENTION": {"attention", "ATTENTION"},
+    "STRUCTURE": {"structure"},
+}
+
+
+def lottery_signal_groups(row: dict[str, Any]) -> list[str]:
+    """Return independent Lottery evidence groups present on a candidate."""
+    components = row.get("components") or {}
+    triggers = {str(value).upper() for value in (row.get("triggers") or [])}
+    signals = {str(value).upper() for value in (row.get("signals") or [])}
+    groups: list[str] = []
+    for group, evidence in LOTTERY_SIGNAL_GROUPS.items():
+        component_keys = {value for value in evidence if value.islower()}
+        trigger_keys = {value for value in evidence if not value.islower()}
+        if any(_num(components.get(key), 0) > 0 for key in component_keys) or triggers.intersection(trigger_keys) or signals.intersection(trigger_keys):
+            groups.append(group)
+    return groups
+
+
+def lottery_strategy_fits(row: dict[str, Any], groups: list[str] | None = None) -> list[str]:
+    """Map confluence into explicit, non-exclusive Lottery strategy lanes."""
+    groups = groups or lottery_signal_groups(row)
+    components = row.get("components") or {}
+    triggers = {str(value).upper() for value in (row.get("triggers") or [])}
+    fits: list[str] = []
+    has_momentum = "MOMENTUM" in groups
+    has_volume = "VOLUME" in groups
+    has_rotation = "ROTATION" in groups
+    has_catalyst = "CATALYST" in groups
+    has_short = "SHORT" in groups
+    has_attention = "ATTENTION" in groups
+    if has_catalyst:
+        fits.append("CATALYST_RUNNER")
+    if has_momentum and (has_volume or has_rotation):
+        fits.append("DAY2_CONTINUATION")
+    if (has_volume and _num(components.get("rvol"), 0) >= 9) or _num(components.get("rotation"), 0) >= 6:
+        if has_momentum or has_short or has_attention:
+            fits.append("SUPERNOVA")
+    if _num(components.get("structure"), 0) >= 4 and (has_momentum or has_rotation):
+        fits.append("RED_GREEN")
+    if row.get("prior_runner_events") or "RUNNER" in " ".join(triggers) or _num(row.get("relative_volume"), 0) >= 8:
+        fits.append("SERIAL_RUNNER")
+    if not fits and len(groups) >= 2:
+        fits.append("SIGNAL_CONFLUENCE")
+    return list(dict.fromkeys(fits))
 FINVIZ_URL = (
     "https://finviz.com/screener.ashx?v=111"
     "&f=sh_price_1to20,sh_relvol_o2,sh_short_o15"
@@ -562,6 +617,11 @@ async def _enrich_candidate(candidate: dict[str, Any], halted: set[str]) -> dict
         scored["halt_status"] = "HALTED"
     else:
         scored["halt_status"] = "CLEAR"
+    signal_groups = lottery_signal_groups(scored)
+    scored["signal_groups"] = signal_groups
+    scored["independent_signal_count"] = len(signal_groups)
+    scored["signal_gate"] = "PASS_2_PLUS" if len(signal_groups) >= 2 else "WATCH_1_SIGNAL"
+    scored["strategy_fits"] = lottery_strategy_fits(scored, signal_groups)
     return scored
 
 
