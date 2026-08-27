@@ -550,9 +550,9 @@ def evaluate_rows(
     # deployment budget; this prevents generic higher scores from consuming
     # all cash before the specialist sleeve is considered.
     out.sort(key=lambda r: (
+        _is_lottery_row(r),
         r["action"] == "ACCUMULATE",
         r["action"] == "STARTER",
-        _is_lottery_row(r),
         r["pm_score"],
     ), reverse=True)
     # The outer cap remains the broad PM account cap. Per-sleeve caps are
