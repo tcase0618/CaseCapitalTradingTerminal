@@ -1665,13 +1665,37 @@ async def scan_strategy_screeners(persist: bool = True):
 async def scan_tabs():
     from services import candidate_ledger, lottery, options_desk, pharma, strategy_screeners
     scan = await scanner.latest_scan()
-    ledger = await candidate_ledger.latest(rebuild=True)
-    lottery_board, options_payload, screeners_payload = await asyncio.gather(
-        lottery.board(),
-        options_desk.candidates(),
-        strategy_screeners.run_all(scan=scan, persist=True),
-        return_exceptions=True,
+    db = get_db()
+    # Scanner tabs are read views of persisted scan artifacts. Rebuilding the
+    # ledger, options candidates, and strategy fan-out on every browser poll
+    # made a simple tab load wait on network/API work. The scheduler owns
+    # refreshes; this endpoint should return the latest known snapshot quickly.
+    ledger = await candidate_ledger.latest(rebuild=False)
+    lottery_doc, option_docs, cached_screeners = await asyncio.gather(
+        db.ll_scans.find_one({"_id": "current"}, {"_id": 0}),
+        db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100),
+        db.strategy_screeners.find_one({"_id": "latest"}, {"_id": 0}),
     )
+    lottery_board = {
+        "candidates": [lottery.annotate_lottery_candidate(row) for row in ((lottery_doc or {}).get("candidates") or [])],
+        "cache_generated_at": (lottery_doc or {}).get("scanned_at"),
+    }
+    options_rows = [options_desk._normalize_candidate_execution_state(row) for row in (option_docs or [])]
+    options_payload = {
+        "candidates": options_rows,
+        "cache_generated_at": max((str(row.get("generated_at") or row.get("created_at") or "") for row in options_rows), default=None),
+    }
+    screeners_payload = cached_screeners or {}
+    # A missing persisted specialist artifact is the only case that falls back
+    # to a synchronous build. Normal scheduler runs always persist these docs.
+    if not cached_screeners:
+        screeners_payload = await strategy_screeners.run_all(scan=scan, persist=True)
+    cache_states = {
+        "lottery": "CACHED",
+        "options": "CACHED" if option_docs else "EMPTY",
+        "strategy_screeners": "CACHED" if cached_screeners else "REFRESHED_ON_READ",
+        "ledger": "CACHED" if ledger else "EMPTY",
+    }
     try:
         pharma_rows = await pharma.get_pdufa_within_days(days=90)
     except Exception as exc:
@@ -1800,6 +1824,12 @@ async def scan_tabs():
         "ledger": ledger,
         "tabs": tab_rows,
         "new_since_previous": new_since_previous,
+        "cache": {
+            "states": cache_states,
+            "scan_finished_at": (scan or {}).get("finished_at"),
+            "lottery_scan_at": (lottery_doc or {}).get("scanned_at"),
+            "strategy_scan_at": (screeners_payload or {}).get("scan_finished_at"),
+        },
         "errors": {
             "lottery": str(lottery_board) if isinstance(lottery_board, Exception) else None,
             "options": str(options_payload) if isinstance(options_payload, Exception) else None,
