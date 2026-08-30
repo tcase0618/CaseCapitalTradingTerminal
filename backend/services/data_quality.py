@@ -93,6 +93,11 @@ def _cached_integration_row(row: dict[str, Any]) -> dict[str, Any]:
         item["score"] = _score_row(status, True, len(item.get("warnings") or []))
         item["blocks_trading"] = status in {"STALE", "MISSING", "DOWN"}
         item["execution_scopes"] = ["equity", "options"] if item["blocks_trading"] else []
+    elif item.get("status") == "LIVE" and (age is None or age > 30):
+        # Optional feeds may not block trades, but they must not display as
+        # LIVE after their evidence has aged beyond the integration SLA.
+        item["status"] = "STALE" if age is not None else "WARN"
+        item["score"] = _score_row(item["status"], False, len(item.get("warnings") or []))
     return item
 
 
