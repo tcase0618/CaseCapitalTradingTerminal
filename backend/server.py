@@ -170,7 +170,7 @@ class AuthLoginRequest(BaseModel):
 
 
 class AuthPreviewRequest(BaseModel):
-    code: str
+    code: str = ""
 
 
 # ---------- Routes ----------
@@ -251,7 +251,7 @@ async def admin_config_validation():
         {"key": "cloud_cors_explicit", "ok": not cloud or bool(cors), "severity": "high"},
         {"key": "execution_explicit", "ok": not cloud or "ENABLE_TRADE_EXECUTION" in os.environ, "severity": "high"},
         {"key": "options_execution_explicit", "ok": not cloud or "ENABLE_OPTIONS_EXECUTION" in os.environ, "severity": "high"},
-        {"key": "indicative_execution_disabled", "ok": not (options_enabled and os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").lower() in {"1", "true", "yes", "on"}), "severity": "critical"},
+        {"key": "indicative_execution_scoped", "ok": not (options_enabled and os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").lower() in {"1", "true", "yes", "on"} and "paper-api.alpaca.markets" not in os.environ.get("OPTIONS_APCA_API_BASE_URL", "").lower()), "severity": "critical"},
         {"key": "operator_secret", "ok": not cloud or bool(_operator_hash()), "severity": "critical"},
     ]
     return {"ok": all(item["ok"] for item in checks), "cloud": cloud, "checks": checks}

@@ -59,3 +59,16 @@ def test_preview_endpoint_empty_body_is_an_auth_failure(monkeypatch):
         assert getattr(exc, "status_code", None) == 403
     else:
         raise AssertionError("empty preview request was accepted")
+
+
+def test_preview_endpoint_empty_json_model_is_an_auth_failure(monkeypatch):
+    monkeypatch.setenv("PREVIEW_ENABLED", "true")
+    import server
+
+    importlib.reload(server)
+    try:
+        asyncio.run(server.auth_preview(server.AuthPreviewRequest()))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    else:
+        raise AssertionError("empty preview payload was accepted")
