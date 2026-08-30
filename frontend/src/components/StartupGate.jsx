@@ -15,6 +15,11 @@ import startupLogo from "../assets/case-capital-startup-logo.png";
 const API = `${(process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "")}/api`;
 const AUTH_KEY = "case_capital_terminal_auth_v1";
 const SESSION_KEY = "case_capital_terminal_session_v1";
+// Preview-only unlocks. Keep these hashed so the raw codes are not stored in the bundle.
+const PREVIEW_CODE_HASHES = new Set([
+  "5ca4f03a02ff51515ab63f01d5c18414b50283687bcb21113d555b92b966f012", // 6969
+  "93fbd43880b3b55ef0ef2580668fcb1fc5af0d541aac855f2e1449f933659f5f", // 0209
+]);
 
 const accent = "#c8a84b";
 const accent2 = "#5eead4";
@@ -62,8 +67,24 @@ export default function StartupGate({ children }) {
     event.preventDefault();
     setError("");
     const normalizedCode = code.trim();
+    const attemptedHash = await hashCode(normalizedCode);
+
+    // Preview access is available on first launch and remains session-scoped.
+    if (PREVIEW_CODE_HASHES.has(attemptedHash)) {
+      const nextAuth = auth || {
+        name: "CASE CAPITAL PREVIEW OPERATOR",
+        created_at: new Date().toISOString(),
+        hash: attemptedHash,
+      };
+      if (!auth) localStorage.setItem(AUTH_KEY, JSON.stringify(nextAuth));
+      setAuth(nextAuth);
+      sessionStorage.setItem(SESSION_KEY, "open");
+      setSessionReady(true);
+      return;
+    }
+
     if (normalizedCode.length < 6) {
-      setError("Access code must be at least 6 characters.");
+      setError("Access code must be at least 6 characters, or use a preview code.");
       return;
     }
 
@@ -84,7 +105,6 @@ export default function StartupGate({ children }) {
       return;
     }
 
-    const attemptedHash = await hashCode(normalizedCode);
     if (attemptedHash !== auth?.hash) {
       setError("Access denied. Check the local terminal code.");
       return;
