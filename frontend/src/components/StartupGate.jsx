@@ -40,6 +40,7 @@ export default function StartupGate({ children }) {
   const [name, setName] = useState(() => readAuth()?.name || "CASE CAPITAL OPERATOR");
   const [code, setCode] = useState("");
   const [confirmCode, setConfirmCode] = useState("");
+  const [previewPrompted, setPreviewPrompted] = useState(false);
   const [error, setError] = useState("");
   const [backend, setBackend] = useState({ state: "checking", message: "Checking backend link" });
   const [bootChecks, setBootChecks] = useState([]);
@@ -234,6 +235,11 @@ export default function StartupGate({ children }) {
     }
   };
 
+  const requestPreviewCode = () => {
+    setPreviewPrompted(true);
+    setError("Enter a preview code: 6969 or 0209.");
+  };
+
   return (
     <div className="startup-gate" style={styles.root}>
       <style>{startupAnimations}</style>
@@ -270,7 +276,8 @@ export default function StartupGate({ children }) {
           onRefresh={() => checkBackend(setBackend, setBootChecks, usesLocalDesktopBackend)}
           onForceBoot={forceBoot}
           onSubmit={submit}
-          onPreview={enterPreview}
+          onPreview={requestPreviewCode}
+          previewPrompted={previewPrompted}
           authConfig={authConfig}
         />
       )}
@@ -350,6 +357,7 @@ function LoginPanel({
   onForceBoot,
   onSubmit,
   onPreview,
+  previewPrompted,
 }) {
   return (
     <section className="startup-login-stage" style={styles.loginStage}>
@@ -437,7 +445,7 @@ function LoginPanel({
         {authConfig?.preview_enabled !== false && (
           <button type="button" onClick={onPreview} style={styles.previewButton}>
             <Eye size={14} />
-            PREVIEW TERMINAL - READ ONLY
+            {previewPrompted ? "ENTER PREVIEW CODE" : "PREVIEW TERMINAL - READ ONLY"}
           </button>
         )}
 
