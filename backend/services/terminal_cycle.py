@@ -13,6 +13,8 @@ from typing import Any
 
 from .db import log_activity
 
+_FULL_SCAN_LOCK = asyncio.Lock()
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -32,7 +34,7 @@ def _reason_counts(rows: Any) -> dict[str, int]:
     return counts
 
 
-async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
+async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
     started = _now()
     stage_times: dict[str, float] = {}
 
@@ -188,3 +190,11 @@ async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[st
         "options_execution": options_execution,
         "telegram": telegram_result,
     }
+
+
+async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
+    """Run one full cycle at a time; concurrent manual/scheduled calls skip."""
+    if _FULL_SCAN_LOCK.locked():
+        return {"ok": False, "skipped": True, "reason": "full_terminal_scan_already_running", "triggered_by": triggered_by}
+    async with _FULL_SCAN_LOCK:
+        return await _run_full_terminal_scan(triggered_by=triggered_by)

@@ -159,7 +159,7 @@ export default function StartupGate({ children }) {
     const attemptedHash = await hashCode(normalizedCode);
 
     if (PREVIEW_CODE_HASHES.has(attemptedHash)) {
-      await enterPreview();
+      await enterPreview(normalizedCode);
       return;
     }
 
@@ -221,17 +221,18 @@ export default function StartupGate({ children }) {
     }
   };
 
-  const enterPreview = async () => {
+  const enterPreview = async previewCode => {
     setError("");
     try {
-      await axios.post(`${API}/auth/preview`, null, { timeout: 6000 }).catch(() => null);
-    } finally {
+      await axios.post(`${API}/auth/preview`, { code: previewCode }, { timeout: 6000 });
       const nextSession = { mode: "preview", name: "CASE CAPITAL PREVIEW" };
       writeSession(nextSession);
       setSession(nextSession);
       if (backend.state === "checking") {
         setBackend({ state: "online", message: "Preview mode. Backend sync continuing read-only." });
       }
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Preview verification failed.");
     }
   };
 

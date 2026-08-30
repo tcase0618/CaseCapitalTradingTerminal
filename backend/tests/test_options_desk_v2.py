@@ -57,6 +57,21 @@ def test_paper_scout_profile_cannot_be_used_on_live_endpoint(monkeypatch):
     assert options_policy.paper_scout_allowed() is False
 
 
+def test_research_fallback_is_never_execution_eligible():
+    assert options_policy.execution_data_allowed({
+        "data_provider": "YFINANCE",
+        "data_quality": "FALLBACK_RESEARCH",
+        "execution_eligible": False,
+    }) is False
+
+
+def test_alpaca_indicative_snapshot_is_explicitly_eligible_for_paper_policy():
+    assert options_policy.execution_data_allowed({
+        "data_provider": "ALPACA_OPTIONS",
+        "data_quality": "INDICATIVE",
+    }) is True
+
+
 def test_spread_cost_context_uses_mid_basis():
     context = options_desk._spread_cost_context(2.1, {"bid": 1.9, "ask": 2.1})
 
@@ -424,6 +439,27 @@ def test_options_scanner_intent_stays_option_when_contract_missing():
 
     route, reasons = options_desk._route(pm_row, scan_row)
 
+    assert route == "OPTION"
+    assert "no executable contract" in reasons[0].lower()
+
+
+def test_options_family_avoid_label_does_not_hide_missing_contract():
+    pm_row = {
+        "action": "STARTER",
+        "pm_score": 60,
+        "risk_reward": 1.4,
+        "option_view": "CALL_ALLOWED",
+    }
+    scan_row = {
+        "strategy_scanner": {"family": "OPTIONS", "screener_id": "options_tactical_momentum_call"},
+        "options": {
+            "strategy": "AVOID_OPTIONS",
+            "options_intent": True,
+            "preferred_route": "OPTION",
+            "iv_rank": 55,
+        },
+    }
+    route, reasons = options_desk._route(pm_row, scan_row)
     assert route == "OPTION"
     assert "no executable contract" in reasons[0].lower()
 

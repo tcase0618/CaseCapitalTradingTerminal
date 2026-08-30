@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 
 
 def test_signed_operator_token_survives_memory_session_clear(monkeypatch):
@@ -29,3 +30,32 @@ def test_signed_operator_token_rejects_tampering(monkeypatch):
 
     assert server._valid_signed_operator_token(token) is True
     assert server._valid_signed_operator_token(forged) is False
+
+
+def test_preview_endpoint_requires_valid_code(monkeypatch):
+    monkeypatch.setenv("PREVIEW_ENABLED", "true")
+    import server
+
+    importlib.reload(server)
+    good = server.AuthPreviewRequest(code="6969")
+    bad = server.AuthPreviewRequest(code="000000")
+    assert asyncio.run(server.auth_preview(good))["mode"] == "preview"
+    try:
+        asyncio.run(server.auth_preview(bad))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    else:
+        raise AssertionError("invalid preview code was accepted")
+
+
+def test_preview_endpoint_empty_body_is_an_auth_failure(monkeypatch):
+    monkeypatch.setenv("PREVIEW_ENABLED", "true")
+    import server
+
+    importlib.reload(server)
+    try:
+        asyncio.run(server.auth_preview(None))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    else:
+        raise AssertionError("empty preview request was accepted")

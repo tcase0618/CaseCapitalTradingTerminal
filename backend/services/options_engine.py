@@ -1,4 +1,4 @@
-"""Options Intelligence — pure-Python pipeline using yfinance.
+"""Options Intelligence — Alpaca-first options research pipeline.
 
 All computation happens here BEFORE Claude is called. Claude only adds two
 small fields per stock (strategy_name + one_liner) — see claude_service.
@@ -404,6 +404,7 @@ async def get_options_data(
                 "data_provider": "YFINANCE",
                 "data_feed": "fallback",
                 "data_quality": "FALLBACK_RESEARCH",
+                "execution_eligible": False,
             }
 
         return await _to_thread(_sync)

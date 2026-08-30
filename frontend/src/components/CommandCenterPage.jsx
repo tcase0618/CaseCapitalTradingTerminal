@@ -214,24 +214,27 @@ export default function CommandCenterPage() {
   const [backendRefresh, setBackendRefresh] = useState(null);
   const [completed, setCompleted] = useState([]);
   const [initialLoad, setInitialLoad] = useState(true);
+  const [loadWarning, setLoadWarning] = useState("");
 
   const refresh = useCallback(async () => {
     const calls = [
-      axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(() => {}),
-      axios.get(`${API}/scan/latest`).then(r => setScan(r.data)).catch(() => {}),
-      axios.get(`${API}/scan/funnel/today`).then(r => setScanFunnel(r.data)).catch(() => {}),
-      axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)).catch(() => {}),
-      axios.get(`${API}/system/health`).then(r => setHealth(r.data)).catch(() => {}),
-      axios.get(`${API}/execution_gate/overview`).then(r => setExecutionGate(r.data)).catch(() => setExecutionGate({ ok: false, decision: "UNKNOWN" })),
-      axios.get(`${API}/trade_floor/positions`).then(r => setTradeFloor(r.data)).catch(() => {}),
-      axios.get(`${API}/position_monitor/latest`).then(r => setPositionMonitor(r.data)).catch(() => {}),
-      axios.get(`${API}/portfolio_manager/latest`).then(r => setPm(r.data)).catch(() => {}),
-      axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)).catch(() => {}),
-      axios.get(`${API}/activity?limit=12`).then(r => setActivity(r.data || [])).catch(() => {}),
-      axios.get(`${API}/telegram/events?limit=12`).then(r => setTelegramEvents(r.data?.events || r.data || [])).catch(() => {}),
-      axios.get(`${API}/data_quality/overview`).then(r => setQualityOverview(r.data)).catch(() => {}),
+      axios.get(`${API}/status`).then(r => setStatus(r.data)),
+      axios.get(`${API}/scan/latest`).then(r => setScan(r.data)),
+      axios.get(`${API}/scan/funnel/today`).then(r => setScanFunnel(r.data)),
+      axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)),
+      axios.get(`${API}/system/health`).then(r => setHealth(r.data)),
+      axios.get(`${API}/execution_gate/overview`).then(r => setExecutionGate(r.data)),
+      axios.get(`${API}/trade_floor/positions`).then(r => setTradeFloor(r.data)),
+      axios.get(`${API}/position_monitor/latest`).then(r => setPositionMonitor(r.data)),
+      axios.get(`${API}/portfolio_manager/latest`).then(r => setPm(r.data)),
+      axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)),
+      axios.get(`${API}/activity?limit=12`).then(r => setActivity(r.data || [])),
+      axios.get(`${API}/telegram/events?limit=12`).then(r => setTelegramEvents(r.data?.events || r.data || [])),
+      axios.get(`${API}/data_quality/overview`).then(r => setQualityOverview(r.data)),
     ];
-    await Promise.allSettled(calls);
+    const results = await Promise.allSettled(calls);
+    const failed = results.filter(result => result.status === "rejected").length;
+    setLoadWarning(failed ? `${failed} COMMAND CENTER DATA REQUEST(S) FAILED - DISPLAY IS INCOMPLETE` : "");
     setInitialLoad(false);
   }, []);
 
@@ -316,6 +319,7 @@ export default function CommandCenterPage() {
           LAUNCH CONTROL
         </button>
       }>
+      {loadWarning && <div style={{ marginBottom: 12, padding: "10px 14px", border: "1px solid #f87171", color: "#f87171", background: "rgba(248,113,113,0.08)", fontSize: 11, letterSpacing: "0.08em" }}>{loadWarning}</div>}
       <DataConfidenceStrip
         title="TERMINAL READINESS"
         items={[

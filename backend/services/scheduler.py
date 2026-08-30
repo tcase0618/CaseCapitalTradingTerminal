@@ -54,7 +54,7 @@ async def _stock_scan_market_day_now() -> tuple[bool, str]:
     if base.endswith("/v2"):
         base = base[:-3]
     if not key or not secret:
-        return True, "weekday fallback; Alpaca calendar unavailable"
+        return False, "market calendar unavailable; scheduled scan held"
 
     date_str = now_et.date().isoformat()
     try:
@@ -72,8 +72,8 @@ async def _stock_scan_market_day_now() -> tuple[bool, str]:
             return True, f"market session day ({date_str})"
         return False, f"market closed ({date_str})"
     except Exception as exc:
-        logger.warning("Alpaca market calendar check failed; weekday fallback: %s", exc)
-        return True, f"weekday fallback after calendar check failed ({date_str})"
+        logger.warning("Alpaca market calendar check failed; scheduled scan held: %s", exc)
+        return False, f"market calendar check failed; scheduled scan held ({date_str})"
 
 
 async def stock_scan_market_day_now() -> tuple[bool, str]:

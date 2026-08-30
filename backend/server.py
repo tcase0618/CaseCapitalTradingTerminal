@@ -10,6 +10,7 @@ import os
 import platform
 import secrets
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -38,16 +39,28 @@ api = APIRouter(prefix="/api")
 OPERATOR_SESSIONS: set[str] = set()
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OPERATOR_TOKEN_VERSION = "cc1"
+PREVIEW_ATTEMPTS: dict[str, list[float]] = {}
+PREVIEW_MAX_ATTEMPTS = 8
+PREVIEW_WINDOW_SECONDS = 300
 AUTH_EXEMPT_PATHS = {
     "/api/auth/config",
     "/api/auth/login",
     "/api/auth/preview",
     "/api/telegram/webhook",
 }
+PREVIEW_CODE_HASHES = {
+    # Hashes of case-capital:<preview-code>; raw codes never live in the API.
+    "5ca4f03a02ff51515ab63f01d5c18414b50283687bcb21113d555b92b966f012",
+    "93fbd43880b3b55ef0ef2580668fcb1fcaf0d541aac855f2e1449f933659f5f",
+}
 
 
 def _cloud_mode() -> bool:
     return os.environ.get("APP_ENV", "").strip().lower() == "cloud"
+
+
+def _preview_enabled() -> bool:
+    return os.environ.get("PREVIEW_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _operator_hash() -> str:
@@ -156,6 +169,10 @@ class AuthLoginRequest(BaseModel):
     code: str
 
 
+class AuthPreviewRequest(BaseModel):
+    code: str
+
+
 # ---------- Routes ----------
 @api.get("/")
 async def root():
@@ -168,7 +185,7 @@ async def auth_config():
         "ok": True,
         "cloud": _cloud_mode(),
         "operator_login_enabled": _operator_configured() or not _cloud_mode(),
-        "preview_enabled": True,
+        "preview_enabled": _preview_enabled(),
         "setup_enabled": not _cloud_mode(),
     }
 
@@ -201,13 +218,43 @@ async def auth_login(payload: AuthLoginRequest):
 
 
 @api.post("/auth/preview")
-async def auth_preview():
+async def auth_preview(payload: AuthPreviewRequest | None = None):
+    if not _preview_enabled():
+        raise HTTPException(status_code=404, detail="Preview mode is disabled.")
+    client_key = "preview-global"
+    now = time.monotonic()
+    attempts = [stamp for stamp in PREVIEW_ATTEMPTS.get(client_key, []) if now - stamp < PREVIEW_WINDOW_SECONDS]
+    if len(attempts) >= PREVIEW_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Preview attempts temporarily rate limited.")
+    attempts.append(now)
+    PREVIEW_ATTEMPTS[client_key] = attempts
+    attempted = hashlib.sha256(f"case-capital:{(payload.code if payload else '').strip()}".encode("utf-8")).hexdigest()
+    if attempted not in PREVIEW_CODE_HASHES:
+        raise HTTPException(status_code=403, detail="Invalid preview code.")
     return {
         "ok": True,
         "mode": "preview",
         "name": "CASE CAPITAL PREVIEW",
         "issued_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@api.get("/admin/config/validation")
+async def admin_config_validation():
+    """Expose deployment safety checks without returning secrets."""
+    cloud = _cloud_mode()
+    execution_enabled = os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+    options_enabled = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+    cors = _cors_origins()
+    checks = [
+        {"key": "preview_code", "ok": bool(PREVIEW_CODE_HASHES), "severity": "high"},
+        {"key": "cloud_cors_explicit", "ok": not cloud or bool(cors), "severity": "high"},
+        {"key": "execution_explicit", "ok": not cloud or "ENABLE_TRADE_EXECUTION" in os.environ, "severity": "high"},
+        {"key": "options_execution_explicit", "ok": not cloud or "ENABLE_OPTIONS_EXECUTION" in os.environ, "severity": "high"},
+        {"key": "indicative_execution_disabled", "ok": not (options_enabled and os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").lower() in {"1", "true", "yes", "on"}), "severity": "critical"},
+        {"key": "operator_secret", "ok": not cloud or bool(_operator_hash()), "severity": "critical"},
+    ]
+    return {"ok": all(item["ok"] for item in checks), "cloud": cloud, "checks": checks}
 
 
 @api.get("/status")
@@ -2281,10 +2328,18 @@ async def gov_intel_layer(ticker: str | None = None, recipient: str | None = Non
 
 # ---------- App wiring ----------
 # (Router include moved to end of file so v5.0 endpoints register)
+def _cors_origins() -> list[str]:
+    configured = [item.strip().rstrip("/") for item in os.environ.get("CORS_ORIGINS", "").split(",") if item.strip()]
+    if configured:
+        return configured
+    # Wildcard origins cannot safely be combined with credentials in cloud mode.
+    return [] if _cloud_mode() else ["*"]
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -75,9 +75,16 @@ def _outbound_kind(text: str) -> str:
 
 def _single_consolidated_scan_only() -> bool:
     """Return whether production Telegram is restricted to the scan digest."""
-    return os.environ.get("TELEGRAM_SINGLE_CONSOLIDATED_SCAN_ONLY", "false").strip().lower() in {
+    return os.environ.get("TELEGRAM_SINGLE_CONSOLIDATED_SCAN_ONLY", "true").strip().lower() in {
         "1", "true", "yes", "on",
     }
+
+
+def _standalone_delivery_allowed(kind: str) -> bool:
+    """Central policy guard used by every outbound send path."""
+    if not _single_consolidated_scan_only():
+        return True
+    return kind == "scan_report"
 
 
 def _outbound_cooldown(kind: str) -> timedelta:
@@ -166,7 +173,7 @@ async def send_message(text: str, chat_id: str | None = None, parse_mode: str = 
         return False
     text = _normalize_outbound_text(str(text or ""))
     outbound_kind = _outbound_kind(text)
-    if _single_consolidated_scan_only() and outbound_kind != "scan_report":
+    if not _standalone_delivery_allowed(outbound_kind):
         await log_activity(
             f"Telegram outbound suppressed by consolidated-scan policy: {outbound_kind}",
             "info",
@@ -203,11 +210,13 @@ async def send_message(text: str, chat_id: str | None = None, parse_mode: str = 
                                     r2.status_code, r2.text[:200])
                 except Exception as e:
                     logger.warning("Telegram plain-text fallback exception: %s", e)
+            await _mark_outbound_sent(guard_token, text, False)
             return False
         await _mark_outbound_sent(guard_token, text, True)
         return True
     except Exception as e:
         logger.warning("Telegram send exception: %s", e)
+        await _mark_outbound_sent(guard_token, text, False)
         return False
 
 

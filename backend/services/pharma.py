@@ -1627,11 +1627,13 @@ async def run_pharma_scan(
 
     # Scheduled full-terminal cycles render one consolidated Telegram report.
     # Standalone/manual pharma scans retain their existing alert behavior.
+    # Scheduled cycles publish through the single consolidated terminal
+    # report. Standalone pharma delivery requires an explicit opt-in gate.
     if notify:
         try:
             from . import telegram_events
             hot = [r for r in enriched if r["binary_event_score"] >= TELEGRAM_THRESHOLD]
-            if hot:
+            if hot and telegram_events._standalone_telegram_allowed(triggered_by):
                 await telegram_events.dispatch_pharma_alerts(hot, triggered_by=triggered_by)
         except Exception as e:
             logger.warning("Pharma telegram dispatch failed: %s", e)
@@ -1702,8 +1704,8 @@ async def run_catalyst_shock_scan(
     hot = [r for r in candidates if (r.get("shock_score") or 0) >= CATALYST_SHOCK_THRESHOLD]
     if notify:
         try:
-            if hot:
-                from . import telegram_events
+            from . import telegram_events
+            if hot and telegram_events._standalone_telegram_allowed(triggered_by):
                 await telegram_events.dispatch_pharma_shock_alerts(hot, triggered_by=triggered_by)
         except Exception as exc:
             logger.warning("Pharma shock telegram dispatch failed: %s", exc)

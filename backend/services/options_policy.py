@@ -55,3 +55,12 @@ def paper_scout_allowed() -> bool:
         and os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").strip().lower()
         in {"1", "true", "yes", "on"}
     )
+
+
+def execution_data_allowed(data: dict | None) -> bool:
+    """Only provider-labelled Alpaca snapshots may reach order selection."""
+    if not isinstance(data, dict) or data.get("execution_eligible") is False:
+        return False
+    provider = str(data.get("data_provider") or "").upper()
+    quality = str(data.get("data_quality") or "").upper()
+    return provider.startswith("ALPACA") and quality in {"INDICATIVE", "EXECUTION_GRADE"}

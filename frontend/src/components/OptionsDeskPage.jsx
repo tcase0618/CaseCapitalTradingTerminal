@@ -28,6 +28,7 @@ export default function OptionsDeskPage() {
   const [lseContext, setLseContext] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [loadWarning, setLoadWarning] = useState("");
 
   const load = useCallback(async () => {
     const [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet, tailSet, expectancySet] = await Promise.all([
@@ -50,6 +51,9 @@ export default function OptionsDeskPage() {
     setLeaps(leapsSet.data);
     setTail(tailSet.data);
     setExpectancy(expectancySet.data);
+    const failed = [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet, tailSet, expectancySet]
+      .filter(result => result?.data?.error || result?.data == null).length;
+    setLoadWarning(failed ? `${failed} OPTIONS DATA REQUEST(S) FAILED - VALUES MAY BE INCOMPLETE` : "");
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -114,6 +118,8 @@ export default function OptionsDeskPage() {
       setCandidates(r.data);
       setSelected(((r.data.candidates || []).filter(row => row.route !== "EQUITY"))[0] || null);
       setMessage("OPTIONS CANDIDATES REFRESHED");
+    } catch (err) {
+      setMessage(`OPTIONS REFRESH FAILED: ${err?.response?.data?.detail || err?.message || "UNKNOWN ERROR"}`);
     } finally {
       setBusy(false);
     }
@@ -235,6 +241,10 @@ export default function OptionsDeskPage() {
       />
 
       {message && <div style={messageBox}>{message}</div>}
+      {loadWarning && <div style={{ ...messageBox, borderColor: "#f87171", color: "#f87171" }}>{loadWarning}</div>}
+      {candidates?.scan_finished_at && <div style={{ ...dataPolicyBox, color: new Date(candidates.scan_finished_at).getTime() < Date.now() - 15 * 60 * 1000 ? "#f87171" : muted }}>
+        SOURCE SCAN: {new Date(candidates.scan_finished_at).toLocaleString()} | {new Date(candidates.scan_finished_at).getTime() < Date.now() - 15 * 60 * 1000 ? "STALE - REFRESH REQUIRED" : "CURRENT"}
+      </div>}
 
       {activeView === "LEAPS" ? (
         <LeapsSleeve data={leaps} onRefresh={async () => {

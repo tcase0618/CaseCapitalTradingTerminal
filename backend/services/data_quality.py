@@ -261,10 +261,12 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
                 note = "using cached integration status; force QC refresh to re-probe optional providers"
                 if note not in row["warnings"]:
                     row["warnings"].append(note)
+                # Cached critical failures remain critical. A cache is a
+                # display fallback, never evidence that the source recovered.
                 if row.get("critical"):
-                    row["critical"] = False
-                    row["blocks_trading"] = False
-                    row["execution_scopes"] = []
+                    row["blocks_trading"] = True
+                    row["execution_scopes"] = row.get("execution_scopes") or ["equity", "options"]
+                    row["status"] = "STALE"
                 cached_rows.append(row)
             return [_demote_support_feed_blocks(row) for row in cached_rows]
 

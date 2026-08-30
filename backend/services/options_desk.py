@@ -917,7 +917,10 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         or scanner_family == "OPTIONS"
         or str(pm_row.get("preferred_route") or "").upper() == "OPTION"
     )
-    if opts.get("strategy") == "AVOID_OPTIONS" or pm_row.get("option_view") == "STOCK_ONLY":
+    # An options-family scanner remains an options PM candidate even when the
+    # contract builder has no valid contract yet. Otherwise the desk silently
+    # relabels a data failure as an equity decision and hides the blocker.
+    if (opts.get("strategy") == "AVOID_OPTIONS" and not options_intent) or pm_row.get("option_view") == "STOCK_ONLY":
         return "EQUITY", ["Options engine says avoid options or hold stock instead."]
     iv_rank = float(opts.get("iv_rank") or 50)
     rr = float(pm_row.get("risk_reward") or 0)

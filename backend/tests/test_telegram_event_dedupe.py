@@ -75,7 +75,9 @@ async def test_single_consolidated_policy_suppresses_non_scan_outbound(monkeypat
     monkeypatch.setenv("TELEGRAM_SINGLE_CONSOLIDATED_SCAN_ONLY", "true")
     monkeypatch.setattr(telegram_service, "_has_token", lambda: True)
     monkeypatch.setattr(telegram_service, "_default_chat_id", lambda: "chat")
-    monkeypatch.setattr(telegram_service, "log_activity", lambda *args, **kwargs: calls.append(args))
+    async def record_activity(*args, **kwargs):
+        calls.append(args)
+    monkeypatch.setattr(telegram_service, "log_activity", record_activity)
 
     sent = await telegram_service.send_message("<b>CASE CAPITAL | PHARMA CATALYST SHOCK</b>\nMRNA")
 
@@ -85,6 +87,12 @@ async def test_single_consolidated_policy_suppresses_non_scan_outbound(monkeypat
 
 def test_single_consolidated_policy_identifies_scan_report():
     assert telegram_service._outbound_kind("<b>CASE CAPITAL | SCAN REPORT</b>\nSCAN") == "scan_report"
+
+
+def test_scheduled_standalone_pharma_alerts_are_always_suppressed(monkeypatch):
+    monkeypatch.setattr(telegram_events, "STANDALONE_PHARMA_ALERTS_ENABLED", True)
+    assert telegram_events._standalone_telegram_allowed("scheduler_pharma_shock") is False
+    assert telegram_events._standalone_telegram_allowed("manual") is True
 
 
 class _UpdateResult:

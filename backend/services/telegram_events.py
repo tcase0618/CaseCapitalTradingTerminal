@@ -36,6 +36,11 @@ def _scheduled_standalone_alert_suppressed(triggered_by: Any) -> bool:
     return trigger.startswith(("scheduler", "full_terminal", "launch_control_full_terminal"))
 
 
+def _standalone_telegram_allowed(triggered_by: Any) -> bool:
+    """Standalone alerts are opt-in and never emitted by scheduled scans."""
+    return STANDALONE_PHARMA_ALERTS_ENABLED and not _scheduled_standalone_alert_suppressed(triggered_by)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
