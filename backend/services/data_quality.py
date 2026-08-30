@@ -90,6 +90,7 @@ def _cached_integration_row(row: dict[str, Any]) -> dict[str, Any]:
     if item.get("critical"):
         status, _ = _status_from_age(age, 30)
         item["status"] = status
+        item["score"] = _score_row(status, True, len(item.get("warnings") or []))
         item["blocks_trading"] = status in {"STALE", "MISSING", "DOWN"}
         item["execution_scopes"] = ["equity", "options"] if item["blocks_trading"] else []
     return item
@@ -294,12 +295,48 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
         integrations = await asyncio.wait_for(integration_svc.integration_status(), timeout=12.0)
     except Exception as exc:
         cached = await db.bot_state.find_one({"_id": "data_quality_integrations_cache"}, {"_id": 0}) or {}
-        if cached.get("rows"):
-            cached_rows = cached.get("rows") or []
-            for row in cached_rows:
-                row.setdefault("warnings", [])
-                row["warnings"] = list(row.get("warnings") or []) + [f"integration probe timed out; using cached QC rows: {str(exc)[:120]}"]
-            return [_demote_support_feed_blocks(row) for row in cached_rows]
+        cached_rows = [_cached_integration_row(row) for row in (cached.get("rows") or [])]
+        # The aggregate probe includes slow optional providers. If it times out,
+        # probe the execution authority independently instead of trusting an
+        # old cached Alpaca timestamp.
+        critical_rows: list[dict[str, Any]] = []
+        try:
+            from . import trade_floor, pricer
+
+            account = await asyncio.wait_for(trade_floor.get_account(), timeout=8.0)
+            critical_rows.append(_qc_row(
+                "integration:alpaca",
+                "Alpaca Paper Trading",
+                "LIVE" if account else "DOWN",
+                critical=True,
+                source="alpaca",
+                fetched_at=_now_iso() if account else None,
+                age_minutes=0 if account else None,
+                detail={"equity": account.get("equity"), "cash": account.get("cash")} if account else "account probe failed",
+                blocks_trading=not bool(account),
+                execution_scopes=["equity", "options"] if not account else [],
+                warnings=[f"aggregate integration probe timed out; critical Alpaca probe completed independently: {str(exc)[:80]}"],
+            ))
+            critical_rows.append(_qc_row(
+                "integration:price_path",
+                "Configured Price Path",
+                "LIVE",
+                critical=True,
+                source="price_path",
+                fetched_at=_now_iso(),
+                age_minutes=0,
+                detail=pricer.source_label(),
+            ))
+        except Exception as critical_exc:
+            critical_rows = []
+            logger.warning("independent Alpaca critical probe failed after integration timeout: %s", critical_exc)
+        critical_keys = {row["key"] for row in critical_rows}
+        for row in cached_rows:
+            row.setdefault("warnings", [])
+            row["warnings"] = list(row.get("warnings") or []) + [f"integration probe timed out; using cached QC rows: {str(exc)[:120]}"]
+        remaining = [row for row in cached_rows if row.get("key") not in critical_keys]
+        if critical_rows or remaining:
+            return [_demote_support_feed_blocks(row) for row in critical_rows + remaining]
         return [_qc_row(
             "integrations",
             "Integration Probe",
