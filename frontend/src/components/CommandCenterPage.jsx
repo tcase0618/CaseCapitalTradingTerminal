@@ -320,6 +320,9 @@ export default function CommandCenterPage() {
         </button>
       }>
       {loadWarning && <div style={{ marginBottom: 12, padding: "10px 14px", border: "1px solid #f87171", color: "#f87171", background: "rgba(248,113,113,0.08)", fontSize: 11, letterSpacing: "0.08em" }}>{loadWarning}</div>}
+      {qualityOverview?.ok === false && <div style={{ marginBottom: 12, padding: "10px 14px", border: "1px solid #fbbf24", color: "#fbbf24", background: "rgba(251,191,36,0.08)", fontSize: 11, letterSpacing: "0.08em" }}>
+        DATA READINESS: {qualityOverview?.trading_gate?.decision || "CHECK"} {qualityOverview?.trading_gate?.reason ? `| ${qualityOverview.trading_gate.reason}` : "| inspect QUALITY for source-level detail"}
+      </div>}
       <DataConfidenceStrip
         title="TERMINAL READINESS"
         items={[

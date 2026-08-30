@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Request
@@ -2384,12 +2385,18 @@ async def on_startup():
     else:
         logger.warning("Scheduler disabled by ENABLE_SCHEDULER")
     base = os.environ.get("PUBLIC_BASE_URL")
-    if os.environ.get("TELEGRAM_BOT_TOKEN") and base:
+    webhook_enabled = os.environ.get("TELEGRAM_WEBHOOK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    is_https = bool(base and urlparse(base).scheme.lower() == "https")
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and base and webhook_enabled and is_https:
         try:
             res = await telegram_service.register_webhook(base)
             logger.info("Telegram webhook setup: %s", res)
         except Exception as e:
             logger.warning("Webhook setup failed: %s", e)
+    elif os.environ.get("TELEGRAM_BOT_TOKEN") and base and webhook_enabled and not is_https:
+        logger.info("Telegram webhook skipped: PUBLIC_BASE_URL is not HTTPS; outbound Telegram remains available")
+    elif os.environ.get("TELEGRAM_BOT_TOKEN") and not webhook_enabled:
+        logger.info("Telegram webhook disabled by TELEGRAM_WEBHOOK_ENABLED")
     try:
         if db_ready:
             await log_activity("Server started", "info")

@@ -76,6 +76,25 @@ def _status_from_age(age: float | None, max_age: float) -> tuple[str, bool]:
     return "DOWN", False
 
 
+def _cached_integration_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Recalculate cached integration age from source evidence, not cache age.
+
+    A recent QC cache only proves that QC ran recently. It does not prove that
+    the provider answered recently. Keeping those timestamps separate prevents
+    a stale Alpaca probe from being displayed as LIVE after a cache refresh.
+    """
+    item = dict(row)
+    evidence_at = item.get("fetched_at") or item.get("last") or item.get("checked_at")
+    age = _age_minutes(evidence_at)
+    item["age_minutes"] = round(age, 2) if age is not None else None
+    if item.get("critical"):
+        status, _ = _status_from_age(age, 30)
+        item["status"] = status
+        item["blocks_trading"] = status in {"STALE", "MISSING", "DOWN"}
+        item["execution_scopes"] = ["equity", "options"] if item["blocks_trading"] else []
+    return item
+
+
 def _score_row(status: str, critical: bool, warnings: int = 0) -> int:
     base = {
         "LIVE": 100,
@@ -252,11 +271,11 @@ async def _integration_rows(force_probe: bool = False) -> list[dict[str, Any]]:
         cached = await db.bot_state.find_one({"_id": "data_quality_integrations_cache"}, {"_id": 0}) or {}
         cache_age = _age_minutes(cached.get("generated_at"))
         if cached.get("rows") and cache_age is not None and cache_age * 60.0 <= INTEGRATION_CACHE_TTL_SECONDS:
-            return [_demote_support_feed_blocks(row) for row in (cached.get("rows") or [])]
+            return [_demote_support_feed_blocks(_cached_integration_row(row)) for row in (cached.get("rows") or [])]
         if cached.get("rows"):
             cached_rows = []
             for row in cached.get("rows") or []:
-                row = dict(row)
+                row = _cached_integration_row(row)
                 row["warnings"] = list(row.get("warnings") or [])
                 note = "using cached integration status; force QC refresh to re-probe optional providers"
                 if note not in row["warnings"]:
