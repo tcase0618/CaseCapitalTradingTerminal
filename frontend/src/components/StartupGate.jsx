@@ -16,6 +16,11 @@ import startupLogo from "../assets/case-capital-startup-logo.png";
 
 const AUTH_KEY = "case_capital_terminal_auth_v1";
 const SESSION_KEY = "case_capital_terminal_session_v1";
+// Preview-only unlocks. Keep the raw codes out of the shipped bundle.
+const PREVIEW_CODE_HASHES = new Set([
+  "5ca4f03a02ff51515ab63f01d5c18414b50283687bcb21113d555b92b966f012", // 6969
+  "93fbd43880b3b55ef0ef2580668fcb1fcaf0d541aac855f2e1449f933659f5f", // 0209
+]);
 
 const accent = "#c8a84b";
 const accent2 = "#5eead4";
@@ -150,8 +155,15 @@ export default function StartupGate({ children }) {
     event.preventDefault();
     setError("");
     const normalizedCode = code.trim();
+    const attemptedHash = await hashCode(normalizedCode);
+
+    if (PREVIEW_CODE_HASHES.has(attemptedHash)) {
+      await enterPreview();
+      return;
+    }
+
     if (normalizedCode.length < 6) {
-      setError("Access code must be at least 6 characters.");
+      setError("Access code must be at least 6 characters, or use a preview code.");
       return;
     }
 
