@@ -43,10 +43,14 @@ OPERATOR_TOKEN_VERSION = "cc1"
 PREVIEW_ATTEMPTS: dict[str, list[float]] = {}
 PREVIEW_MAX_ATTEMPTS = 8
 PREVIEW_WINDOW_SECONDS = 300
+AUTH_ATTEMPTS: dict[str, list[float]] = {}
+AUTH_MAX_ATTEMPTS = 8
+AUTH_WINDOW_SECONDS = 300
 AUTH_EXEMPT_PATHS = {
     "/api/auth/config",
     "/api/auth/login",
     "/api/auth/preview",
+    "/api/status",
     "/api/telegram/webhook",
 }
 PREVIEW_CODE_HASHES = {
@@ -141,11 +145,29 @@ def _authorized_request(request: Request) -> bool:
     return bool(token and (token in OPERATOR_SESSIONS or _valid_signed_operator_token(token)))
 
 
+def _auth_required() -> bool:
+    return _cloud_mode() or _operator_configured()
+
+
+def _client_key(request: Request) -> str:
+    return str(getattr(request.client, "host", None) or "unknown")[:128]
+
+
+def _allow_auth_attempt(key: str) -> bool:
+    now = time.monotonic()
+    attempts = [stamp for stamp in AUTH_ATTEMPTS.get(key, []) if now - stamp < AUTH_WINDOW_SECONDS]
+    if len(attempts) >= AUTH_MAX_ATTEMPTS:
+        AUTH_ATTEMPTS[key] = attempts
+        return False
+    attempts.append(now)
+    AUTH_ATTEMPTS[key] = attempts
+    return True
+
+
 @app.middleware("http")
 async def cloud_operator_write_gate(request: Request, call_next):
     if (
-        _cloud_mode()
-        and request.method.upper() in MUTATING_METHODS
+        _auth_required()
         and request.url.path not in AUTH_EXEMPT_PATHS
         and not _authorized_request(request)
     ):
@@ -198,7 +220,9 @@ async def postgres_status():
 
 
 @api.post("/auth/login")
-async def auth_login(payload: AuthLoginRequest):
+async def auth_login(request: Request, payload: AuthLoginRequest):
+    if not _allow_auth_attempt(_client_key(request)):
+        raise HTTPException(status_code=429, detail="Too many access attempts. Try again later.")
     code = (payload.code or "").strip()
     if not code:
         raise HTTPException(status_code=400, detail="Access code required.")
@@ -219,10 +243,10 @@ async def auth_login(payload: AuthLoginRequest):
 
 
 @api.post("/auth/preview")
-async def auth_preview(payload: AuthPreviewRequest | None = None):
+async def auth_preview(payload: AuthPreviewRequest | None = None, request: Request = None):
     if not _preview_enabled():
         raise HTTPException(status_code=404, detail="Preview mode is disabled.")
-    client_key = "preview-global"
+    client_key = _client_key(request) if request is not None else "direct"
     now = time.monotonic()
     attempts = [stamp for stamp in PREVIEW_ATTEMPTS.get(client_key, []) if now - stamp < PREVIEW_WINDOW_SECONDS]
     if len(attempts) >= PREVIEW_MAX_ATTEMPTS:
@@ -2016,6 +2040,83 @@ async def scan_history(limit: int = 10):
         "finished_at", -1
     ).to_list(limit)
     return items
+
+
+@api.get("/scan/replay_calendar")
+async def scan_replay_calendar(days: int = 90):
+    """Replayable daily scan calendar sourced only from persisted snapshots."""
+    db = get_db()
+    days = max(7, min(int(days or 90), 366))
+    et = ZoneInfo("America/New_York")
+    cutoff = datetime.now(et).date() - timedelta(days=days - 1)
+    rows = await db.scan_results.find(
+        {"finished_at": {"$exists": True}},
+        {"_id": 0, "finished_at": 1, "triggered_by": 1, "universe_size": 1, "pre_filter_passed": 1, "results": 1, "scan_signature": 1},
+    ).sort("finished_at", 1).to_list(5000)
+
+    seen_before: set[str] = set()
+    by_day: dict[str, dict[str, Any]] = {}
+    for snapshot in rows:
+        raw_ts = snapshot.get("finished_at")
+        try:
+            dt = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            day = dt.astimezone(et).date()
+        except Exception:
+            continue
+        tickers = {
+            str(row.get("ticker") or row.get("symbol") or "").replace("$", "").upper()
+            for row in (snapshot.get("results") or [])
+            if str(row.get("ticker") or row.get("symbol") or "").strip()
+        }
+        if day < cutoff:
+            seen_before.update(tickers)
+            continue
+        key = day.isoformat()
+        bucket = by_day.setdefault(key, {
+            "date": key, "scan_count": 0, "universe_size": 0,
+            "passed_tickers": set(), "new_tickers": set(),
+            "triggers": [], "snapshots": [],
+        })
+        fresh = tickers - seen_before
+        bucket["scan_count"] += 1
+        bucket["universe_size"] = max(bucket["universe_size"], int(snapshot.get("universe_size") or 0))
+        bucket["passed_tickers"].update(tickers)
+        bucket["new_tickers"].update(fresh)
+        if snapshot.get("triggered_by"):
+            bucket["triggers"].append(snapshot.get("triggered_by"))
+        bucket["snapshots"].append({
+            "finished_at": raw_ts,
+            "triggered_by": snapshot.get("triggered_by"),
+            "passed": len(tickers),
+            "universe_size": int(snapshot.get("universe_size") or 0),
+            "pre_filter_passed": int(snapshot.get("pre_filter_passed") or 0),
+            "scan_signature": snapshot.get("scan_signature"),
+        })
+        seen_before.update(tickers)
+
+    days_payload = []
+    for key in sorted(by_day):
+        bucket = by_day[key]
+        days_payload.append({
+            "date": key,
+            "scan_count": bucket["scan_count"],
+            "universe_size": bucket["universe_size"],
+            "passed_tickers": len(bucket["passed_tickers"]),
+            "new_tickers": len(bucket["new_tickers"]),
+            "new_ticker_list": sorted(bucket["new_tickers"])[:50],
+            "triggers": sorted(set(bucket["triggers"])),
+            "snapshots": bucket["snapshots"],
+        })
+    return {
+        "ok": True,
+        "source": "persisted_scan_results",
+        "days": days,
+        "date_start": cutoff.isoformat(),
+        "date_end": datetime.now(et).date().isoformat(),
+        "calendar": days_payload,
+    }
 
 
 @api.get("/activity")

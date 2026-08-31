@@ -141,6 +141,7 @@ export default function Dashboard() {
   const [fyStatus, setFyStatus] = useState({ fy_multiplier_active: false, days_to_fy_end: 0 });
   const [preview, setPreview] = useState(null);
   const [scanTabs, setScanTabs] = useState(null);
+  const [replayCalendar, setReplayCalendar] = useState(null);
   const [scannerView, setScannerView] = useState("core");
   const [kronosCard, setKronosCard] = useState(null);
   const [kronosLoading, setKronosLoading] = useState(false);
@@ -172,6 +173,7 @@ export default function Dashboard() {
     axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
     axios.get(`${API}/scan/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
     axios.get(`${API}/scan/tabs`).then(r => setScanTabs(r.data)).catch(e => console.error("scan-tabs:", e));
+    axios.get(`${API}/scan/replay_calendar?days=90`).then(r => setReplayCalendar(r.data)).catch(e => console.error("replay-calendar:", e));
   }, []);
 
   useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
@@ -383,7 +385,7 @@ export default function Dashboard() {
             <span style={{ fontSize: 8, color: dim, letterSpacing: "0.14em" }}>ACTIVE INTELLIGENCE</span>
             <div style={{ flex: 1, height: 1, margin: "0 16px", background: "rgba(200,168,75,0.15)" }} />
             <span style={{ fontSize: 8, color: accent, letterSpacing: "0.1em" }}>
-              {scannerView === "core" ? `SHOWING ${results.length} OF ${scan?.pre_filter_passed || 0} TARGETS` : `${scannerTabCounts[scannerView] || 0} ${scannerView.toUpperCase()} ROWS`}
+              {scannerView === "calendar" ? "PERSISTED SNAPSHOT REPLAY" : scannerView === "core" ? `SHOWING ${results.length} OF ${scan?.pre_filter_passed || 0} TARGETS` : `${scannerTabCounts[scannerView] || 0} ${scannerView.toUpperCase()} ROWS`}
             </span>
             <button data-testid="run-scan-button" onClick={runScan} disabled={scanning}
               style={{
@@ -410,7 +412,9 @@ export default function Dashboard() {
             stat={scannerNewStats[scannerView] || { count: 0, tickers: [], total: scannerTabCounts[scannerView] || 0 }}
           />
 
-          {scannerView !== "core" && (
+          {scannerView === "calendar" && <ScannerSnapshotCalendar data={replayCalendar} />}
+
+          {scannerView !== "core" && scannerView !== "calendar" && (
             <ScannerSubtabPanel
               view={scannerView}
               rows={scannerTabRows[scannerView] || []}
@@ -768,6 +772,67 @@ function ScannerNewStockGraphic({ view, stat }) {
   );
 }
 
+function ScannerSnapshotCalendar({ data }) {
+  const days = data?.calendar || [];
+  const byDate = Object.fromEntries(days.map(day => [day.date, day]));
+  const end = data?.date_end ? new Date(`${data.date_end}T12:00:00`) : new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - 41);
+  const cells = [];
+  const cursor = new Date(start);
+  cursor.setDate(cursor.getDate() - cursor.getDay());
+  while (cursor <= end || cells.length % 7) {
+    const date = cursor.toISOString().slice(0, 10);
+    cells.push({ date, day: byDate[date] });
+    cursor.setDate(cursor.getDate() + 1);
+    if (cells.length > 70) break;
+  }
+  return (
+    <div style={{ padding: "18px 20px", borderBottom: hairline, background: cardBg }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div style={{ color: accent, fontSize: 11, letterSpacing: "0.14em", fontWeight: 700 }}>REPLAYABLE SCAN SNAPSHOTS</div>
+          <div style={{ color: muted, fontSize: 9, marginTop: 5 }}>PERSISTED SCANS · DAILY UNIQUE COUNTS · NO LIVE REFRESH</div>
+        </div>
+        <div style={{ color: muted, fontSize: 9 }}>{data?.date_start || "—"} → {data?.date_end || "—"}</div>
+      </div>
+      {!data ? <div style={{ color: muted, padding: 24, textAlign: "center" }}>LOADING SNAPSHOT CALENDAR...</div> : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 9, letterSpacing: "0.08em", marginBottom: 6 }}>
+            {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map(day => <span key={day}>{day}</span>)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 }}>
+            {cells.map(cell => {
+              const day = cell.day;
+              const active = Boolean(day);
+              const color = day?.new_tickers ? "#5eead4" : day?.scan_count ? accent : dim;
+              return (
+                <div key={cell.date} title={day ? `${day.date}: ${day.scan_count} scans, ${day.universe_size} swept, ${day.new_tickers} new` : cell.date} style={{
+                  minHeight: 82, padding: 7, border: `0.5px solid ${active ? `${color}55` : "rgba(255,255,255,0.04)"}`,
+                  background: active ? `linear-gradient(145deg, ${color}12, transparent)` : "transparent", opacity: active ? 1 : 0.5,
+                }}>
+                  <div style={{ color: active ? labelLight : dim, fontSize: 9, textAlign: "right" }}>{cell.date.slice(8)}</div>
+                  {day && <div style={{ display: "grid", gap: 4, marginTop: 8, textAlign: "center" }}>
+                    <strong style={{ color, fontSize: 16 }}>{day.new_tickers}</strong>
+                    <small style={{ color: muted, fontSize: 8 }}>NEW</small>
+                    <small style={{ color: labelLight, fontSize: 8 }}>{day.universe_size.toLocaleString()} SWEPT</small>
+                    <small style={{ color: muted, fontSize: 8 }}>{day.scan_count} SCAN{day.scan_count === 1 ? "" : "S"}</small>
+                  </div>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 12, color: muted, fontSize: 9, letterSpacing: "0.08em" }}>
+            <span>DAY TOTALS ARE UNIQUE WITHIN EACH DATE</span>
+            <span>FOUND = PASSED SCAN RESULTS</span>
+            <span>NEW = FIRST APPEARANCE IN STORED HISTORY</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ScannerSubTabs({ active, onChange, counts, ledgerSummary }) {
   const tabs = [
     ["core", "Core"],
@@ -777,6 +842,7 @@ function ScannerSubTabs({ active, onChange, counts, ledgerSummary }) {
     ["pharma", "Pharma"],
     ["earnings", "Earnings"],
     ["court", "Case Court"],
+    ["calendar", "Scan Calendar"],
   ];
   return (
     <div style={scannerTabsWrap}>
