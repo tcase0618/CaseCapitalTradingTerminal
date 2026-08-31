@@ -78,6 +78,46 @@ async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
+
+
+async def _revalidate_stale_execution_authority(
+    truth: dict[str, Any],
+    scope: str,
+    scoped_blockers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recheck the two execution-critical providers when QC is stale.
+
+    A recently-run QC cache is not provider evidence. Previously, an old
+    cached Alpaca/price-path row could block an otherwise healthy paper
+    account for days. The order path now performs a bounded live recheck and
+    removes only those two blockers when both authorities answer cleanly.
+    Options still require their own valid contract checks in options_desk.
+    """
+    if scope not in {"equity", "options"}:
+        return scoped_blockers
+    critical = {"integration:alpaca", "integration:price_path"}
+    if not any((row.get("key") or row.get("label")) in critical for row in scoped_blockers):
+        return scoped_blockers
+    try:
+        from . import pricer, trade_floor
+
+        account = await asyncio.wait_for(trade_floor.get_account(), timeout=6.0)
+        price_source = pricer.source_label()
+        if not account or not str(price_source).lower().startswith("alpaca"):
+            return scoped_blockers
+        truth["execution_authority_revalidated_at"] = _now()
+        truth["execution_authority_revalidation"] = {
+            "alpaca_account": True,
+            "price_path": price_source,
+            "scope": scope,
+        }
+        return [
+            row for row in scoped_blockers
+            if (row.get("key") or row.get("label")) not in critical
+        ]
+    except Exception as exc:
+        truth["execution_authority_revalidation_error"] = exc.__class__.__name__
+        return scoped_blockers
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
@@ -157,6 +197,7 @@ async def check(
         scoped_blockers = scoped_qc.get(scope, [])
     else:
         scoped_blockers = scoped_qc.get("system", [])
+    scoped_blockers = await _revalidate_stale_execution_authority(truth, scope, scoped_blockers)
     for row in scoped_blockers:
         key = row.get("key") or row.get("label") or "quality"
         blockers.append(f"qc:{key}")

@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from .db import log_activity
+from .db import get_db, log_activity
 
 _FULL_SCAN_LOCK = asyncio.Lock()
 
@@ -73,6 +73,23 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         row for row in strategy_payload.get("candidates") or []
         if row.get("pm_routable") and not row.get("read_only")
     ]
+    lottery_strategy_rows = [
+        row for row in strategy_payload.get("candidates") or []
+        if str((row.get("strategy_scanner") or {}).get("family") or "").upper() == "LOTTERY"
+    ]
+    lottery_tickers = {
+        str(row.get("ticker") or "").upper()
+        for row in lottery_strategy_rows
+        if row.get("ticker")
+    }
+    lottery_summary = {
+        "raw_candidates": len(lottery_result.get("candidates") or []),
+        "qualified_rows": len(lottery_strategy_rows),
+        "qualified_tickers": len(lottery_tickers),
+        "pm_actions": {},
+        "pm_approved": 0,
+        "execution_note": "PM-approved lottery rows still require live execution gates and broker checks",
+    }
     scan["lottery_result"] = lottery_result
     scan["pharma_result"] = pharma_result
     scan["pharma_shock_result"] = pharma_shock_result
@@ -91,6 +108,14 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             lottery_result=lottery_result,
         ),
     )
+    for pm in pm_payload.get("recommendations") or []:
+        ticker = str(pm.get("ticker") or "").upper()
+        if ticker not in lottery_tickers:
+            continue
+        action = str(pm.get("action") or "MISSING").upper()
+        lottery_summary["pm_actions"][action] = lottery_summary["pm_actions"].get(action, 0) + 1
+        if action in {"ACCUMULATE", "STARTER"}:
+            lottery_summary["pm_approved"] += 1
     # The Options Desk consumes this cycle's authoritative PM recommendations.
     # It selects and validates contracts, but must not recompute PM routing.
     options_payload = await timed(
@@ -104,6 +129,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     )
     scan["options_payload"] = options_payload
     scan["pm_payload"] = pm_payload
+    scan["lottery_summary"] = lottery_summary
 
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
     if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
@@ -147,6 +173,28 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         from . import telegram_events
         scan["telegram_report_variant"] = "full_terminal"
         telegram_result = await timed("telegram_dispatch", telegram_events.dispatch_scan_report(scan))
+
+    # scanner.run_scan persists its core document before the specialist/PM
+    # stages exist. Update that same document so the latest scan is a complete,
+    # replayable decision record rather than a misleading core-only snapshot.
+    try:
+        await get_db().scan_results.update_one(
+            {"finished_at": scan.get("finished_at")},
+            {"$set": {
+                "full_cycle_finished_at": _now().isoformat(),
+                "strategy_payload": strategy_payload,
+                "lottery_result": lottery_result,
+                "lottery_summary": lottery_summary,
+                "pharma_result": pharma_result,
+                "pharma_shock_result": pharma_shock_result,
+                "options_payload": options_payload,
+                "pm_payload": pm_payload,
+                "execution_summary": scan.get("execution_summary"),
+                "telegram_report_variant": scan.get("telegram_report_variant"),
+            }},
+        )
+    except Exception as exc:
+        await log_activity(f"Full terminal cycle persistence failed: {exc.__class__.__name__}", "warning")
 
     finished = _now()
     duration = round((finished - started).total_seconds(), 2)
