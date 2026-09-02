@@ -292,7 +292,7 @@ async def status():
     alerts_count = 0
     try:
         db = get_db()
-        today_iso_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_iso_prefix = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
         state = await db.bot_state.find_one({"_id": "state"}, {"_id": 0}) or {}
         cache_today = await db.claude_cache.count_documents({"date_key": today_iso_prefix})
         last_scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
@@ -1148,6 +1148,13 @@ async def performance_summary():
         pnl_tracker.options_performance_summary(),
     )
     return {"signals": sig, "options": opt, "proof": proof}
+
+
+@api.get("/performance/audit")
+async def performance_audit():
+    """Read-only signal-to-order reconciliation; never calls a broker mutation."""
+    from services import performance_audit as audit
+    return await audit.overview()
 
 
 @api.get("/signals/curve")

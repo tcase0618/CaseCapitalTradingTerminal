@@ -13,16 +13,24 @@ import asyncio
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from .db import FEATURE_VERSION, get_db, log_activity, stamped
 from . import pricer
+from .market_dates import add_trading_days, trading_days_between
 
 logger = logging.getLogger(__name__)
 
 
 def _today_iso() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+    # Performance records are operator-facing and must use the terminal's ET
+    # trading date, not UTC (which rolls over during the US evening session).
+    return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+
+def _today_et():
+    return datetime.now(ZoneInfo("America/New_York")).date()
 
 
 def _now() -> datetime:
@@ -41,7 +49,8 @@ async def _fetch_close(ticker: str, days_ago: int = 0) -> float | None:
 # ============== Recording ==============
 async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
     """For every result in a scan, write a signal_performance row + (if options
-    play exists) an options_performance row. Idempotent on (ticker, date).
+    play exists) an options_performance row. Idempotent on (ticker, date,
+    screener_id).
     Also writes a `signal_first_seen` row ONCE per ticker — locks in the
     very first price + signal combo we surfaced, so the Performance page
     can show 'as if I bought on day-one of signal' P&L."""
@@ -54,6 +63,9 @@ async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
             continue
         entry_price = r.get("price")
         signals = r.get("signals", [])
+        scanner = r.get("strategy_scanner") or {}
+        screener_id = str(scanner.get("screener_id") or r.get("source_scan") or "CORE")
+        scanner_family = str(scanner.get("family") or r.get("scanner_family") or "CORE")
 
         # signal_first_seen — ONE row per ticker, INSERT-only (never updated).
         # First time we ever surfaced this ticker, with that day's price.
@@ -89,12 +101,15 @@ async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
              "$inc": {"times_found": 1}},
         )
 
-        # signal_performance: 1 row per (ticker, date) — feeds 7/30/90d returns
+        # signal_performance: one row per (ticker, date, screener). This keeps
+        # independent strategy evidence separate even when the ticker overlaps.
         await db.signal_performance.update_one(
-            {"ticker": ticker, "date": today},
+            {"ticker": ticker, "date": today, "screener_id": screener_id},
             {"$set": stamped({
                 "ticker": ticker,
                 "date": today,
+                "screener_id": screener_id,
+                "scanner_family": scanner_family,
                 "ts": _now().isoformat(),
                 "signals": signals,
                 "signal_score": r.get("signal_score", 0),
@@ -170,10 +185,12 @@ async def refresh_due_returns() -> dict[str, int]:
             row_date = datetime.fromisoformat(r["date"]).replace(tzinfo=timezone.utc)
         except Exception:
             continue
-        age_days = (now - row_date).days
+        today_et = _today_et()
+        row_calendar_date = row_date.date()
+        age_days = trading_days_between(row_calendar_date, today_et)
         entry = r.get("entry_price")
         if entry is None:
-            entry = await _fetch_close(r["ticker"], days_ago=age_days)
+            entry = await pricer.get_close_on_date(r["ticker"], row_calendar_date.isoformat())
             if entry:
                 await db.signal_performance.update_one(
                     {"ticker": r["ticker"], "date": r["date"]},
@@ -183,18 +200,21 @@ async def refresh_due_returns() -> dict[str, int]:
             continue
         updates: dict[str, Any] = {}
         if age_days >= 7 and r.get("return_7d") is None:
-            cur = await _fetch_close(r["ticker"], days_ago=max(0, age_days - 7))
-            if cur:
+            target = add_trading_days(row_calendar_date, 7)
+            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat())
+            if cur is not None:
                 updates["return_7d"] = round((cur - entry) / entry * 100.0, 2)
                 counters["r7"] += 1
         if age_days >= 30 and r.get("return_30d") is None:
-            cur = await _fetch_close(r["ticker"], days_ago=max(0, age_days - 30))
-            if cur:
+            target = add_trading_days(row_calendar_date, 30)
+            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat())
+            if cur is not None:
                 updates["return_30d"] = round((cur - entry) / entry * 100.0, 2)
                 counters["r30"] += 1
         if age_days >= 90 and r.get("return_90d") is None:
-            cur = await _fetch_close(r["ticker"], days_ago=max(0, age_days - 90))
-            if cur:
+            target = add_trading_days(row_calendar_date, 90)
+            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat())
+            if cur is not None:
                 updates["return_90d"] = round((cur - entry) / entry * 100.0, 2)
                 counters["r90"] += 1
         if updates:
@@ -286,11 +306,6 @@ async def refresh_due_options_returns() -> int:
                 updates["current_option_premium"] = round(cur_premium, 2)
 
         if updates:
-            await db.options_performance.update_one(
-                {"_id_lookup": True, "ticker": ticker, "date": r["date"], "expiration": r["expiration"]},
-                {"$set": updates},
-            )
-            # Re-run with the right filter (no _id_lookup field)
             await db.options_performance.update_one(
                 {"ticker": ticker, "date": r["date"], "expiration": r["expiration"]},
                 {"$set": updates},
@@ -507,7 +522,7 @@ async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
     rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
     if not rows:
         return []
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days + 5)
+    cutoff = _today_et() - timedelta(days=days + 5)
     rows = [r for r in rows if r.get("first_seen_price") and r.get("first_seen_date")
              and r.get("first_seen_date") >= cutoff.isoformat()]
     if not rows:
@@ -526,8 +541,8 @@ async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
 
     first_seen_map = {r["ticker"]: (r["first_seen_date"], r["first_seen_price"]) for r in rows}
     sorted_dates = sorted(closes_by_date.keys())
-    today = datetime.now(timezone.utc).date().isoformat()
-    floor = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    today = _today_iso()
+    floor = (_today_et() - timedelta(days=days)).isoformat()
     out: list[dict[str, Any]] = []
     for d in sorted_dates:
         if d < floor:
@@ -565,7 +580,7 @@ async def daily_options_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
     rows = await db.options_performance.find({}, {"_id": 0}).to_list(5000)
     if not rows:
         return []
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days + 5)
+    cutoff = _today_et() - timedelta(days=days + 5)
     rows = [r for r in rows
             if r.get("date") and r["date"] >= cutoff.isoformat()
             and r.get("entry_spot") and r.get("estimated_premium")
@@ -584,8 +599,8 @@ async def daily_options_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
             closes_by_date.setdefault(d, {})[t] = v
 
     sorted_dates = sorted(closes_by_date.keys())
-    today = datetime.now(timezone.utc).date().isoformat()
-    floor = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    today = _today_iso()
+    floor = (_today_et() - timedelta(days=days)).isoformat()
     out: list[dict[str, Any]] = []
     for d in sorted_dates:
         if d < floor:

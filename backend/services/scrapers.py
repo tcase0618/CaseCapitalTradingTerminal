@@ -25,6 +25,14 @@ def _safe_text(el) -> str:
     return el.get_text(strip=True) if el else ""
 
 
+def _soup(text: str) -> BeautifulSoup:
+    """Use lxml when installed, with stdlib parsing as a valid fallback."""
+    try:
+        return BeautifulSoup(text, "lxml")
+    except Exception:
+        return BeautifulSoup(text, "html.parser")
+
+
 def _finviz_anchor_ticker(a) -> str | None:
     href = a.get("href") or ""
     parsed = urlparse(href)
@@ -52,7 +60,7 @@ async def fetch_openinsider_cluster_buys(limit: int = 50) -> list[dict[str, Any]
         async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
             r = await client.get(url)
             r.raise_for_status()
-        soup = BeautifulSoup(r.text, "lxml")
+        soup = _soup(r.text)
         table = soup.find("table", class_="tinytable")
         if not table or not table.find("tbody"):
             return []
@@ -128,9 +136,11 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
+        headers = {**HEADERS, "Cache-Control": "no-cache, no-store", "Pragma": "no-cache"}
+        refresh = int(datetime.now(timezone.utc).timestamp() * 1000)
+        async with httpx.AsyncClient(headers=headers, timeout=TIMEOUT, follow_redirects=True) as client:
             for page_start in range(1, limit + 1, 20):
-                url = f"{base}&r={page_start}"
+                url = f"{base}&r={page_start}&cc_refresh={refresh}"
                 # 1 retry on transient failure
                 resp_text = None
                 for attempt in range(2):
@@ -144,7 +154,7 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                     await asyncio.sleep(0.4)
                 if not resp_text:
                     break
-                soup = BeautifulSoup(resp_text, "lxml")
+                soup = _soup(resp_text)
                 added = 0
                 for a in soup.find_all("a", href=True):
                     # Finviz now renders row links as stock?t=... and places
@@ -236,16 +246,17 @@ async def fetch_finviz_upcoming_earnings(days: str = "nextweek", limit: int = 30
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
+        headers = {**HEADERS, "Cache-Control": "no-cache, no-store", "Pragma": "no-cache"}
+        async with httpx.AsyncClient(headers=headers, timeout=TIMEOUT, follow_redirects=True) as client:
             for page_start in range(1, limit + 1, 20):
-                url = f"{base}&r={page_start}"
+                url = f"{base}&r={page_start}&cc_refresh={int(datetime.now(timezone.utc).timestamp() * 1000)}"
                 try:
                     r = await client.get(url)
                     if r.status_code != 200:
                         break
                 except Exception:
                     break
-                soup = BeautifulSoup(r.text, "lxml")
+                soup = _soup(r.text)
                 added = 0
                 for a in soup.find_all("a", href=True):
                     t = _finviz_anchor_ticker(a)
@@ -282,7 +293,7 @@ async def fetch_yahoo_upcoming_earnings(days_ahead: int = 14, limit: int = 500) 
                         break
                 except Exception:
                     break
-                soup = BeautifulSoup(r.text, "lxml")
+                soup = _soup(r.text)
                 table = None
                 for t in soup.find_all("table"):
                     headers = [th.get_text(strip=True).lower() for th in t.find_all("th")]
@@ -365,7 +376,7 @@ async def fetch_finviz_short_for_ticker(ticker: str) -> float | None:
             r = await client.get(url)
             if r.status_code != 200:
                 return None
-            soup = BeautifulSoup(r.text, "lxml")
+            soup = _soup(r.text)
             # Finviz quote page: snapshot table cells; "Short Float" appears
             # as a label in one td immediately followed by its value td.
             for td in soup.find_all("td"):
@@ -394,7 +405,7 @@ async def fetch_openinsider_for_ticker(ticker: str, days: int = 60) -> dict[str,
             r = await client.get(url)
             if r.status_code != 200:
                 return None
-            soup = BeautifulSoup(r.text, "lxml")
+            soup = _soup(r.text)
             table = soup.find("table", class_="tinytable")
             if not table:
                 return None

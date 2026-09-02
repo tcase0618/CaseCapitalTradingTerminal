@@ -94,7 +94,10 @@ async def _to_thread(fn, *a, **kw):
     return await loop.run_in_executor(None, lambda: fn(*a, **kw))
 
 
-def _option_expiration_target(catalyst_date: str | None = None) -> tuple[date, date]:
+def _option_expiration_target(catalyst_date: str | None = None, *, horizon: str = "tactical") -> tuple[date, date]:
+    if str(horizon).lower() in {"leaps", "long", "long_duration"}:
+        base = date.today()
+        return base + timedelta(days=365), base + timedelta(days=730)
     target_min, target_max = 14, 70
     if catalyst_date:
         try:
@@ -147,6 +150,7 @@ async def _fetch_alpaca_options_data(
     ticker: str,
     catalyst_date: str | None = None,
     spot_hint: float | None = None,
+    horizon: str = "tactical",
 ) -> dict[str, Any] | None:
     """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
     if not _alpaca_options_configured():
@@ -158,7 +162,7 @@ async def _fetch_alpaca_options_data(
         spot = _safe_float(spot_hint) or await _alpaca_stock_price(ticker)
         if not spot or spot <= 0:
             return None
-        target_lo, target_hi = _option_expiration_target(catalyst_date)
+        target_lo, target_hi = _option_expiration_target(catalyst_date, horizon=horizon)
         strike_lo = max(0.5, spot * 0.55)
         strike_hi = spot * 1.75
         params = {
@@ -275,10 +279,11 @@ async def get_options_data(
     ticker: str,
     catalyst_date: str | None = None,
     spot_hint: float | None = None,
+    horizon: str = "tactical",
 ) -> dict[str, Any] | None:
     """Returns chain dataframes + ATM IV + iv_rank, or None if fetch fails."""
     ticker = ticker.upper()
-    alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date, spot_hint=spot_hint)
+    alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
     if alpaca_chain:
         return alpaca_chain
     try:
@@ -880,7 +885,14 @@ async def analyze_ticker(stock: dict, budget: float = 300.0) -> dict | None:
             or _safe_float(stock.get("last"))
             or _safe_float(stock.get("spot"))
         )
-        chain = await get_options_data(ticker, catalyst, spot_hint=spot_hint)
+        lane = str(stock.get("strategy_lane") or stock.get("options_lane") or "").lower()
+        horizon = "leaps" if "leap" in lane or stock.get("leaps") else "tactical"
+        try:
+            chain = await get_options_data(ticker, catalyst, spot_hint=spot_hint, horizon=horizon)
+        except TypeError:
+            # Preserve compatibility with injected/test providers that still
+            # implement the older three-argument adapter contract.
+            chain = await get_options_data(ticker, catalyst, spot_hint=spot_hint)
         if not chain:
             return None
 

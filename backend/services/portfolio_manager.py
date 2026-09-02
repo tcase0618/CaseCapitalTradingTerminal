@@ -121,7 +121,7 @@ def _num(v: Any, default: float = 0.0) -> float:
 
 
 def _signals(row: dict[str, Any]) -> list[str]:
-    sigs = row.get("signals") or []
+    sigs = row.get("evidence_signals") or row.get("signals") or []
     if isinstance(sigs, dict):
         return sorted(str(k) for k, v in sigs.items() if v)
     return sorted(str(s) for s in sigs)

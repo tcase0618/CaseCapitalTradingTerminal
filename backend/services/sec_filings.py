@@ -48,6 +48,8 @@ EDGAR_RSS_FORM = (
     "&type={form}&company=&dateb=&owner=include&count={count}&output=atom"
 )
 
+FINANCING_FORMS = {"S-1", "S-3", "424B3", "424B5", "FWP"}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -194,6 +196,14 @@ def _explain_filing(filing: dict[str, Any]) -> dict[str, Any]:
             "expected_effect_pct": 2.5,
         }
     if form == "8-K":
+        items = {str(item).strip() for item in (filing.get("items") or filing.get("item_numbers") or [])}
+        if items and not items.intersection(EIGHTK_ITEMS):
+            return {
+                "summary": f"{company} filed an 8-K; surfaced item numbers were not in the material-event set.",
+                "bias": "NEUTRAL",
+                "tradability_pct": 15,
+                "expected_effect_pct": 0.0,
+            }
         return {
             "summary": (f"{company} filed an 8-K covering a material agreement, "
                         f"termination, or completed acquisition."),
@@ -202,6 +212,14 @@ def _explain_filing(filing: dict[str, Any]) -> dict[str, Any]:
             "expected_effect_pct": 3.0,
         }
     if form == "Form 4":
+        transaction_code = str(filing.get("transaction_code") or filing.get("transactionCode") or "").upper()
+        if transaction_code and transaction_code not in {"P", "A"}:
+            return {
+                "summary": f"{company} Form 4 reports transaction code {transaction_code}; it is not treated as a bullish purchase.",
+                "bias": "NEUTRAL",
+                "tradability_pct": 10,
+                "expected_effect_pct": 0.0,
+            }
         return {
             "summary": (f"Cluster of 2+ insider open-market purchases at "
                         f"{company} within 10 days — high-conviction signal."),
@@ -217,6 +235,13 @@ def _explain_filing(filing: dict[str, Any]) -> dict[str, Any]:
             "tradability_pct": 40,
             "expected_effect_pct": 2.0,
         }
+    if form in FINANCING_FORMS:
+        return {
+            "summary": f"{company} filed {form}, which may create financing or dilution risk; verify the filing terms.",
+            "bias": "BEARISH",
+            "tradability_pct": 20,
+            "expected_effect_pct": -5.0,
+        }
     return {"summary": "—", "bias": "NEUTRAL", "tradability_pct": 0, "expected_effect_pct": 0.0}
 
 
@@ -226,7 +251,7 @@ async def poll_edgar_filings() -> dict[str, Any]:
     significance, plain-language assessment, persist to MongoDB."""
     started = _now()
     cik_map = await _load_cik_map()
-    forms = ["SC 13D", "SC 13G", "8-K", "Form 4", "13F-HR"]
+    forms = ["SC 13D", "SC 13G", "8-K", "Form 4", "13F-HR", *sorted(FINANCING_FORMS)]
     raw_lists = await asyncio.gather(
         *[fetch_recent_filings(f, count=50) for f in forms],
         return_exceptions=True,

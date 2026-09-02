@@ -382,9 +382,41 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     }
 
 
-def _finviz_row_from_cells(cells: list[str], source: str) -> dict[str, Any] | None:
+def _header_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _finviz_row_from_cells(
+    cells: list[str], source: str, headers: list[str] | None = None,
+) -> dict[str, Any] | None:
     if len(cells) < 9:
         return None
+    if headers and len(headers) == len(cells):
+        indexed = {_header_key(header): index for index, header in enumerate(headers)}
+        ticker_idx = indexed.get("ticker")
+        if ticker_idx is not None:
+            def named(*names: str) -> str:
+                for name in names:
+                    index = indexed.get(_header_key(name))
+                    if index is not None and index < len(cells):
+                        return cells[index]
+                return ""
+
+            ticker = _clean_ticker(named("Ticker"))
+            if not ticker:
+                return None
+            return {
+                "ticker": ticker,
+                "company": named("Company") or ticker,
+                "sector": named("Sector") or "-",
+                "price": _num(named("Price"), 0) or None,
+                "change_pct": _pct(named("Change")),
+                "volume": _parse_volume(named("Volume")) or None,
+                "relative_volume": _num(named("Rel Volume", "Relative Volume"), 0) or None,
+                "source": source,
+                "signals": ["FINVIZ_UNIVERSE"],
+                "finviz_parse_mode": "header",
+            }
     ticker_idx = None
     for i, cell in enumerate(cells[:4]):
         text = str(cell or "").upper().strip()
@@ -431,13 +463,20 @@ def _finviz_row_from_cells(cells: list[str], source: str) -> dict[str, Any] | No
         "relative_volume": rel_vol,
         "source": source,
         "signals": ["FINVIZ_UNIVERSE"],
+        "finviz_parse_mode": "legacy_fallback",
     }
 
 
 async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[dict[str, Any]]:
+    # Finviz is an upstream HTML response, not our frontend shell.  Force a
+    # fresh response for every scan so a scheduler run cannot silently reuse a
+    # proxy/browser cache from an earlier cycle.
+    cache_buster = int(_now().timestamp() * 1000)
     headers = {
         "User-Agent": "Mozilla/5.0 CaseCapitalTerminal/1.0",
         "Accept": "text/html,application/xhtml+xml",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
     }
     try:
         from bs4 import BeautifulSoup
@@ -448,7 +487,7 @@ async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[
         async with httpx.AsyncClient(timeout=18.0, headers=headers, follow_redirects=True) as client:
             pages = []
             for page_start in range(1, limit + 1, 20):
-                page_url = f"{url}&r={page_start}"
+                page_url = f"{url}&r={page_start}&cc_refresh={cache_buster}"
                 response = await client.get(page_url)
                 if response.status_code != 200:
                     break
@@ -461,7 +500,10 @@ async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[
             soup = BeautifulSoup(html, "html.parser")
             for table_row in soup.select("table.screener_table tr, table#screener-table tr, tr.styled-row"):
                 cells = [cell.get_text(" ", strip=True) for cell in table_row.find_all("td")]
-                parsed = _finviz_row_from_cells(cells, source)
+                table = table_row.find_parent("table")
+                header_row = table.find("tr") if table else None
+                headers = [cell.get_text(" ", strip=True) for cell in header_row.find_all("th")] if header_row else None
+                parsed = _finviz_row_from_cells(cells, source, headers=headers)
                 if not parsed or parsed["ticker"] in seen:
                     continue
                 seen.add(parsed["ticker"])

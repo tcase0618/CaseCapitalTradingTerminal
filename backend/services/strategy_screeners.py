@@ -82,6 +82,28 @@ def _text_blob(row: dict[str, Any]) -> str:
     return " ".join(str(p or "") for p in parts).upper()
 
 
+def _thesis_target(row: dict[str, Any], family: str, lane: str, px: float) -> tuple[float, str | None]:
+    """Resolve targets from supplied structure, with a named fallback."""
+    supplied = _num(row.get("target_blended") or (row.get("targets") or {}).get("target_blended"), 0)
+    if supplied > px:
+        return round(supplied, 4), "source_thesis_target"
+    for key in ("measured_move_target", "prior_high", "entry_high", "target_high", "resistance"):
+        value = _num(row.get(key) or (row.get("targets") or {}).get(key), 0)
+        if value > px:
+            return round(value, 4), f"source_{key}"
+    # Preserve a bounded lane-specific proxy for paper/advisory routing while
+    # making the fallback explicit so it can be measured and retired.
+    uplift = {
+        "SUPERNOVA": 0.60, "SERIAL_RUNNER": 0.35, "CATALYST_RUNNER": 0.25,
+        "DAY2_CONTINUATION": 0.40, "RED_GREEN": 0.20,
+        "BREAKOUT_CALL": 0.20, "TACTICAL_MOMENTUM_CALL": 0.20,
+        "LEAPS_TREND": 0.25, "EVENT_DEFINED_RISK": 0.20,
+    }.get(str(lane).upper())
+    if px > 0 and uplift is not None and family in {"LOTTERY", "OPTIONS"}:
+        return round(px * (1 + uplift), 4), "thesis_lane_proxy_pending_validation"
+    return 0.0, None
+
+
 def _base_row(
     *,
     row: dict[str, Any],
@@ -98,33 +120,14 @@ def _base_row(
     ticker = _ticker(row.get("ticker") or row.get("underlying") or row.get("symbol"))
     px = _num(price if price is not None else row.get("price") or row.get("last") or row.get("current_price"), 0)
     score = max(0.0, min(100.0, float(score or 0)))
-    target = _num(row.get("target_blended") or (row.get("targets") or {}).get("target_blended"), 0)
-    if px > 0 and target <= px:
-        if family == "LOTTERY":
-            # Lottery candidates need a defined-risk plan that can clear the
-            # PM starter floor. The old 22% target / 28% stop produced RR
-            # 0.79, so every otherwise-valid Lottery proposal became WATCH.
-            target = round(px * 1.40, 4)
-        elif family == "OPTIONS":
-            target = round(px * 1.20, 4)
-        else:
-            target = round(px * 1.14, 4)
+    target, target_source = _thesis_target(row, family, lane, px)
     stop = _num(row.get("stop_loss") or (row.get("risk") or {}).get("stop_loss"), 0)
     if px > 0 and stop <= 0:
-        if family == "LOTTERY":
-            stop = round(px * 0.80, 4)
-        elif family == "OPTIONS":
-            stop = round(px * 0.92, 4)
-        else:
-            stop = round(px * 0.88, 4)
-    raw_signals = _signals(row)
-    signals = list(dict.fromkeys([
-        "STRATEGY_SCANNER",
-        family,
-        screener_id,
-        lane,
-        *raw_signals[:8],
-    ]))
+        stop = 0.0
+    raw_signals = _signals({"signals": row.get("evidence_signals")}) if row.get("evidence_signals") else _signals(row)
+    if family == "LOTTERY" and row.get("signal_groups"):
+        raw_signals = [str(value) for value in row.get("signal_groups") if value]
+    signals = list(dict.fromkeys(raw_signals[:12]))
     strategy_case = strategy_ideology.case_score(
         strategy_id=screener_id,
         native_score=score,
@@ -148,6 +151,13 @@ def _base_row(
         "trade_score": round(score / 2.5, 2),
         "learning_score": row.get("learning_score") or 0,
         "signals": signals,
+        "evidence_signals": signals,
+        "provenance": {
+            "family": family,
+            "screener_id": screener_id,
+            "lane": lane,
+            "sources": row.get("sources") or [row.get("source") or screener_id],
+        },
         "targets": {"target_blended": target} if target > 0 else {},
         "stop_loss": stop if stop > 0 else None,
         "risk": {
@@ -174,6 +184,8 @@ def _base_row(
         "source_scan": screener_id,
         "scanner_family": family,
         "pm_routable": bool(pm_routable),
+        "risk_plan_source": "explicit_row" if row.get("stop_loss") else "stop_engine_pending",
+        "target_source": target_source,
         "read_only": bool(read_only),
         "raw_source": row,
     }
@@ -286,8 +298,8 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
         t = _ticker(ticker)
         if not t:
             return
-        existing = by_ticker.get(t) or {"ticker": t, "signals": [], "sources": [], "option_lanes": [], "option_screeners": []}
-        merged_signals = list(dict.fromkeys([*(existing.get("signals") or []), *(signals or []), source, lane]))
+        existing = by_ticker.get(t) or {"ticker": t, "signals": [], "evidence_signals": [], "sources": [], "option_lanes": [], "option_screeners": []}
+        merged_signals = list(dict.fromkeys([*(existing.get("evidence_signals") or []), *(signals or [])]))
         by_ticker[t] = {
             **existing,
             **(row or {}),
@@ -295,6 +307,7 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
             "source": source,
             "sources": list(dict.fromkeys([*(existing.get("sources") or []), source])),
             "signals": merged_signals,
+            "evidence_signals": merged_signals,
             "option_lanes": list(dict.fromkeys([*(existing.get("option_lanes") or []), lane])),
             "option_screeners": list(dict.fromkeys([*(existing.get("option_screeners") or []), screener_id or f"options_{lane.lower()}"])),
             "score": max(_num(existing.get("score"), 0), float(score or 0)),
@@ -649,6 +662,42 @@ async def run_all(
     rows.extend(await _earnings_rows(scan_rows))
     rows.extend(await _sec_rows())
     rows = _dedupe(rows)
+    from . import stop_engine
+    semaphore = asyncio.Semaphore(12)
+
+    async def enrich_stop(row: dict[str, Any]) -> dict[str, Any]:
+        scanner = row.get("strategy_scanner") or {}
+        if not row.get("pm_routable") or not row.get("price"):
+            return row
+        async with semaphore:
+            try:
+                calc = await stop_engine.compute_stop(
+                    ticker=str(row.get("ticker") or ""),
+                    entry_price=float(row["price"]),
+                    signal_combo=list(row.get("evidence_signals") or row.get("signals") or []),
+                    score=_num(scanner.get("native_score"), 0),
+                    hold_window_days=30,
+                    sector=row.get("sector"),
+                    instrument="options" if scanner.get("family") == "OPTIONS" else "fractional",
+                )
+            except Exception as exc:
+                row["pm_routable"] = False
+                row["strategy_scanner"]["pm_routable"] = False
+                row["strategy_scanner"]["notes"] = [*(row["strategy_scanner"].get("notes") or []), f"Stop computation unavailable: {exc.__class__.__name__}."]
+                return row
+        row["stop_loss"] = calc["stop_price"]
+        row["current_stop"] = calc["stop_price"]
+        row["stop_pct"] = calc["stop_pct"]
+        row["stop_breakdown"] = calc["breakdown"]
+        row["risk"] = {**(row.get("risk") or {}), "stop_loss": calc["stop_price"]}
+        row["risk_plan_source"] = "stop_engine"
+        row["strategy_scanner"]["pm_routable"] = bool(row.get("targets", {}).get("target_blended") and row.get("stop_loss"))
+        row["pm_routable"] = row["strategy_scanner"]["pm_routable"]
+        if not row["pm_routable"]:
+            row["strategy_scanner"]["notes"] = [*(row["strategy_scanner"].get("notes") or []), "No thesis target or stop; research-only until supplied."]
+        return row
+
+    rows = list(await asyncio.gather(*(enrich_stop(row) for row in rows)))
     payload = stamped({
         "ok": True,
         "version": SCREENER_VERSION,

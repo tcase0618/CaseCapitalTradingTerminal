@@ -13,6 +13,7 @@ from typing import Any
 
 from .db import get_db
 from . import pricer
+from .market_dates import add_trading_days
 
 
 FORWARD_WINDOWS = (7, 30, 90)
@@ -110,7 +111,7 @@ def _distribution(xs: list[float]) -> dict[str, Any]:
 async def _spy_return(entry_date: str, days: int) -> float | None:
     start = await pricer.get_close_on_date("SPY", entry_date)
     try:
-        target_date = (datetime.fromisoformat(entry_date).date() + timedelta(days=days)).isoformat()
+        target_date = add_trading_days(datetime.fromisoformat(entry_date).date(), days).isoformat()
     except Exception:
         return None
     end = await pricer.get_close_on_date("SPY", target_date)
@@ -196,7 +197,9 @@ async def _trade_stats(limit: int) -> dict[str, Any]:
     closed = [t for t in trades if str(t.get("status") or "").upper() in {"CLOSED", "FILLED_CLOSED", "EXITED"}]
     pnl_vals: list[float] = []
     for t in closed:
-        for key in ("realized_pl_pct", "pnl_pct", "return_pct"):
+        # Trade Floor records use realized_pct; retain legacy aliases for old
+        # rows.  Never let a valid closed trade disappear from the summary.
+        for key in ("realized_pct", "realized_pl_pct", "pnl_pct", "return_pct"):
             v = _num(t.get(key))
             if v is not None:
                 pnl_vals.append(v)
@@ -204,7 +207,7 @@ async def _trade_stats(limit: int) -> dict[str, Any]:
     by_regime: dict[str, list[float]] = defaultdict(list)
     for t in closed:
         v = None
-        for key in ("realized_pl_pct", "pnl_pct", "return_pct"):
+        for key in ("realized_pct", "realized_pl_pct", "pnl_pct", "return_pct"):
             v = _num(t.get(key))
             if v is not None:
                 break

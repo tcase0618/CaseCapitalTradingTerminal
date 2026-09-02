@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_WEIGHTS = {
+    "DAY2_CONTINUATION": {"value": 4.0, "min": 1.0, "max": 9.0},
+    "SUPERNOVA": {"value": 4.0, "min": 1.0, "max": 9.0},
+    "RED_GREEN": {"value": 4.0, "min": 1.0, "max": 9.0},
+    "SERIAL_RUNNER": {"value": 4.0, "min": 1.0, "max": 9.0},
+    "CATALYST_RUNNER": {"value": 5.0, "min": 1.0, "max": 12.0},
+    "TACTICAL_MOMENTUM_CALL": {"value": 4.0, "min": 1.0, "max": 9.0},
+    "BREAKOUT_CALL": {"value": 4.0, "min": 1.0, "max": 9.0},
+    "LEAPS_TREND": {"value": 4.0, "min": 1.0, "max": 9.0},
     # ── Hard-catalyst / institutional signals (weighted UP) ──
     "insider_cluster_buy":   {"value": 18.0, "min": 8.0,  "max": 28.0},
     "CONGRESSIONAL_BUY":     {"value": 15.0, "min": 6.0,  "max": 24.0},
@@ -33,14 +41,15 @@ DEFAULT_WEIGHTS = {
 BASELINE_WR = 0.50    # 50% win rate baseline
 MAX_CHANGE = 0.15     # max ±15% per cycle
 MIN_SAMPLES = 10      # min trades before adjusting a weight (30d basis)
-MIN_SAMPLES_LIVE = 3  # min trades before adjusting on LIVE return basis
+MIN_SAMPLES_LIVE = 10  # minimum scanned marks before any live-basis adjustment
 
 
 async def _collect_live_trades() -> list[dict[str, Any]]:
-    """Pull every signal_first_seen row + current price → synthesize a "trade"
-    using live return-since-signal (whatever days of history we have).
-    This makes EVERY scanned stock count as a learning data point immediately,
-    instead of waiting 30 days for the cron to fill return_30d."""
+    """Build display-only live marks for surfaced tickers.
+
+    Live marks may inform reporting, but weight changes require a larger
+    minimum sample and prefer closed 30-day observations when available.
+    """
     db = get_db()
     rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(5000)
     if not rows:

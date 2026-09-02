@@ -95,8 +95,9 @@ def test_lottery_default_risk_plan_can_clear_pm_starter_floor():
     )
 
     assert row["targets"]["target_blended"] == 14.0
-    assert row["stop_loss"] == 8.0
-    assert (row["targets"]["target_blended"] - 10) / (10 - row["stop_loss"]) == 2.0
+    assert row["stop_loss"] is None
+    assert row["pm_routable"] is True
+    assert row["target_source"] == "thesis_lane_proxy_pending_validation"
 
 
 def test_lottery_single_signal_candidate_stays_out_of_pm():
@@ -544,7 +545,8 @@ def test_strategy_run_uses_attached_lottery_result(monkeypatch):
         lottery_result={"candidates": [lottery_row]},
     ))
 
-    assert payload["summary"]["by_pm_family"]["LOTTERY"] >= 1
+    assert payload["summary"]["by_family"]["LOTTERY"] >= 1
+    assert payload["summary"]["by_pm_family"].get("LOTTERY", 0) == 0
     assert any(row["ticker"] == "LOTTO" for row in payload["candidates"])
 
 
@@ -590,7 +592,7 @@ def test_options_strategy_rows_have_options_rr_shape():
     )
 
     assert row["targets"]["target_blended"] == 12.0
-    assert row["stop_loss"] == 9.2
+    assert row["stop_loss"] is None
 
 
 def test_options_desk_build_candidates_uses_strategy_rows_not_core_scan(monkeypatch):

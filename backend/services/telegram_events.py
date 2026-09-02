@@ -192,7 +192,12 @@ def _scan_report_suppressed_reason(scan: dict[str, Any]) -> str | None:
     return None
 
 
-async def _scan_report_dedupe_reason(scan_id: str, triggered_by: Any) -> str | None:
+async def _scan_report_dedupe_reason(
+    scan_id: str,
+    triggered_by: Any,
+    *,
+    variant: Any = None,
+) -> str | None:
     db = get_db()
     if scan_id:
         exact = await db.telegram_deliveries.find_one(
@@ -206,7 +211,11 @@ async def _scan_report_dedupe_reason(scan_id: str, triggered_by: Any) -> str | N
         if exact:
             return "same_scan_already_sent"
 
-    if not _scan_report_throttle_enabled(triggered_by):
+    # Full-terminal scans are already serialized by terminal_cycle and must
+    # produce one consolidated report per completed cycle.  Keep the throttle
+    # for standalone/core scheduler reports only.
+    is_full_terminal = str(variant or "").strip().lower() == "full_terminal"
+    if is_full_terminal or not _scan_report_throttle_enabled(triggered_by):
         return None
 
     cutoff = _now() - timedelta(minutes=max(1, SCAN_REPORT_THROTTLE_MINUTES))
@@ -768,7 +777,11 @@ async def dispatch_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         )
         return {"ok": True, "sent": False, "suppressed": True, "reason": suppressed_reason}
     report = await build_scan_report(scan)
-    dedupe_reason = await _scan_report_dedupe_reason(report["scan_id"], scan.get("triggered_by"))
+    dedupe_reason = await _scan_report_dedupe_reason(
+        report["scan_id"],
+        scan.get("triggered_by"),
+        variant=scan.get("telegram_report_variant"),
+    )
     if dedupe_reason:
         await log_activity(f"Telegram scan report deduped: {dedupe_reason}", "info", {
             "scan_id": report["scan_id"],

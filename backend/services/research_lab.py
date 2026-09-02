@@ -195,7 +195,7 @@ def _experiment_score(samples: int, matured: int, win_rate: float | None, avg_re
 async def dashboard(limit_scans: int = 160) -> dict[str, Any]:
     db = get_db()
     qlib = _qlib_status()
-    scans = await db.scan_results.find({}, {"_id": 0}).sort("finished_at", -1).to_list(max(20, min(limit_scans, 400)))
+    scans = await db.scan_results.find({}, {"_id": 0}).sort("finished_at", -1).allow_disk_use(True).to_list(max(20, min(limit_scans, 400)))
     latest_scan = scans[0] if scans else {}
 
     signal_stats: dict[str, dict[str, Any]] = defaultdict(_bucket)

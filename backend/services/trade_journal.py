@@ -104,7 +104,7 @@ def _final_bucket(key: str, bucket: dict[str, Any]) -> dict[str, Any]:
 
 async def overview(limit_scans: int = 120, limit_trades: int = 200) -> dict[str, Any]:
     db = get_db()
-    scans = await db.scan_results.find({}, {"_id": 0}).sort("finished_at", -1).to_list(limit_scans)
+    scans = await db.scan_results.find({}, {"_id": 0}).sort("finished_at", -1).allow_disk_use(True).to_list(limit_scans)
     trades = await db.tf_trades.find({}, {"_id": 0}).sort("submitted_at", -1).to_list(limit_trades)
     phase_outcomes = await db.tf_phase_outcomes.find({}, {"_id": 0}).sort("closed_at", -1).to_list(limit_trades)
     ratchets = await db.pm_ratchet_events.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit_trades)

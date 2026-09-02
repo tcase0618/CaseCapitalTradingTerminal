@@ -195,8 +195,20 @@ async def compute_stop(
     breakdown["instrument_delta"] = inst_delta
 
     # Signal combo specials
-    combo_key = "+".join(sorted(signal_combo or []))
-    combo_delta = float(coef["signal_combo_delta"].get(combo_key, 0.0))
+    combo_values = {str(value) for value in (signal_combo or [])}
+    combo_key = "+".join(sorted(combo_values))
+    combo_delta = 0.0
+    matched_combo = None
+    # A tuned pair remains applicable when a proposal also carries an
+    # unrelated third signal. Prefer the most specific configured subset.
+    for candidate_key, candidate_delta in coef["signal_combo_delta"].items():
+        candidate_values = {value for value in str(candidate_key).split("+") if value}
+        if candidate_values and candidate_values.issubset(combo_values):
+            if matched_combo is None or len(candidate_values) > len(matched_combo[0]):
+                matched_combo = (candidate_values, float(candidate_delta), candidate_key)
+    if matched_combo:
+        combo_delta = matched_combo[1]
+        breakdown["matched_combo"] = matched_combo[2]
     stop_pct += combo_delta
     breakdown["signal_combo"] = combo_key
     breakdown["combo_delta"] = combo_delta
