@@ -77,6 +77,7 @@ async def _collect_live_trades() -> list[dict[str, Any]]:
             "ticker": t,
             "date": r["first_seen_date"],
             "signals": r.get("first_signals") or [],
+            "strategy_lanes": r.get("first_strategy_lanes") or [],
             "signal_score": r.get("first_signal_score"),
             "entry_price": entry,
             "current_price": cur,
@@ -535,8 +536,8 @@ async def signal_lifetime_stats() -> list[dict[str, Any]]:
     ).to_list(5000)
     out: list[dict[str, Any]] = []
     for key in DEFAULT_WEIGHTS.keys():
-        live_rel = [t for t in live if key in (t.get("signals") or [])]
-        perf_rel = [d for d in perf_docs if key in (d.get("signals") or [])]
+        live_rel = [t for t in live if key in (t.get("signals") or []) or key in (t.get("strategy_lanes") or [])]
+        perf_rel = [d for d in perf_docs if key in (d.get("signals") or []) or key in (d.get("strategy_lanes") or [])]
         if not live_rel and not perf_rel:
             out.append({
                 "signal": key, "n": 0, "n_live": 0,

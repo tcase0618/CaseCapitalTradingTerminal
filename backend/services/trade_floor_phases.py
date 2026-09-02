@@ -82,8 +82,13 @@ async def _params() -> dict[str, Any]:
 
 
 def _params_for(combo: list[str], all_params: dict[str, Any]) -> dict[str, Any]:
-    key = "+".join(sorted(combo or []))
-    return {**all_params["defaults"], **(all_params["params_by_combo"].get(key) or {})}
+    values = {str(value) for value in (combo or [])}
+    best: tuple[int, dict[str, Any]] | None = None
+    for key, params in (all_params.get("params_by_combo") or {}).items():
+        required = {value for value in str(key).split("+") if value}
+        if required and required.issubset(values) and (best is None or len(required) > best[0]):
+            best = (len(required), params or {})
+    return {**all_params["defaults"], **(best[1] if best else {})}
 
 
 async def _alpaca_market_sell(ticker: str, qty: float,

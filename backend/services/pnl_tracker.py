@@ -47,7 +47,7 @@ async def _fetch_close(ticker: str, days_ago: int = 0) -> float | None:
 
 
 # ============== Recording ==============
-async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
+async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: bool = True) -> int:
     """For every result in a scan, write a signal_performance row + (if options
     play exists) an options_performance row. Idempotent on (ticker, date,
     screener_id).
@@ -67,16 +67,21 @@ async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
         screener_id = str(scanner.get("screener_id") or r.get("source_scan") or "CORE")
         scanner_family = str(scanner.get("family") or r.get("scanner_family") or "CORE")
 
-        # signal_first_seen — ONE row per ticker, INSERT-only (never updated).
-        # First time we ever surfaced this ticker, with that day's price.
-        await db.signal_first_seen.update_one(
-            {"ticker": ticker},
-            {"$setOnInsert": stamped({
+        # signal_first_seen remains a ticker-level Core discovery ledger.
+        if include_first_seen:
+            await db.signal_first_seen.update_one(
+                {"ticker": ticker},
+                {"$setOnInsert": stamped({
                 "ticker": ticker,
                 "first_seen_date": today,
                 "first_seen_ts": _now().isoformat(),
                 "first_seen_price": entry_price,
                 "first_signals": signals,
+                "first_strategy_lanes": (
+                    list(scanner.get("lanes") or [])
+                    if isinstance(scanner.get("lanes"), (list, tuple))
+                    else ([str(scanner.get("lane"))] if scanner.get("lane") else [])
+                ),
                 "first_signal_score": r.get("signal_score", 0),
                 "first_risk_level": (r.get("risk") or {}).get("level"),
                 "first_options_strategy": (r.get("options") or {}).get("strategy"),
@@ -87,19 +92,20 @@ async def record_scan_picks(scan_doc: dict[str, Any]) -> int:
                 "first_options_strike": ((r.get("options") or {}).get("contract") or {}).get("strike"),
                 "first_options_expiration": ((r.get("options") or {}).get("contract") or {}).get("expiration"),
                 "first_thesis": r.get("thesis", ""),
-            })},
-            upsert=True,
-        )
-        # Also bump last_seen on every appearance
-        await db.signal_first_seen.update_one(
-            {"ticker": ticker},
-            {"$set": {
+                })},
+                upsert=True,
+            )
+        # Also bump last_seen on every Core appearance.
+        if include_first_seen:
+            await db.signal_first_seen.update_one(
+                {"ticker": ticker},
+                {"$set": {
                 "last_seen_date": today,
                 "last_seen_price": entry_price,
                 "last_signal_score": r.get("signal_score", 0),
             },
-             "$inc": {"times_found": 1}},
-        )
+                 "$inc": {"times_found": 1}},
+            )
 
         # signal_performance: one row per (ticker, date, screener). This keeps
         # independent strategy evidence separate even when the ticker overlaps.
@@ -193,7 +199,7 @@ async def refresh_due_returns() -> dict[str, int]:
             entry = await pricer.get_close_on_date(r["ticker"], row_calendar_date.isoformat())
             if entry:
                 await db.signal_performance.update_one(
-                    {"ticker": r["ticker"], "date": r["date"]},
+                    {"ticker": r["ticker"], "date": r["date"], "screener_id": r.get("screener_id", "CORE")},
                     {"$set": {"entry_price": entry}},
                 )
         if not entry:
@@ -219,7 +225,7 @@ async def refresh_due_returns() -> dict[str, int]:
                 counters["r90"] += 1
         if updates:
             await db.signal_performance.update_one(
-                {"ticker": r["ticker"], "date": r["date"]},
+                {"ticker": r["ticker"], "date": r["date"], "screener_id": r.get("screener_id", "CORE")},
                 {"$set": updates},
             )
     return counters

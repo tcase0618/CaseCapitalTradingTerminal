@@ -84,6 +84,8 @@ def _parse_atom(xml_text: str, form_type: str) -> list[dict[str, Any]]:
             link_el = entry.find("atom:link", ns)
             link = link_el.get("href") if link_el is not None else None
             summary = entry.findtext("atom:summary", default="", namespaces=ns) or ""
+            summary_text = summary.strip()
+            item_matches = re.findall(r"(?:ITEM|ITEMS?)\s*([0-9]+\.[0-9]+)", summary_text, flags=re.I)
             # Title format: "FORM_TYPE - COMPANY NAME (CIK)"
             m = re.search(r"\(([\d]{10})\)", title)
             cik = m.group(1) if m else None
@@ -98,7 +100,8 @@ def _parse_atom(xml_text: str, form_type: str) -> list[dict[str, Any]]:
                 "filing_date": updated[:10] if updated else None,
                 "accepted_at": updated or None,
                 "link": link,
-                "summary": summary.strip(),
+                "summary": summary_text,
+                "items": sorted(set(item_matches)),
                 "source": "SEC EDGAR Atom",
             })
     except Exception as e:

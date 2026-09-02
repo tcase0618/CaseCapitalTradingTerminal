@@ -66,6 +66,14 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "strategy_screeners",
         strategy_screeners.run_all(scan=scan, persist=True, lottery_result=lottery_result),
     )
+    try:
+        from . import pnl_tracker
+        await pnl_tracker.record_scan_picks(
+            {"results": strategy_payload.get("candidates") or []},
+            include_first_seen=False,
+        )
+    except Exception as exc:
+        await log_activity(f"Strategy performance ledger failed: {exc.__class__.__name__}", "warning")
     # Keep the exact specialist output attached to this cycle. Reporting and
     # execution must consume this result rather than recomputing it later.
     scan["strategy_payload"] = strategy_payload

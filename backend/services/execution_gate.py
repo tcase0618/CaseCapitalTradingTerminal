@@ -78,6 +78,10 @@ async def _truth_snapshot(force_refresh: bool = False) -> dict[str, Any]:
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 async def _revalidate_stale_execution_authority(
@@ -118,12 +122,6 @@ async def _revalidate_stale_execution_authority(
     except Exception as exc:
         truth["execution_authority_revalidation_error"] = exc.__class__.__name__
         return scoped_blockers
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
 async def _cached_truth_snapshot(max_age_seconds: int | None = None, allow_stale: bool = False) -> dict[str, Any] | None:
     ttl = max_age_seconds
     if ttl is None:
