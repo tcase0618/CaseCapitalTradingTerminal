@@ -177,6 +177,8 @@ class PublicAPIClient:
                     ),
                 )
                 await self._sdk.__aenter__()
+                if self._http is None:
+                    self._http = httpx.AsyncClient(timeout=self.cfg.timeout_seconds)
                 return self
             except ImportError as exc:
                 raise PublicAPIError("PUBLIC_API_SDK_ENABLED=true but publicdotcom-py is not installed") from exc
@@ -188,6 +190,9 @@ class PublicAPIClient:
         if self._sdk:
             await self._sdk.__aexit__(None, None, None)
             self._sdk = None
+            if self._owned and self._http:
+                await self._http.aclose()
+                self._http = None
             return
         if self._owned and self._http:
             await self._http.aclose()
