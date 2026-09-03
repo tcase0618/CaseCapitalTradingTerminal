@@ -345,10 +345,24 @@ def has_finnhub() -> bool:
 
 
 def source_label() -> str:
+    """Describe the research/scan price waterfall for reporting."""
     if _public_configured():
         fallback = "alpaca" if ALPACA_KEY else "finnhub" if FINNHUB_KEY else "massive" if MASSIVE_KEY else "yfinance"
         return f"public+{fallback}"
     return _SOURCE
+
+
+def execution_source_label() -> str:
+    """Return the source authorized for broker execution validation.
+
+    Public is intentionally excluded here. Its quote path is useful for
+    research and scan enrichment, but Alpaca must independently provide the
+    execution-grade price authority for Alpaca orders.
+    """
+    base = os.environ.get("APCA_API_BASE_URL", "https://paper-api.alpaca.markets").strip().rstrip("/")
+    if ALPACA_KEY and ALPACA_SECRET and "alpaca.markets" in base:
+        return "alpaca"
+    return "unavailable"
 
 
 # ─────────────────────────── Finnhub primitives ───────────────────────────

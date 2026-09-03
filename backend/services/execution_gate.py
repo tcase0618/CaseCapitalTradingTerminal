@@ -106,7 +106,7 @@ async def _revalidate_stale_execution_authority(
         from . import pricer, trade_floor
 
         account = await asyncio.wait_for(trade_floor.get_account(), timeout=6.0)
-        price_source = pricer.source_label()
+        price_source = pricer.execution_source_label()
         if not account or not str(price_source).lower().startswith("alpaca"):
             return scoped_blockers
         truth["execution_authority_revalidated_at"] = _now()

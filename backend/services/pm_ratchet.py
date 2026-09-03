@@ -55,13 +55,17 @@ def compute_active_levels(entry: float, current: float, plan: dict[str, Any], pr
 
 async def process_open_ratchets() -> dict[str, Any]:
     db = get_db()
+    from .trade_floor_phases import _alpaca_trade_base, _broker_scope
+
+    broker_base = _alpaca_trade_base()
+    broker_scope = _broker_scope()
     open_trades = await db.tf_trades.find(
-        {
+        {"$and": [{
             "status": "OPEN",
             "fill_status": "FILLED",
             "qty_remaining": {"$gt": 0},
             "pm_ratchet_plan.enabled": True,
-        },
+        }, broker_scope]},
         {"_id": 0},
     ).to_list(500)
     actions: list[dict[str, Any]] = []
@@ -103,6 +107,7 @@ async def process_open_ratchets() -> dict[str, Any]:
                 "active_target": levels["active_target"],
                 "gain_pct": levels["gain_pct"],
                 "profile": (trade.get("pm_ratchet_plan") or {}).get("profile"),
+                "broker_base": broker_base,
                 "created_at": _now().isoformat(),
             }))
             actions.append({
@@ -113,7 +118,7 @@ async def process_open_ratchets() -> dict[str, Any]:
                 "gain_pct": levels["gain_pct"],
             })
         await db.tf_trades.update_one(
-            {"client_order_id": trade.get("client_order_id")},
+            {"$and": [{"client_order_id": trade.get("client_order_id")}, broker_scope]},
             {"$set": updates},
         )
     return {"checked": len(open_trades), "ratcheted": len(actions), "actions": actions, "ran_at": _now().isoformat()}
@@ -121,5 +126,7 @@ async def process_open_ratchets() -> dict[str, Any]:
 
 async def recent_events(limit: int = 50) -> dict[str, Any]:
     db = get_db()
-    rows = await db.pm_ratchet_events.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    from .trade_floor_phases import _broker_scope
+
+    rows = await db.pm_ratchet_events.find(_broker_scope(), {"_id": 0}).sort("created_at", -1).to_list(limit)
     return {"events": rows, "count": len(rows)}

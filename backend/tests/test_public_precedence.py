@@ -27,3 +27,11 @@ def test_public_is_first_price_source(monkeypatch):
 def test_source_label_identifies_public_first(monkeypatch):
     monkeypatch.setattr(public_api, "configured", lambda: True)
     assert pricer.source_label().startswith("public+")
+
+
+def test_public_research_source_does_not_authorize_execution(monkeypatch):
+    monkeypatch.setattr(public_api, "configured", lambda: True)
+    monkeypatch.setattr(pricer, "ALPACA_KEY", "")
+    monkeypatch.setattr(pricer, "ALPACA_SECRET", "")
+    assert pricer.source_label().startswith("public+")
+    assert pricer.execution_source_label() == "unavailable"
