@@ -67,6 +67,7 @@ def test_public_equity_order_payload_is_deterministic_and_not_market():
     assert payload["instrument"] == {"symbol": "AAPL", "type": "EQUITY"}
     assert payload["orderType"] == "LIMIT"
     assert payload["amount"] == "4.00"
+    assert payload["limitPrice"] == "150.25"
     assert "quantity" not in payload
 
 

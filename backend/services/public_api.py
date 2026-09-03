@@ -403,9 +403,9 @@ class PublicAPIClient:
         if quantity is not None:
             payload["quantity"] = f"{float(quantity):.8f}".rstrip("0").rstrip(".")
         if limit_price is not None:
-            payload["limitPrice"] = f"{float(limit_price):.4f}"
+            payload["limitPrice"] = f"{float(limit_price):.2f}"
         if stop_price is not None:
-            payload["stopPrice"] = f"{float(stop_price):.4f}"
+            payload["stopPrice"] = f"{float(stop_price):.2f}"
         return payload
 
     async def preflight_single_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
