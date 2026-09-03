@@ -1,6 +1,15 @@
 import asyncio
+from datetime import timezone
 
 from services import execution_gate, pricer, trade_floor
+
+
+def test_parse_dt_restored_and_normalized_to_utc():
+    parsed = execution_gate._parse_dt("2026-09-02T12:00:00Z")
+    assert parsed is not None
+    assert parsed.tzinfo == timezone.utc
+    assert parsed.hour == 12
+    assert execution_gate._parse_dt("not-a-date") is None
 
 
 def test_stale_execution_authority_is_revalidated(monkeypatch):

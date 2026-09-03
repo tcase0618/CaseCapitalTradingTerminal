@@ -49,7 +49,21 @@ logger = logging.getLogger(__name__)
 
 ALPACA_KEY = os.environ.get("APCA_API_KEY_ID", "").strip()
 ALPACA_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
-ALPACA_TRADE_BASE = "https://paper-api.alpaca.markets"
+def _alpaca_trade_base() -> str:
+    base = os.environ.get("APCA_API_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
+    return base[:-3] if base.endswith("/v2") else base
+
+
+def _broker_scope() -> dict[str, Any]:
+    """Keep paper and live Trade Floor ledgers from crossing accounts.
+
+    Legacy rows without a marker remain visible only while the configured
+    account is paper; live mode requires an explicit broker_base marker.
+    """
+    base = _alpaca_trade_base()
+    if "paper-api.alpaca.markets" in base:
+        return {"$or": [{"broker_base": base}, {"broker_base": {"$exists": False}}]}
+    return {"broker_base": base}
 
 # Defaults — overwritten by Learning Engine recalibration once enough data.
 DEFAULTS = {
@@ -108,7 +122,7 @@ async def _alpaca_market_sell(ticker: str, qty: float,
     }
     try:
         async with httpx.AsyncClient(timeout=15.0, headers=headers) as c:
-            r = await c.post(f"{ALPACA_TRADE_BASE}/v2/orders", json=payload)
+            r = await c.post(f"{_alpaca_trade_base()}/v2/orders", json=payload)
             if r.status_code in (200, 201):
                 return r.json()
             logger.warning("alpaca market sell %s qty=%s: %s %s",
@@ -130,9 +144,12 @@ async def _alpaca_available_qty(ticker: str) -> float | None:
     headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
     try:
         async with httpx.AsyncClient(timeout=10.0, headers=headers) as c:
-            r = await c.get(f"{ALPACA_TRADE_BASE}/v2/positions/{ticker.upper()}")
+            r = await c.get(f"{_alpaca_trade_base()}/v2/positions/{ticker.upper()}")
             if r.status_code == 404:
-                return 0.0
+                # A missing position is not proof that the configured broker
+                # account is empty. Treat it as unknown so a wrong-account or
+                # transient response cannot permanently zero the local ledger.
+                return None
             if r.status_code not in (200, 201):
                 logger.warning("alpaca position qty %s: %s %s", ticker, r.status_code, r.text[:200])
                 return None
@@ -231,8 +248,8 @@ async def process_phase_exits() -> dict[str, Any]:
     all_params = await _params()
 
     open_trades = await db.tf_trades.find(
-        {"status": "OPEN", "fill_status": "FILLED",
-          "qty_remaining": {"$gt": 0}},
+        {"$and": [{"status": "OPEN", "fill_status": "FILLED",
+          "qty_remaining": {"$gt": 0}}, _broker_scope()]},
         {"_id": 0},
     ).to_list(500)
     actions: list[dict[str, Any]] = []

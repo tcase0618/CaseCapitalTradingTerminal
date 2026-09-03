@@ -50,6 +50,14 @@ ALPACA_TRADE_BASE = os.environ.get(
 ).rstrip("/")
 if ALPACA_TRADE_BASE.endswith("/v2"):
     ALPACA_TRADE_BASE = ALPACA_TRADE_BASE[:-3]
+
+
+def _broker_scope() -> dict[str, Any]:
+    """Prevent paper/live Trade Floor records from crossing accounts."""
+    scope = {"broker_base": ALPACA_TRADE_BASE}
+    if paper_only():
+        return {"$or": [scope, {"broker_base": {"$exists": False}}]}
+    return scope
 ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
 ALPACA_24H_EQUITY_ENABLED = os.environ.get("ALPACA_24H_EQUITY_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on",
@@ -1259,6 +1267,7 @@ async def evaluate_and_execute(
         trade_doc = stamped({
             "client_order_id": cli_id,
             "order_id": order.get("id"),
+            "broker_base": ALPACA_TRADE_BASE,
             "ticker": ticker,
             "entry_score": score,
             "trade_score": row.get("trade_score") or score,
@@ -1384,7 +1393,7 @@ async def sync_positions_and_close_settled():
                       if o.get("client_order_id", "").startswith("tf-") and o.get("filled_at")}
 
     open_trades = await db.tf_trades.find(
-        {"status": {"$in": ["OPEN", "UNFILLED_CANCELLED"]}},
+        {"$and": [{"status": {"$in": ["OPEN", "UNFILLED_CANCELLED"]}}, _broker_scope()]},
         {"_id": 0},
     ).to_list(200)
     closed = 0
@@ -1578,7 +1587,7 @@ async def reconcile_live_positions(
         return {"ok": True, "created": 0, "checked": 0, "symbols": []}
 
     existing = await db.tf_trades.find(
-        {"status": "OPEN", "ticker": {"$in": list(live_by_symbol)}},
+        {"$and": [{"status": "OPEN", "ticker": {"$in": list(live_by_symbol)}}, _broker_scope()]},
         {"_id": 0, "ticker": 1},
     ).to_list(500)
     existing_symbols = {str(t.get("ticker") or "").upper() for t in existing}
@@ -1664,6 +1673,7 @@ async def reconcile_live_positions(
             "submitted_at": order.get("submitted_at") or now_iso,
             "last_synced_at": now_iso,
             "reconciled_from_alpaca_position": True,
+            "broker_base": ALPACA_TRADE_BASE,
             "reconciled_at": now_iso,
             "reconciliation_reason": "live_alpaca_position_missing_tf_trade",
         })
@@ -1777,7 +1787,10 @@ async def _last_close_via_pricer(ticker: str) -> float | None:
 # ─────── Public read endpoints helpers ───────
 async def open_positions_view() -> list[dict[str, Any]]:
     db = get_db()
-    return await db.tf_trades.find({"status": "OPEN"}, {"_id": 0}).sort(
+    scope = {"broker_base": ALPACA_TRADE_BASE}
+    if paper_only():
+        scope = {"$or": [scope, {"broker_base": {"$exists": False}}]}
+    return await db.tf_trades.find({"$and": [{"status": "OPEN"}, scope]}, {"_id": 0}).sort(
         "submitted_at", -1).to_list(50)
 
 
