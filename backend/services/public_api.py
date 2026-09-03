@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
 import httpx
@@ -342,6 +342,22 @@ class PublicAPIClient:
             raise PublicAPIError("Public order mutations require PUBLIC_API_ACCESS_TOKEN")
         return self._client()
 
+    async def _refresh_access_token(self) -> None:
+        """Refresh the bearer token in memory without logging credentials."""
+        if not self.cfg.secret:
+            raise PublicAPIError("Public access token rejected and no secret is configured for refresh")
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=self.cfg.timeout_seconds)
+        response = await self._http.post(
+            f"{self.cfg.api_base}/userapiauthservice/personal/access-tokens",
+            json={"validityInMinutes": self.cfg.sdk_token_validity_minutes, "secret": self.cfg.secret},
+            headers={"Content-Type": "application/json"},
+        )
+        refreshed = self._decode(response).get("accessToken")
+        if not refreshed:
+            raise PublicAPIError("Public token refresh returned no access token")
+        self.cfg = replace(self.cfg, access_token=str(refreshed))
+
     def _account(self, account_id: str | None = None) -> str:
         account = (account_id or self.cfg.account_id).strip()
         if not account:
@@ -394,11 +410,22 @@ class PublicAPIClient:
 
     async def preflight_single_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
         account = self._account(account_id)
-        response = await self._mutation_client().post(
-            f"{self.cfg.api_base}/userapigateway/trading/{account}/preflight/single-leg",
-            json=payload,
-            headers=_auth_headers(self.cfg),
-        )
+        try:
+            response = await self._mutation_client().post(
+                f"{self.cfg.api_base}/userapigateway/trading/{account}/preflight/single-leg",
+                json=payload,
+                headers=_auth_headers(self.cfg),
+            )
+            return self._decode(response)
+        except PublicAPIError as exc:
+            if "HTTP 401" not in str(exc):
+                raise
+            await self._refresh_access_token()
+            response = await self._mutation_client().post(
+                f"{self.cfg.api_base}/userapigateway/trading/{account}/preflight/single-leg",
+                json=payload,
+                headers=_auth_headers(self.cfg),
+            )
         return self._decode(response)
 
     async def place_order(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:

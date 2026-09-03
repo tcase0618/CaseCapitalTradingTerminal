@@ -115,3 +115,24 @@ async def test_public_order_status_uses_account_scoped_endpoint():
         async with public_api.PublicAPIClient(_cfg(), http) as client:
             result = await client.get_order("order-1")
     assert result["status"] == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_public_preflight_refreshes_rejected_bearer_token():
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith("/preflight/single-leg") and len([c for c in calls if c[1].endswith("preflight/single-leg")]) == 1:
+            return httpx.Response(401)
+        if request.url.path.endswith("/access-tokens"):
+            return httpx.Response(200, json={"accessToken": "refreshed-token"})
+        return httpx.Response(200, json={"outcome": "SUCCESS"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            result = await client.preflight_single_leg({"orderId": "x"})
+    assert result["outcome"] == "SUCCESS"
+    assert calls[0][2] == "Bearer token"
+    assert calls[1][1].endswith("/access-tokens")
+    assert calls[2][2] == "Bearer refreshed-token"
