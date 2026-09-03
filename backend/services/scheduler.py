@@ -580,6 +580,12 @@ def start_scheduler():
             await trade_floor.flush_queued_equity_orders(limit=25)
             await trade_floor.sync_positions_and_close_settled()
             try:
+                from . import public_execution
+                if public_execution.enabled():
+                    await public_execution.reconcile()
+            except Exception:
+                logger.exception("Public execution reconciliation failed")
+            try:
                 from . import safety
                 await safety.check_daily_loss(source="position_monitor")
             except Exception as breaker_exc:
