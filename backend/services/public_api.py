@@ -408,6 +408,44 @@ class PublicAPIClient:
         )
         return self._decode(response)
 
+    async def submit_equity_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        amount: float | None = None,
+        quantity: float | None = None,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        time_in_force: str = "DAY",
+        session: str = "CORE",
+        client_order_id: str | None = None,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Preflight, then submit one Public equity order.
+
+        Public order placement is asynchronous. Returning both broker
+        responses lets the caller persist the preflight evidence beside the
+        submission and then poll ``get_order`` using the returned order id.
+        """
+        payload = self._equity_order_payload(
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            quantity=quantity,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            time_in_force=time_in_force,
+            session=session,
+            order_id=client_order_id,
+        )
+        preflight = await self.preflight_single_leg(payload, account_id=account_id)
+        outcome = str(preflight.get("outcome") or preflight.get("status") or "SUCCESS").upper()
+        if outcome not in {"SUCCESS", "VALID", "OK"}:
+            raise PublicAPIError(f"Public preflight rejected order: {outcome}")
+        placed = await self.place_order(payload, account_id=account_id)
+        return {"preflight": preflight, "order": placed, "payload": payload}
+
     async def get_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
         account = self._account(account_id)
         response = await self._mutation_client().get(

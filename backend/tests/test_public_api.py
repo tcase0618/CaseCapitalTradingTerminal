@@ -76,3 +76,29 @@ async def test_public_order_mutations_fail_closed_in_research_mode():
         async with public_api.PublicAPIClient(_cfg(), http) as client:
             with pytest.raises(public_api.PublicTradingBlocked):
                 await client.place_order({"orderId": "x"})
+
+
+@pytest.mark.asyncio
+async def test_public_equity_submit_preflights_before_placing():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith("/preflight/single-leg"):
+            return httpx.Response(200, json={"outcome": "SUCCESS", "estimatedCost": "4.00"})
+        if request.url.path.endswith("/order"):
+            return httpx.Response(200, json={"orderId": "public-order-1"})
+        return httpx.Response(404)
+
+    cfg = _cfg(research_only=False, live_equity_enabled=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(cfg, http) as client:
+            result = await client.submit_equity_order(
+                symbol="AAPL", side="BUY", amount=4, limit_price=150.25,
+                client_order_id="cc-public-aapl-1",
+            )
+    assert result["order"]["orderId"] == "public-order-1"
+    assert seen == [
+        ("POST", "/userapigateway/trading/acct-1/preflight/single-leg"),
+        ("POST", "/userapigateway/trading/acct-1/order"),
+    ]
