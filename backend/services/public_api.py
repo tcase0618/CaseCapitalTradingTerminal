@@ -137,6 +137,16 @@ def _sdk_quote_payload(quote: Any, option_type: str | None = None) -> dict[str, 
     return flat
 
 
+def _sdk_bar_period(days: int) -> Any:
+    from public_api_sdk import BarPeriod
+
+    if days <= 365:
+        return BarPeriod.YEAR
+    if days <= 5 * 365:
+        return BarPeriod.FIVE_YEARS
+    return BarPeriod.TEN_YEARS
+
+
 class PublicAPIClient:
     def __init__(self, cfg: PublicAPIConfig | None = None, http_client: httpx.AsyncClient | None = None):
         self.cfg = cfg or config()
@@ -286,6 +296,26 @@ class PublicAPIClient:
 
     async def option_greeks(self, option_symbol: str) -> dict[str, Any]:
         return await self._get(f"/userapigateway/marketdata/options/{option_symbol.upper()}/greeks")
+
+    async def bars(self, symbol: str, days: int = 120) -> dict[str, Any]:
+        """Return Public daily regular-session bars in terminal format."""
+        if not self._sdk:
+            raise PublicAPIError("Public historical bars require the SDK")
+        from public_api_sdk import BarAggregation, InstrumentType
+        result = await self._sdk.get_bars(
+            symbol.upper(),
+            _sdk_bar_period(max(1, days)),
+            instrument_type=InstrumentType.EQUITY,
+            aggregation=BarAggregation.ONE_DAY,
+        )
+        payload = result.model_dump(by_alias=True, mode="json")
+        session = payload.get("regularMarket") or payload.get("regular_market") or {}
+        return {
+            "symbol": symbol.upper(),
+            "bars": session.get("bars") or [],
+            "dataProvider": "PUBLIC_BARS",
+            "dataFeed": "public",
+        }
 
     async def strategy_quote(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/userapigateway/marketdata/options/strategy-quote", payload)

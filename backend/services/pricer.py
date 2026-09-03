@@ -797,6 +797,23 @@ async def get_history(ticker: str, days: int = 120,
         cached = await _cached_history(ticker)
         if cached:
             return cached
+    if _public_configured():
+        try:
+            from . import public_api
+            async with public_api.PublicAPIClient() as client:
+                payload = await client.bars(ticker, days=days)
+            closes = {}
+            for bar in payload.get("bars") or []:
+                timestamp = bar.get("timestamp") or bar.get("time")
+                close = bar.get("close") or bar.get("c")
+                if timestamp and close is not None:
+                    closes[str(timestamp)[:10]] = float(close)
+            if closes:
+                closes = dict(sorted(closes.items())[-max(1, days):])
+                await _store_history(ticker, closes, "public")
+                return closes
+        except Exception as exc:
+            logger.debug("public history %s failed; falling back: %s", ticker, exc)
     to_d = _now().date()
     from_d = to_d - timedelta(days=days + 10)
     closes = await _massive_range(ticker, from_d.isoformat(), to_d.isoformat())
@@ -815,6 +832,24 @@ async def get_history_range(ticker: str, from_iso: str, to_iso: str,
     ticker = (ticker or "").upper().strip()
     if not ticker:
         return {}
+    if _public_configured():
+        try:
+            from . import public_api
+            start = datetime.fromisoformat(from_iso).date()
+            end = datetime.fromisoformat(to_iso).date()
+            async with public_api.PublicAPIClient() as client:
+                payload = await client.bars(ticker, days=max(1, (end - start).days + 10))
+            closes = {}
+            for bar in payload.get("bars") or []:
+                timestamp = bar.get("timestamp") or bar.get("time")
+                close = bar.get("close") or bar.get("c")
+                day = str(timestamp)[:10] if timestamp else ""
+                if day and close is not None and from_iso <= day <= to_iso:
+                    closes[day] = float(close)
+            if closes:
+                return closes
+        except Exception as exc:
+            logger.debug("public history range %s failed; falling back: %s", ticker, exc)
     closes = await _massive_range(ticker, from_iso, to_iso)
     if not closes:
         closes = await _yf_range(ticker, from_iso, to_iso)
