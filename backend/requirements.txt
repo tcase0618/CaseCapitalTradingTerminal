@@ -137,4 +137,5 @@ watchfiles==1.1.1
 websockets==16.0
 yarl==1.23.0
 yfinance==1.3.0
+publicdotcom-py==0.1.17
 zipp==3.23.0
