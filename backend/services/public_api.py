@@ -83,6 +83,11 @@ def safety_state(cfg: PublicAPIConfig | None = None) -> dict[str, Any]:
     }
 
 
+def configured(cfg: PublicAPIConfig | None = None) -> bool:
+    cfg = cfg or config()
+    return bool(cfg.enabled and cfg.access_token)
+
+
 def _auth_headers(cfg: PublicAPIConfig) -> dict[str, str]:
     if not cfg.access_token:
         return {}

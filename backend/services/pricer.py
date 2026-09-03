@@ -56,6 +56,14 @@ _SOURCE = (
 )
 
 
+def _public_configured() -> bool:
+    try:
+        from . import public_api
+        return public_api.configured()
+    except Exception:
+        return False
+
+
 def _parse_provider_ts(value: Any) -> datetime | None:
     if not value:
         return None
@@ -172,6 +180,40 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
     }
     if not ticker:
         return empty
+
+    # Public is the preferred actionable quote source.  Alpaca and the other
+    # providers remain fallbacks so a Public outage does not erase research.
+    if _public_configured():
+        try:
+            from . import public_api
+            async with public_api.PublicAPIClient() as client:
+                payload = await client.quotes([ticker])
+            quote_rows = payload.get("quotes") or payload.get("results") or payload.get("data") or []
+            if isinstance(quote_rows, dict):
+                quote = quote_rows.get(ticker) or quote_rows.get(ticker.upper()) or quote_rows
+            else:
+                quote = next((row for row in quote_rows if isinstance(row, dict) and str(row.get("symbol") or row.get("ticker") or "").upper() == ticker), None)
+            quote = quote if isinstance(quote, dict) else {}
+            price = quote.get("lastPrice") or quote.get("last") or quote.get("price") or quote.get("close")
+            if price is not None and float(price) > 0:
+                provider_ts = quote.get("updatedAt") or quote.get("timestamp") or quote.get("quoteTime")
+                age_s = _age_seconds(provider_ts) if provider_ts else 0
+                max_age = _live_price_max_age_seconds()
+                return {
+                    "ticker": ticker,
+                    "price": float(price),
+                    "source": "public_quote",
+                    "provider_ts": provider_ts or _now().isoformat(),
+                    "age_seconds": round(age_s, 2) if age_s is not None else 0,
+                    "fresh": bool(age_s is None or age_s <= max_age),
+                    "premarket_confirmed": True,
+                    "delayed": False,
+                    "execution_eligible": bool(age_s is None or age_s <= max_age),
+                    "warning": None if age_s is None or age_s <= max_age else "public_quote_timestamp_stale",
+                    "raw": quote,
+                }
+        except Exception as exc:
+            logger.debug("public quote %s failed; falling back: %s", ticker, exc)
 
     preferred_feed = (os.environ.get("ALPACA_STOCK_FEED") or "").strip().lower() or None
     feeds = []
@@ -303,6 +345,9 @@ def has_finnhub() -> bool:
 
 
 def source_label() -> str:
+    if _public_configured():
+        fallback = "alpaca" if ALPACA_KEY else "finnhub" if FINNHUB_KEY else "massive" if MASSIVE_KEY else "yfinance"
+        return f"public+{fallback}"
     return _SOURCE
 
 

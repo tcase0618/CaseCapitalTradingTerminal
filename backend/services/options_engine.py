@@ -155,6 +155,107 @@ async def _fetch_alpaca_options_data(
     """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
     if not _alpaca_options_configured():
         return None
+
+
+async def _fetch_public_options_data(
+    ticker: str,
+    catalyst_date: str | None = None,
+    spot_hint: float | None = None,
+    horizon: str = "tactical",
+) -> dict[str, Any] | None:
+    """Fetch and normalize Public's chain for research and PM analysis.
+
+    Public is preferred over Alpaca when configured.  This function only
+    reads market data; the Public order API is intentionally not called.
+    """
+    try:
+        from . import public_api
+        import pandas as pd
+
+        if not public_api.configured():
+            return None
+        async with public_api.PublicAPIClient() as client:
+            expirations_payload = await client.option_expirations(ticker.upper())
+            expirations = expirations_payload.get("expirations") or expirations_payload.get("results") or expirations_payload.get("data") or []
+            if isinstance(expirations, dict):
+                expirations = expirations.get("dates") or expirations.get("expirations") or []
+            expirations = [str(x.get("date") if isinstance(x, dict) else x)[:10] for x in expirations if x]
+            if not expirations:
+                return None
+            target_lo, target_hi = _option_expiration_target(catalyst_date, horizon=horizon)
+            parsed_expirations = []
+            for exp in expirations:
+                try:
+                    parsed_expirations.append((exp, datetime.fromisoformat(exp).date()))
+                except Exception:
+                    continue
+            if not parsed_expirations:
+                return None
+            best_exp, _ = min(parsed_expirations, key=lambda pair: abs((pair[1] - (target_lo + (target_hi - target_lo) / 2)).days))
+            chain_payload = await client.option_chain(ticker.upper(), expiration=best_exp)
+        raw_rows = chain_payload.get("options") or chain_payload.get("contracts") or chain_payload.get("chain") or chain_payload.get("results") or chain_payload.get("data") or []
+        if isinstance(raw_rows, dict):
+            raw_rows = raw_rows.get("options") or raw_rows.get("contracts") or list(raw_rows.values())
+        rows = []
+        for item in raw_rows:
+            if not isinstance(item, dict):
+                continue
+            symbol = item.get("symbol") or item.get("contractSymbol") or item.get("optionSymbol")
+            option_type = str(item.get("type") or item.get("optionType") or item.get("right") or "").upper()[:1]
+            strike = _safe_float(item.get("strike") or item.get("strikePrice"))
+            if not symbol or option_type not in {"C", "P"} or strike <= 0:
+                continue
+            bid = _safe_float(item.get("bid") or item.get("bidPrice"))
+            ask = _safe_float(item.get("ask") or item.get("askPrice"))
+            last = _safe_float(item.get("lastPrice") or item.get("last") or item.get("price")) or ((bid + ask) / 2 if bid and ask else 0)
+            rows.append({
+                "contractSymbol": symbol,
+                "strike": strike,
+                "lastPrice": last,
+                "bid": bid,
+                "ask": ask,
+                "impliedVolatility": _safe_float(item.get("impliedVolatility") or item.get("iv")),
+                "openInterest": _safe_int(item.get("openInterest") or item.get("oi"), -1),
+                "volume": _safe_int(item.get("volume") or item.get("dayVolume")),
+                "delta": _safe_float(item.get("delta")),
+                "deltaSource": "public_greeks" if item.get("delta") is not None else "unavailable",
+                "gamma": _safe_float(item.get("gamma")),
+                "theta": _safe_float(item.get("theta")),
+                "vega": _safe_float(item.get("vega")),
+                "expiration": str(item.get("expiration") or item.get("expirationDate") or best_exp)[:10],
+                "type": option_type,
+                "quoteTime": item.get("updatedAt") or item.get("quoteTime") or item.get("timestamp"),
+                "dataProvider": "PUBLIC_OPTIONS",
+                "dataFeed": "public",
+            })
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        calls, puts = df[df["type"] == "C"].copy(), df[df["type"] == "P"].copy()
+        if calls.empty and puts.empty:
+            return None
+        spot = _safe_float(spot_hint)
+        if not spot:
+            async with public_api.PublicAPIClient() as client:
+                quote_payload = await client.quotes([ticker.upper()])
+            quote_rows = quote_payload.get("quotes") or quote_payload.get("results") or quote_payload.get("data") or []
+            quote = quote_rows.get(ticker.upper(), {}) if isinstance(quote_rows, dict) else (quote_rows[0] if quote_rows else {})
+            spot = _safe_float((quote or {}).get("lastPrice") or (quote or {}).get("price"))
+        if spot <= 0:
+            return None
+        valid = df[df["impliedVolatility"] > 0]
+        atm_iv = _safe_float(valid.iloc[(valid["strike"] - spot).abs().argmin()]["impliedVolatility"]) if not valid.empty else None
+        return {
+            "ticker": ticker.upper(), "calls": calls, "puts": puts, "price": spot,
+            "expirations": expirations, "expiration": best_exp,
+            "expiration_window": {"gte": target_lo.isoformat(), "lte": target_hi.isoformat()},
+            "snapshot_count": len(rows), "atm_iv": atm_iv, "iv_rank": 50,
+            "iv_label": "FAIR", "data_provider": "PUBLIC_OPTIONS", "data_feed": "public",
+            "data_quality": "RESEARCH_LIVE", "execution_eligible": False,
+        }
+    except Exception as exc:
+        logger.debug("Public options data failed for %s: %s", ticker, exc)
+        return None
     try:
         import pandas as pd
 
@@ -283,6 +384,9 @@ async def get_options_data(
 ) -> dict[str, Any] | None:
     """Returns chain dataframes + ATM IV + iv_rank, or None if fetch fails."""
     ticker = ticker.upper()
+    public_chain = await _fetch_public_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
+    if public_chain:
+        return public_chain
     alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
     if alpaca_chain:
         return alpaca_chain
