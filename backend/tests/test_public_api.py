@@ -51,3 +51,28 @@ def test_public_defaults_fail_closed_and_mutations_are_blocked(monkeypatch):
     assert state["live_order_mutation_allowed"] is False
     with pytest.raises(public_api.PublicTradingBlocked):
         public_api.place_order("AAPL")
+
+
+def test_public_equity_order_payload_is_deterministic_and_not_market():
+    payload = public_api.PublicAPIClient._equity_order_payload(
+        symbol="aapl",
+        side="buy",
+        amount=4,
+        limit_price=150.25,
+        order_id="cc-aapl-cycle-1",
+    )
+    assert payload["orderId"] == public_api.PublicAPIClient._equity_order_payload(
+        symbol="AAPL", side="BUY", amount=4, limit_price=150.25, order_id="cc-aapl-cycle-1"
+    )["orderId"]
+    assert payload["instrument"] == {"symbol": "AAPL", "type": "EQUITY"}
+    assert payload["orderType"] == "LIMIT"
+    assert payload["amount"] == "4.00"
+    assert "quantity" not in payload
+
+
+@pytest.mark.asyncio
+async def test_public_order_mutations_fail_closed_in_research_mode():
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(500))) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            with pytest.raises(public_api.PublicTradingBlocked):
+                await client.place_order({"orderId": "x"})

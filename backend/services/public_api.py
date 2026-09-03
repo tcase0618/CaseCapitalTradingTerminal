@@ -8,6 +8,7 @@ separate live rollout enables it.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -237,7 +238,7 @@ class PublicAPIClient:
             raise PublicAPIError("PUBLIC_ACCOUNT_ID is not configured")
         if self._sdk:
             return (await self._sdk.get_portfolio(account_id=account)).model_dump(by_alias=True, mode="json")
-        return await self._get(f"/userapigateway/trading/{account}/portfolio")
+        return await self._get(f"/userapigateway/trading/{account}/portfolio/v2")
 
     async def quotes(self, symbols: Iterable[str]) -> dict[str, Any]:
         values = _symbols(symbols)
@@ -325,6 +326,119 @@ class PublicAPIClient:
             return await self._get(f"/userapigateway/instruments/{symbol.upper()}")
         return await self._get("/userapigateway/instruments")
 
+    def _mutation_client(self) -> httpx.AsyncClient:
+        """Return the bearer-authenticated HTTP client for order mutations.
+
+        The SDK read path may authenticate from a secret, but order requests
+        are kept on the documented bearer-token path so the terminal has an
+        explicit, inspectable execution credential and request contract.
+        """
+        if not self.cfg.access_token:
+            raise PublicAPIError("Public order mutations require PUBLIC_API_ACCESS_TOKEN")
+        return self._client()
+
+    def _account(self, account_id: str | None = None) -> str:
+        account = (account_id or self.cfg.account_id).strip()
+        if not account:
+            raise PublicAPIError("PUBLIC_ACCOUNT_ID is not configured")
+        return account
+
+    @staticmethod
+    def _order_id(value: str | None) -> str:
+        """Map a terminal idempotency key to Public's required UUID order id."""
+        if value:
+            try:
+                return str(uuid.UUID(value))
+            except ValueError:
+                return str(uuid.uuid5(uuid.NAMESPACE_URL, f"case-capital:public:{value}"))
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def _equity_order_payload(
+        *,
+        symbol: str,
+        side: str,
+        amount: float | None = None,
+        quantity: float | None = None,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        time_in_force: str = "DAY",
+        session: str = "CORE",
+        order_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (amount is None) == (quantity is None):
+            raise PublicAPIError("Public equity order requires exactly one of amount or quantity")
+        payload: dict[str, Any] = {
+            "orderId": PublicAPIClient._order_id(order_id),
+            "instrument": {"symbol": symbol.upper().strip(), "type": "EQUITY"},
+            "orderSide": side.upper(),
+            "orderType": "STOP_LIMIT" if stop_price is not None else "LIMIT" if limit_price is not None else "MARKET",
+            "expiration": {"timeInForce": time_in_force.upper()},
+            "equityMarketSession": session.upper(),
+            "openCloseIndicator": "OPEN" if side.upper() == "BUY" else "CLOSE",
+        }
+        if amount is not None:
+            payload["amount"] = f"{float(amount):.2f}"
+        if quantity is not None:
+            payload["quantity"] = f"{float(quantity):.8f}".rstrip("0").rstrip(".")
+        if limit_price is not None:
+            payload["limitPrice"] = f"{float(limit_price):.4f}"
+        if stop_price is not None:
+            payload["stopPrice"] = f"{float(stop_price):.4f}"
+        return payload
+
+    async def preflight_single_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
+        account = self._account(account_id)
+        response = await self._mutation_client().post(
+            f"{self.cfg.api_base}/userapigateway/trading/{account}/preflight/single-leg",
+            json=payload,
+            headers=_auth_headers(self.cfg),
+        )
+        return self._decode(response)
+
+    async def place_order(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
+        cfg = self.cfg
+        if cfg.research_only or not cfg.live_equity_enabled:
+            raise PublicTradingBlocked("Public equity order blocked by configuration")
+        account = self._account(account_id)
+        response = await self._mutation_client().post(
+            f"{cfg.api_base}/userapigateway/trading/{account}/order",
+            json=payload,
+            headers=_auth_headers(cfg),
+        )
+        return self._decode(response)
+
+    async def get_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
+        account = self._account(account_id)
+        response = await self._mutation_client().get(
+            f"{self.cfg.api_base}/userapigateway/trading/{account}/order/{order_id}",
+            headers=_auth_headers(self.cfg),
+        )
+        return self._decode(response)
+
+    async def cancel_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
+        cfg = self.cfg
+        if cfg.research_only or not cfg.live_equity_enabled:
+            raise PublicTradingBlocked("Public order cancellation blocked by configuration")
+        account = self._account(account_id)
+        response = await self._mutation_client().delete(
+            f"{cfg.api_base}/userapigateway/trading/{account}/order/{order_id}",
+            headers=_auth_headers(cfg),
+        )
+        return self._decode(response)
+
+    async def replace_order(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
+        cfg = self.cfg
+        if cfg.research_only or not cfg.live_equity_enabled:
+            raise PublicTradingBlocked("Public order replacement blocked by configuration")
+        account = self._account(account_id)
+        response = await self._mutation_client().put(
+            f"{cfg.api_base}/userapigateway/trading/{account}/order",
+            json=payload,
+            headers=_auth_headers(cfg),
+        )
+        return self._decode(response)
+
 
 async def status() -> dict[str, Any]:
     cfg = config()
@@ -358,6 +472,7 @@ def assert_order_blocked(action: str = "order_mutation") -> None:
 
 
 def place_order(*_: Any, **__: Any) -> None:
+    """Compatibility guard; async mutations must use PublicAPIClient."""
     assert_order_blocked("place_order")
 
 
