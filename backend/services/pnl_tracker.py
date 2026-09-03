@@ -116,6 +116,11 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
                 "date": today,
                 "screener_id": screener_id,
                 "scanner_family": scanner_family,
+                "strategy_lanes": (
+                    list(scanner.get("lanes") or [])
+                    if isinstance(scanner.get("lanes"), (list, tuple))
+                    else ([str(scanner.get("lane"))] if scanner.get("lane") else [])
+                ),
                 "ts": _now().isoformat(),
                 "signals": signals,
                 "signal_score": r.get("signal_score", 0),
@@ -123,14 +128,16 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
                 "regime_playbook": r.get("regime_playbook"),
                 "pead": r.get("pead"),
                 "sector": r.get("sector"),
-                "entry_price": entry_price,
                 "risk_level": (r.get("risk") or {}).get("level"),
                 "squeeze_score": (r.get("squeeze") or {}).get("score"),
                 "catalyst_date": (r.get("time_target") or {}).get("target_date") or r.get("catalyst_date", ""),
-                "return_7d": None,
-                "return_30d": None,
-                "return_90d": None,
-            })},
+            }),
+             "$setOnInsert": {
+                 "entry_price": entry_price,
+                 "return_7d": None,
+                 "return_30d": None,
+                 "return_90d": None,
+             }},
             upsert=True,
         )
 

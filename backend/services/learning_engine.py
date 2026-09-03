@@ -231,8 +231,8 @@ async def run_learning_cycle() -> dict[str, Any]:
     # Per-signal performance: prefer 30d basis when available, fall back to live
     signal_stats: dict[str, dict | None] = {}
     for key in DEFAULT_WEIGHTS.keys():
-        perf_rel = [d for d in perf_docs if key in (d.get("signals") or [])]
-        live_rel = [t for t in live_trades if key in (t.get("signals") or [])]
+        perf_rel = [d for d in perf_docs if key in (d.get("signals") or []) or key in (d.get("strategy_lanes") or [])]
+        live_rel = [t for t in live_trades if key in (t.get("signals") or []) or key in (t.get("strategy_lanes") or [])]
         if len(perf_rel) >= MIN_SAMPLES:
             wins = [d for d in perf_rel if (d.get("return_30d") or 0) > 0]
             signal_stats[key] = {
