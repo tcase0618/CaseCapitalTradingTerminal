@@ -123,6 +123,37 @@ async def integration_status() -> list[dict[str, Any]]:
     ))
 
     try:
+        from . import public_api
+
+        public_probe = await asyncio.wait_for(public_api.status(), timeout=14.0)
+        public_cfg = public_probe.get("config") or public_api.safety_state()
+        public_ok = bool(public_probe.get("ok") and public_probe.get("connected"))
+        out.append(_row(
+            "public_api",
+            "Public.com API (Research)",
+            public_ok,
+            last=_now_iso() if public_ok else None,
+            detail={
+                "research_only": public_cfg.get("research_only", True),
+                "live_equity_enabled": public_cfg.get("live_equity_enabled", False),
+                "live_order_mutation_allowed": public_cfg.get("live_order_mutation_allowed", False),
+                "account_count": public_probe.get("account_count", 0),
+                "coverage": ["account", "portfolio", "equity quotes", "option expirations", "option chains", "greeks", "strategy quotes"],
+                "orders_transmitted": public_probe.get("orders_transmitted", 0),
+            },
+            quality="research" if public_ok else "optional",
+            reason=None if public_ok else public_probe.get("reason") or "Public API read-only probe failed",
+        ))
+    except Exception as exc:
+        out.append(_row(
+            "public_api",
+            "Public.com API (Research)",
+            False,
+            quality="optional",
+            reason=str(exc)[:160],
+        ))
+
+    try:
         from . import ibkr_research, ibkr_terminal
 
         ibkr_probe = await asyncio.wait_for(asyncio.to_thread(ibkr_research.status), timeout=12.0)

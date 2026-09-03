@@ -468,6 +468,13 @@ async def robinhood_status():
     return await robinhood_mcp.status()
 
 
+@api.get("/public/status")
+async def public_api_status():
+    """Public.com API health and safety state; never submits an order."""
+    from services import public_api
+    return await public_api.status()
+
+
 @api.post("/robinhood/probe")
 async def robinhood_probe():
     """Run MCP tools/list only; no account mutation or order operation is attempted."""

@@ -117,6 +117,17 @@ async def run(force_refresh: bool = False, persist: bool = True) -> dict[str, An
         await _safe_check("options_account", _options_account_check(), blocks=False),
         await _safe_check("options_mark_audit", _latest_options_mark_audit(), blocks=False),
     ]
+    try:
+        from . import public_api
+
+        checks.append(await _safe_check("public_api_research", public_api.status(), blocks=False))
+    except Exception as exc:
+        checks.append({
+            "name": "public_api_research",
+            "status": "WATCH",
+            "blocks": False,
+            "detail": {"ok": False, "reason": str(exc)[:220]},
+        })
     checks.append({
         "name": "scheduler_env",
         "status": "PASS" if _env_bool("ENABLE_SCHEDULER") else "WATCH",
