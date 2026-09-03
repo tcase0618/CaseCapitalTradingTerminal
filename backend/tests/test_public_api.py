@@ -102,3 +102,16 @@ async def test_public_equity_submit_preflights_before_placing():
         ("POST", "/userapigateway/trading/acct-1/preflight/single-leg"),
         ("POST", "/userapigateway/trading/acct-1/order"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_public_order_status_uses_account_scoped_endpoint():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/userapigateway/trading/acct-1/order/order-1"
+        return httpx.Response(200, json={"orderId": "order-1", "status": "FILLED"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            result = await client.get_order("order-1")
+    assert result["status"] == "FILLED"

@@ -114,6 +114,21 @@ async def reconcile() -> dict[str, Any]:
         return {"skipped": True, "reason": "public_live_equity_disabled"}
     db = get_db()
     async with public_api.PublicAPIClient() as client:
+        pending = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "PENDING", "public_order_id": {"$exists": True}}, {"_id": 0}).to_list(500)
+        order_updates = 0
+        for trade in pending:
+            try:
+                order = await client.get_order(str(trade.get("public_order_id")))
+            except Exception:
+                continue
+            status = str(order.get("status") or "").upper()
+            if status in {"FILLED", "PARTIALLY_FILLED"}:
+                filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
+                await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat(), "last_order_status": status}})
+                order_updates += 1
+            elif status in {"CANCELLED", "REJECTED", "EXPIRED", "FAILED"}:
+                await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "fill_status": status, "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": f"public_order_{status.lower()}", "last_order_status": status}})
+                order_updates += 1
         positions = {_symbol(row): row for row in _positions(await client.portfolio())}
         rows = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN"}, {"_id": 0}).to_list(500)
         updated = closed = 0
@@ -127,7 +142,7 @@ async def reconcile() -> dict[str, Any]:
             elif trade.get("fill_status") == "FILLED":
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
                 closed += 1
-    return {"skipped": False, "updated": updated, "closed": closed, "broker": BROKER_BASE}
+    return {"skipped": False, "order_updates": order_updates, "updated": updated, "closed": closed, "broker": BROKER_BASE}
 
 
 async def process_protective_exits() -> dict[str, Any]:
