@@ -583,6 +583,7 @@ def start_scheduler():
                 from . import public_execution
                 if public_execution.enabled():
                     await public_execution.reconcile()
+                    await public_execution.process_protective_exits()
             except Exception:
                 logger.exception("Public execution reconciliation failed")
             try:

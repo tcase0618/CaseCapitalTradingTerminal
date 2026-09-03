@@ -128,3 +128,36 @@ async def reconcile() -> dict[str, Any]:
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
                 closed += 1
     return {"skipped": False, "updated": updated, "closed": closed, "broker": BROKER_BASE}
+
+
+async def process_protective_exits() -> dict[str, Any]:
+    """Submit a Public stop-limit when a reconciled position breaches its stop."""
+    if not enabled():
+        return {"skipped": True, "reason": "public_live_equity_disabled"}
+    db = get_db()
+    rows = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "FILLED", "qty_remaining": {"$gt": 0}}, {"_id": 0}).to_list(500)
+    if not rows:
+        return {"skipped": False, "checked": 0, "submitted": []}
+    submitted: list[dict[str, Any]] = []
+    async with public_api.PublicAPIClient() as client:
+        quote_rows = _quotes(await client.quotes([_symbol(row) for row in rows]))
+        by_symbol = {_symbol(row): row for row in quote_rows}
+        for trade in rows:
+            ticker = _symbol(trade)
+            stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
+            current = _quote_price(by_symbol.get(ticker) or {})
+            quantity = _qty(trade)
+            if stop <= 0 or current <= 0 or quantity <= 0 or current > stop:
+                continue
+            client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, stop, prefix="public")
+            claim = await execution_safety.claim_execution_intent(scope="public_equity_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"stop": stop})
+            if not claim.get("ok"):
+                continue
+            try:
+                result = await client.submit_equity_order(symbol=ticker, side="SELL", quantity=quantity, stop_price=stop, limit_price=round(stop * 0.99, 4), session="TWENTY_FOUR_HOURS", client_order_id=client_id)
+                order = result.get("order") or {}
+                submitted.append({"ticker": ticker, "order_id": order.get("orderId"), "stop": stop})
+                await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order.get("orderId")})
+            except Exception as exc:
+                await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
+    return {"skipped": False, "checked": len(rows), "submitted": submitted}
