@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from services import public_execution
+from services import portfolio_manager, public_execution
 
 
 def test_public_trade_quantity_prefers_reconciled_remaining_quantity():
@@ -75,17 +75,19 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     monkeypatch.setattr(public_execution, "log_activity", _marked)
     monkeypatch.setattr("services.trading_halts.fetch_halts", lambda: _clear_halts())
 
+    pm_row = portfolio_manager.evaluate_rows([{
+        "ticker": "AAPL",
+        "price": 150.25,
+        "target_blended": 180,
+        "stop_loss": 140,
+        "source_scan": "lottery_gap",
+        "scanner_family": "LOTTERY",
+        "signals": ["GAP/SURGE", "RVOL"],
+        "strategy_views": [{"screener_id": "lottery_gap", "family": "LOTTERY", "lane": "DAY2_CONTINUATION"}],
+    }], equity=1000, mode="BALANCED")[0]
+    pm_row.update({"action": "STARTER", "allocation_usd": 6})
     result = await public_execution.execute_pm_equity(
-        [{
-            "ticker": "AAPL",
-            "action": "STARTER",
-            "allocation_usd": 6,
-            "stop_price": 140,
-            "source_scan": "lottery_gap",
-            "scanner_family": "LOTTERY",
-            "signals": ["GAP/SURGE", "RVOL"],
-            "strategy_views": [{"screener_id": "lottery_gap", "family": "LOTTERY", "lane": "DAY2_CONTINUATION"}],
-        }],
+        [pm_row],
         cycle_id="cycle-1",
     )
 
@@ -97,6 +99,8 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     assert fake_trades.docs[0]["scanner_family"] == "LOTTERY"
     assert fake_trades.docs[0]["strategy_lanes"] == ["DAY2_CONTINUATION"]
     assert fake_trades.docs[0]["strategy_attribution"]["strategy_id"] == "lottery_gap"
+    assert fake_trades.docs[0]["current_stop"] == 140.0
+    assert fake_trades.docs[0]["pm_active_stop"] == 140.0
 
 
 async def _allowed():

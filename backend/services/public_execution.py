@@ -71,6 +71,11 @@ def _quote_timestamp(row: dict[str, Any]) -> Any:
     return row.get("quoteTime") or row.get("quote_time") or row.get("timestamp") or row.get("updatedAt")
 
 
+def _stop_price(row: dict[str, Any]) -> float:
+    """Accept the PM contract's ``stop`` field and legacy ``stop_price``."""
+    return _num(row.get("stop") or row.get("stop_price"))
+
+
 def _numeric_field(payload: Any, names: set[str]) -> float | None:
     """Find a positive account value across Public's changing response shapes."""
     normalized = {name.replace("_", "").lower() for name in names}
@@ -205,7 +210,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
-                "current_stop": _num(row.get("stop_price")), "pm_active_stop": _num(row.get("stop_price")),
+                "current_stop": _stop_price(row), "pm_active_stop": _stop_price(row),
                 "pm_ratchet_plan": row.get("ratchet_plan") or {"enabled": False}, "submitted_at": datetime.now(timezone.utc).isoformat(),
                 "public_preflight": result.get("preflight"),
                 **attribution,
