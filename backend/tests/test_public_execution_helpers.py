@@ -28,6 +28,32 @@ def test_trade_floor_learning_scope_allows_legacy_rows_only_in_paper(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_public_execution_analytics_reports_slippage_protection_and_strategy(monkeypatch):
+    class Cursor:
+        def sort(self, *_args):
+            return self
+
+        async def to_list(self, _limit):
+            return [{
+                "broker_base": "public", "fill_status": "FILLED", "limit_price": 10,
+                "filled_avg_price": 10.05, "qty_remaining": 1,
+                "protective_order_id": "stop-1", "strategy_id": "lottery_gap",
+            }]
+
+    class FakeCollection:
+        def find(self, *_args, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=FakeCollection()))
+    result = await public_execution.analytics()
+    assert result["filled_records"] == 1
+    assert result["protected_filled_records"] == 1
+    assert result["protection_coverage_pct"] == 100.0
+    assert result["slippage_bps"]["avg"] == 50.0
+    assert result["by_strategy"] == {"lottery_gap": 1}
+
+
+@pytest.mark.asyncio
 async def test_public_reconciliation_health_fails_closed_without_success_marker(monkeypatch):
     class FakeCollection:
         async def find_one(self, *_args, **_kwargs):

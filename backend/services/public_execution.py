@@ -361,3 +361,37 @@ async def process_protective_exits() -> dict[str, Any]:
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
     return {"skipped": False, "checked": len(rows), "submitted": submitted}
+
+
+async def analytics(limit: int = 500) -> dict[str, Any]:
+    """Read-only Public execution and protection coverage metrics."""
+    db = get_db()
+    rows = await db.tf_trades.find({"broker_base": BROKER_BASE}, {"_id": 0}).sort("submitted_at", -1).to_list(max(1, min(limit, 5000)))
+    status_counts = Counter(str(row.get("fill_status") or row.get("status") or "UNKNOWN").upper() for row in rows)
+    slippage_bps: list[float] = []
+    by_strategy: Counter[str] = Counter()
+    filled = 0
+    protected = 0
+    for row in rows:
+        strategy = str(row.get("strategy_id") or row.get("screener_id") or "UNATTRIBUTED")
+        by_strategy[strategy] += 1
+        fill_price = _num(row.get("filled_avg_price"))
+        limit_price = _num(row.get("limit_price"))
+        if fill_price > 0 and limit_price > 0:
+            slippage_bps.append(round(((fill_price - limit_price) / limit_price) * 10000, 2))
+        if str(row.get("fill_status") or "").upper() in {"FILLED", "PARTIALLY_FILLED"} or _qty(row) > 0:
+            filled += 1
+            if row.get("protective_order_id") or row.get("protective_order_status") == "SUBMITTED":
+                protected += 1
+    return {
+        "ok": True,
+        "read_only": True,
+        "broker": BROKER_BASE,
+        "records": len(rows),
+        "status_counts": dict(status_counts),
+        "filled_records": filled,
+        "protected_filled_records": protected,
+        "protection_coverage_pct": round(protected / filled * 100, 2) if filled else None,
+        "slippage_bps": {"n": len(slippage_bps), "avg": round(sum(slippage_bps) / len(slippage_bps), 2) if slippage_bps else None, "worst": max(slippage_bps) if slippage_bps else None},
+        "by_strategy": dict(by_strategy),
+    }

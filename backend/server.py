@@ -475,6 +475,13 @@ async def public_api_status():
     return await public_api.status()
 
 
+@api.get("/public/execution/analytics")
+async def public_execution_analytics(limit: int = 500):
+    """Read-only Public fill, slippage, attribution, and stop coverage metrics."""
+    from services import public_execution
+    return await public_execution.analytics(limit=limit)
+
+
 @api.post("/robinhood/probe")
 async def robinhood_probe():
     """Run MCP tools/list only; no account mutation or order operation is attempted."""
