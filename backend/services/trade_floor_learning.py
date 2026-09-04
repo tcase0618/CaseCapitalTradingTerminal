@@ -12,6 +12,7 @@ The Signal Learning Engine and main scan NEVER read or write these.
 """
 from __future__ import annotations
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -22,6 +23,23 @@ logger = logging.getLogger(__name__)
 PRE_ADJUSTMENT_MIN = 5     # 0-4 = held at inherited weight
 SIGNAL_PHASE_MIN = 5       # 5-29 = adjust signal weights only
 FULL_PHASE_MIN = 30        # 30+ = adjust weights + gates + risk tiers
+
+
+def _broker_base() -> str:
+    base = os.environ.get("APCA_API_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
+    return base[:-3] if base.endswith("/v2") else base
+
+
+def _trade_scope() -> dict[str, Any]:
+    """Keep Trade Floor learning isolated by the configured broker account."""
+    base = _broker_base()
+    if "paper-api.alpaca.markets" in base:
+        return {"$or": [{"broker_base": base}, {"broker_base": {"$exists": False}}]}
+    return {"broker_base": base}
+
+
+def _trade_query(*clauses: dict[str, Any]) -> dict[str, Any]:
+    return {"$and": [*clauses, _trade_scope()]}
 
 
 def _now() -> datetime:
@@ -94,6 +112,7 @@ async def log_trade_initiation(trade_doc: dict[str, Any]) -> None:
         "hard_cap_applied": trade_doc.get("hard_cap_applied"),
         "notional": trade_doc.get("notional"),
         "submitted_at": trade_doc.get("submitted_at"),
+        "broker_base": trade_doc.get("broker_base") or _broker_base(),
     }))
 
 
@@ -108,7 +127,7 @@ async def log_trade_outcomes(closed_trades: list[dict[str, Any]]) -> None:
                 bool(truth_status) and truth_status != "verified_alpaca_sell_fill"
             )
             await db.tf_trade_decisions.update_one(
-                {"client_order_id": t.get("client_order_id")},
+                {"$and": [{"client_order_id": t.get("client_order_id")}, _trade_scope()]},
                 {"$set": {
                     "fill_status": t.get("fill_status"),
                     "fill_seconds": t.get("fill_seconds"),
@@ -139,13 +158,13 @@ def _score_tier(score: float) -> str:
 
 async def closed_trade_count() -> int:
     db = get_db()
-    return await db.tf_trades.count_documents({
-        "status": "CLOSED",
-        "$or": [
+    return await db.tf_trades.count_documents(_trade_query(
+        {"status": "CLOSED"},
+        {"$or": [
             {"learning_excluded": {"$ne": True}},
             {"fill_truth_status": "verified_alpaca_sell_fill"},
-        ],
-    })
+        ]},
+    ))
 
 
 async def phase() -> str:
@@ -211,13 +230,13 @@ async def recalibrate() -> dict[str, Any]:
         return {"phase": p, "changes": 0}
 
     # Build combo stats from closed trades
-    trades = await db.tf_trades.find({
-        "status": "CLOSED",
-        "$or": [
+    trades = await db.tf_trades.find(_trade_query(
+        {"status": "CLOSED"},
+        {"$or": [
             {"learning_excluded": {"$ne": True}},
             {"fill_truth_status": "verified_alpaca_sell_fill"},
-        ],
-    }, {"_id": 0}).to_list(1000)
+        ]},
+    ), {"_id": 0}).to_list(1000)
     combos: dict[tuple, dict[str, Any]] = {}
     for t in trades:
         combo = tuple(sorted(t.get("signal_combo") or []))

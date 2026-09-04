@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from services import portfolio_manager, public_execution
+from services import trade_floor_learning
 
 
 def test_public_trade_quantity_prefers_reconciled_remaining_quantity():
@@ -16,6 +17,14 @@ def test_public_trade_quantity_supports_portfolio_quantity():
 
 def test_public_buying_power_prefers_buying_power_over_cash():
     assert public_execution._numeric_field({"cash": 0, "buyingPower": "12.00"}, {"cash", "buying_power"}) == 12.0
+
+
+def test_trade_floor_learning_scope_allows_legacy_rows_only_in_paper(monkeypatch):
+    monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+    assert trade_floor_learning._trade_scope() == {"$or": [{"broker_base": "https://paper-api.alpaca.markets"}, {"broker_base": {"$exists": False}}]}
+
+    monkeypatch.setenv("APCA_API_BASE_URL", "https://api.alpaca.markets")
+    assert trade_floor_learning._trade_scope() == {"broker_base": "https://api.alpaca.markets"}
 
 
 @pytest.mark.asyncio
