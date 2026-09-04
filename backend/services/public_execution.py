@@ -263,8 +263,22 @@ async def reconcile() -> dict[str, Any]:
                 filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
                 update = {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat(), "last_order_status": status}
                 stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
-                if filled_qty > 0 and stop > 0 and not trade.get("protective_order_id"):
-                    stop_client_id = execution_safety.stable_client_order_id("public_protective", trade.get("client_order_id"), ticker, stop, prefix="public")
+                protective_id = trade.get("protective_order_id")
+                protective_qty = _num(trade.get("protective_order_qty"))
+                needs_protective = filled_qty > 0 and stop > 0 and (
+                    not protective_id or abs(protective_qty - filled_qty) > 1e-8
+                )
+                if needs_protective:
+                    if protective_id:
+                        try:
+                            await client.cancel_order(str(protective_id))
+                            update.update({"protective_order_id": None, "protective_order_status": "REPLACEMENT_CANCELLED"})
+                        except Exception as exc:
+                            update.update({"protective_order_status": "REPLACEMENT_CANCEL_FAILED", "protective_order_error": str(exc)[:220]})
+                            await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": update})
+                            order_updates += 1
+                            continue
+                    stop_client_id = execution_safety.stable_client_order_id("public_protective", trade.get("client_order_id"), ticker, stop, filled_qty, prefix="public")
                     stop_claim = await execution_safety.claim_execution_intent(
                         scope="public_equity_exit",
                         client_order_id=stop_client_id,
@@ -285,7 +299,7 @@ async def reconcile() -> dict[str, Any]:
                             )
                             protective_order = protective.get("order") or {}
                             protective_id = protective_order.get("orderId") or protective_order.get("id")
-                            update.update({"protective_order_id": protective_id, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
+                            update.update({"protective_order_id": protective_id, "protective_order_qty": filled_qty, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
                             await execution_safety.mark_execution_intent(stop_client_id, "submitted", {"order_id": protective_id, "broker": BROKER_BASE})
                         except Exception as exc:
                             update.update({"protective_order_status": "FAILED", "protective_order_error": str(exc)[:220]})

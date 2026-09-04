@@ -103,6 +103,86 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     assert fake_trades.docs[0]["pm_active_stop"] == 140.0
 
 
+@pytest.mark.asyncio
+async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monkeypatch):
+    class Cursor:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def to_list(self, _limit):
+            return list(self.rows)
+
+    class FakeClient:
+        def __init__(self):
+            self.cancelled = []
+            self.submitted = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get_order(self, _order_id):
+            return {"status": "PARTIALLY_FILLED", "filledQuantity": 2, "averagePrice": 10.0}
+
+        async def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return {"ok": True}
+
+        async def submit_equity_order(self, **kwargs):
+            self.submitted.append(kwargs)
+            return {"preflight": {"outcome": "SUCCESS"}, "order": {"orderId": "new-stop"}}
+
+        async def portfolio(self):
+            return {"positions": [{"symbol": "AAPL", "quantity": 2}]}
+
+    class FakeCollection:
+        def __init__(self, rows):
+            self.rows = rows
+            self.updates = []
+
+        def find(self, query, *_args):
+            if query.get("fill_status") == "PENDING":
+                return Cursor(self.rows)
+            return Cursor(self.rows)
+
+        async def update_one(self, query, update, **_kwargs):
+            self.updates.append((query, update))
+
+    class FakeState:
+        async def update_one(self, *_args, **_kwargs):
+            return None
+
+    trade = {
+        "client_order_id": "public-entry-1",
+        "public_order_id": "entry-1",
+        "broker_base": "public",
+        "status": "OPEN",
+        "fill_status": "PENDING",
+        "ticker": "AAPL",
+        "protective_order_id": "old-stop",
+        "protective_order_qty": 1.0,
+        "pm_active_stop": 9.0,
+        "current_stop": 9.0,
+    }
+    fake_client = FakeClient()
+    fake_trades = FakeCollection([trade])
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda: fake_client)
+    monkeypatch.setattr(public_execution, "enabled", lambda: True)
+    monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", lambda **_kwargs: _claimed())
+    monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", lambda *_args, **_kwargs: _marked())
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=fake_trades, bot_state=FakeState()))
+
+    result = await public_execution.reconcile()
+
+    assert result["ok"] is True
+    assert fake_client.cancelled == ["old-stop"]
+    assert len(fake_client.submitted) == 1
+    assert fake_client.submitted[0]["quantity"] == 2
+    assert fake_client.submitted[0]["session"] == "TWENTY_FOUR_HOURS"
+
+
 async def _allowed():
     return True, {"trading_enabled": True}
 
