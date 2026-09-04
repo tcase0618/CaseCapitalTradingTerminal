@@ -610,7 +610,7 @@ def start_scheduler():
             management["legacy_position_monitor"] = {"ok": False, "reason": e.__class__.__name__}
         try:
             snapshot = await persist_live_position_snapshot(
-                triggered_by="scheduler_position_monitor_15m",
+                triggered_by="scheduler_position_monitor_5m_24_5",
                 management=management,
             )
             await log_activity(
