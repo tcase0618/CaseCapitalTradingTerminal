@@ -106,6 +106,27 @@ async def test_public_equity_submit_preflights_before_placing():
 
 
 @pytest.mark.asyncio
+async def test_public_equity_submit_rejects_unknown_preflight_shape():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/preflight/single-leg"):
+            return httpx.Response(200, json={"estimatedCost": "4.00"})
+        return httpx.Response(200, json={"orderId": "must-not-be-called"})
+
+    cfg = _cfg(research_only=False, live_equity_enabled=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(cfg, http) as client:
+            with pytest.raises(public_api.PublicAPIError, match="no explicit outcome"):
+                await client.submit_equity_order(
+                    symbol="AAPL", side="BUY", amount=4, limit_price=150.25,
+                    client_order_id="cc-public-aapl-unknown-preflight",
+                )
+    assert seen == ["/userapigateway/trading/acct-1/preflight/single-leg"]
+
+
+@pytest.mark.asyncio
 async def test_public_order_status_uses_account_scoped_endpoint():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
@@ -42,11 +43,45 @@ def _positions(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _qty(row: dict[str, Any]) -> float:
-    return _num(row.get("quantity") or row.get("qty") or row.get("shares"))
+    # Trade-floor rows store the broker-confirmed holding in qty_remaining;
+    # Public portfolio rows normally expose quantity/shares instead.
+    return _num(row.get("qty_remaining") or row.get("quantity") or row.get("qty") or row.get("shares"))
 
 
 def _quote_price(row: dict[str, Any]) -> float:
     return _num(row.get("ask") or row.get("askPrice") or row.get("last") or row.get("lastPrice"))
+
+
+def _quote_timestamp(row: dict[str, Any]) -> Any:
+    return row.get("quoteTime") or row.get("quote_time") or row.get("timestamp") or row.get("updatedAt")
+
+
+def _numeric_field(payload: Any, names: set[str]) -> float | None:
+    """Find a positive account value across Public's changing response shapes."""
+    normalized = {name.replace("_", "").lower() for name in names}
+    if isinstance(payload, dict):
+        priority = ("buyingpower", "availablecash", "cash")
+        for wanted in priority:
+            for key, value in payload.items():
+                if wanted in normalized and str(key).replace("_", "").lower() == wanted:
+                    number = _num(value, -1.0)
+                    if number >= 0:
+                        return number
+        for key, value in payload.items():
+            if str(key).replace("_", "").lower() in normalized:
+                number = _num(value, -1.0)
+                if number >= 0:
+                    return number
+        for value in payload.values():
+            found = _numeric_field(value, names)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _numeric_field(value, names)
+            if found is not None:
+                return found
+    return None
 
 
 def _quotes(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -66,7 +101,16 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
     if not approved:
         return {"skipped": False, "reason": "no_pm_equity_approvals", "executed": [], "rejected": []}
     async with public_api.PublicAPIClient() as client:
+        risk_allowed, safety_status = await execution_safety.add_risk_allowed("public_equity")
+        if not risk_allowed:
+            return {"skipped": False, "reason": safety_status.get("reason") or "safety_halt", "executed": [], "rejected": []}
         portfolio = await client.portfolio()
+        account = await client.accounts()
+        buying_power = _numeric_field(account, {"buying_power", "buyingPower", "cash", "available_cash", "availableCash"})
+        if buying_power is None:
+            buying_power = _numeric_field(portfolio, {"buying_power", "buyingPower", "cash", "available_cash", "availableCash"})
+        if buying_power is None:
+            return {"skipped": False, "reason": "public_buying_power_unavailable", "executed": [], "rejected": [{"ticker": "", "reason": "public_buying_power_unavailable"}], "rejection_reason_counts": {"public_buying_power_unavailable": 1}}
         held = {_symbol(row) for row in _positions(portfolio)}
         quote_rows = _quotes(await client.quotes([_symbol(row) for row in approved]))
         quote_by_symbol = {_symbol(row): row for row in quote_rows}
@@ -77,8 +121,16 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if not ticker or price <= 0:
                 rejected.append({"ticker": ticker, "reason": "public_quote_unavailable"})
                 continue
+            quote_row = quote_by_symbol.get(ticker) or {}
+            fresh, age = execution_safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
+            if not fresh:
+                rejected.append({"ticker": ticker, "reason": "public_quote_stale_or_unverifiable", "age_seconds": age})
+                continue
             if ticker in held:
                 rejected.append({"ticker": ticker, "reason": "public_position_exists"})
+                continue
+            if amount > buying_power:
+                rejected.append({"ticker": ticker, "reason": "public_buying_power_insufficient", "required_usd": amount, "available_usd": buying_power})
                 continue
             client_id = execution_safety.stable_client_order_id("public_pm", cycle_id or "", ticker, amount, round(price, 4), prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity", client_order_id=client_id, symbol=ticker, side="buy", metadata={"amount": amount, "price": price, "cycle_id": cycle_id})
@@ -105,6 +157,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
             executed.append({"ticker": ticker, "allocation_usd": amount, "limit_price": price, "order_id": order_id})
             held.add(ticker)
+            buying_power -= amount
     await log_activity("Public equity execution completed", "info", {"executed": len(executed), "rejected": len(rejected)})
     return {"skipped": False, "executed": executed, "rejected": rejected, "rejection_reason_counts": dict(Counter(item.get("reason", "unknown") for item in rejected))}
 
@@ -117,6 +170,25 @@ async def reconcile() -> dict[str, Any]:
         pending = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "PENDING", "public_order_id": {"$exists": True}}, {"_id": 0}).to_list(500)
         order_updates = 0
         for trade in pending:
+            ticker = _symbol(trade)
+            submitted_at = trade.get("submitted_at")
+            try:
+                submitted_dt = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00")) if submitted_at else None
+            except ValueError:
+                submitted_dt = None
+            ttl_seconds = max(60, int(_num(os.environ.get("PUBLIC_PENDING_ORDER_TTL_SECONDS"), 900)))
+            if submitted_dt and (datetime.now(timezone.utc) - submitted_dt.astimezone(timezone.utc)).total_seconds() > ttl_seconds:
+                try:
+                    await client.cancel_order(str(trade.get("public_order_id")))
+                    await db.tf_trades.update_one(
+                        {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                        {"$set": {"status": "CLOSED", "fill_status": "EXPIRED_BY_TERMINAL", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_pending_order_ttl"}},
+                    )
+                    await execution_safety.mark_execution_intent(trade.get("client_order_id"), "expired", {"reason": "public_pending_order_ttl"})
+                    order_updates += 1
+                except Exception:
+                    logger.exception("Public stale-order cancellation failed for %s", ticker)
+                continue
             try:
                 order = await client.get_order(str(trade.get("public_order_id")))
             except Exception:
@@ -124,7 +196,36 @@ async def reconcile() -> dict[str, Any]:
             status = str(order.get("status") or "").upper()
             if status in {"FILLED", "PARTIALLY_FILLED"}:
                 filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
-                await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat(), "last_order_status": status}})
+                update = {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat(), "last_order_status": status}
+                stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
+                if filled_qty > 0 and stop > 0 and not trade.get("protective_order_id"):
+                    stop_client_id = execution_safety.stable_client_order_id("public_protective", trade.get("client_order_id"), ticker, stop, prefix="public")
+                    stop_claim = await execution_safety.claim_execution_intent(
+                        scope="public_equity_exit",
+                        client_order_id=stop_client_id,
+                        symbol=ticker,
+                        side="sell",
+                        metadata={"stop": stop, "source_order_id": trade.get("public_order_id")},
+                    )
+                    if stop_claim.get("ok"):
+                        try:
+                            protective = await client.submit_equity_order(
+                                symbol=ticker,
+                                side="SELL",
+                                quantity=filled_qty,
+                                stop_price=stop,
+                                limit_price=round(stop * 0.99, 2),
+                                session="CORE",
+                                client_order_id=stop_client_id,
+                            )
+                            protective_order = protective.get("order") or {}
+                            protective_id = protective_order.get("orderId") or protective_order.get("id")
+                            update.update({"protective_order_id": protective_id, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
+                            await execution_safety.mark_execution_intent(stop_client_id, "submitted", {"order_id": protective_id, "broker": BROKER_BASE})
+                        except Exception as exc:
+                            update.update({"protective_order_status": "FAILED", "protective_order_error": str(exc)[:220]})
+                            await execution_safety.mark_execution_intent(stop_client_id, "broker_rejected", {"error": str(exc)[:220]})
+                await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": update})
                 order_updates += 1
             elif status in {"CANCELLED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "fill_status": status, "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": f"public_order_{status.lower()}", "last_order_status": status}})

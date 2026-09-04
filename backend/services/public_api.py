@@ -472,7 +472,17 @@ class PublicAPIClient:
             order_id=client_order_id,
         )
         preflight = await self.preflight_single_leg(payload, account_id=account_id)
-        outcome = str(preflight.get("outcome") or preflight.get("status") or "SUCCESS").upper()
+        # Never treat an unfamiliar or incomplete broker response as approval.
+        # Public can add response fields without preserving our assumptions;
+        # execution must require an explicit known-success outcome.
+        outcome = str(
+            preflight.get("outcome")
+            or preflight.get("status")
+            or preflight.get("result")
+            or ""
+        ).upper()
+        if not outcome:
+            raise PublicAPIError("Public preflight returned no explicit outcome")
         if outcome not in {"SUCCESS", "VALID", "OK"}:
             raise PublicAPIError(f"Public preflight rejected order: {outcome}")
         placed = await self.place_order(payload, account_id=account_id)
