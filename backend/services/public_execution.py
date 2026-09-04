@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from . import execution_safety, public_api
+from . import execution_safety, public_api, safety
 from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 rejected.append({"ticker": ticker, "reason": "public_quote_unavailable"})
                 continue
             quote_row = quote_by_symbol.get(ticker) or {}
-            fresh, age = execution_safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
+            fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
             if not fresh:
                 rejected.append({"ticker": ticker, "reason": "public_quote_stale_or_unverifiable", "age_seconds": age})
                 continue
@@ -215,7 +215,7 @@ async def reconcile() -> dict[str, Any]:
                                 quantity=filled_qty,
                                 stop_price=stop,
                                 limit_price=round(stop * 0.99, 2),
-                                session="CORE",
+                                session="TWENTY_FOUR_HOURS",
                                 client_order_id=stop_client_id,
                             )
                             protective_order = protective.get("order") or {}
