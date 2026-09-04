@@ -12,6 +12,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.combining import OrTrigger
 
 from . import learning_engine, lottery, options_engine, pnl_tracker, scanner, telegram_service
 from .db import get_db, log_activity, stamped
@@ -559,7 +560,8 @@ def start_scheduler():
         id="regime_gate", replace_existing=True,
     )
 
-    # v5.0 - position monitor every 15 min during market hours
+    # Position and broker monitor every 5 minutes during the requested 24/5
+    # window: Sunday 20:00 ET through Friday 19:55 ET.
     async def _day_start_equity_snapshot_job():
         try:
             from . import safety
@@ -623,7 +625,11 @@ def start_scheduler():
 
     _scheduler.add_job(
         _position_monitor_with_snapshot,
-        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
+        OrTrigger([
+            CronTrigger(day_of_week="sun", hour="20-23", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="mon-thu", hour="0-23", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="fri", hour="0-19", minute="*/5", timezone=ET),
+        ]),
         id="position_monitor", replace_existing=True,
     )
     _scheduler.add_job(
