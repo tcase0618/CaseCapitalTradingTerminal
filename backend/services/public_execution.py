@@ -91,6 +91,21 @@ def _quotes(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
+async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:
+    state = await get_db().bot_state.find_one({"_id": "public_reconciliation"}, {"_id": 0}) or {}
+    checked_at = state.get("last_success_at")
+    if not checked_at:
+        return {"ok": False, "reason": "public_reconciliation_not_initialized"}
+    try:
+        parsed = datetime.fromisoformat(str(checked_at).replace("Z", "+00:00"))
+        age = max(0, int((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()))
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "public_reconciliation_timestamp_invalid"}
+    if age > max_age_seconds:
+        return {"ok": False, "reason": "public_reconciliation_stale", "age_seconds": age}
+    return {"ok": True, "age_seconds": age, "last_success_at": checked_at}
+
+
 async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | None = None) -> dict[str, Any]:
     """Submit only PM-approved equity rows, with Public preflight first."""
     if not enabled():
@@ -101,6 +116,18 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
     if not approved:
         return {"skipped": False, "reason": "no_pm_equity_approvals", "executed": [], "rejected": []}
     async with public_api.PublicAPIClient() as client:
+        health = await reconciliation_health()
+        if not health.get("ok"):
+            # Bootstrap the health record once after deployment. This performs
+            # reconciliation only; it does not submit a buy order.
+            try:
+                await reconcile()
+            except Exception as exc:
+                logger.exception("Public reconciliation bootstrap failed")
+                return {"skipped": False, "reason": "public_reconciliation_failed", "executed": [], "rejected": [{"ticker": "", "reason": "public_reconciliation_failed", "detail": str(exc)[:220]}]}
+            health = await reconciliation_health()
+            if not health.get("ok"):
+                return {"skipped": False, "reason": health.get("reason") or "public_reconciliation_unhealthy", "executed": [], "rejected": [{"ticker": "", "reason": health.get("reason") or "public_reconciliation_unhealthy"}]}
         risk_allowed, safety_status = await execution_safety.add_risk_allowed("public_equity")
         if not risk_allowed:
             return {"skipped": False, "reason": safety_status.get("reason") or "safety_halt", "executed": [], "rejected": []}
@@ -111,6 +138,15 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             buying_power = _numeric_field(portfolio, {"buying_power", "buyingPower", "cash", "available_cash", "availableCash"})
         if buying_power is None:
             return {"skipped": False, "reason": "public_buying_power_unavailable", "executed": [], "rejected": [{"ticker": "", "reason": "public_buying_power_unavailable"}], "rejection_reason_counts": {"public_buying_power_unavailable": 1}}
+        from . import trading_halts
+        try:
+            halt_payload = await trading_halts.fetch_halts()
+        except Exception as exc:
+            logger.exception("Public halt feed check failed")
+            return {"skipped": False, "reason": "public_halt_feed_unavailable", "executed": [], "rejected": [{"ticker": "", "reason": "public_halt_feed_unavailable", "detail": str(exc)[:220]}], "rejection_reason_counts": {"public_halt_feed_unavailable": 1}}
+        if not halt_payload.get("ok"):
+            return {"skipped": False, "reason": "public_halt_feed_unavailable", "executed": [], "rejected": [{"ticker": "", "reason": "public_halt_feed_unavailable"}], "rejection_reason_counts": {"public_halt_feed_unavailable": 1}}
+        active_halts = {str(item.get("symbol") or "").upper() for item in halt_payload.get("halts") or [] if item.get("active")}
         held = {_symbol(row) for row in _positions(portfolio)}
         quote_rows = _quotes(await client.quotes([_symbol(row) for row in approved]))
         quote_by_symbol = {_symbol(row): row for row in quote_rows}
@@ -120,6 +156,9 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             price = _quote_price(quote_by_symbol.get(ticker) or {})
             if not ticker or price <= 0:
                 rejected.append({"ticker": ticker, "reason": "public_quote_unavailable"})
+                continue
+            if ticker in active_halts:
+                rejected.append({"ticker": ticker, "reason": "public_symbol_actively_halted"})
                 continue
             quote_row = quote_by_symbol.get(ticker) or {}
             fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
@@ -243,6 +282,11 @@ async def reconcile() -> dict[str, Any]:
             elif trade.get("fill_status") == "FILLED":
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
                 closed += 1
+    await db.bot_state.update_one(
+        {"_id": "public_reconciliation"},
+        {"$set": {"last_success_at": datetime.now(timezone.utc).isoformat(), "last_result": {"order_updates": order_updates, "updated": updated, "closed": closed}}},
+        upsert=True,
+    )
     return {"skipped": False, "order_updates": order_updates, "updated": updated, "closed": closed, "broker": BROKER_BASE}
 
 

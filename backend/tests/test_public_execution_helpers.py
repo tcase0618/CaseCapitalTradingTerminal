@@ -19,6 +19,17 @@ def test_public_buying_power_prefers_buying_power_over_cash():
 
 
 @pytest.mark.asyncio
+async def test_public_reconciliation_health_fails_closed_without_success_marker(monkeypatch):
+    class FakeCollection:
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(bot_state=FakeCollection()))
+    result = await public_execution.reconciliation_health()
+    assert result == {"ok": False, "reason": "public_reconciliation_not_initialized"}
+
+
+@pytest.mark.asyncio
 async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     class FakeClient:
         def __init__(self):
@@ -51,11 +62,13 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     fake_client = FakeClient()
     monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda: fake_client)
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
+    monkeypatch.setattr(public_execution, "reconciliation_health", lambda: _healthy())
     monkeypatch.setattr(public_execution.execution_safety, "add_risk_allowed", lambda _scope: _allowed())
     monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", lambda **_kwargs: _claimed())
     monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", lambda *_args, **_kwargs: _marked())
     monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=FakeCollection()))
     monkeypatch.setattr(public_execution, "log_activity", _marked)
+    monkeypatch.setattr("services.trading_halts.fetch_halts", lambda: _clear_halts())
 
     result = await public_execution.execute_pm_equity(
         [{"ticker": "AAPL", "action": "STARTER", "allocation_usd": 6, "stop_price": 140}],
@@ -77,3 +90,11 @@ async def _claimed():
 
 async def _marked(*_args, **_kwargs):
     return None
+
+
+async def _healthy():
+    return {"ok": True, "age_seconds": 1}
+
+
+async def _clear_halts():
+    return {"ok": True, "halts": []}
