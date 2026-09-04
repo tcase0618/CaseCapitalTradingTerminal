@@ -39,11 +39,16 @@ def _symbol(row: dict[str, Any]) -> str:
 
 def _strategy_attribution(row: dict[str, Any]) -> dict[str, Any]:
     scanner = row.get("strategy_scanner") or {}
+    source_scan = row.get("source_scan")
+    views = [view for view in (row.get("strategy_views") or []) if isinstance(view, dict)]
+    view_lanes = [str(view.get("lane")) for view in views if view.get("lane")]
+    view_screeners = [str(view.get("screener_id")) for view in views if view.get("screener_id")]
+    lanes = row.get("strategy_lanes") or scanner.get("lanes") or view_lanes
     return {
-        "strategy_id": row.get("strategy_id") or scanner.get("id") or scanner.get("name"),
-        "screener_id": row.get("screener_id") or scanner.get("screener_id") or scanner.get("id"),
+        "strategy_id": row.get("strategy_id") or scanner.get("id") or scanner.get("name") or source_scan,
+        "screener_id": row.get("screener_id") or scanner.get("screener_id") or scanner.get("id") or source_scan or (view_screeners[0] if view_screeners else None),
         "scanner_family": row.get("scanner_family") or scanner.get("family"),
-        "strategy_lanes": row.get("strategy_lanes") or row.get("signals") or scanner.get("lanes") or [],
+        "strategy_lanes": list(dict.fromkeys(str(lane) for lane in lanes)) if isinstance(lanes, (list, tuple)) else ([str(lanes)] if lanes else []),
     }
 
 

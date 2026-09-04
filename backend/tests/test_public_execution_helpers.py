@@ -81,10 +81,10 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
             "action": "STARTER",
             "allocation_usd": 6,
             "stop_price": 140,
-            "strategy_id": "lottery_gap",
-            "screener_id": "LOTTERY_GAP",
+            "source_scan": "lottery_gap",
             "scanner_family": "LOTTERY",
-            "signals": ["GAP/SURGE"],
+            "signals": ["GAP/SURGE", "RVOL"],
+            "strategy_views": [{"screener_id": "lottery_gap", "family": "LOTTERY", "lane": "DAY2_CONTINUATION"}],
         }],
         cycle_id="cycle-1",
     )
@@ -93,9 +93,9 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     assert result["rejected"] == []
     assert fake_client.submitted[0]["session"] == "TWENTY_FOUR_HOURS"
     assert fake_trades.docs[0]["strategy_id"] == "lottery_gap"
-    assert fake_trades.docs[0]["screener_id"] == "LOTTERY_GAP"
+    assert fake_trades.docs[0]["screener_id"] == "lottery_gap"
     assert fake_trades.docs[0]["scanner_family"] == "LOTTERY"
-    assert fake_trades.docs[0]["strategy_lanes"] == ["GAP/SURGE"]
+    assert fake_trades.docs[0]["strategy_lanes"] == ["DAY2_CONTINUATION"]
     assert fake_trades.docs[0]["strategy_attribution"]["strategy_id"] == "lottery_gap"
 
 
