@@ -56,28 +56,47 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
             return {"preflight": {"outcome": "SUCCESS"}, "order": {"orderId": "order-1"}}
 
     class FakeCollection:
+        def __init__(self):
+            self.docs = []
+
         async def insert_one(self, _doc):
+            self.docs.append(_doc)
             return None
 
     fake_client = FakeClient()
+    fake_trades = FakeCollection()
     monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda: fake_client)
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
     monkeypatch.setattr(public_execution, "reconciliation_health", lambda: _healthy())
     monkeypatch.setattr(public_execution.execution_safety, "add_risk_allowed", lambda _scope: _allowed())
     monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", lambda **_kwargs: _claimed())
     monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", lambda *_args, **_kwargs: _marked())
-    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=FakeCollection()))
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=fake_trades))
     monkeypatch.setattr(public_execution, "log_activity", _marked)
     monkeypatch.setattr("services.trading_halts.fetch_halts", lambda: _clear_halts())
 
     result = await public_execution.execute_pm_equity(
-        [{"ticker": "AAPL", "action": "STARTER", "allocation_usd": 6, "stop_price": 140}],
+        [{
+            "ticker": "AAPL",
+            "action": "STARTER",
+            "allocation_usd": 6,
+            "stop_price": 140,
+            "strategy_id": "lottery_gap",
+            "screener_id": "LOTTERY_GAP",
+            "scanner_family": "LOTTERY",
+            "signals": ["GAP/SURGE"],
+        }],
         cycle_id="cycle-1",
     )
 
     assert len(result["executed"]) == 1
     assert result["rejected"] == []
     assert fake_client.submitted[0]["session"] == "TWENTY_FOUR_HOURS"
+    assert fake_trades.docs[0]["strategy_id"] == "lottery_gap"
+    assert fake_trades.docs[0]["screener_id"] == "LOTTERY_GAP"
+    assert fake_trades.docs[0]["scanner_family"] == "LOTTERY"
+    assert fake_trades.docs[0]["strategy_lanes"] == ["GAP/SURGE"]
+    assert fake_trades.docs[0]["strategy_attribution"]["strategy_id"] == "lottery_gap"
 
 
 async def _allowed():

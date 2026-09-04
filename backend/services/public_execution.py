@@ -37,6 +37,16 @@ def _symbol(row: dict[str, Any]) -> str:
     return str(row.get("symbol") or row.get("ticker") or instrument.get("symbol") or "").upper().strip()
 
 
+def _strategy_attribution(row: dict[str, Any]) -> dict[str, Any]:
+    scanner = row.get("strategy_scanner") or {}
+    return {
+        "strategy_id": row.get("strategy_id") or scanner.get("id") or scanner.get("name"),
+        "screener_id": row.get("screener_id") or scanner.get("screener_id") or scanner.get("id"),
+        "scanner_family": row.get("scanner_family") or scanner.get("family"),
+        "strategy_lanes": row.get("strategy_lanes") or row.get("signals") or scanner.get("lanes") or [],
+    }
+
+
 def _positions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = payload.get("positions") or payload.get("holdings") or []
     return rows if isinstance(rows, list) else []
@@ -184,6 +194,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 continue
             order = result.get("order") or {}
             order_id = order.get("orderId") or order.get("id")
+            attribution = _strategy_attribution(row)
             await get_db().tf_trades.insert_one(stamped({
                 "client_order_id": client_id, "public_order_id": order_id, "broker_base": BROKER_BASE,
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
@@ -192,6 +203,8 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "current_stop": _num(row.get("stop_price")), "pm_active_stop": _num(row.get("stop_price")),
                 "pm_ratchet_plan": row.get("ratchet_plan") or {"enabled": False}, "submitted_at": datetime.now(timezone.utc).isoformat(),
                 "public_preflight": result.get("preflight"),
+                **attribution,
+                "strategy_attribution": attribution,
             }))
             await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
             executed.append({"ticker": ticker, "allocation_usd": amount, "limit_price": price, "order_id": order_id})
@@ -208,6 +221,7 @@ async def reconcile() -> dict[str, Any]:
     async with public_api.PublicAPIClient() as client:
         pending = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "PENDING", "public_order_id": {"$exists": True}}, {"_id": 0}).to_list(500)
         order_updates = 0
+        poll_errors = 0
         for trade in pending:
             ticker = _symbol(trade)
             submitted_at = trade.get("submitted_at")
@@ -227,10 +241,12 @@ async def reconcile() -> dict[str, Any]:
                     order_updates += 1
                 except Exception:
                     logger.exception("Public stale-order cancellation failed for %s", ticker)
+                    poll_errors += 1
                 continue
             try:
                 order = await client.get_order(str(trade.get("public_order_id")))
             except Exception:
+                poll_errors += 1
                 continue
             status = str(order.get("status") or "").upper()
             if status in {"FILLED", "PARTIALLY_FILLED"}:
@@ -282,12 +298,12 @@ async def reconcile() -> dict[str, Any]:
             elif trade.get("fill_status") == "FILLED":
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
                 closed += 1
-    await db.bot_state.update_one(
-        {"_id": "public_reconciliation"},
-        {"$set": {"last_success_at": datetime.now(timezone.utc).isoformat(), "last_result": {"order_updates": order_updates, "updated": updated, "closed": closed}}},
-        upsert=True,
-    )
-    return {"skipped": False, "order_updates": order_updates, "updated": updated, "closed": closed, "broker": BROKER_BASE}
+    result = {"skipped": False, "ok": poll_errors == 0, "order_updates": order_updates, "updated": updated, "closed": closed, "poll_errors": poll_errors, "broker": BROKER_BASE}
+    state_update = {"last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_result": result}
+    if poll_errors == 0:
+        state_update["last_success_at"] = datetime.now(timezone.utc).isoformat()
+    await db.bot_state.update_one({"_id": "public_reconciliation"}, {"$set": state_update}, upsert=True)
+    return result
 
 
 async def process_protective_exits() -> dict[str, Any]:
