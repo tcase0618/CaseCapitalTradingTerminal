@@ -102,7 +102,7 @@ def test_options_summary_distinguishes_routed_names_from_contract_readiness():
 
 def test_spread_gate_computes_spread_from_bid_ask():
     tight = {"bid": 2.0, "ask": 2.12, "premium": 2.12}
-    wide = {"bid": 2.0, "ask": 2.3, "premium": 2.3}
+    wide = {"bid": 2.0, "ask": 2.4, "premium": 2.4}
     cheap = {"bid": 0.01, "ask": 0.05, "premium": 0.05}
 
     assert options_desk._spread_is_too_wide(tight) is False
