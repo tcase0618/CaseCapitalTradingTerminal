@@ -1,11 +1,11 @@
-"""Mirror critical MongoDB collections into PostgreSQL.
+"""Migrate MongoDB collections into PostgreSQL.
 
 Usage:
   cd backend
   python migrate_mongo_to_postgres.py --limit 5000
 
-This is intentionally non-destructive. Mongo remains untouched; Postgres gets
-latest-document snapshots plus append-only event rows for each mirrored doc.
+This is intentionally non-destructive. Mongo remains untouched as rollback
+source; PostgreSQL receives latest-document snapshots and migration metadata.
 """
 from __future__ import annotations
 

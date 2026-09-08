@@ -1,10 +1,9 @@
-"""Optional PostgreSQL durability layer.
+"""PostgreSQL persistence, migration, and the Mongo-compatible async API.
 
-MongoDB remains the active application store until an explicit subsystem
-cutover. This module gives the terminal a conservative Postgres foundation:
-schema creation, append-only events, latest-document snapshots, and migration
-helpers. All calls are no-op unless POSTGRES_ENABLED=true and POSTGRES_DSN is
-configured.
+The compatibility API lets existing terminal services move to PostgreSQL
+without a simultaneous rewrite of every strategy module. MongoDB is retained
+only as a rollback archive after cutover; it is not opened by the active
+runtime when ``DB_BACKEND=postgres``.
 """
 from __future__ import annotations
 
