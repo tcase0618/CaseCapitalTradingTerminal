@@ -101,21 +101,34 @@ async def migrate(limit: int, collections: list[str], dry_run: bool = False) -> 
             mirrored = 0
             errors = 0
             try:
-                cursor = db[name].find({}, {"_id": 0}).sort(sort[0], sort[1]).limit(limit)
-                docs = await cursor.to_list(limit)
+                cursor = db[name].find({}, {"_id": 0}).sort(sort[0], sort[1])
             except Exception:
-                cursor = db[name].find({}, {"_id": 0}).limit(limit)
-                docs = await cursor.to_list(limit)
-            for doc in docs:
+                cursor = db[name].find({}, {"_id": 0})
+            batch: list[dict[str, Any]] = []
+            seen = 0
+            async for doc in cursor:
+                if seen >= limit:
+                    break
+                seen += 1
+                batch.append(doc)
+                if len(batch) >= 250:
+                    if dry_run:
+                        mirrored += len(batch)
+                    else:
+                        try:
+                            mirrored += await postgres_store.upsert_snapshots_bulk(name, batch)
+                        except Exception:
+                            errors += len(batch)
+                    batch.clear()
+            if batch:
                 if dry_run:
-                    mirrored += 1
-                    continue
-                ok = await postgres_store.mirror_document(name, doc, source="mongo-migration")
-                if ok:
-                    mirrored += 1
+                    mirrored += len(batch)
                 else:
-                    errors += 1
-            results[name] = {"seen": len(docs), "mirrored": mirrored, "errors": errors}
+                    try:
+                        mirrored += await postgres_store.upsert_snapshots_bulk(name, batch)
+                    except Exception:
+                        errors += len(batch)
+            results[name] = {"seen": seen, "mirrored": mirrored, "errors": errors}
         if run_id:
             await _mark_run("complete", results, run_id=run_id)
         return {

@@ -587,6 +587,24 @@ async def mirror_document(collection: str, doc: dict[str, Any], *, source: str =
     return await upsert_snapshot(collection, doc_key(collection, doc), doc, source=source)
 
 
+async def upsert_snapshots_bulk(collection: str, docs: list[dict[str, Any]], *, source: str = "mongo-migration") -> int:
+    """Write a bounded migration batch without retaining the whole collection."""
+    if not docs or not await init_schema() or _pool is None:
+        return 0
+    rows = [(collection, doc_key(collection, normalize_json(doc)), json.dumps(normalize_json(doc), default=_json_default)) for doc in docs]
+    async with _pool.acquire() as conn:
+        await conn.executemany(
+            """
+            insert into cc_collection_snapshots(collection, doc_key, payload, updated_at)
+            values($1, $2, $3::jsonb, now())
+            on conflict(collection, doc_key) do update
+            set payload = excluded.payload, updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+    return len(rows)
+
+
 async def status() -> dict[str, Any]:
     ready = await init_schema() if enabled() else False
     counts: dict[str, int] = {}
