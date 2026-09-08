@@ -100,10 +100,10 @@ async def migrate(limit: int, collections: list[str], dry_run: bool = False) -> 
             sort = DEFAULT_SORTS.get(name, ("created_at", -1))
             mirrored = 0
             errors = 0
-            try:
-                cursor = db[name].find({}, {"_id": 0}).sort(sort[0], sort[1])
-            except Exception:
-                cursor = db[name].find({}, {"_id": 0})
+            # Do not sort unindexed historical collections during migration.
+            # Mongo can throw a 32MB sort error before the cursor yields rows;
+            # ordering is irrelevant because snapshots are idempotent.
+            cursor = db[name].find({}, {"_id": 0})
             batch: list[dict[str, Any]] = []
             seen = 0
             async for doc in cursor:
