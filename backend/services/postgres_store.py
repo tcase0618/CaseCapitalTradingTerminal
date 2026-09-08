@@ -14,7 +14,7 @@ import math
 import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
 
 try:
     import asyncpg
@@ -25,6 +25,300 @@ except Exception:  # pragma: no cover - optional dependency at import time
 _pool: Any | None = None
 _last_error: str | None = None
 _schema_ready = False
+
+
+class PostgresResult:
+    def __init__(self, **values: Any):
+        self.__dict__.update(values)
+
+
+def _path_get(doc: dict[str, Any], path: str, default: Any = None) -> Any:
+    value: Any = doc
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return default
+        value = value[part]
+    return value
+
+
+def _path_set(doc: dict[str, Any], path: str, value: Any) -> None:
+    parts = path.split(".")
+    target = doc
+    for part in parts[:-1]:
+        current = target.get(part)
+        if not isinstance(current, dict):
+            current = {}
+            target[part] = current
+        target = current
+    target[parts[-1]] = value
+
+
+def _path_delete(doc: dict[str, Any], path: str) -> None:
+    parts = path.split(".")
+    target: Any = doc
+    for part in parts[:-1]:
+        if not isinstance(target, dict):
+            return
+        target = target.get(part)
+    if isinstance(target, dict):
+        target.pop(parts[-1], None)
+
+
+def _value_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, list) and not isinstance(expected, list):
+        return expected in actual
+    return actual == expected
+
+
+def _match_value(actual: Any, condition: Any) -> bool:
+    if not isinstance(condition, dict) or not any(str(k).startswith("$") for k in condition):
+        return _value_equal(actual, condition)
+    for op, expected in condition.items():
+        if op == "$exists":
+            if bool(expected) != (actual is not None):
+                return False
+        elif op == "$in":
+            values = actual if isinstance(actual, list) else [actual]
+            if not any(any(_value_equal(v, e) for e in expected) for v in values):
+                return False
+        elif op == "$nin":
+            values = actual if isinstance(actual, list) else [actual]
+            if any(any(_value_equal(v, e) for e in expected) for v in values):
+                return False
+        elif op == "$ne" and _value_equal(actual, expected):
+            return False
+        elif op in {"$gt", "$gte", "$lt", "$lte"}:
+            if actual is None:
+                return False
+            try:
+                if op == "$gt" and not actual > expected: return False
+                if op == "$gte" and not actual >= expected: return False
+                if op == "$lt" and not actual < expected: return False
+                if op == "$lte" and not actual <= expected: return False
+            except TypeError:
+                return False
+        elif op == "$regex":
+            import re
+            if actual is None or re.search(str(expected), str(actual)) is None:
+                return False
+        elif op == "$elemMatch":
+            if not isinstance(actual, list) or not any(_matches(item, expected) if isinstance(item, dict) else _match_value(item, expected) for item in actual):
+                return False
+        else:
+            return False
+    return True
+
+
+def _matches(doc: dict[str, Any], query: dict[str, Any] | None) -> bool:
+    if not query:
+        return True
+    for key, condition in query.items():
+        if key == "$or":
+            if not any(_matches(doc, item) for item in condition):
+                return False
+        elif key == "$and":
+            if not all(_matches(doc, item) for item in condition):
+                return False
+        elif not _match_value(_path_get(doc, key), condition):
+            return False
+    return True
+
+
+def _project(doc: dict[str, Any], projection: dict[str, Any] | None) -> dict[str, Any]:
+    if not projection:
+        return dict(doc)
+    include = {k for k, v in projection.items() if v and k != "_id"}
+    exclude = {k for k, v in projection.items() if not v}
+    if include:
+        out = {k: _path_get(doc, k) for k in include if _path_get(doc, k) is not None}
+        if projection.get("_id", 1) and "_id" in doc:
+            out["_id"] = doc["_id"]
+        return out
+    out = dict(doc)
+    for key in exclude:
+        _path_delete(out, key)
+    return out
+
+
+class PostgresCursor:
+    def __init__(self, collection: "PostgresCollection", query: dict[str, Any] | None, projection: dict[str, Any] | None):
+        self.collection, self.query, self.projection = collection, query or {}, projection
+        self._sort: list[tuple[str, int]] = []
+        self._limit: int | None = None
+        self._skip = 0
+
+    def sort(self, key_or_list: Any, direction: int | None = None):
+        self._sort = [(key_or_list, direction or 1)] if isinstance(key_or_list, str) else list(key_or_list)
+        return self
+
+    def limit(self, value: int):
+        self._limit = value
+        return self
+
+    def skip(self, value: int):
+        self._skip = value
+        return self
+
+    async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
+        rows = await self.collection._read(self.query)
+        for key, direction in reversed(self._sort):
+            rows.sort(key=lambda row: (_path_get(row, key) is None, _path_get(row, key)), reverse=direction < 0)
+        rows = rows[self._skip:]
+        if self._limit is not None:
+            rows = rows[:self._limit]
+        if length is not None:
+            rows = rows[:length]
+        return [_project(row, self.projection) for row in rows]
+
+    def __aiter__(self):
+        async def gen():
+            for row in await self.to_list(None):
+                yield row
+        return gen()
+
+
+class PostgresCollection:
+    def __init__(self, name: str):
+        self.name = name
+
+    async def _read(self, query: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        if not await init_schema() or _pool is None:
+            raise RuntimeError(_last_error or "Postgres is unavailable")
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch("select payload from cc_collection_snapshots where collection=$1", self.name)
+        return [dict(row["payload"]) for row in rows if _matches(dict(row["payload"]), query)]
+
+    def find(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None, **kwargs: Any) -> PostgresCursor:
+        return PostgresCursor(self, query, projection)
+
+    async def find_one(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None, sort: Any = None, **kwargs: Any) -> dict[str, Any] | None:
+        cursor = self.find(query, projection)
+        if sort:
+            cursor.sort(sort)
+        rows = await cursor.to_list(1)
+        return rows[0] if rows else None
+
+    async def insert_one(self, doc: dict[str, Any]) -> PostgresResult:
+        clean = normalize_json(doc)
+        key = doc_key(self.name, clean)
+        ok = await upsert_snapshot(self.name, key, clean, event_type="insert")
+        if not ok:
+            raise RuntimeError(_last_error or "Postgres insert failed")
+        return PostgresResult(inserted_id=clean.get("_id", key))
+
+    async def insert_many(self, docs: Iterable[dict[str, Any]]) -> PostgresResult:
+        ids = []
+        for doc in docs:
+            result = await self.insert_one(doc)
+            ids.append(result.inserted_id)
+        return PostgresResult(inserted_ids=ids)
+
+    async def update_one(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **kwargs: Any) -> PostgresResult:
+        existing = await self.find_one(query)
+        inserted = False
+        if existing is None:
+            if not upsert:
+                return PostgresResult(matched_count=0, modified_count=0, upserted_id=None)
+            existing = {k: v for k, v in query.items() if not k.startswith("$") and not isinstance(v, dict)}
+            inserted = True
+        original = dict(existing)
+        for op, values in update.items():
+            if op == "$set" or (op == "$setOnInsert" and inserted):
+                for key, value in values.items(): _path_set(existing, key, normalize_json(value))
+            elif op == "$unset":
+                for key in values: _path_delete(existing, key)
+            elif op == "$inc":
+                for key, value in values.items(): _path_set(existing, key, (_path_get(existing, key, 0) or 0) + value)
+            elif op in {"$max", "$min"}:
+                for key, value in values.items():
+                    old = _path_get(existing, key)
+                    if old is None or (op == "$max" and value > old) or (op == "$min" and value < old): _path_set(existing, key, value)
+            elif op in {"$push", "$addToSet"}:
+                for key, value in values.items():
+                    arr = list(_path_get(existing, key, []) or [])
+                    additions = value.get("$each", []) if isinstance(value, dict) and "$each" in value else [value]
+                    for item in additions:
+                        if op == "$push" or item not in arr: arr.append(item)
+                    _path_set(existing, key, arr)
+        key = doc_key(self.name, existing)
+        if not await upsert_snapshot(self.name, key, existing):
+            raise RuntimeError(_last_error or "Postgres update failed")
+        return PostgresResult(matched_count=0 if inserted else 1, modified_count=1 if existing != original else 0, upserted_id=key if inserted else None)
+
+    async def update_many(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **kwargs: Any) -> PostgresResult:
+        rows = await self._read(query)
+        if not rows and upsert:
+            return await self.update_one(query, update, upsert=True)
+        modified = 0
+        for row in rows:
+            result = await self.update_one({"_id": row.get("_id")} if row.get("_id") else {"_key": doc_key(self.name, row)}, update)
+            modified += result.modified_count
+        return PostgresResult(matched_count=len(rows), modified_count=modified)
+
+    async def find_one_and_update(self, query: dict[str, Any], update: dict[str, Any], *, upsert: bool = False, return_document: Any = None, projection: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any] | None:
+        before = await self.find_one(query, projection)
+        await self.update_one(query, update, upsert=upsert)
+        if return_document or before is None:
+            return await self.find_one(query, projection)
+        return before
+
+    async def find_one_and_delete(self, query: dict[str, Any], projection: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any] | None:
+        row = await self.find_one(query, projection)
+        if row is not None:
+            await self.delete_one(query)
+        return row
+
+    async def delete_one(self, query: dict[str, Any], **kwargs: Any) -> PostgresResult:
+        rows = await self._read(query)
+        if not rows: return PostgresResult(deleted_count=0)
+        return await self._delete_doc(rows[0])
+
+    async def delete_many(self, query: dict[str, Any], **kwargs: Any) -> PostgresResult:
+        rows = await self._read(query)
+        deleted = 0
+        for row in rows: deleted += (await self._delete_doc(row)).deleted_count
+        return PostgresResult(deleted_count=deleted)
+
+    async def _delete_doc(self, doc: dict[str, Any]) -> PostgresResult:
+        if _pool is None or not await init_schema(): raise RuntimeError(_last_error or "Postgres unavailable")
+        async with _pool.acquire() as conn:
+            result = await conn.execute("delete from cc_collection_snapshots where collection=$1 and doc_key=$2", self.name, doc_key(self.name, doc))
+        return PostgresResult(deleted_count=1 if result.endswith("1") else 0)
+
+    async def count_documents(self, query: dict[str, Any] | None = None, **kwargs: Any) -> int:
+        return len(await self._read(query))
+
+    async def distinct(self, key: str, query: dict[str, Any] | None = None, **kwargs: Any) -> list[Any]:
+        values = {_path_get(row, key) for row in await self._read(query)}
+        return list(values)
+
+    async def create_index(self, *args: Any, **kwargs: Any) -> str:
+        return "postgres_jsonb_compat"
+
+    def aggregate(self, pipeline: list[dict[str, Any]], **kwargs: Any) -> PostgresCursor:
+        query: dict[str, Any] = {}
+        cursor = PostgresCursor(self, query, None)
+        for stage in pipeline:
+            if "$match" in stage: query.update(stage["$match"]); cursor.query = query
+            elif "$sort" in stage: cursor.sort(list(stage["$sort"].items()))
+            elif "$skip" in stage: cursor.skip(stage["$skip"])
+            elif "$limit" in stage: cursor.limit(stage["$limit"])
+        return cursor
+
+
+class PostgresDatabase:
+    def __getitem__(self, name: str) -> PostgresCollection:
+        return PostgresCollection(name)
+
+    def __getattr__(self, name: str) -> PostgresCollection:
+        return PostgresCollection(name)
+
+
+_database = PostgresDatabase()
+
+
+def get_database() -> PostgresDatabase:
+    return _database
 
 
 CRITICAL_COLLECTIONS: tuple[str, ...] = (

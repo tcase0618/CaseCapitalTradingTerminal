@@ -1,4 +1,4 @@
-"""Shared MongoDB client + collection accessors."""
+"""Database access with an explicit, reversible Postgres cutover."""
 import os
 from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,6 +9,9 @@ FEATURE_VERSION = "3.0"
 
 
 def get_db():
+    if os.environ.get("DB_BACKEND", "mongo").strip().lower() == "postgres":
+        from . import postgres_store
+        return postgres_store.get_database()
     global _client
     if _client is None:
         _client = AsyncIOMotorClient(
@@ -38,6 +41,8 @@ async def log_activity(message: str, level: str = "info", meta: dict | None = No
         "feature_version": FEATURE_VERSION,
     }
     await db.activity_log.insert_one(doc)
+    if os.environ.get("DB_BACKEND", "mongo").strip().lower() == "postgres":
+        return
     try:
         from . import postgres_store
         await postgres_store.mirror_document("activity_log", doc)

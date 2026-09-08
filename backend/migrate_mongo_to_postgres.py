@@ -50,7 +50,7 @@ DEFAULT_SORTS: dict[str, tuple[str, int]] = {
 
 def _collections(raw: str | None) -> list[str]:
     if not raw:
-        return list(postgres_store.CRITICAL_COLLECTIONS)
+        return []
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
@@ -89,6 +89,8 @@ async def migrate(limit: int, collections: list[str], dry_run: bool = False) -> 
     if dry_run:
         os.environ["POSTGRES_ENABLED"] = "false"
     db = get_db()
+    if not dry_run and not collections:
+        collections = sorted(await db.list_collection_names())
     run_id = None if dry_run else await _mark_run("running", {})
     results: dict[str, Any] = {}
     try:
@@ -132,7 +134,7 @@ async def migrate(limit: int, collections: list[str], dry_run: bool = False) -> 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=5000)
-    parser.add_argument("--collections", default=None, help="Comma-separated collection list. Defaults to critical collections.")
+    parser.add_argument("--collections", default=None, help="Comma-separated collection list. Defaults to every Mongo collection.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     payload = asyncio.run(migrate(max(1, args.limit), _collections(args.collections), dry_run=args.dry_run))
