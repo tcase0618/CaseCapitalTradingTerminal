@@ -186,7 +186,14 @@ class PostgresCollection:
             raise RuntimeError(_last_error or "Postgres is unavailable")
         async with _pool.acquire() as conn:
             rows = await conn.fetch("select payload from cc_collection_snapshots where collection=$1", self.name)
-        return [dict(row["payload"]) for row in rows if _matches(dict(row["payload"]), query)]
+        documents: list[dict[str, Any]] = []
+        for row in rows:
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if isinstance(payload, dict) and _matches(payload, query):
+                documents.append(payload)
+        return documents
 
     def find(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None, **kwargs: Any) -> PostgresCursor:
         return PostgresCursor(self, query, projection)
