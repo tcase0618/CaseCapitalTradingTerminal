@@ -381,9 +381,23 @@ async def get_options_data(
     catalyst_date: str | None = None,
     spot_hint: float | None = None,
     horizon: str = "tactical",
+    *,
+    execution_preferred: bool = False,
 ) -> dict[str, Any] | None:
-    """Returns chain dataframes + ATM IV + iv_rank, or None if fetch fails."""
+    """Return a normalized chain, using Public for research by default.
+
+    Execution-preferred callers must refresh through Alpaca first because the
+    order desk submits to Alpaca and needs the same provider's contract symbol,
+    quote, greeks, and liquidity fields. Public remains the normal first source
+    for research and PM context.
+    """
     ticker = ticker.upper()
+    if execution_preferred:
+        alpaca_chain = await _fetch_alpaca_options_data(
+            ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon
+        )
+        if alpaca_chain:
+            return alpaca_chain
     public_chain = await _fetch_public_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
     if public_chain:
         return public_chain
@@ -974,7 +988,12 @@ def assess_iv_crush_risk(stock: dict, chain: dict | None) -> dict:
 
 
 # ---------------- top-level pipeline ----------------
-async def analyze_ticker(stock: dict, budget: float = 300.0) -> dict | None:
+async def analyze_ticker(
+    stock: dict,
+    budget: float = 300.0,
+    *,
+    execution_preferred: bool = False,
+) -> dict | None:
     """Full pipeline for one ticker. Returns the options-intelligence block
     that gets attached to the stock dict and surfaced everywhere.
     NEVER raises — returns None on any failure."""
@@ -992,7 +1011,13 @@ async def analyze_ticker(stock: dict, budget: float = 300.0) -> dict | None:
         lane = str(stock.get("strategy_lane") or stock.get("options_lane") or "").lower()
         horizon = "leaps" if "leap" in lane or stock.get("leaps") else "tactical"
         try:
-            chain = await get_options_data(ticker, catalyst, spot_hint=spot_hint, horizon=horizon)
+            chain = await get_options_data(
+                ticker,
+                catalyst,
+                spot_hint=spot_hint,
+                horizon=horizon,
+                execution_preferred=execution_preferred,
+            )
         except TypeError:
             # Preserve compatibility with injected/test providers that still
             # implement the older three-argument adapter contract.

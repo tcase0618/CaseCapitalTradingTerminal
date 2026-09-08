@@ -1265,7 +1265,14 @@ async def build_candidates(
                 from . import options_engine
                 attempted_live_refresh = True
                 refresh_budget = _risk_budget("OPTION", pm_action, pm_score) or STANDARD_RISK_USD
-                refreshed = await options_engine.analyze_ticker(row, budget=refresh_budget)
+                # Public remains the research/PM source. The order desk must
+                # refresh the selected contract from Alpaca so its symbol,
+                # quote, greeks, and quality state match the broker path.
+                refreshed = await options_engine.analyze_ticker(
+                    row,
+                    budget=refresh_budget,
+                    execution_preferred=True,
+                )
                 if refreshed:
                     opts = refreshed
                     row = {**row, "options": opts}
