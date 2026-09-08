@@ -155,6 +155,121 @@ async def _fetch_alpaca_options_data(
     """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
     if not _alpaca_options_configured():
         return None
+    try:
+        import pandas as pd
+
+        ticker = ticker.upper()
+        spot = _safe_float(spot_hint) or await _alpaca_stock_price(ticker)
+        if not spot or spot <= 0:
+            return None
+        target_lo, target_hi = _option_expiration_target(catalyst_date, horizon=horizon)
+        strike_lo = max(0.5, spot * 0.55)
+        strike_hi = spot * 1.75
+        params = {
+            "feed": ALPACA_OPTIONS_FEED,
+            "limit": 1000,
+            "root_symbol": ticker,
+            "expiration_date_gte": target_lo.isoformat(),
+            "expiration_date_lte": target_hi.isoformat(),
+            "strike_price_gte": round(strike_lo, 2),
+            "strike_price_lte": round(strike_hi, 2),
+        }
+        snapshots: dict[str, Any] = {}
+        async with httpx.AsyncClient(timeout=25.0, headers=_alpaca_headers()) as client:
+            for _ in range(8):
+                page = await _alpaca_chain_page(client, ticker, params)
+                snapshots.update(page.get("snapshots") or {})
+                token = page.get("next_page_token")
+                if not token:
+                    break
+                params["page_token"] = token
+        if not snapshots:
+            return None
+
+        rows = []
+        for symbol, snap in snapshots.items():
+            parsed = _parse_occ_symbol(symbol)
+            if not parsed:
+                continue
+            quote = snap.get("latestQuote") or {}
+            trade = snap.get("latestTrade") or {}
+            greeks = snap.get("greeks") or {}
+            daily = snap.get("dailyBar") or {}
+            bid = _safe_float(quote.get("bp"))
+            ask = _safe_float(quote.get("ap"))
+            last = _safe_float(trade.get("p")) or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
+            provider_delta = _safe_float(greeks.get("delta"))
+            rows.append({
+                "contractSymbol": symbol,
+                "strike": parsed["strike"],
+                "lastPrice": last,
+                "bid": bid,
+                "ask": ask,
+                "impliedVolatility": _safe_float(snap.get("impliedVolatility")),
+                "openInterest": _safe_int(snap.get("openInterest"), -1),
+                "volume": _safe_int(daily.get("v") or trade.get("s") or 0),
+                "delta": provider_delta,
+                "deltaSource": "alpaca_greeks" if provider_delta else "unavailable",
+                "gamma": _safe_float(greeks.get("gamma")),
+                "theta": _safe_float(greeks.get("theta")),
+                "vega": _safe_float(greeks.get("vega")),
+                "expiration": parsed["expiration"],
+                "type": parsed["type"],
+                "quoteTime": quote.get("t"),
+                "dataProvider": "ALPACA_OPTIONS",
+                "dataFeed": ALPACA_OPTIONS_FEED,
+                "openInterestSource": "alpaca_snapshot" if snap.get("openInterest") is not None else "unavailable",
+            })
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+        expirations = sorted(df["expiration"].dropna().unique().tolist())
+        if not expirations:
+            return None
+        ideal = target_lo + ((target_hi - target_lo) / 2)
+        best = min(expirations, key=lambda exp: abs((datetime.fromisoformat(exp).date() - ideal).days))
+        calls = df[df["type"] == "C"].copy()
+        puts = df[df["type"] == "P"].copy()
+        if not len(calls) and not len(puts):
+            return None
+
+        atm_iv = None
+        valid_iv = calls[calls["impliedVolatility"] > 0] if len(calls) else df[df["impliedVolatility"] > 0]
+        if len(valid_iv):
+            idx = (valid_iv["strike"] - spot).abs().idxmin()
+            atm_iv = _safe_float(valid_iv.loc[idx, "impliedVolatility"])
+        iv_rank = 50
+        iv_label = "FAIR"
+        if atm_iv and atm_iv > 0:
+            if atm_iv < 0.3:
+                iv_rank, iv_label = 25, "CHEAP"
+            elif atm_iv < 0.6:
+                iv_rank, iv_label = 50, "FAIR"
+            elif atm_iv < 0.9:
+                iv_rank, iv_label = 70, "ELEVATED"
+            else:
+                iv_rank, iv_label = 85, "EXPENSIVE"
+        return {
+            "ticker": ticker,
+            "calls": calls,
+            "puts": puts,
+            "price": spot,
+            "expirations": expirations,
+            "expiration": best,
+            "expiration_window": {"gte": target_lo.isoformat(), "lte": target_hi.isoformat()},
+            "strike_window": {"gte": round(strike_lo, 2), "lte": round(strike_hi, 2)},
+            "snapshot_count": len(rows),
+            "atm_iv": atm_iv,
+            "iv_rank": iv_rank,
+            "iv_label": iv_label,
+            "data_provider": "ALPACA_OPTIONS",
+            "data_feed": ALPACA_OPTIONS_FEED,
+            "data_quality": "INDICATIVE" if ALPACA_OPTIONS_FEED == "indicative" else "EXECUTION_GRADE",
+        }
+    except Exception as e:
+        logger.warning("Alpaca options data failed for %s: %s", ticker, e)
+        return None
 
 
 async def _fetch_public_options_data(
@@ -256,125 +371,6 @@ async def _fetch_public_options_data(
     except Exception as exc:
         logger.debug("Public options data failed for %s: %s", ticker, exc)
         return None
-    try:
-        import pandas as pd
-
-        ticker = ticker.upper()
-        spot = _safe_float(spot_hint) or await _alpaca_stock_price(ticker)
-        if not spot or spot <= 0:
-            return None
-        target_lo, target_hi = _option_expiration_target(catalyst_date, horizon=horizon)
-        strike_lo = max(0.5, spot * 0.55)
-        strike_hi = spot * 1.75
-        params = {
-            "feed": ALPACA_OPTIONS_FEED,
-            "limit": 1000,
-            "root_symbol": ticker,
-            "expiration_date_gte": target_lo.isoformat(),
-            "expiration_date_lte": target_hi.isoformat(),
-            "strike_price_gte": round(strike_lo, 2),
-            "strike_price_lte": round(strike_hi, 2),
-        }
-        snapshots: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=25.0, headers=_alpaca_headers()) as client:
-            for _ in range(8):
-                page = await _alpaca_chain_page(client, ticker, params)
-                snapshots.update(page.get("snapshots") or {})
-                token = page.get("next_page_token")
-                if not token:
-                    break
-                params["page_token"] = token
-        if not snapshots:
-            return None
-
-        rows = []
-        for symbol, snap in snapshots.items():
-            parsed = _parse_occ_symbol(symbol)
-            if not parsed:
-                continue
-            quote = snap.get("latestQuote") or {}
-            trade = snap.get("latestTrade") or {}
-            greeks = snap.get("greeks") or {}
-            daily = snap.get("dailyBar") or {}
-            bid = _safe_float(quote.get("bp"))
-            ask = _safe_float(quote.get("ap"))
-            last = _safe_float(trade.get("p")) or ((bid + ask) / 2 if bid > 0 and ask > 0 else 0.0)
-            volume = _safe_int(daily.get("v") or trade.get("s") or 0)
-            provider_delta = _safe_float(greeks.get("delta"))
-            rows.append({
-                "contractSymbol": symbol,
-                "strike": parsed["strike"],
-                "lastPrice": last,
-                "bid": bid,
-                "ask": ask,
-                "impliedVolatility": _safe_float(snap.get("impliedVolatility")),
-                "openInterest": _safe_int(snap.get("openInterest"), -1),
-                "volume": volume,
-                "delta": provider_delta,
-                "deltaSource": "alpaca_greeks" if provider_delta else "unavailable",
-                "gamma": _safe_float(greeks.get("gamma")),
-                "theta": _safe_float(greeks.get("theta")),
-                "vega": _safe_float(greeks.get("vega")),
-                "expiration": parsed["expiration"],
-                "type": parsed["type"],
-                "quoteTime": quote.get("t"),
-                "dataProvider": "ALPACA_OPTIONS",
-                "dataFeed": ALPACA_OPTIONS_FEED,
-                "openInterestSource": "alpaca_snapshot" if snap.get("openInterest") is not None else "unavailable",
-            })
-        if not rows:
-            return None
-
-        df = pd.DataFrame(rows)
-        expirations = sorted(df["expiration"].dropna().unique().tolist())
-        if not expirations:
-            return None
-        ideal = target_lo + ((target_hi - target_lo) / 2)
-        best = min(expirations, key=lambda exp: abs((datetime.fromisoformat(exp).date() - ideal).days))
-        calls = df[df["type"] == "C"].copy()
-        puts = df[df["type"] == "P"].copy()
-        if not len(calls) and not len(puts):
-            return None
-
-        atm_iv = None
-        valid_iv = calls[calls["impliedVolatility"] > 0] if len(calls) else df[df["impliedVolatility"] > 0]
-        if len(valid_iv):
-            idx = (valid_iv["strike"] - spot).abs().idxmin()
-            atm_iv = _safe_float(valid_iv.loc[idx, "impliedVolatility"])
-        iv_rank = 50
-        iv_label = "FAIR"
-        if atm_iv and atm_iv > 0:
-            # Free Alpaca indicative feed gives current IV, not a full IV history.
-            if atm_iv < 0.3:
-                iv_rank, iv_label = 25, "CHEAP"
-            elif atm_iv < 0.6:
-                iv_rank, iv_label = 50, "FAIR"
-            elif atm_iv < 0.9:
-                iv_rank, iv_label = 70, "ELEVATED"
-            else:
-                iv_rank, iv_label = 85, "EXPENSIVE"
-        return {
-            "ticker": ticker,
-            "calls": calls,
-            "puts": puts,
-            "price": spot,
-            "expirations": expirations,
-            "expiration": best,
-            "expiration_window": {"gte": target_lo.isoformat(), "lte": target_hi.isoformat()},
-            "strike_window": {"gte": round(strike_lo, 2), "lte": round(strike_hi, 2)},
-            "snapshot_count": len(rows),
-            "atm_iv": atm_iv,
-            "iv_rank": iv_rank,
-            "iv_label": iv_label,
-            "data_provider": "ALPACA_OPTIONS",
-            "data_feed": ALPACA_OPTIONS_FEED,
-            "data_quality": "INDICATIVE" if ALPACA_OPTIONS_FEED == "indicative" else "EXECUTION_GRADE",
-        }
-    except Exception as e:
-        logger.warning("Alpaca options data failed for %s: %s", ticker, e)
-        return None
-
-
 # ---------------- chain fetcher (Part 2) ----------------
 async def get_options_data(
     ticker: str,
