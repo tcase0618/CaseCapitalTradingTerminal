@@ -1,9 +1,9 @@
 """Database access with an explicit, reversible Postgres cutover."""
 import os
 from datetime import datetime, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
+from typing import Any
 
-_client: AsyncIOMotorClient | None = None
+_client: Any | None = None
 
 FEATURE_VERSION = "3.0"
 
@@ -14,6 +14,7 @@ def get_db():
         return postgres_store.get_database()
     global _client
     if _client is None:
+        from motor.motor_asyncio import AsyncIOMotorClient
         _client = AsyncIOMotorClient(
             os.environ["MONGO_URL"],
             serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000")),

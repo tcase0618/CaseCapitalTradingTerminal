@@ -1,15 +1,4 @@
 services:
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
   backend:
     build:
       context: ./backend
@@ -17,14 +6,11 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      MONGO_URL: mongodb://mongo:27017
-      DB_NAME: stock_intel
+      DB_BACKEND: postgres
+      POSTGRES_ENABLED: "true"
       CORS_ORIGINS: http://localhost:3000,http://localhost:8080
     ports:
       - "8001:8001"
-    depends_on:
-      mongo:
-        condition: service_healthy
 
   frontend:
     build:
@@ -37,5 +23,3 @@ services:
     depends_on:
       - backend
 
-volumes:
-  mongo-data:
