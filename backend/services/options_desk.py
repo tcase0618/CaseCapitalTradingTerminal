@@ -1242,6 +1242,10 @@ async def build_candidates(
             "risk_reward": pm_row.get("risk_reward"),
         }
         opts = row.get("options") or {}
+        # Public is the research/PM source. Keep that packet intact so the
+        # decision remains attributable to the data the PM actually saw.
+        research_opts = dict(opts)
+        execution_opts: dict[str, Any] | None = None
         attempted_live_refresh = False
         try:
             pm_score = float(pm_row.get("pm_score") or 0)
@@ -1274,8 +1278,7 @@ async def build_candidates(
                     execution_preferred=True,
                 )
                 if refreshed:
-                    opts = refreshed
-                    row = {**row, "options": opts}
+                    execution_opts = refreshed
                     pm_row = {
                         **pm_row,
                         "option_view": portfolio_manager._option_view(row, float(pm_row.get("risk_reward") or 0)),
@@ -1284,7 +1287,10 @@ async def build_candidates(
         except Exception as exc:
             logger.warning("options chain refresh failed for %s: %s", ticker, exc)
         route, route_reasons = _route(pm_row, row)
-        instrument = _selected_instrument(opts)
+        # The final instrument must be the Alpaca-refreshed contract, while
+        # the research packet remains the source for PM-facing context.
+        execution_view = execution_opts or {}
+        instrument = _selected_instrument(execution_view or opts)
         score = float(pm_row.get("pm_score") or 0)
         strategy_lane = _strategy_lane(pm_row, row, opts, instrument, route)
         risk_budget = _risk_budget(route, pm_row.get("action"), score)
@@ -1297,8 +1303,8 @@ async def build_candidates(
         exit_policy = options_ratchet_state(entry_premium=entry_premium)
         contracts = int(risk_budget // contract_risk) if contract_risk > 0 and risk_budget > 0 else 0
         blocked = []
-        data_provider = opts.get("data_provider") or instrument.get("data_provider")
-        data_quality = opts.get("data_quality") or instrument.get("data_quality")
+        data_provider = execution_view.get("data_provider") or instrument.get("data_provider") or opts.get("data_provider")
+        data_quality = execution_view.get("data_quality") or instrument.get("data_quality") or opts.get("data_quality")
         quality_state = "EXECUTION_GRADE" if data_provider == "ALPACA_OPTIONS" and _execution_grade_allowed(data_quality) else "RESEARCH_ONLY"
         if route in {"OPTION", "BOTH"}:
             if not OPTIONS_EXECUTION_ENABLED:
@@ -1344,9 +1350,11 @@ async def build_candidates(
             "strategy_reason": opts.get("strategy_reason") or opts.get("one_liner"),
             "iv_rank": opts.get("iv_rank"),
             "iv_label": opts.get("iv_label"),
-            "data_provider": opts.get("data_provider") or instrument.get("data_provider"),
+            "data_provider": data_provider,
             "data_feed": opts.get("data_feed") or instrument.get("data_feed"),
-            "data_quality": opts.get("data_quality") or instrument.get("data_quality"),
+            "data_quality": data_quality,
+            "research_options": research_opts,
+            "execution_options": execution_opts,
             "crush_risk": opts.get("crush_risk"),
             "instrument": instrument,
             "risk_budget": round(risk_budget, 2),
