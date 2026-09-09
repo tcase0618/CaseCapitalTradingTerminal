@@ -10,6 +10,27 @@ def test_options_finviz_screeners_require_optionable_filter():
         assert "sh_opt_option" in spec["url"]
 
 
+def test_finviz_logo_prefix_does_not_corrupt_ticker():
+    assert lottery._clean_ticker("A AAPD") == "AAPD"
+    assert lottery._clean_ticker("$DFDV") == "DFDV"
+    assert lottery._clean_ticker("AAPL") == "AAPL"
+
+
+def test_options_pm_quote_freshness_fails_closed(monkeypatch):
+    monkeypatch.setenv("OPTIONS_PM_MAX_UNDERLYING_AGE_SECONDS", "90")
+    assert strategy_screeners._quote_is_fresh(0)
+    assert strategy_screeners._quote_is_fresh(90)
+    assert not strategy_screeners._quote_is_fresh(91)
+    assert not strategy_screeners._quote_is_fresh(None)
+    assert not strategy_screeners._quote_is_fresh("unknown")
+
+
+def test_options_pm_quote_age_limit_is_configurable(monkeypatch):
+    monkeypatch.setenv("OPTIONS_PM_MAX_UNDERLYING_AGE_SECONDS", "300")
+    assert strategy_screeners._quote_is_fresh(300)
+    assert not strategy_screeners._quote_is_fresh(301)
+
+
 def test_sec_bearish_filing_is_read_only_and_not_pm_routable():
     row = {
         "ticker": "ABC",

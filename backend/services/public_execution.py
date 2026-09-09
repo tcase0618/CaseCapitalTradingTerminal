@@ -258,11 +258,40 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if not fresh:
                 rejected.append({"ticker": ticker, "reason": "public_and_alpaca_quote_stale_or_unverifiable", "age_seconds": age, "public_price": _quote_price(quote_row)})
                 continue
+            stop_price = _stop_price(row)
+            if not (0 < stop_price < price):
+                rejected.append({
+                    "ticker": ticker,
+                    "reason": "public_invalid_protective_stop",
+                    "limit_price": round(price, 4),
+                    "stop_price": stop_price,
+                })
+                continue
             if ticker in held:
                 rejected.append({"ticker": ticker, "reason": "public_position_exists"})
                 continue
             if amount > buying_power:
                 rejected.append({"ticker": ticker, "reason": "public_buying_power_insufficient", "required_usd": amount, "available_usd": buying_power})
+                continue
+            # Quote and preflight calls can take long enough for a fast name
+            # to move. Re-read the Public quote immediately before claiming
+            # the order; do not silently submit against the earlier price.
+            try:
+                final_rows = _quotes(await client.quotes([ticker]))
+                final_row = next((item for item in final_rows if _symbol(item) == ticker), final_rows[0] if final_rows else {})
+                final_price = _quote_price(final_row)
+                final_fresh, final_age = safety.quote_is_fresh({"ts": _quote_timestamp(final_row)})
+            except Exception:
+                final_price, final_fresh, final_age = 0.0, False, None
+            if not final_fresh or final_price <= 0:
+                rejected.append({"ticker": ticker, "reason": "public_final_quote_stale_or_unverifiable", "age_seconds": final_age})
+                continue
+            if price > 0 and abs(final_price - price) / price > 0.01:
+                rejected.append({"ticker": ticker, "reason": "public_quote_changed_before_submit", "initial_price": price, "final_price": final_price})
+                continue
+            price = final_price
+            if not (0 < stop_price < price):
+                rejected.append({"ticker": ticker, "reason": "public_final_stop_not_below_limit", "limit_price": price, "stop_price": stop_price})
                 continue
             client_id = execution_safety.stable_client_order_id("public_pm", cycle_id or "", ticker, amount, round(price, 4), prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity", client_order_id=client_id, symbol=ticker, side="buy", metadata={"amount": amount, "price": price, "cycle_id": cycle_id})
@@ -288,7 +317,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
                 "quote_source": quote_source,
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
-                "current_stop": _stop_price(row), "pm_active_stop": _stop_price(row),
+                "current_stop": stop_price, "pm_active_stop": stop_price,
                 "pm_ratchet_plan": row.get("ratchet_plan") or {"enabled": False}, "submitted_at": datetime.now(timezone.utc).isoformat(),
                 "public_preflight": result.get("preflight"),
                 **attribution,
@@ -388,6 +417,8 @@ async def reconcile() -> dict[str, Any]:
                             protective_order = protective.get("order") or {}
                             protective_id = protective_order.get("orderId") or protective_order.get("id")
                             update.update({"protective_order_id": protective_id, "protective_order_qty": filled_qty, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
+                            update["protective_order_type"] = "STOP_LIMIT"
+                            update["protective_order_gap_risk"] = "STOP_LIMIT_MAY_NOT_FILL_BELOW_LIMIT"
                             await execution_safety.mark_execution_intent(stop_client_id, "submitted", {"order_id": protective_id, "broker": BROKER_BASE})
                         except Exception as exc:
                             update.update({"protective_order_status": "FAILED", "protective_order_error": str(exc)[:220]})
@@ -536,7 +567,7 @@ async def process_protective_exits() -> dict[str, Any]:
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                     {"$set": {"protective_order_id": order_id, "protective_order_qty": quantity, "protective_order_status": "SUBMITTED", "protective_order_preflight": result.get("preflight")}},
                 )
-                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop})
+                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "order_type": "STOP_LIMIT", "gap_risk": "STOP_LIMIT_MAY_NOT_FILL_BELOW_LIMIT"})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id})
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})

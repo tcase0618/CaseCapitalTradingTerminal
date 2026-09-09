@@ -118,8 +118,14 @@ def _today() -> str:
 
 
 def _clean_ticker(value: Any) -> str:
-    text = re.sub(r"[^A-Za-z.]", "", str(value or "").upper()).replace(".", "-")
-    return text[:8]
+    raw = str(value or "").upper()
+    # Finviz can render a one-letter logo immediately before the symbol
+    # (for example, "A AAPD"). Keep the final ticker token instead of
+    # concatenating the logo into a different security symbol.
+    tokens = re.findall(r"[A-Z]{1,5}(?:[.-][A-Z]{1,2})?", raw)
+    if not tokens:
+        return ""
+    return tokens[-1].replace(".", "-")[:8]
 
 
 def _num(value: Any, default: float = 0.0) -> float:

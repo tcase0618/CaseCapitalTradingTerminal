@@ -50,7 +50,7 @@ async def claim_execution_intent(
     })
     try:
         result = await db.execution_intents.insert_one(doc)
-        if getattr(result, "duplicate", False) or not getattr(result, "inserted_id", None):
+        if getattr(result, "duplicate", False):
             existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
             return {
                 "ok": False,
@@ -61,7 +61,14 @@ async def claim_execution_intent(
             }
         return {"ok": True, "claimed": True, "intent": {k: v for k, v in doc.items() if k != "_id"}}
     except Exception as exc:
-        if "duplicate" not in str(exc).lower() and "unique" not in str(exc).lower():
+        # Drivers do not all include the word "duplicate" in their exception
+        # text, so recognize the canonical duplicate-key type as well.
+        try:
+            from pymongo.errors import DuplicateKeyError
+        except ImportError:
+            DuplicateKeyError = ()
+        is_duplicate = isinstance(exc, DuplicateKeyError) or "duplicate" in str(exc).lower() or "unique" in str(exc).lower()
+        if not is_duplicate:
             raise
         existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
         return {

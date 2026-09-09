@@ -992,6 +992,7 @@ async def evaluate_and_execute(
     from . import execution_gate, execution_safety, portfolio_manager, pm_rules, safety, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []
+    queued: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     started = _now()
     enabled, safety_status = await safety.trading_enabled(scope="equity")
@@ -1168,12 +1169,30 @@ async def evaluate_and_execute(
                        or row.get("hold_period_high") \
                        or row.get("recommended_hold_days") or 30
         sector = row.get("sector")
-        stop_calc = await stop_engine.compute_stop(
-            ticker=ticker, entry_price=ask, signal_combo=_sig_list,
-            score=score, hold_window_days=int(hold_days or 30), sector=sector,
-            instrument=instrument,
-        )
-        stop_price = float(pm_row.get("stop") or stop_calc["stop_price"])
+        try:
+            stop_calc = await stop_engine.compute_stop(
+                ticker=ticker, entry_price=ask, signal_combo=_sig_list,
+                score=score, hold_window_days=int(hold_days or 30), sector=sector,
+                instrument=instrument,
+            )
+        except Exception as exc:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "stop_computation_failed",
+                              "detail": str(exc)[:220]})
+            continue
+        calculated_stop = float(stop_calc.get("stop_price") or 0)
+        pm_stop = float(pm_row.get("stop") or 0)
+        # A PM stop calculated from an older scanner price cannot be above the
+        # actual order limit. Fall back to the stop recalculated from the fresh
+        # quote, and reject if neither produces a valid protective level.
+        stop_price = pm_stop if 0 < pm_stop < ask else calculated_stop
+        if not (0 < stop_price < ask):
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "invalid_protective_stop",
+                              "limit_price": round(ask, 4),
+                              "pm_stop": pm_stop,
+                              "calculated_stop": calculated_stop})
+            continue
 
         # AXIOM target: prefer scan blended target; fall back to signal uplift.
         axiom_target = row.get("target_blended") or row.get("target_high")
@@ -1219,7 +1238,47 @@ async def evaluate_and_execute(
                               "reason": "ticker_has_pending_open_order (final check)"})
             continue
 
+        # Revalidate the market immediately before claiming/submitting the
+        # order. The earlier quote is used for sizing and stop construction;
+        # a material move during preflight must not silently turn into a chase.
+        final_quote_meta = await get_latest_ask_meta(ticker)
+        if not final_quote_meta:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "final_quote_unavailable"})
+            continue
+        final_fresh, final_age = safety.quote_is_fresh(final_quote_meta)
+        if not final_fresh:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "final_quote_stale",
+                              "quote_meta": final_quote_meta,
+                              "age_seconds": final_age})
+            continue
+        final_ask = float(final_quote_meta.get("price") or 0)
+        if final_ask <= 0:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "final_quote_invalid"})
+            continue
+        quote_move = abs(final_ask - raw_ask) / raw_ask if raw_ask > 0 else 1.0
+        if quote_move > 0.01:
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "quote_changed_before_submit",
+                              "initial_ask": raw_ask,
+                              "final_ask": final_ask,
+                              "move_pct": round(quote_move * 100, 3)})
+            continue
+        # Use the final quote within the tolerance so the order record and
+        # limit price reflect the last verified market observation.
+        ask = final_ask
         limit_price = round(ask, 4)
+        if entry_high > 0 and limit_price > entry_high:
+            limit_price = round(entry_high, 4)
+        if not (0 < stop_price < limit_price):
+            rejected.append({"ticker": ticker, "score": score,
+                              "reason": "final_stop_not_below_limit",
+                              "limit_price": limit_price,
+                              "stop_price": stop_price})
+            continue
+        quote_meta = {**final_quote_meta, "age_s": final_age}
         cli_id = execution_safety.stable_client_order_id(
             "pm_equity",
             ticker,
@@ -1321,6 +1380,20 @@ async def evaluate_and_execute(
             "peak_price_since_entry": None,
         })
         await db.tf_trades.insert_one(trade_doc)
+        order_record = {"ticker": ticker, "notional": notional,
+                        "score": score, "pm_score": pm_row.get("pm_score"),
+                        "pm_action": pm_row.get("action"),
+                        "strategy": ((row.get("strategy_scanner") or {}).get("screener_id")
+                                     or (row.get("strategy_scanner") or {}).get("family")
+                                     or row.get("source_scan") or "CORE"),
+                        "limit_price": limit_price,
+                        "stop_price": stop_price, "stop_pct": stop_calc["stop_pct"],
+                        "order_id": order.get("id"),
+                        "queued": order_queued}
+        if order_queued:
+            queued.append({**order_record, "status": "QUEUED"})
+        else:
+            executed.append({**order_record, "status": "SUBMITTED_TO_BROKER"})
         if order_queued:
             await db.tf_queued_orders.update_one(
                 {"client_order_id": cli_id},
@@ -1330,16 +1403,6 @@ async def evaluate_and_execute(
             await tfle.log_trade_initiation(trade_doc)
         except Exception as e:
             logger.warning("tfle.log_trade_initiation: %s", e)
-        executed.append({"ticker": ticker, "notional": notional,
-                          "score": score, "pm_score": pm_row.get("pm_score"),
-                          "pm_action": pm_row.get("action"),
-                          "strategy": ((row.get("strategy_scanner") or {}).get("screener_id")
-                                       or (row.get("strategy_scanner") or {}).get("family")
-                                       or row.get("source_scan") or "CORE"),
-                          "limit_price": limit_price,
-                          "stop_price": stop_price, "stop_pct": stop_calc["stop_pct"],
-                          "order_id": order.get("id"),
-                          "queued": order_queued})
 
     from collections import Counter
     rejection_reason_counts = dict(Counter(str(item.get("reason") or "unknown") for item in rejected))
@@ -1350,6 +1413,7 @@ async def evaluate_and_execute(
         "core_rows": len(scan_results),
         "strategy_rows_included": max(0, len(execution_rows) - len(scan_results)),
         "executed": len(executed),
+        "queued": len(queued),
         "rejected": len(rejected),
         "rejection_details": rejected,
         "rejection_reason_counts": rejection_reason_counts,
@@ -1366,7 +1430,7 @@ async def evaluate_and_execute(
         f"(compression {compression*100:.0f}%)", "info",
         {"rejection_reason_counts": rejection_reason_counts},
     )
-    return {"executed": executed, "rejected": rejected,
+    return {"executed": executed, "queued": queued, "rejected": rejected,
              "compression_ratio": round(compression, 3),
              "total_scanned": len(execution_rows),
              "core_rows": len(scan_results),

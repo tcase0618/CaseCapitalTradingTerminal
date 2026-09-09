@@ -7,6 +7,7 @@ can have its own scanner lane without adding order authority here.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -56,6 +57,20 @@ def _num(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _quote_age_limit_seconds() -> int:
+    try:
+        return max(1, int(os.environ.get("OPTIONS_PM_MAX_UNDERLYING_AGE_SECONDS", "90")))
+    except (TypeError, ValueError):
+        return 90
+
+
+def _quote_is_fresh(age: Any) -> bool:
+    try:
+        return age is not None and float(age) <= _quote_age_limit_seconds()
+    except (TypeError, ValueError):
+        return False
 
 
 def _signals(row: dict[str, Any]) -> list[str]:
@@ -409,6 +424,42 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
     except Exception:
         pass
 
+    # Contract evidence belongs before PM scoring.  Use Public's research
+    # waterfall here so PM sees a real contract when available; the Options
+    # Desk still performs its separate Alpaca execution-grade refresh later.
+    contract_semaphore = asyncio.Semaphore(6)
+
+    async def enrich_contract(row: dict[str, Any]) -> dict[str, Any]:
+        age = row.get("quote_age_seconds")
+        if not _quote_is_fresh(age):
+            row["data_quality"] = "STALE_UNDERLYING_QUOTE"
+            row["contract_readiness"] = "BLOCKED_STALE_UNDERLYING_QUOTE"
+            row["pm_data_blocked"] = True
+            return row
+        try:
+            from . import options_engine
+
+            async with contract_semaphore:
+                analysis = await options_engine.analyze_ticker(
+                    {**row, "strategy_lane": (row.get("option_lanes") or ["TACTICAL_MOMENTUM_CALL"])[0]},
+                    budget=100.0,
+                    execution_preferred=False,
+                )
+            if analysis:
+                row["options_analysis"] = analysis
+                row["contract_readiness"] = "RESEARCH_CONTRACT_SELECTED" if analysis.get("contract") else "CHAIN_UNAVAILABLE"
+                row["contract"] = analysis.get("contract")
+                row["data_provider"] = analysis.get("data_provider") or "SCREENER_ONLY"
+                row["data_quality"] = analysis.get("data_quality") or "RESEARCH_ONLY"
+                return row
+        except Exception as exc:
+            row["contract_analysis_error"] = exc.__class__.__name__
+        row["contract_readiness"] = "CHAIN_UNAVAILABLE"
+        row["data_quality"] = "CHAIN_UNAVAILABLE"
+        return row
+
+    rows = list(await asyncio.gather(*(enrich_contract(row) for row in rows)))
+
     out: list[dict[str, Any]] = []
     for row in rows:
         ticker = _ticker(row.get("ticker"))
@@ -443,9 +494,22 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
             "iv_label": row.get("iv_label", "UNKNOWN"),
             "screener_lanes": lanes,
             "screener_sources": row.get("sources") or [],
-            "data_provider": "SCREENER_ONLY",
-            "data_quality": "NEEDS_CHAIN_REFRESH",
+            "data_provider": row.get("data_provider") or "SCREENER_ONLY",
+            "data_quality": row.get("data_quality") or "NEEDS_CHAIN_REFRESH",
+            "contract": row.get("contract"),
+            "contract_readiness": row.get("contract_readiness") or "CHAIN_UNAVAILABLE",
+            "quote_age_seconds": row.get("quote_age_seconds"),
         }
+        if row.get("pm_data_blocked"):
+            built["pm_routable"] = False
+            built["read_only"] = True
+            built["strategy_scanner"]["pm_routable"] = False
+            built["strategy_scanner"]["read_only"] = True
+            built["strategy_scanner"]["notes"] = [
+                *built["strategy_scanner"].get("notes", []),
+                f"Underlying quote stale or unverifiable; PM blocked until refreshed (>{_quote_age_limit_seconds()}s).",
+            ]
+            built["stale_data_reason"] = "underlying_quote_stale_or_unverifiable"
         built["strategy_scanner"]["badges"] = _strategy_badges(built["strategy_case"], {"options": built["options"], **row})
         out.append(built)
     return out

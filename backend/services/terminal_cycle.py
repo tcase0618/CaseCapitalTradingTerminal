@@ -161,6 +161,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "equity_status": "SKIPPED" if equity_execution.get("skipped") else "ATTEMPTED",
         "equity_skip_reason": equity_execution.get("reason") if equity_execution.get("skipped") else None,
         "equity_executed": len(equity_execution.get("executed") or []),
+        "equity_queued": len(equity_execution.get("queued") or []),
         "equity_rejected": len(equity_execution.get("rejected") or []),
         "equity_rejection_reason_counts": equity_execution.get("rejection_reason_counts") or _reason_counts(equity_execution.get("rejected")),
         "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],

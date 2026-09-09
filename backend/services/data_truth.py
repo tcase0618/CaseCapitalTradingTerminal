@@ -112,7 +112,7 @@ def _persistence_blocker(error: Exception) -> dict[str, Any]:
     label = "Database Persistence Block"
     key = "database_persistence_block"
     if "space quota" in detail.lower() or "writes are blocked" in detail.lower():
-        detail = "PostgreSQL writes are unavailable; execution remains blocked until the database is healthy."
+        detail = f"Database storage quota is exhausted; PostgreSQL writes are unavailable and execution remains blocked until the database is healthy. Provider detail: {detail}"
     return {
         "key": key,
         "label": label,
