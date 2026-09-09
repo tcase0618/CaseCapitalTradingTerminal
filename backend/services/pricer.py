@@ -666,8 +666,7 @@ async def _store_history(ticker: str, closes: dict[str, float], src: str) -> Non
 
 # ───────────────────────────── Public API ─────────────────────────────────
 async def get_latest_close(ticker: str, force: bool = False) -> float | None:
-    """Single-ticker latest price. v5.0 order: Alpaca → Finnhub → yfinance.
-    Massive (EOD only) kept as ultra-fallback for grouped daily backfills."""
+    """Single-ticker latest price using the Public-first terminal waterfall."""
     ticker = (ticker or "").upper().strip()
     if not ticker:
         return None
@@ -675,22 +674,28 @@ async def get_latest_close(ticker: str, force: bool = False) -> float | None:
         c = await _cached_latest(ticker)
         if c is not None:
             return c
-    # 1) Alpaca real-time (v5.0 primary)
+    # 1) Public live quote when configured.
+    if _public_configured():
+        meta = await live_price_meta(ticker)
+        if meta.get("source") == "public_quote" and meta.get("price"):
+            await _store_latest(ticker, float(meta["price"]), "public")
+            return float(meta["price"])
+    # 2) Alpaca real-time execution-provider fallback.
     price = await _alpaca_quote(ticker)
     if price is not None:
         await _store_latest(ticker, price, "alpaca")
         return price
-    # 2) Finnhub
+    # 3) Finnhub
     price = await _finnhub_quote(ticker)
     if price is not None:
         await _store_latest(ticker, price, "finnhub")
         return price
-    # 3) yfinance
-    price = await _yf_latest_close(ticker)
+    # 4) Explicitly permitted display-only yfinance fallback.
+    price = await _yf_latest_close(ticker) if _allow_yfinance_live_fallback() else None
     if price is not None:
         await _store_latest(ticker, price, "yfinance")
         return price
-    # 4) Massive grouped EOD as last resort
+    # 5) Massive grouped EOD as last resort.
     if MASSIVE_KEY:
         _, grouped = await grouped_latest()
         if grouped and ticker in grouped:
@@ -783,7 +788,21 @@ async def batch_latest_closes(tickers: list[str], force: bool = False,
     now_iso = _now().isoformat()
     db = get_db()
 
-    # 1) Massive grouped — single call gets yesterday's close for everything
+    # 1) Public live quotes first. Alpaca remains the broker-boundary fallback.
+    if _public_configured():
+        public_meta = await batch_live_price_meta(missing, concurrency=concurrency)
+        for t, meta in public_meta.items():
+            if meta.get("source") == "public_quote" and meta.get("price"):
+                result[t] = float(meta["price"])
+                await db.price_cache.update_one(
+                    {"ticker": t},
+                    {"$set": {"ticker": t, "price": float(meta["price"]),
+                              "fetched_at": now_iso, "source": "public"}},
+                    upsert=True,
+                )
+        missing = [t for t in missing if t not in result]
+
+    # 2) Massive grouped — single call gets yesterday's close for everything
     if MASSIVE_KEY:
         _, grouped = await grouped_latest()
         if grouped:
@@ -798,7 +817,7 @@ async def batch_latest_closes(tickers: list[str], force: bool = False,
                         upsert=True,
                     )
 
-    # 2) Finnhub — override with real-time quote for every ticker we want fresh
+    # 3) Finnhub — override with real-time quote for every ticker we want fresh
     #    (overwrites Massive's EOD close with today's intraday price)
     if FINNHUB_KEY:
         fh_data = await _finnhub_batch(missing, concurrency=concurrency)

@@ -323,44 +323,23 @@ async def fetch_yahoo_upcoming_earnings(days_ahead: int = 14, limit: int = 500) 
 
 # ---------- Quote helper ----------
 async def fetch_quote(ticker: str) -> dict[str, Any] | None:
-    """Use yfinance which handles rate-limiting via curl_cffi sessions."""
+    """Legacy quote facade backed by the terminal's Public-first price path."""
     ticker = ticker.upper()
     try:
-        import yfinance as yf
-        loop = asyncio.get_event_loop()
-        def _sync():
-            t = yf.Ticker(ticker)
-            fast = getattr(t, "fast_info", None)
-            price = None
-            prev_close = None
-            currency = None
-            name = None
-            if fast:
-                price = fast.get("last_price") if hasattr(fast, "get") else getattr(fast, "last_price", None)
-                prev_close = fast.get("previous_close") if hasattr(fast, "get") else getattr(fast, "previous_close", None)
-                currency = fast.get("currency") if hasattr(fast, "get") else getattr(fast, "currency", None)
-            if price is None:
-                hist = t.history(period="5d")
-                if len(hist):
-                    price = float(hist["Close"].iloc[-1])
-                    if prev_close is None and len(hist) >= 2:
-                        prev_close = float(hist["Close"].iloc[-2])
-            elif prev_close is None:
-                hist = t.history(period="5d")
-                if len(hist) >= 2:
-                    prev_close = float(hist["Close"].iloc[-2])
-            try:
-                info = t.info
-                name = info.get("longName") or info.get("shortName")
-            except Exception:
-                pass
-            return {"price": float(price) if price else None,
-                    "previous_close": float(prev_close) if prev_close else None,
-                    "currency": currency, "name": name}
-        data = await loop.run_in_executor(None, _sync)
-        if not data or data.get("price") is None:
+        from . import pricer
+        meta = await pricer.live_price_meta(ticker)
+        if not meta.get("price"):
             return None
-        return {"ticker": ticker, **data}
+        return {
+            "ticker": ticker,
+            "price": float(meta["price"]),
+            "previous_close": None,
+            "currency": "USD",
+            "name": None,
+            "source": meta.get("source"),
+            "quote_time": meta.get("provider_ts"),
+            "execution_eligible": bool(meta.get("execution_eligible")),
+        }
     except Exception as e:
         logger.warning("fetch_quote failed for %s: %s", ticker, e)
         return None
