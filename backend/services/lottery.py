@@ -761,6 +761,109 @@ async def _tickets(active_only: bool = False) -> list[dict[str, Any]]:
     return await db.ll_tickets.find(query, {"_id": 0}).sort("opened_at", -1).to_list(500)
 
 
+def _lottery_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Flatten the strategy identity needed to attribute a broker fill."""
+    metadata = metadata or {}
+    candidate = metadata.get("candidate") if isinstance(metadata.get("candidate"), dict) else {}
+    scanner = metadata.get("strategy_scanner") if isinstance(metadata.get("strategy_scanner"), dict) else {}
+    candidate_scanner = candidate.get("strategy_scanner") if isinstance(candidate.get("strategy_scanner"), dict) else {}
+    family = str(
+        metadata.get("scanner_family") or candidate.get("scanner_family")
+        or scanner.get("family") or candidate_scanner.get("family") or ""
+    ).upper()
+    return {
+        "is_lottery": family == "LOTTERY" or bool(metadata.get("lottery")) or bool(candidate.get("lottery")),
+        "scanner_family": family,
+        "strategy_id": metadata.get("strategy_id") or candidate.get("strategy_id") or metadata.get("source_scan") or candidate.get("source_scan"),
+        "screener_id": metadata.get("screener_id") or candidate.get("screener_id") or metadata.get("source_scan") or candidate.get("source_scan"),
+        "strategy_lane": metadata.get("strategy_lane") or candidate.get("strategy_lane") or metadata.get("lane") or candidate.get("lane"),
+        "strategy_lanes": metadata.get("strategy_lanes") or candidate.get("strategy_lanes") or [],
+        "cycle_id": metadata.get("cycle_id") or candidate.get("cycle_id"),
+    }
+
+
+async def record_filled_lottery_entry(
+    *,
+    broker: str,
+    broker_order_id: str,
+    ticker: str,
+    asset_type: str,
+    fill_price: float,
+    quantity: float,
+    filled_at: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create one attributable Lottery ledger row after a real broker fill.
+
+    Candidate discovery and PM approval are deliberately excluded. This hook
+    is called only by broker reconciliation after a buy fill is confirmed.
+    """
+    identity = _lottery_metadata(metadata)
+    if not identity["is_lottery"] or not broker_order_id or fill_price <= 0 or quantity <= 0:
+        return {"ok": False, "created": False, "reason": "not_a_lottery_fill"}
+    db = get_db()
+    existing = await db.ll_tickets.find_one({"broker": broker, "broker_order_id": str(broker_order_id)}, {"_id": 0})
+    if existing:
+        return {"ok": True, "created": False, "ticket_id": existing.get("ticket_id"), "reason": "already_recorded"}
+    now = _now().isoformat()
+    ticket_id = f"llt-{str(broker).lower()}-{str(broker_order_id)}"
+    doc = stamped({
+        "ticket_id": ticket_id,
+        "book": "lottery",
+        "ticker": _clean_ticker(ticker),
+        "date": (filled_at or now)[:10],
+        "variant": identity.get("strategy_lane") or identity.get("strategy_id") or "BROKER_FILLED_LOTTERY",
+        "status": "OPEN",
+        "asset_type": str(asset_type or "EQUITY").upper(),
+        "broker": broker,
+        "broker_order_id": str(broker_order_id),
+        "entry_price": round(float(fill_price), 6),
+        "entry_fill_price": round(float(fill_price), 6),
+        "current_price": round(float(fill_price), 6),
+        "peak_price": round(float(fill_price), 6),
+        "trough_price": round(float(fill_price), 6),
+        "quantity": float(quantity),
+        "entry_filled_at": filled_at or now,
+        "opened_at": filled_at or now,
+        "opened_by": "broker_fill_reconciliation",
+        **identity,
+    })
+    await db.ll_tickets.insert_one(doc)
+    await log_activity(
+        f"Lottery ticket opened from {broker} fill: {_clean_ticker(ticker)} @ ${fill_price}",
+        "info",
+        {"ticket_id": ticket_id, "asset_type": doc["asset_type"], "strategy_id": identity.get("strategy_id")},
+    )
+    doc.pop("_id", None)
+    return {"ok": True, "created": True, "ticket": doc}
+
+
+async def close_filled_lottery_entry(
+    *, broker: str, entry_order_id: str, exit_price: float, exit_quantity: float, reason: str,
+) -> dict[str, Any]:
+    """Close the Lottery ledger row when its broker sell fill is confirmed."""
+    if not entry_order_id or exit_price <= 0 or exit_quantity <= 0:
+        return {"ok": False, "closed": False, "reason": "invalid_exit_fill"}
+    db = get_db()
+    ticket = await db.ll_tickets.find_one({"broker": broker, "broker_order_id": str(entry_order_id), "status": {"$in": ["OPEN", "HALTED"]}}, {"_id": 0})
+    if not ticket:
+        return {"ok": True, "closed": False, "reason": "ticket_not_found"}
+    entry = _num(ticket.get("entry_fill_price") or ticket.get("entry_price"), 0)
+    raw_pct = ((exit_price - entry) / entry * 100) if entry else 0
+    update = {
+        "status": "CLOSED",
+        "exit_price": round(float(exit_price), 6),
+        "exit_fill_price": round(float(exit_price), 6),
+        "exit_quantity": float(exit_quantity),
+        "closed_at": _now().isoformat(),
+        "exit_reason": reason,
+        "raw_return_pct": round(raw_pct, 2),
+        "haircut_return_pct": round(raw_pct - ROUND_TRIP_HAIRCUT_PCT, 2),
+    }
+    await db.ll_tickets.update_one({"ticket_id": ticket["ticket_id"]}, {"$set": update})
+    return {"ok": True, "closed": True, "ticket_id": ticket["ticket_id"], **update}
+
+
 def _ticket_multiple(ticket: dict[str, Any]) -> float | None:
     entry = _num(ticket.get("entry_price"), 0)
     current = _num(ticket.get("current_price") or ticket.get("exit_price"), 0)

@@ -2081,6 +2081,21 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
                 {"$set": trade, "$setOnInsert": stamped({})},
                 upsert=True,
             )
+            try:
+                from . import lottery
+                candidate = (local_order or {}).get("candidate") or {}
+                await lottery.record_filled_lottery_entry(
+                    broker="alpaca_options",
+                    broker_order_id=str(order.get("id")),
+                    ticker=parsed["root"],
+                    asset_type="OPTIONS",
+                    fill_price=fill_price,
+                    quantity=filled_qty,
+                    filled_at=order.get("filled_at") or order.get("updated_at"),
+                    metadata={**candidate, "candidate": candidate, "scanner_family": candidate.get("scanner_family") or candidate.get("family")},
+                )
+            except Exception:
+                logger.exception("Lottery fill ledger failed for Alpaca option order %s", order.get("id"))
             await db.options_desk_orders.update_one(
                 {"order.id": order.get("id")},
                 {"$set": {"status": status, "fill_synced": True, "filled_order": order, "exit_policy": exit_policy}},

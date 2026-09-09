@@ -376,6 +376,21 @@ async def reconcile() -> dict[str, Any]:
                             update.update({"protective_order_status": "FAILED", "protective_order_error": str(exc)[:220]})
                             await execution_safety.mark_execution_intent(stop_client_id, "broker_rejected", {"error": str(exc)[:220]})
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": update})
+                if filled_qty > 0:
+                    try:
+                        from . import lottery
+                        await lottery.record_filled_lottery_entry(
+                            broker="public",
+                            broker_order_id=str(trade.get("public_order_id")),
+                            ticker=ticker,
+                            asset_type="EQUITY",
+                            fill_price=_num(update.get("filled_avg_price") or trade.get("limit_price")),
+                            quantity=filled_qty,
+                            filled_at=update.get("filled_at"),
+                            metadata={**trade, **(trade.get("strategy_attribution") or {})},
+                        )
+                    except Exception:
+                        logger.exception("Lottery fill ledger failed for Public order %s", trade.get("public_order_id"))
                 order_updates += 1
             elif status in {"CANCELLED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "fill_status": status, "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": f"public_order_{status.lower()}", "last_order_status": status}})
