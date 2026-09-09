@@ -2167,6 +2167,20 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
                         {"$set": {k: v for k, v in closed_doc.items() if k != "_id"}},
                     )
                     try:
+                        from . import lottery
+                        candidate = trade.get("candidate") or {}
+                        family = candidate.get("scanner_family") or candidate.get("family")
+                        if str(family or "").upper() == "LOTTERY" or candidate.get("lottery"):
+                            await lottery.close_filled_lottery_entry(
+                                broker="alpaca_options",
+                                entry_order_id=str(trade.get("entry_order_id") or ""),
+                                exit_price=fill_price,
+                                exit_quantity=qty_for_pnl,
+                                reason=trade.get("close_reason") or "sell_fill",
+                            )
+                    except Exception:
+                        logger.exception("Lottery exit ledger failed for Alpaca option order %s", order.get("id"))
+                    try:
                         from . import expectancy_ledger
                         await expectancy_ledger.record_closed_trade(closed_doc)
                     except Exception:
