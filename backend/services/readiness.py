@@ -53,7 +53,15 @@ async def _safe_check(name: str, coro, *, blocks: bool = True) -> dict[str, Any]
         }
 
 
-async def _mongo_check() -> dict[str, Any]:
+async def _database_check() -> dict[str, Any]:
+    if os.environ.get("DB_BACKEND", "mongo").strip().lower() == "postgres":
+        from . import postgres_store
+
+        state = await postgres_store.status()
+        if not state.get("ready"):
+            return {"ok": False, "backend": "postgres", "reason": state.get("last_error") or "postgres_unavailable"}
+        return {"ok": True, "backend": "postgres", "schema_ready": state.get("schema_ready")}
+
     db = get_db()
     await db.command("ping")
     latest_scan = await db.scan_results.find_one({}, {"_id": 0, "finished_at": 1, "results": 1}, sort=[("finished_at", -1)])
@@ -107,7 +115,7 @@ async def run(force_refresh: bool = False, persist: bool = True) -> dict[str, An
 
     truth = await data_truth.overview(force_refresh=force_refresh, persist=False)
     checks = [
-        await _safe_check("mongo", _mongo_check()),
+        await _safe_check("database", _database_check()),
         await _safe_check("data_quality", data_quality.overview(force_refresh=force_refresh, record_event=False), blocks=False),
         await _safe_check("data_truth", asyncio.sleep(0, result=truth)),
         await _safe_check("system_gate", execution_gate.check(scope="system", truth=truth, record=False)),
