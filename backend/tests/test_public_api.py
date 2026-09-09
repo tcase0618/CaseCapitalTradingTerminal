@@ -161,6 +161,26 @@ async def test_public_history_and_tax_lots_are_account_scoped_read_only():
 
 
 @pytest.mark.asyncio
+async def test_public_strategy_quote_and_multileg_preflight_are_read_only_and_scoped():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={"estimatedCost": "3.00", "strategyQuote": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            quote = await client.strategy_quote({"legs": []})
+            preflight = await client.preflight_multi_leg({"legs": []})
+    assert quote["strategyQuote"] == {}
+    assert preflight["estimatedCost"] == "3.00"
+    assert seen == [
+        ("POST", "/userapigateway/option-details/acct-1/strategy-details/quote"),
+        ("POST", "/userapigateway/trading/acct-1/preflight/multi-leg"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_public_preflight_refreshes_rejected_bearer_token():
     calls = []
 

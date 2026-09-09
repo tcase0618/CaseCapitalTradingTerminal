@@ -351,8 +351,23 @@ class PublicAPIClient:
             "dataFeed": "public",
         }
 
-    async def strategy_quote(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._post("/userapigateway/marketdata/options/strategy-quote", payload)
+    async def strategy_quote(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
+        """Return a combined quote for a multi-leg option strategy.
+
+        This is a read-only pricing call. It is deliberately separate from
+        Alpaca's execution-grade option chain used by Options Desk.
+        """
+        return await self._post(
+            f"/userapigateway/option-details/{self._account(account_id)}/strategy-details/quote",
+            payload,
+        )
+
+    async def preflight_multi_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
+        """Run Public's multi-leg what-if validation without placing an order."""
+        return await self._post(
+            f"/userapigateway/trading/{self._account(account_id)}/preflight/multi-leg",
+            payload,
+        )
 
     async def instruments(self, symbol: str | None = None) -> dict[str, Any]:
         if symbol:
