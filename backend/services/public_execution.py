@@ -206,17 +206,40 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
         for row in approved:
             ticker = _symbol(row)
             amount = _allocation(row)
-            price = _quote_price(quote_by_symbol.get(ticker) or {})
+            quote_row = quote_by_symbol.get(ticker) or {}
+            quote_source = "public"
+            price = _quote_price(quote_row)
             if not ticker or price <= 0:
-                rejected.append({"ticker": ticker, "reason": "public_quote_unavailable"})
-                continue
+                fresh, age = False, None
+            else:
+                fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
             if ticker in active_halts:
                 rejected.append({"ticker": ticker, "reason": "public_symbol_actively_halted"})
                 continue
-            quote_row = quote_by_symbol.get(ticker) or {}
-            fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
             if not fresh:
-                rejected.append({"ticker": ticker, "reason": "public_quote_stale_or_unverifiable", "age_seconds": age})
+                # Public remains the execution broker, but Alpaca can provide
+                # a fresher underlying mark for a Public limit order when the
+                # Public quote is delayed or inactive. Never accept a stale
+                # fallback and record the source for auditability.
+                try:
+                    from . import pricer
+                    feeds = [os.environ.get("ALPACA_STOCK_FEED", "").strip() or None, "iex", None]
+                    seen_feeds: set[str | None] = set()
+                    for feed in feeds:
+                        if feed in seen_feeds:
+                            continue
+                        seen_feeds.add(feed)
+                        meta = await pricer._alpaca_trade_meta(ticker, feed=feed)
+                        if meta and meta.get("execution_eligible") and _num(meta.get("price")) > 0:
+                            price = _num(meta.get("price"))
+                            fresh, age = safety.quote_is_fresh({"ts": meta.get("provider_ts")})
+                            if fresh:
+                                quote_source = "alpaca_fallback"
+                                break
+                except Exception as exc:
+                    logger.debug("Alpaca fallback quote failed for %s: %s", ticker, exc)
+            if not fresh:
+                rejected.append({"ticker": ticker, "reason": "public_and_alpaca_quote_stale_or_unverifiable", "age_seconds": age, "public_price": _quote_price(quote_row)})
                 continue
             if ticker in held:
                 rejected.append({"ticker": ticker, "reason": "public_position_exists"})
@@ -246,6 +269,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "client_order_id": client_id, "public_order_id": order_id, "broker_base": BROKER_BASE,
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
+                "quote_source": quote_source,
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
                 "current_stop": _stop_price(row), "pm_active_stop": _stop_price(row),
                 "pm_ratchet_plan": row.get("ratchet_plan") or {"enabled": False}, "submitted_at": datetime.now(timezone.utc).isoformat(),
@@ -254,7 +278,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "strategy_attribution": attribution,
             }))
             await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
-            executed.append({"ticker": ticker, "allocation_usd": amount, "limit_price": price, "order_id": order_id})
+            executed.append({"ticker": ticker, "allocation_usd": amount, "limit_price": price, "order_id": order_id, "quote_source": quote_source})
             held.add(ticker)
             buying_power -= amount
     await log_activity("Public equity execution completed", "info", {"executed": len(executed), "rejected": len(rejected)})

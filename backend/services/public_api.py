@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import httpx
@@ -111,6 +112,15 @@ def _sdk_quote_payload(quote: Any, option_type: str | None = None) -> dict[str, 
     details = row.get("optionDetails") or row.get("option_details") or {}
     greeks = details.get("greeks") or {}
     symbol = instrument.get("symbol") or row.get("symbol")
+    timestamp_values = [row.get(key) for key in ("lastTimestamp", "bidTimestamp", "askTimestamp") if row.get(key)]
+    parsed_timestamps = []
+    for value in timestamp_values:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            parsed_timestamps.append((parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc), value))
+        except (TypeError, ValueError):
+            continue
+    newest_timestamp = max(parsed_timestamps, key=lambda item: item[0])[1] if parsed_timestamps else (timestamp_values[0] if timestamp_values else None)
     flat = {
         **row,
         "symbol": symbol,
@@ -131,7 +141,7 @@ def _sdk_quote_payload(quote: Any, option_type: str | None = None) -> dict[str, 
         "gamma": greeks.get("gamma"),
         "theta": greeks.get("theta"),
         "vega": greeks.get("vega"),
-        "quoteTime": row.get("lastTimestamp") or row.get("bidTimestamp") or row.get("askTimestamp"),
+        "quoteTime": newest_timestamp,
     }
     if option_type:
         flat["type"] = option_type

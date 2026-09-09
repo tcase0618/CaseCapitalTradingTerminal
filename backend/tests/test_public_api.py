@@ -44,6 +44,22 @@ async def test_public_read_only_endpoints_use_bearer_and_never_mutate():
     ]
 
 
+def test_public_sdk_quote_uses_newest_market_timestamp():
+    class Quote:
+        def model_dump(self, **_kwargs):
+            return {
+                "instrument": {"symbol": "AAPL"},
+                "last": "100.00",
+                "bid": "99.90",
+                "ask": "100.10",
+                "lastTimestamp": "2026-09-09T12:00:00Z",
+                "bidTimestamp": "2026-09-09T12:01:00Z",
+                "askTimestamp": "2026-09-09T12:00:30Z",
+            }
+
+    assert public_api._sdk_quote_payload(Quote())["quoteTime"] == "2026-09-09T12:01:00Z"
+
+
 def test_public_defaults_fail_closed_and_mutations_are_blocked(monkeypatch):
     monkeypatch.delenv("PUBLIC_RESEARCH_ONLY", raising=False)
     state = public_api.safety_state(_cfg())
