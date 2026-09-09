@@ -153,49 +153,6 @@ async def integration_status() -> list[dict[str, Any]]:
             reason=str(exc)[:160],
         ))
 
-    try:
-        from . import ibkr_research, ibkr_terminal
-
-        ibkr_probe = await asyncio.wait_for(asyncio.to_thread(ibkr_research.status), timeout=12.0)
-        ibkr_cfg = ibkr_probe.get("config") or ibkr_research.safety_state()
-        ibkr_apps = await asyncio.wait_for(ibkr_terminal.applications(), timeout=12.0)
-        app_summary = ibkr_apps.get("summary") or {}
-        ibkr_enabled = bool(ibkr_cfg.get("enabled"))
-        ibkr_ok = bool(ibkr_probe.get("ok") and ibkr_probe.get("connected"))
-        quality = "live" if ibkr_ok else "optional" if not ibkr_enabled else "down"
-        out.append(_row(
-            "ibkr_readonly",
-            "IBKR Gateway Read-Only Data",
-            ibkr_ok,
-            last=_now_iso() if ibkr_ok else None,
-            detail={
-                "mode": ibkr_cfg.get("mode"),
-                "data_only": ibkr_cfg.get("data_only"),
-                "allow_trading": ibkr_cfg.get("allow_trading"),
-                "host": ibkr_cfg.get("host"),
-                "port": ibkr_cfg.get("port"),
-                "applications": app_summary,
-                "coverage": [
-                    "options validation",
-                    "equity quotes",
-                    "historical bars",
-                    "option chains",
-                    "option greeks when available",
-                    "scanner top-candidate validation",
-                ],
-            },
-            quality=quality,
-            reason=None if ibkr_ok else ibkr_probe.get("reason") or "IBKR read-only data not connected",
-        ))
-    except Exception as exc:
-        out.append(_row(
-            "ibkr_readonly",
-            "IBKR Gateway Read-Only Data",
-            False,
-            quality="down",
-            reason=str(exc)[:160],
-        ))
-
     fh_key = os.environ.get("FINNHUB_API_KEY", "").strip()
     fh_ok = False
     fh_reason = "missing FINNHUB_API_KEY"

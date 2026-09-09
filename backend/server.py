@@ -455,12 +455,6 @@ async def readiness_run(force_refresh: bool = False):
     return await readiness.run(force_refresh=force_refresh, persist=True)
 
 
-@api.get("/ibkr/status")
-async def ibkr_status():
-    from services import ibkr_research
-    return await asyncio.to_thread(ibkr_research.status)
-
-
 @api.get("/robinhood/status")
 async def robinhood_status():
     """Return Robinhood MCP connection and safety state without mutating orders."""
@@ -491,139 +485,6 @@ async def robinhood_probe():
             return await client.probe_read_only()
     except robinhood_mcp.RobinhoodMCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@api.get("/ibkr/applications")
-async def ibkr_applications():
-    from services import ibkr_terminal
-    return await ibkr_terminal.applications()
-
-
-@api.get("/ibkr/enrichment/{symbol}")
-async def ibkr_enrichment(symbol: str, force: bool = False):
-    from services import ibkr_terminal
-    return await ibkr_terminal.ticker_enrichment(symbol, force=force)
-
-
-@api.get("/ibkr/scanner_validation")
-async def ibkr_scanner_validation(limit: int = 8, force: bool = False):
-    from services import ibkr_terminal
-    return await ibkr_terminal.scanner_validation(limit=limit, force=force)
-
-
-@api.get("/ibkr/contract/{symbol}")
-async def ibkr_contract(symbol: str):
-    from services import ibkr_research
-    return await asyncio.to_thread(ibkr_research.contract_info, symbol)
-
-
-@api.get("/ibkr/quote/{symbol}")
-async def ibkr_quote(symbol: str, delayed_allowed: bool = True):
-    from services import ibkr_research
-    return await asyncio.to_thread(ibkr_research.quote, symbol, delayed_allowed=delayed_allowed)
-
-
-@api.get("/ibkr/history/{symbol}")
-async def ibkr_history(
-    symbol: str,
-    duration: str = "1 M",
-    bar_size: str = "1 day",
-    what_to_show: str = "TRADES",
-    use_rth: bool = True,
-):
-    from services import ibkr_research
-    return await asyncio.to_thread(
-        ibkr_research.historical_data,
-        symbol,
-        duration=duration,
-        bar_size=bar_size,
-        what_to_show=what_to_show,
-        use_rth=use_rth,
-    )
-
-
-@api.get("/ibkr/options/chain/{symbol}")
-async def ibkr_options_chain(symbol: str, max_expirations: int = 12, max_strikes: int = 240):
-    from services import ibkr_research
-    return await asyncio.to_thread(
-        ibkr_research.option_chain,
-        symbol,
-        max_expirations=max_expirations,
-        max_strikes=max_strikes,
-    )
-
-
-@api.get("/ibkr/options/contract/{symbol}")
-async def ibkr_options_contract(
-    symbol: str,
-    expiry: str,
-    strike: float,
-    right: str,
-    exchange: str = "SMART",
-    trading_class: str | None = None,
-):
-    from services import ibkr_research
-    return await asyncio.to_thread(
-        ibkr_research.option_contract_info,
-        symbol,
-        expiry=expiry,
-        strike=strike,
-        right=right,
-        exchange=exchange,
-        trading_class=trading_class,
-    )
-
-
-@api.get("/ibkr/options/quote/{symbol}")
-async def ibkr_options_quote(
-    symbol: str,
-    expiry: str,
-    strike: float,
-    right: str,
-    delayed_allowed: bool = True,
-    exchange: str = "SMART",
-    trading_class: str | None = None,
-):
-    from services import ibkr_research
-    return await asyncio.to_thread(
-        ibkr_research.option_quote,
-        symbol,
-        expiry=expiry,
-        strike=strike,
-        right=right,
-        delayed_allowed=delayed_allowed,
-        exchange=exchange,
-        trading_class=trading_class,
-    )
-
-
-@api.get("/ibkr/options/history/{symbol}")
-async def ibkr_options_history(
-    symbol: str,
-    expiry: str,
-    strike: float,
-    right: str,
-    duration: str = "1 W",
-    bar_size: str = "1 day",
-    what_to_show: str = "TRADES",
-    use_rth: bool = True,
-    exchange: str = "SMART",
-    trading_class: str | None = None,
-):
-    from services import ibkr_research
-    return await asyncio.to_thread(
-        ibkr_research.option_historical_data,
-        symbol,
-        expiry=expiry,
-        strike=strike,
-        right=right,
-        duration=duration,
-        bar_size=bar_size,
-        what_to_show=what_to_show,
-        use_rth=use_rth,
-        exchange=exchange,
-        trading_class=trading_class,
-    )
 
 
 @api.get("/edge/overview")
@@ -2993,15 +2854,15 @@ async def options_desk_refresh():
 
 
 @api.get("/options_desk/alpaca_workflow")
-async def options_desk_alpaca_workflow(limit: int = 25, validate_ibkr: bool = True):
+async def options_desk_alpaca_workflow(limit: int = 25):
     from services import options_desk
-    return await options_desk.alpaca_workflow(limit=limit, persist=False, validate_ibkr=validate_ibkr)
+    return await options_desk.alpaca_workflow(limit=limit, persist=False)
 
 
 @api.post("/options_desk/alpaca_workflow/refresh")
-async def options_desk_alpaca_workflow_refresh(limit: int = 25, validate_ibkr: bool = True):
+async def options_desk_alpaca_workflow_refresh(limit: int = 25):
     from services import options_desk
-    return await options_desk.alpaca_workflow(limit=limit, persist=True, validate_ibkr=validate_ibkr)
+    return await options_desk.alpaca_workflow(limit=limit, persist=True)
 
 
 class OptionsDeskExecutePayload(BaseModel):

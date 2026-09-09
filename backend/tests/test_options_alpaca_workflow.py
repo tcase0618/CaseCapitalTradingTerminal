@@ -9,20 +9,7 @@ sys.path.insert(0, ROOT)
 from services import options_desk, options_engine  # noqa: E402
 
 
-def test_occ_symbol_maps_to_ibkr_option_params():
-    params = options_desk._ibkr_params_from_occ_symbol("SPY260918C00650000")
-
-    assert params == {
-        "symbol": "SPY",
-        "expiry": "20260918",
-        "strike": 650.0,
-        "right": "C",
-        "exchange": "SMART",
-        "trading_class": "SPY",
-    }
-
-
-def test_alpaca_order_preview_never_targets_ibkr():
+def test_alpaca_order_preview_never_targets_another_broker():
     ticket = {
         "candidate_id": "opt-SPY-2026-08-12T12:00:00",
         "contracts": 2,

@@ -40,7 +40,6 @@ The current release makes three safe corrections:
 | F-21 | Repository hygiene | `.gitignore` contained repeated credential blocks and invalid `-e` entries. | Noise and possible dependency confusion. | Fixed |
 | F-22 | Config | HTTP deployment correctly skips HTTPS webhook registration. | Prevents invalid Telegram webhook startup calls. | Fixed |
 | F-23 | Config | Preview/read-only and execution flags are spread across environment values. | Unsafe configuration combinations are possible. | Add validated config matrix |
-| F-24 | Integration | IBKR is research-only and local-host dependent unless Gateway runs on VPS. | No remote data guarantee when the laptop is off. | Surface listener check in readiness |
 | F-25 | Integration | FinanceToolkit/FMP is research-only. | It must not influence PM or order eligibility accidentally. | Keep explicit read-only boundary |
 | F-26 | Database | Mongo remains primary while Postgres is optional. | Duplicate persistence semantics may diverge. | Define per-collection ownership before cutover |
 | F-27 | Database | Large operational documents are stored in Mongo collections. | Storage growth can recur. | Add retention/TTL policy by collection |
@@ -68,7 +67,7 @@ The current release makes three safe corrections:
 11. **Route contract registry**: endpoint owner, version, frontend callers, response schema, and deprecation date.
 12. **Feature registry**: canonical name, units, definition, version, source, and consumers; reject unregistered duplicate calculations.
 13. **Snapshot manifest**: cycle id, source hashes, code version, config version, and completeness vector.
-14. **Research-only firewall**: automated test that finance toolkit, IBKR, SEC, earnings, and other read-only sources cannot create order intents.
+14. **Research-only firewall**: automated test that finance toolkit, SEC, earnings, and other read-only sources cannot create order intents.
 15. **Collection retention dashboard**: document counts, estimated bytes, TTL coverage, and top growth collections.
 16. **Replay command**: rebuild a past scan from its snapshot manifest without calling live providers.
 17. **Market-session calendar service**: one canonical holiday/early-close/extended-session decision used by scheduler, freshness, and execution.
