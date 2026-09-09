@@ -894,6 +894,8 @@ def build_spread(chain_data: dict, direction: str, width: float = 5.0, budget: f
         "data_feed": chain_data.get("data_feed"),
         "data_quality": chain_data.get("data_quality"),
         "buy_symbol": primary.get("symbol") or primary.get("contractSymbol"),
+        "sell_symbol": sell_row.get("symbol") or sell_row.get("contractSymbol"),
+        "base_symbol": chain_data.get("ticker"),
         "buy_strike": primary["strike"],
         "sell_strike": sell_strike,
         "buy_premium": round(buy_premium, 2),
@@ -1029,6 +1031,25 @@ async def analyze_ticker(
         elif selected["strategy"] == "BEAR_PUT_SPREAD":
             spread = build_spread(chain, "BEAR", budget=budget)
 
+        # Public supplies a combined strategy quote for research. Keep this
+        # separate from the Alpaca execution view and tolerate provider
+        # outages because the chain itself remains usable.
+        public_strategy_quote = None
+        if spread and chain.get("data_provider") == "PUBLIC_OPTIONS":
+            try:
+                from . import public_api
+                option_type = "CALL" if spread.get("direction") == "BULL" else "PUT"
+                async with public_api.PublicAPIClient() as client:
+                    public_strategy_quote = await client.strategy_quote({
+                        "baseSymbol": ticker.upper(),
+                        "optionLegs": [
+                            {"instrument": {"symbol": spread.get("buy_symbol"), "type": option_type}, "side": "BUY", "openCloseIndicator": "OPEN", "ratioQuantity": 1},
+                            {"instrument": {"symbol": spread.get("sell_symbol"), "type": option_type}, "side": "SELL", "openCloseIndicator": "OPEN", "ratioQuantity": 1},
+                        ],
+                    })
+            except Exception as exc:
+                logger.debug("Public strategy quote failed for %s: %s", ticker, exc)
+
         crush = assess_iv_crush_risk(stock, chain)
         flow = _detect_unusual_flow_from_chain(ticker, chain)
 
@@ -1047,6 +1068,7 @@ async def analyze_ticker(
             "spot": chain.get("price"),
             "contract": contract,
             "spread": spread,
+            "public_strategy_quote": public_strategy_quote,
             "crush_risk": crush.get("crush_risk"),
             "crush_recommendation": crush.get("recommendation"),
             "flow": flow,
