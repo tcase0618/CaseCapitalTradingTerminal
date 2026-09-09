@@ -245,6 +245,34 @@ class PublicAPIClient:
             return (await self._sdk.get_portfolio(account_id=account)).model_dump(by_alias=True, mode="json")
         return await self._get(f"/userapigateway/trading/{account}/portfolio/v2")
 
+    async def history(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        page_size: int | None = None,
+        next_token: str | None = None,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return broker-authoritative account activity for research/reporting."""
+        params: dict[str, Any] = {}
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        if page_size is not None:
+            params["pageSize"] = max(1, min(500, int(page_size)))
+        if next_token:
+            params["nextToken"] = next_token
+        return await self._get(f"/userapigateway/trading/{self._account(account_id)}/history", **params)
+
+    async def unrealized_tax_lots(self, symbol: str | None = None, account_id: str | None = None) -> dict[str, Any]:
+        """Return unrealized lots without changing sell-lot instructions."""
+        path = f"/userapigateway/trading/{self._account(account_id)}/taxlots/unrealized"
+        if symbol:
+            path = f"{path}/{symbol.upper().strip()}"
+        return await self._get(path)
+
     async def quotes(self, symbols: Iterable[str]) -> dict[str, Any]:
         values = _symbols(symbols)
         if self._sdk:

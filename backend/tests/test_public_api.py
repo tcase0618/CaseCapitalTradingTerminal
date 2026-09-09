@@ -68,6 +68,7 @@ def test_public_equity_order_payload_is_deterministic_and_not_market():
     assert payload["orderType"] == "LIMIT"
     assert payload["amount"] == "4.00"
     assert payload["limitPrice"] == "150.25"
+    assert payload["useMargin"] is False
     assert "quantity" not in payload
 
 
@@ -137,6 +138,26 @@ async def test_public_order_status_uses_account_scoped_endpoint():
         async with public_api.PublicAPIClient(_cfg(), http) as client:
             result = await client.get_order("order-1")
     assert result["status"] == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_public_history_and_tax_lots_are_account_scoped_read_only():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params)))
+        return httpx.Response(200, json={"transactions": [], "lots": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            history = await client.history(start="2026-09-01T00:00:00Z", page_size=50)
+            lots = await client.unrealized_tax_lots("AAPL")
+    assert history["transactions"] == []
+    assert lots["lots"] == []
+    assert seen == [
+        ("GET", "/userapigateway/trading/acct-1/history", {"start": "2026-09-01T00:00:00Z", "pageSize": "50"}),
+        ("GET", "/userapigateway/trading/acct-1/taxlots/unrealized/AAPL", {}),
+    ]
 
 
 @pytest.mark.asyncio
