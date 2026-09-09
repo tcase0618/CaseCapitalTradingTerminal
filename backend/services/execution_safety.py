@@ -5,8 +5,6 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pymongo.errors import DuplicateKeyError
-
 from .db import get_db, stamped
 
 
@@ -51,9 +49,20 @@ async def claim_execution_intent(
         "metadata": metadata or {},
     })
     try:
-        await db.execution_intents.insert_one(doc)
+        result = await db.execution_intents.insert_one(doc)
+        if getattr(result, "duplicate", False) or not getattr(result, "inserted_id", None):
+            existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
+            return {
+                "ok": False,
+                "claimed": False,
+                "reason": "duplicate_execution_intent",
+                "client_order_id": client_order_id,
+                "existing": existing,
+            }
         return {"ok": True, "claimed": True, "intent": {k: v for k, v in doc.items() if k != "_id"}}
-    except DuplicateKeyError:
+    except Exception as exc:
+        if "duplicate" not in str(exc).lower() and "unique" not in str(exc).lower():
+            raise
         existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
         return {
             "ok": False,

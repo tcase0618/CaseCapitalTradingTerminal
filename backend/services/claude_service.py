@@ -1,4 +1,4 @@
-"""Single-batch Claude analysis with 24h Mongo cache. Token-efficient."""
+"""Single-batch Claude analysis with a 24h PostgreSQL-backed cache."""
 from __future__ import annotations
 import json
 import logging

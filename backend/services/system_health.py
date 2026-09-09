@@ -99,9 +99,8 @@ async def overview() -> dict[str, Any]:
     except Exception as exc:
         postgres = {"enabled": False, "ready": False, "last_error": str(exc)[:220]}
     env = {
-        "mongodb": _mask(os.environ.get("MONGO_URL")),
         "postgres": _mask(os.environ.get("POSTGRES_DSN")),
-        "postgres_enabled": os.environ.get("POSTGRES_ENABLED", "false").lower() == "true",
+        "postgres_enabled": os.environ.get("POSTGRES_ENABLED", "true").lower() == "true",
         "db_name": os.environ.get("DB_NAME", ""),
         "anthropic": _mask(os.environ.get("ANTHROPIC_API_KEY")),
         "claude_disabled": os.environ.get("DISABLE_CLAUDE_ANALYSIS", "").lower() == "true",
@@ -113,7 +112,7 @@ async def overview() -> dict[str, Any]:
 
     blockers = []
     if not db.get("ok"):
-        blockers.append("MongoDB unavailable")
+        blockers.append("PostgreSQL unavailable")
     if not alpaca.get("ok"):
         blockers.append(f"Alpaca execution unavailable: {alpaca.get('reason')}")
     if not db.get("counts", {}).get("scan_results"):

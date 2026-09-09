@@ -300,7 +300,7 @@ async def status():
         alerts_count = await db.alerts.count_documents({"triggered": False})
     except Exception as e:
         db_available = False
-        logger.warning("status degraded; MongoDB unavailable: %s", e)
+        logger.warning("status degraded; PostgreSQL unavailable: %s", e)
 
     return {
         "bot": {
@@ -702,7 +702,7 @@ async def desktop_diagnostics():
 
     checklist = [
         {"key": "backend", "label": "Backend API", "ok": True, "detail": "FastAPI responding on 127.0.0.1:8001"},
-        {"key": "mongo", "label": "MongoDB", "ok": bool(status_payload.get("bot", {}).get("db_available")), "detail": health.get("database", {}).get("reason") or "database reachable"},
+        {"key": "postgres", "label": "PostgreSQL", "ok": bool(status_payload.get("bot", {}).get("db_available")), "detail": health.get("database", {}).get("reason") or "database reachable"},
         {"key": "latest_scan", "label": "Latest Scan", "ok": bool(status_payload.get("last_scan_at") or health.get("database", {}).get("latest_scan_at")), "detail": status_payload.get("last_scan_at") or health.get("database", {}).get("latest_scan_at") or "no scan saved"},
         {"key": "pm", "label": "Portfolio Manager", "ok": bool(health.get("ready_for_pm")), "detail": "latest scan available" if health.get("ready_for_pm") else "waiting for scan state"},
         {"key": "trade_floor", "label": "Trade Floor", "ok": bool(health.get("ready_for_trade_floor")), "detail": health.get("alpaca", {}).get("reason") or "execution account reachable"},
@@ -711,7 +711,7 @@ async def desktop_diagnostics():
         {"key": "xfactor", "label": "X Factor Alerts", "ok": xfactor_count > 0, "detail": f"{xfactor_count} alerts in 2 days"},
     ]
 
-    core_keys = {"backend", "mongo", "latest_scan", "pm"}
+    core_keys = {"backend", "postgres", "latest_scan", "pm"}
     core_ready = all(item["ok"] for item in checklist if item["key"] in core_keys)
 
     return {
@@ -2345,7 +2345,7 @@ async def on_startup():
         await learning_engine.ensure_weights_exist()
     except Exception as e:
         db_ready = False
-        logger.warning("learning weights init skipped; MongoDB unavailable: %s", e)
+        logger.warning("learning weights init skipped; PostgreSQL unavailable: %s", e)
     try:
         if db_ready:
             await pnl_tracker.ensure_first_seen_backfill()

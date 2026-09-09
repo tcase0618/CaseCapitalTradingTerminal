@@ -82,7 +82,7 @@ async def _fetch_finra_file(date_str: str) -> dict[str, dict[str, float]] | None
 async def get_latest_finra() -> tuple[str, dict] | None:
     """Return (date_str, {ticker: row}) for the most recent FINRA publication.
     Walks back up to 5 calendar days (handles weekends + holidays).
-    Caches in MongoDB for `CACHE_TTL_HR` hours."""
+    Caches in PostgreSQL for `CACHE_TTL_HR` hours."""
     db = get_db()
     cached = await db.finra_cache.find_one({"_id": "latest"}, {"_id": 0})
     if cached:

@@ -1,9 +1,7 @@
-"""PostgreSQL persistence, migration, and the Mongo-compatible async API.
+"""PostgreSQL persistence and the collection-style async API.
 
-The compatibility API lets existing terminal services move to PostgreSQL
-without a simultaneous rewrite of every strategy module. MongoDB is retained
-only as a rollback archive after cutover; it is not opened by the active
-runtime when ``DB_BACKEND=postgres``.
+The collection-style API lets existing terminal services use PostgreSQL
+without a simultaneous rewrite of every strategy module.
 """
 from __future__ import annotations
 
@@ -206,12 +204,28 @@ class PostgresCollection:
         return rows[0] if rows else None
 
     async def insert_one(self, doc: dict[str, Any]) -> PostgresResult:
+        global _last_error
         clean = normalize_json(doc)
         key = doc_key(self.name, clean)
-        ok = await upsert_snapshot(self.name, key, clean, event_type="insert")
-        if not ok:
+        if not await init_schema() or _pool is None:
             raise RuntimeError(_last_error or "Postgres insert failed")
-        return PostgresResult(inserted_id=clean.get("_id", key))
+        try:
+            async with _pool.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    insert into cc_collection_snapshots(collection, doc_key, payload, updated_at)
+                    values($1, $2, $3::jsonb, now())
+                    on conflict(collection, doc_key) do nothing
+                    """,
+                    self.name, key, json.dumps(clean, default=_json_default),
+                )
+            if not result.endswith("1"):
+                return PostgresResult(inserted_id=None, duplicate=True)
+            await write_event(self.name, clean, natural_key=key, event_type="insert")
+            return PostgresResult(inserted_id=clean.get("_id", key), duplicate=False)
+        except Exception as exc:
+            _last_error = str(exc)[:500]
+            raise RuntimeError(_last_error) from exc
 
     async def insert_many(self, docs: Iterable[dict[str, Any]]) -> PostgresResult:
         ids = []
@@ -363,7 +377,7 @@ CRITICAL_COLLECTIONS: tuple[str, ...] = (
 
 
 def enabled() -> bool:
-    return os.environ.get("POSTGRES_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("POSTGRES_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def dsn() -> str:
@@ -399,7 +413,7 @@ def normalize_json(value: Any) -> Any:
 
 
 def doc_key(collection: str, doc: dict[str, Any]) -> str:
-    """Stable best-effort natural key for mirrored Mongo documents."""
+    """Stable best-effort natural key for collection-style documents."""
     for key in (
         "_id",
         "id",
@@ -604,11 +618,11 @@ async def upsert_snapshot(
         return False
 
 
-async def mirror_document(collection: str, doc: dict[str, Any], *, source: str = "mongo-dual-write") -> bool:
+async def mirror_document(collection: str, doc: dict[str, Any], *, source: str = "postgres-write") -> bool:
     return await upsert_snapshot(collection, doc_key(collection, doc), doc, source=source)
 
 
-async def upsert_snapshots_bulk(collection: str, docs: list[dict[str, Any]], *, source: str = "mongo-migration") -> int:
+async def upsert_snapshots_bulk(collection: str, docs: list[dict[str, Any]], *, source: str = "postgres-migration") -> int:
     """Write a bounded migration batch without retaining the whole collection."""
     if not docs or not await init_schema() or _pool is None:
         return 0

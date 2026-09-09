@@ -251,7 +251,7 @@ def _explain_filing(filing: dict[str, Any]) -> dict[str, Any]:
 # ─────── Master pipeline ───────
 async def poll_edgar_filings() -> dict[str, Any]:
     """Pull recent filings of all 5 surfaced types, attach tickers,
-    significance, plain-language assessment, persist to MongoDB."""
+    significance, plain-language assessment, persist to PostgreSQL."""
     started = _now()
     cik_map = await _load_cik_map()
     forms = ["SC 13D", "SC 13G", "8-K", "Form 4", "13F-HR", *sorted(FINANCING_FORMS)]

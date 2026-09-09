@@ -208,7 +208,7 @@ async def grade_closed_tickets() -> dict[str, Any]:
             continue
         await db.ll_grades.update_one(
             {"ticket_id": grade["ticket_id"]},
-            {"$setOnInsert": grade},
+            {"$set": grade},
             upsert=True,
         )
         written += 1

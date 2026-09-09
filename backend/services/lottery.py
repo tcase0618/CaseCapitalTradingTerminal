@@ -641,7 +641,9 @@ async def _attach_live_price_meta(rows: list[dict[str, Any]]) -> list[dict[str, 
         if meta.get("price") is not None:
             row = {
                 **row,
-                "price": row.get("price") or meta.get("price"),
+                # Provider price is the current scan mark; Finviz is discovery
+                # input only and must not override it when both are present.
+                "price": meta.get("price") if meta.get("price") is not None else row.get("price"),
                 "quote_age_seconds": meta.get("age_seconds"),
                 "price_source": meta.get("source"),
             }
@@ -692,7 +694,15 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
         merged_sources = list(dict.fromkeys([*(existing.get("sources") or []), row.get("source"), *(row.get("sources") or [])]))
         by_ticker[ticker] = {**existing, **row, "ticker": ticker, "signals": merged_signals, "sources": [s for s in merged_sources if s]}
 
-    universe_rows = await _attach_live_price_meta(list(by_ticker.values())[:220])
+    # Enrich the complete deduplicated universe before selecting the final
+    # docket. Truncating by insertion order made source order decide which
+    # candidates were scored and silently discarded later high-confluence names.
+    universe_rows = await _attach_live_price_meta(list(by_ticker.values()))
+    universe_rows = sorted(
+        (_score_candidate(row, halted) for row in universe_rows),
+        key=lambda row: (row.get("score") or 0, row.get("relative_volume") or 0),
+        reverse=True,
+    )[:220]
     candidates = []
     for row in universe_rows:
         candidates.append(await _enrich_candidate(row, halted))
@@ -772,13 +782,14 @@ def _lottery_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
         or scanner.get("family") or candidate_scanner.get("family") or ""
     ).upper()
     return {
-        "is_lottery": family == "LOTTERY" or bool(metadata.get("lottery")) or bool(candidate.get("lottery")),
+        "is_lottery": family == "LOTTERY" or bool(metadata.get("lottery")) or bool(candidate.get("lottery")) or bool(metadata.get("strategy_is_lottery")),
         "scanner_family": family,
         "strategy_id": metadata.get("strategy_id") or candidate.get("strategy_id") or metadata.get("source_scan") or candidate.get("source_scan"),
         "screener_id": metadata.get("screener_id") or candidate.get("screener_id") or metadata.get("source_scan") or candidate.get("source_scan"),
         "strategy_lane": metadata.get("strategy_lane") or candidate.get("strategy_lane") or metadata.get("lane") or candidate.get("lane"),
         "strategy_lanes": metadata.get("strategy_lanes") or candidate.get("strategy_lanes") or [],
         "cycle_id": metadata.get("cycle_id") or candidate.get("cycle_id"),
+        "execution_origin": "broker_fill",
     }
 
 
@@ -804,9 +815,30 @@ async def record_filled_lottery_entry(
     db = get_db()
     existing = await db.ll_tickets.find_one({"broker": broker, "broker_order_id": str(broker_order_id)}, {"_id": 0})
     if existing:
-        return {"ok": True, "created": False, "ticket_id": existing.get("ticket_id"), "reason": "already_recorded"}
+        # Broker fill quantities are cumulative.  A partial fill can be seen
+        # more than once, so refresh the ledger rather than freezing the first
+        # partial quantity/average price forever.
+        existing_qty = _num(existing.get("quantity"), 0)
+        if quantity > existing_qty or abs(_num(existing.get("entry_fill_price"), 0) - fill_price) > 1e-8:
+            await db.ll_tickets.update_one(
+                {"ticket_id": existing.get("ticket_id")},
+                {"$set": {
+                    "quantity": max(existing_qty, float(quantity)),
+                    "entry_price": round(float(fill_price), 6),
+                    "entry_fill_price": round(float(fill_price), 6),
+                    "current_price": round(float(fill_price), 6),
+                    "peak_price": max(_num(existing.get("peak_price"), fill_price), float(fill_price)),
+                    "trough_price": min(x for x in [_num(existing.get("trough_price"), fill_price), float(fill_price)] if x > 0),
+                    "entry_filled_at": filled_at or existing.get("entry_filled_at") or _now().isoformat(),
+                    "last_fill_update_at": _now().isoformat(),
+                }},
+            )
+            return {"ok": True, "created": False, "updated": True, "ticket_id": existing.get("ticket_id"), "reason": "cumulative_fill_updated"}
+        return {"ok": True, "created": False, "updated": False, "ticket_id": existing.get("ticket_id"), "reason": "already_recorded"}
     now = _now().isoformat()
     ticket_id = f"llt-{str(broker).lower()}-{str(broker_order_id)}"
+    # Use the deterministic ticket id as the document key so concurrent
+    # reconciliation workers cannot create duplicate rows.
     doc = stamped({
         "ticket_id": ticket_id,
         "book": "lottery",
@@ -827,8 +859,15 @@ async def record_filled_lottery_entry(
         "opened_at": filled_at or now,
         "opened_by": "broker_fill_reconciliation",
         **identity,
+        "_id": ticket_id,
     })
-    await db.ll_tickets.insert_one(doc)
+    inserted = await db.ll_tickets.update_one(
+        {"_id": ticket_id},
+        {"$setOnInsert": doc},
+        upsert=True,
+    )
+    if getattr(inserted, "upserted_id", None) is None:
+        return {"ok": True, "created": False, "updated": False, "ticket_id": ticket_id, "reason": "already_recorded"}
     await log_activity(
         f"Lottery ticket opened from {broker} fill: {_clean_ticker(ticker)} @ ${fill_price}",
         "info",
@@ -850,18 +889,51 @@ async def close_filled_lottery_entry(
         return {"ok": True, "closed": False, "reason": "ticket_not_found"}
     entry = _num(ticket.get("entry_fill_price") or ticket.get("entry_price"), 0)
     raw_pct = ((exit_price - entry) / entry * 100) if entry else 0
+    existing_qty = _num(ticket.get("quantity_remaining"), _num(ticket.get("quantity"), 0))
+    remaining_qty = max(0.0, existing_qty - float(exit_quantity))
     update = {
-        "status": "CLOSED",
+        "status": "CLOSED" if remaining_qty <= 0 else "OPEN",
         "exit_price": round(float(exit_price), 6),
         "exit_fill_price": round(float(exit_price), 6),
         "exit_quantity": float(exit_quantity),
-        "closed_at": _now().isoformat(),
         "exit_reason": reason,
         "raw_return_pct": round(raw_pct, 2),
         "haircut_return_pct": round(raw_pct - ROUND_TRIP_HAIRCUT_PCT, 2),
+        "quantity_remaining": remaining_qty,
+        "last_exit_at": _now().isoformat(),
     }
+    if remaining_qty <= 0:
+        update["closed_at"] = _now().isoformat()
+    else:
+        update["partial_exit"] = True
     await db.ll_tickets.update_one({"ticket_id": ticket["ticket_id"]}, {"$set": update})
     return {"ok": True, "closed": True, "ticket_id": ticket["ticket_id"], **update}
+
+
+async def mark_broker_exit_unconfirmed(*, broker: str, entry_order_id: str, reason: str) -> dict[str, Any]:
+    """Flag a broker position that disappeared without a matched sell fill.
+
+    Do not invent an exit price or grade the trade. The flag keeps the ledger
+    visible for reconciliation while making the missing broker evidence
+    explicit to reporting and learning.
+    """
+    if not broker or not entry_order_id:
+        return {"ok": False, "marked": False, "reason": "invalid_broker_exit_identity"}
+    db = get_db()
+    ticket = await db.ll_tickets.find_one({
+        "broker": broker,
+        "broker_order_id": str(entry_order_id),
+        "status": {"$in": ["OPEN", "HALTED"]},
+    }, {"_id": 0})
+    if not ticket:
+        return {"ok": True, "marked": False, "reason": "ticket_not_found"}
+    update = {
+        "risk_state": "EXIT_UNCONFIRMED",
+        "broker_exit_unconfirmed_at": _now().isoformat(),
+        "broker_exit_unconfirmed_reason": reason,
+    }
+    await db.ll_tickets.update_one({"ticket_id": ticket["ticket_id"]}, {"$set": update})
+    return {"ok": True, "marked": True, "ticket_id": ticket["ticket_id"], **update}
 
 
 def _ticket_multiple(ticket: dict[str, Any]) -> float | None:
@@ -901,7 +973,7 @@ async def issue_ticket(ticker: str, entry_price: float, variant: str = "V1_DAY2_
 
     stop_price = round(max(entry_price * 0.60, entry_price - (entry_price * 0.40)), 4)
     doc = stamped({
-        "ticket_id": f"llt-{t}-{_now().strftime('%Y%m%d%H%M%S')}",
+        "ticket_id": f"llt-manual-{t}-{_today()}",
         "book": "lottery",
         "ticker": t,
         "date": _today(),
@@ -945,9 +1017,16 @@ async def issue_ticket(ticker: str, entry_price: float, variant: str = "V1_DAY2_
         "time_stop_date": (_now().date() + timedelta(days=7)).isoformat(),
         "opened_at": _now().isoformat(),
         "opened_by": reason,
+        "execution_origin": "manual",
         "haircut": {"entry_pct": ENTRY_HAIRCUT_PCT, "exit_pct": EXIT_HAIRCUT_PCT},
     })
-    await db.ll_tickets.insert_one(doc)
+    inserted = await db.ll_tickets.update_one(
+        {"_id": doc["ticket_id"]},
+        {"$setOnInsert": {**doc, "_id": doc["ticket_id"]}},
+        upsert=True,
+    )
+    if getattr(inserted, "upserted_id", None) is None:
+        return {"ok": False, "reason": "no_reentry_same_ticker_same_day"}
     await log_activity(f"Lottery League ticket opened: {t} @ ${entry_price}", "info")
     doc.pop("_id", None)
     return {"ok": True, "ticket": doc}

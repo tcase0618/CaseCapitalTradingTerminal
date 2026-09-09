@@ -1,11 +1,11 @@
 # Stock Intel
 
-Portable stock intelligence dashboard with a FastAPI backend, MongoDB storage,
+Portable stock intelligence dashboard with a FastAPI backend, PostgreSQL storage,
 Telegram delivery hooks, and a React frontend.
 
 ## Quick Start With Docker
 
-This is the recommended local path on Windows because it runs the app and MongoDB
+This is the recommended local path on Windows because it runs the app and PostgreSQL
 the same way you would run them in the cloud.
 
 1. Install Docker Desktop.
@@ -32,7 +32,7 @@ http://127.0.0.1:8001/api/status
 
 ## Manual Local Run
 
-Run MongoDB locally or use MongoDB Atlas, then set `MONGO_URL` in
+Run PostgreSQL locally or use a managed PostgreSQL instance, then set `POSTGRES_DSN` in
 `backend/.env`.
 
 Backend:
@@ -67,8 +67,8 @@ For a same-domain cloud deployment behind a proxy, leave
 
 Backend:
 
-- `MONGO_URL`: MongoDB connection string.
-- `DB_NAME`: Mongo database name.
+- `POSTGRES_DSN`: PostgreSQL connection string.
+- `DB_NAME`: Logical terminal database name.
 - `ANTHROPIC_API_KEY`: Required for new Claude analysis.
 
 Optional integrations:
@@ -98,7 +98,7 @@ Use the Dockerfiles in this repo:
   backend environment variables.
 - Frontend service: build `frontend/Dockerfile`, expose port `80`. The included
   nginx config serves the React build and proxies `/api` to the backend service.
-- Database: use managed MongoDB, such as MongoDB Atlas, and set `MONGO_URL`.
+- Database: use managed PostgreSQL and set `POSTGRES_DSN`.
 
 If your cloud provider runs frontend and backend on different domains, set
 `REACT_APP_BACKEND_URL` during the frontend build to the public backend URL and

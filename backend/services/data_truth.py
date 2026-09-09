@@ -112,7 +112,7 @@ def _persistence_blocker(error: Exception) -> dict[str, Any]:
     label = "Database Persistence Block"
     key = "database_persistence_block"
     if "space quota" in detail.lower() or "writes are blocked" in detail.lower():
-        detail = "MongoDB writes are blocked because the cluster is at its storage quota. Free storage or upgrade the cluster before execution is allowed."
+        detail = "PostgreSQL writes are unavailable; execution remains blocked until the database is healthy."
     return {
         "key": key,
         "label": label,

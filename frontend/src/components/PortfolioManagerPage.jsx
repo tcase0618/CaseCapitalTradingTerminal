@@ -1719,7 +1719,7 @@ function SystemHealthView({ health, refresh }) {
           <PlanRow k="LATEST SCAN" v={health.database?.latest_scan_at || "--"} color={accent2} />
         </Card>
         <Card title="FREE DATA READINESS" accentColor={accent}>
-          <PlanRow k="MONGODB" v={health.env?.mongodb || "--"} />
+          <PlanRow k="POSTGRESQL" v={health.env?.postgres || "--"} />
           <PlanRow k="FRED" v={health.env?.fred || "--"} />
           <PlanRow k="ALPHA VANTAGE" v={health.env?.alpha_vantage || "--"} />
           <PlanRow k="FMP" v={health.env?.fmp || "--"} />

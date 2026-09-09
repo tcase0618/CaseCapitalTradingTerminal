@@ -54,32 +54,11 @@ async def _safe_check(name: str, coro, *, blocks: bool = True) -> dict[str, Any]
 
 
 async def _database_check() -> dict[str, Any]:
-    if os.environ.get("DB_BACKEND", "mongo").strip().lower() == "postgres":
-        from . import postgres_store
-
-        state = await postgres_store.status()
-        if not state.get("ready"):
-            return {"ok": False, "backend": "postgres", "reason": state.get("last_error") or "postgres_unavailable"}
-        return {"ok": True, "backend": "postgres", "schema_ready": state.get("schema_ready")}
-
-    db = get_db()
-    await db.command("ping")
-    latest_scan = await db.scan_results.find_one({}, {"_id": 0, "finished_at": 1, "results": 1}, sort=[("finished_at", -1)])
-    latest_snapshot = await db.live_position_snapshot_latest.find_one({}, {"_id": 0}, sort=[("snapshot_at", -1)])
-    latest_risk = await db.options_desk_risk_checks.find_one(
-        {}, {"_id": 0, "checked_at": 1, "positions_checked": 1, "errors": 1}, sort=[("checked_at", -1)]
-    )
-    return {
-        "ok": True,
-        "latest_scan_at": (latest_scan or {}).get("finished_at"),
-        "latest_scan_age_minutes": _age_minutes((latest_scan or {}).get("finished_at")),
-        "latest_scan_rows": len((latest_scan or {}).get("results") or []),
-        "position_snapshot_at": (latest_snapshot or {}).get("snapshot_at"),
-        "position_snapshot_age_minutes": _age_minutes((latest_snapshot or {}).get("snapshot_at")),
-        "options_risk_checked_at": (latest_risk or {}).get("checked_at"),
-        "options_risk_age_minutes": _age_minutes((latest_risk or {}).get("checked_at")),
-        "options_risk_errors": len((latest_risk or {}).get("errors") or []),
-    }
+    from . import postgres_store
+    state = await postgres_store.status()
+    if not state.get("ready"):
+        return {"ok": False, "backend": "postgres", "reason": state.get("last_error") or "postgres_unavailable"}
+    return {"ok": True, "backend": "postgres", "schema_ready": state.get("schema_ready")}
 
 
 async def _equity_account_check() -> dict[str, Any]:

@@ -280,7 +280,7 @@ async def fetch_pdufa_calendar() -> list[dict[str, Any]]:
             logger.warning("PDUFA source %s exception: %s", name, e)
             continue
     # Last-resort curated seed (kept current with major upcoming PDUFAs).
-    # Operator-editable from MongoDB if biopharmcatalyst/streetinsider stay blocked.
+    # Operator-editable from PostgreSQL if biopharmcatalyst/streetinsider stay blocked.
     logger.warning("PDUFA all live sources failed — falling back to seed list")
     return _seed_pdufa()
 
@@ -288,7 +288,7 @@ async def fetch_pdufa_calendar() -> list[dict[str, Any]]:
 def _seed_pdufa() -> list[dict[str, Any]]:
     """Curated seed list of known upcoming PDUFA dates. Updated quarterly.
     Used only when all live sources are blocked. Operator can override by
-    inserting docs directly into pharma_pdufa_cache.entries in MongoDB."""
+    inserting docs directly into the PostgreSQL-backed collection interface."""
     rows = [
         {"ticker": "LLY",   "drug": "Donanemab",       "indication": "Early Alzheimer's disease", "pdufa_date": "2026-07-08", "type": "PDUFA"},
         {"ticker": "BMY",   "drug": "Iberdomide",      "indication": "Multiple myeloma",            "pdufa_date": "2026-08-15", "type": "PDUFA"},
@@ -1417,7 +1417,7 @@ async def run_pharma_scan(
     notify: bool = True,
 ) -> dict[str, Any]:
     """Complete pharma pipeline. Returns enriched PDUFA entries with scores +
-    persists to MongoDB."""
+    persists to PostgreSQL."""
     started = _now()
     await log_activity(f"Pharma scan started ({triggered_by})", "info")
 

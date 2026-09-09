@@ -44,10 +44,19 @@ def _strategy_attribution(row: dict[str, Any]) -> dict[str, Any]:
     view_lanes = [str(view.get("lane")) for view in views if view.get("lane")]
     view_screeners = [str(view.get("screener_id")) for view in views if view.get("screener_id")]
     lanes = row.get("strategy_lanes") or scanner.get("lanes") or view_lanes
+    lottery_views = [view for view in views if str(view.get("family") or "").upper() == "LOTTERY"]
+    lottery_view = lottery_views[0] if lottery_views else None
+    primary_scanner = lottery_view or scanner
+    primary_family = str(primary_scanner.get("family") or row.get("scanner_family") or "").upper() or None
+    primary_id = primary_scanner.get("screener_id") or primary_scanner.get("id") or primary_scanner.get("name")
+    primary_lane = lottery_view.get("lane") if lottery_view else None
+    if lottery_view and primary_lane and primary_lane not in lanes:
+        lanes = [primary_lane, *lanes]
     return {
-        "strategy_id": row.get("strategy_id") or scanner.get("id") or scanner.get("name") or source_scan,
-        "screener_id": row.get("screener_id") or scanner.get("screener_id") or scanner.get("id") or source_scan or (view_screeners[0] if view_screeners else None),
-        "scanner_family": row.get("scanner_family") or scanner.get("family"),
+        "strategy_id": primary_id or row.get("strategy_id") or source_scan or (view_screeners[0] if view_screeners else None),
+        "screener_id": primary_id or row.get("screener_id") or source_scan or (view_screeners[0] if view_screeners else None),
+        "scanner_family": primary_family,
+        "strategy_is_lottery": bool(lottery_view) or primary_family == "LOTTERY",
         "strategy_lanes": list(dict.fromkeys(str(lane) for lane in lanes)) if isinstance(lanes, (list, tuple)) else ([str(lanes)] if lanes else []),
     }
 
@@ -206,6 +215,14 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
         for row in approved:
             ticker = _symbol(row)
             amount = _allocation(row)
+            intended_route = str(row.get("route") or "").upper()
+            preferred_route = str(row.get("preferred_route") or "").upper()
+            if intended_route == "OPTION" or preferred_route == "OPTION":
+                rejected.append({"ticker": ticker, "reason": "public_equity_route_not_authorized", "intended_route": intended_route or preferred_route})
+                continue
+            if bool(row.get("target_is_proxy")) or str(row.get("target_source") or "") == "thesis_lane_proxy_pending_validation":
+                rejected.append({"ticker": ticker, "reason": "lottery_proxy_target_not_live_authorized"})
+                continue
             quote_row = quote_by_symbol.get(ticker) or {}
             quote_source = "public"
             price = _quote_price(quote_row)
@@ -395,6 +412,65 @@ async def reconcile() -> dict[str, Any]:
             elif status in {"CANCELLED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "fill_status": status, "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": f"public_order_{status.lower()}", "last_order_status": status}})
                 order_updates += 1
+        protective_trades = await db.tf_trades.find(
+            {"broker_base": BROKER_BASE, "status": "OPEN", "protective_order_id": {"$exists": True, "$ne": None}},
+            {"_id": 0},
+        ).to_list(500)
+        for trade in protective_trades:
+            protective_id = trade.get("protective_order_id")
+            try:
+                protective = await client.get_order(str(protective_id))
+            except Exception:
+                poll_errors += 1
+                continue
+            protective_status = str(protective.get("status") or protective.get("orderStatus") or "").upper()
+            if protective_status in {"FILLED", "PARTIALLY_FILLED"}:
+                cumulative_exit_qty = _num(protective.get("filledQuantity") or protective.get("filled_quantity"))
+                exit_price = _num(protective.get("averagePrice") or protective.get("average_price") or protective.get("limitPrice") or protective.get("limit_price"))
+                prior_exit_qty = _num(trade.get("protective_filled_qty"))
+                exit_qty = max(0.0, cumulative_exit_qty - prior_exit_qty)
+                if exit_qty <= 0 or exit_price <= 0:
+                    await db.tf_trades.update_one(
+                        {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                        {"$set": {"protective_order_status": protective_status, "last_order_status": protective_status}},
+                    )
+                    order_updates += 1
+                    continue
+                remaining = max(0.0, _qty(trade) - exit_qty)
+                update = {
+                    "protective_order_status": protective_status,
+                    "protective_filled_qty": cumulative_exit_qty,
+                    "protective_fill_price": exit_price,
+                    "last_order_status": protective_status,
+                    "last_exit_synced_at": datetime.now(timezone.utc).isoformat(),
+                }
+                if remaining <= 0:
+                    update.update({"status": "CLOSED", "fill_status": "EXIT_FILLED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_protective_stop_filled"})
+                else:
+                    update["qty_remaining"] = remaining
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": update},
+                )
+                if exit_qty > 0:
+                    try:
+                        from . import lottery
+                        await lottery.close_filled_lottery_entry(
+                            broker="public",
+                            entry_order_id=str(trade.get("public_order_id") or ""),
+                            exit_price=exit_price,
+                            exit_quantity=exit_qty,
+                            reason="public_protective_stop_filled",
+                        )
+                    except Exception:
+                        logger.exception("Lottery exit ledger failed for Public order %s", trade.get("public_order_id"))
+                order_updates += 1
+            elif protective_status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": {"protective_order_status": protective_status, "last_order_status": protective_status}},
+                )
+                order_updates += 1
         positions = {_symbol(row): row for row in _positions(await client.portfolio())}
         rows = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN"}, {"_id": 0}).to_list(500)
         updated = closed = 0
@@ -407,6 +483,15 @@ async def reconcile() -> dict[str, Any]:
                 updated += 1
             elif trade.get("fill_status") == "FILLED":
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
+                try:
+                    from . import lottery
+                    await lottery.mark_broker_exit_unconfirmed(
+                        broker="public",
+                        entry_order_id=str(trade.get("public_order_id") or ""),
+                        reason="public_position_absent_without_matched_sell_fill",
+                    )
+                except Exception:
+                    logger.exception("Lottery exit reconciliation flag failed for Public order %s", trade.get("public_order_id"))
                 closed += 1
     result = {"skipped": False, "ok": poll_errors == 0, "order_updates": order_updates, "updated": updated, "closed": closed, "poll_errors": poll_errors, "broker": BROKER_BASE}
     state_update = {"last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_result": result}
@@ -431,9 +516,11 @@ async def process_protective_exits() -> dict[str, Any]:
         for trade in rows:
             ticker = _symbol(trade)
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
-            current = _quote_price(by_symbol.get(ticker) or {})
+            quote_row = by_symbol.get(ticker) or {}
+            current = _quote_price(quote_row)
+            fresh, _age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
             quantity = _qty(trade)
-            if stop <= 0 or current <= 0 or quantity <= 0 or current > stop:
+            if stop <= 0 or current <= 0 or not fresh or quantity <= 0 or current > stop:
                 continue
             client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, stop, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"stop": stop})
@@ -442,8 +529,15 @@ async def process_protective_exits() -> dict[str, Any]:
             try:
                 result = await client.submit_equity_order(symbol=ticker, side="SELL", quantity=quantity, stop_price=stop, limit_price=round(stop * 0.99, 4), session="TWENTY_FOUR_HOURS", client_order_id=client_id)
                 order = result.get("order") or {}
-                submitted.append({"ticker": ticker, "order_id": order.get("orderId"), "stop": stop})
-                await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order.get("orderId")})
+                order_id = order.get("orderId") or order.get("id")
+                if not order_id:
+                    raise RuntimeError("Public protective order response missing order id")
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": {"protective_order_id": order_id, "protective_order_qty": quantity, "protective_order_status": "SUBMITTED", "protective_order_preflight": result.get("preflight")}},
+                )
+                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop})
+                await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id})
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
     return {"skipped": False, "checked": len(rows), "submitted": submitted}

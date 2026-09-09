@@ -4,7 +4,7 @@ Inputs (all from existing data we already fetch):
   - Short interest %  (Finviz)
   - Days-to-cover   (Yahoo: shortRatio or short_pct * float_shares / avg_volume)
   - Borrow-rate proxy (delta in short_pct over 30d; >20% growth = elevated)
-  - Rate of change in short positions (Finviz repeat reads, persisted in Mongo)
+  - Rate of change in short positions (Finviz repeat reads, persisted in PostgreSQL)
 
 Score formula:
   base = (short_pct/100 * 0.35) + (min(dtc,30)/30 * 0.30)

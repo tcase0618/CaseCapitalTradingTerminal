@@ -552,6 +552,8 @@ def evaluate_rows(
             "scanner_family": row.get("scanner_family") or (row.get("strategy_scanner") or {}).get("family"),
             "strategy_profile": strategy_profile,
             "source_scan": row.get("source_scan"),
+            "target_source": row.get("target_source"),
+            "target_is_proxy": bool(row.get("target_is_proxy")),
             "signals": signals,
             "ratchet_plan": ratchet,
             "strategy_case": strategy_case,

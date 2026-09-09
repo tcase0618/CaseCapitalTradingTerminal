@@ -718,7 +718,7 @@ function domainFor(i, idx) {
   if (key.includes("alpaca") || key.includes("option") || key.includes("price") || key.includes("market")) return "MARKET DATA";
   if (key.includes("sec") || key.includes("filing") || key.includes("fund")) return "FUNDAMENTALS";
   if (key.includes("news") || key.includes("sentiment") || key.includes("social")) return "SENTIMENT / NEWS";
-  if (key.includes("mongo") || key.includes("api") || key.includes("scheduler")) return "SYSTEM HEALTH";
+  if (key.includes("postgres") || key.includes("api") || key.includes("scheduler")) return "SYSTEM HEALTH";
   return idx % 2 ? "FILL TRUTH" : "DATA CHECK";
 }
 

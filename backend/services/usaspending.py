@@ -571,7 +571,7 @@ async def list_prime_contracts(days: int = 90, min_amount: float = 1_000_000,
     """Top-level contracts list for the Contracts tab. Returns prime awards
     with ticker mapping. When `enrich_subs=True`, the sub-awards endpoint
     is called for each prime in bounded parallel (max 6 concurrent) and
-    embedded as `sub_awards` directly in each row + cached in MongoDB."""
+    embedded as `sub_awards` directly in each row + cached in PostgreSQL."""
     end = date.today()
     start = end - timedelta(days=days)
     filters: dict[str, Any] = {

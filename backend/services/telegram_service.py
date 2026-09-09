@@ -11,7 +11,6 @@ from typing import Any
 
 import httpx
 import pytz
-from pymongo.errors import DuplicateKeyError
 
 from . import claude_service, risk_target, scanner, usaspending
 from .db import get_db, log_activity
@@ -136,8 +135,6 @@ async def _should_skip_outbound(text: str) -> tuple[bool, str]:
             },
             upsert=True,
         )
-    except DuplicateKeyError:
-        return True, f"{kind}_cooldown"
     except Exception as exc:
         logger.error("Telegram outbound guard unavailable; suppressing %s: %s", kind, exc)
         return True, "telegram_guard_unavailable"

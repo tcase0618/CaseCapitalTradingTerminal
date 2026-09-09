@@ -1,4 +1,4 @@
-"""Database access with an explicit, reversible Postgres cutover."""
+"""Database access for the terminal's PostgreSQL runtime."""
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -9,17 +9,10 @@ FEATURE_VERSION = "3.0"
 
 
 def get_db():
-    if os.environ.get("DB_BACKEND", "mongo").strip().lower() == "postgres":
-        from . import postgres_store
-        return postgres_store.get_database()
-    global _client
-    if _client is None:
-        from motor.motor_asyncio import AsyncIOMotorClient
-        _client = AsyncIOMotorClient(
-            os.environ["MONGO_URL"],
-            serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000")),
-        )
-    return _client[os.environ["DB_NAME"]]
+    # PostgreSQL is the only supported runtime backend. Keep the function
+    # boundary so services retain their existing collection-style interface.
+    from . import postgres_store
+    return postgres_store.get_database()
 
 
 def stamped(doc: dict | None = None) -> dict:
@@ -42,12 +35,3 @@ async def log_activity(message: str, level: str = "info", meta: dict | None = No
         "feature_version": FEATURE_VERSION,
     }
     await db.activity_log.insert_one(doc)
-    if os.environ.get("DB_BACKEND", "mongo").strip().lower() == "postgres":
-        return
-    try:
-        from . import postgres_store
-        await postgres_store.mirror_document("activity_log", doc)
-    except Exception:
-        # Postgres is a parallel durability layer during migration; it must not
-        # break the active Mongo-backed runtime.
-        pass

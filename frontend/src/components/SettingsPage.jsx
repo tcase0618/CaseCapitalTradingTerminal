@@ -337,7 +337,7 @@ export default function SettingsPage() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
         <div>
           <Card title="INTEGRATIONS STATUS">
-            <Row k="MONGODB" v="[CONNECTED]" c="#4ade80" />
+            <Row k="POSTGRESQL" v="[CONNECTED]" c="#4ade80" />
             <Row k="TELEGRAM BOT" v="[ACTIVE — @CaseCapitalTerminalQuant]" c="#4ade80" />
             <Row k="CLAUDE LLM" v="[ANTHROPIC KEY - 24H CACHE]" c="#4ade80" />
             <Row k="USASPENDING API" v="[PUBLIC ENDPOINT]" c="#4ade80" />

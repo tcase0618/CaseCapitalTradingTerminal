@@ -35,6 +35,36 @@ def test_public_account_permission_blocks_close_only_accounts():
     ) == (False, "public_account_close_only")
 
 
+def test_public_attribution_preserves_lottery_overlap_over_core_base():
+    attribution = public_execution._strategy_attribution({
+        "source_scan": "CORE",
+        "scanner_family": "CORE",
+        "strategy_views": [
+            {"screener_id": "lottery_supernova", "family": "LOTTERY", "lane": "SUPERNOVA"},
+        ],
+    })
+    assert attribution["strategy_id"] == "lottery_supernova"
+    assert attribution["screener_id"] == "lottery_supernova"
+    assert attribution["scanner_family"] == "LOTTERY"
+    assert attribution["strategy_is_lottery"] is True
+    assert attribution["strategy_lanes"] == ["SUPERNOVA"]
+
+
+def test_pm_output_preserves_proxy_target_marker():
+    row = portfolio_manager.evaluate_rows([{
+        "ticker": "TEST",
+        "price": 10,
+        "target_blended": 14,
+        "stop_loss": 9,
+        "target_source": "thesis_lane_proxy_pending_validation",
+        "target_is_proxy": True,
+        "source_scan": "lottery_gap",
+        "scanner_family": "LOTTERY",
+    }], equity=1000, mode="BALANCED")[0]
+    assert row["target_is_proxy"] is True
+    assert row["target_source"] == "thesis_lane_proxy_pending_validation"
+
+
 def test_trade_floor_learning_scope_allows_legacy_rows_only_in_paper(monkeypatch):
     monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
     assert trade_floor_learning._trade_scope() == {"$or": [{"broker_base": "https://paper-api.alpaca.markets"}, {"broker_base": {"$exists": False}}]}

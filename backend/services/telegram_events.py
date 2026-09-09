@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,6 +29,7 @@ PHARMA_SHOCK_BATCH_MAX = int(os.environ.get("TELEGRAM_PHARMA_SHOCK_BATCH_MAX", "
 # inside the consolidated terminal scan report instead of sending a second feed.
 STANDALONE_PHARMA_ALERTS_ENABLED = os.environ.get("TELEGRAM_STANDALONE_PHARMA_ALERTS", "false").strip().lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TEXT_LIMIT = 3900
+logger = logging.getLogger(__name__)
 
 
 def _scheduled_standalone_alert_suppressed(triggered_by: Any) -> bool:
@@ -898,10 +900,15 @@ async def dispatch_pharma_alerts(rows: list[dict[str, Any]], *, triggered_by: st
 
 async def dispatch_pharma_shock_alerts(rows: list[dict[str, Any]], *, triggered_by: str = "unknown") -> dict[str, Any]:
     if not STANDALONE_PHARMA_ALERTS_ENABLED or _scheduled_standalone_alert_suppressed(triggered_by):
-        await log_activity("Standalone scheduled pharma shock suppressed; included in terminal scan report", "info", {
-            "triggered_by": triggered_by,
-            "count": len(rows or []),
-        })
+        try:
+            await log_activity("Standalone scheduled pharma shock suppressed; included in terminal scan report", "info", {
+                "triggered_by": triggered_by,
+                "count": len(rows or []),
+            })
+        except Exception:
+            # Suppression must remain a successful no-send path even when the
+            # optional activity store is unavailable.
+            logger.debug("suppressed pharma alert activity log unavailable", exc_info=True)
         return {"ok": True, "sent": False, "suppressed": True, "count": 0, "reason": "consolidated_terminal_report"}
     hot = [r for r in rows if _num(r.get("shock_score")) >= 75]
     if not hot:

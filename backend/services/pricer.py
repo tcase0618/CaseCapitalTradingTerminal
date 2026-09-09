@@ -6,8 +6,8 @@ Fallback endpoints used when Alpaca is unavailable:
 - /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}  → daily aggregates
 
 Caching:
-- price_cache (Mongo) — 10-minute TTL for latest closes
-- price_history_cache (Mongo) — 24h TTL for daily series
+- price_cache (PostgreSQL) — 10-minute TTL for latest closes
+- price_history_cache (PostgreSQL) — 24h TTL for daily series
 
 Public API:
 - get_latest_close(ticker)

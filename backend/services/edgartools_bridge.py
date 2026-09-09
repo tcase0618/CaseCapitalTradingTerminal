@@ -1,7 +1,7 @@
 """Optional EdgarTools enrichment for SEC battle cards.
 
 The existing SEC feed remains the live event source. EdgarTools adds deeper
-company context from EDGAR with a short Mongo cache so UI clicks do not turn
+company context from EDGAR with a short PostgreSQL cache so UI clicks do not turn
 into repeated SEC requests.
 """
 from __future__ import annotations

@@ -700,7 +700,11 @@ def start_scheduler():
     )
     _scheduler.add_job(
         _lottery_active_monitor_job,
-        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
+        OrTrigger([
+            CronTrigger(day_of_week="sun", hour="20-23", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="mon-thu", hour="0-23", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="fri", hour="0-19", minute="*/5", timezone=ET),
+        ]),
         id="lottery_active_monitor_5m",
         replace_existing=True,
     )

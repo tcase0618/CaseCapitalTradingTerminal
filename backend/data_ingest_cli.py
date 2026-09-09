@@ -308,7 +308,7 @@ async def _forex_factory_async(
 def forex_factory(
     weeks: str = typer.Option("thisweek", help="Comma-separated feed names or XML URLs."),
     impact: str = typer.Option("medium,high", help="Minimum/allowed impact levels to keep."),
-    persist: bool = typer.Option(True, help="Persist raw snapshot into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshot into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Pull ForexFactory/FairEconomy economic calendar XML.
@@ -353,7 +353,7 @@ async def _fred_series_async(series: list[str], persist: bool) -> dict[str, Any]
 @app.command("fred-series")
 def fred_series(
     series: list[str] = typer.Argument(None, help="FRED series IDs. Defaults to core macro set."),
-    persist: bool = typer.Option(True, help="Persist raw snapshot into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshot into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Pull latest observations for selected FRED series.
@@ -446,7 +446,7 @@ def fda_calendar(
 @app.command("macro-calendar")
 def macro_calendar(
     days: int = typer.Option(30, min=1, max=120),
-    persist: bool = typer.Option(True, help="Persist raw snapshot into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshot into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Refresh the terminal macro calendar and store a raw snapshot.
@@ -492,7 +492,7 @@ async def _ticker_async(tickers: list[str], persist: bool) -> dict[str, Any]:
 @app.command("ticker")
 def ticker(
     tickers: list[str] = typer.Argument(..., help="Ticker symbols to enrich."),
-    persist: bool = typer.Option(True, help="Persist raw snapshot into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshot into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Pull free context for ticker(s): SEC, trials, FDA, Alpha Vantage, LSE if configured.
@@ -540,7 +540,7 @@ async def _sec_ticker_async(tickers: list[str], persist: bool) -> dict[str, Any]
 @app.command("sec-ticker")
 def sec_ticker(
     tickers: list[str] = typer.Argument(..., help="Ticker symbols to pull from SEC EDGAR."),
-    persist: bool = typer.Option(True, help="Persist raw snapshot into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshot into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Pull SEC ticker lookup + companyfacts for ticker(s).
@@ -576,7 +576,7 @@ async def _usaspending_probe_async(persist: bool) -> dict[str, Any]:
 
 @app.command("usaspending-probe")
 def usaspending_probe(
-    persist: bool = typer.Option(True, help="Persist raw snapshot into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshot into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Probe USAspending agency reference data and persist the response.
@@ -613,7 +613,7 @@ async def _all_async(tickers: list[str], fred_series_ids: list[str], persist: bo
 def all_sources(
     tickers: list[str] = typer.Option(None, "--ticker", "-t", help="Optional ticker(s) to enrich."),
     fred_series_ids: list[str] = typer.Option(None, "--fred", help="Optional FRED series IDs."),
-    persist: bool = typer.Option(True, help="Persist raw snapshots into Mongo raw_data_snapshots."),
+    persist: bool = typer.Option(True, help="Persist raw snapshots into PostgreSQL raw_data_snapshots."),
     raw_output: bool = typer.Option(False, help="Print full payload instead of summary."),
 ) -> None:
     """Run the main free-data pull set in one command.

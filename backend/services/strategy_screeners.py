@@ -186,6 +186,7 @@ def _base_row(
         "pm_routable": bool(pm_routable),
         "risk_plan_source": "explicit_row" if row.get("stop_loss") else "stop_engine_pending",
         "target_source": target_source,
+        "target_is_proxy": target_source == "thesis_lane_proxy_pending_validation",
         "read_only": bool(read_only),
         "raw_source": row,
     }
@@ -667,7 +668,15 @@ async def run_all(
 
     async def enrich_stop(row: dict[str, Any]) -> dict[str, Any]:
         scanner = row.get("strategy_scanner") or {}
-        if not row.get("pm_routable") or not row.get("price"):
+        if not row.get("pm_routable"):
+            return row
+        if not row.get("price"):
+            row["pm_routable"] = False
+            row["strategy_scanner"]["pm_routable"] = False
+            row["strategy_scanner"]["notes"] = [
+                *(row["strategy_scanner"].get("notes") or []),
+                "No current price; research-only until a verified quote is available.",
+            ]
             return row
         async with semaphore:
             try:
