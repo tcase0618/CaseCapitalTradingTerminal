@@ -577,37 +577,68 @@ def start_scheduler():
     )
 
     async def _position_monitor():
+        failures: list[dict[str, str]] = []
         try:
             from . import options_desk, pm_ratchet, tail_hunter, trade_floor, trade_floor_phases
-            await trade_floor.flush_queued_equity_orders(limit=25)
-            await trade_floor.sync_positions_and_close_settled()
+            try:
+                await trade_floor.flush_queued_equity_orders(limit=25)
+                await trade_floor.sync_positions_and_close_settled()
+            except Exception as exc:
+                failures.append({"stage": "alpaca_position_sync", "reason": exc.__class__.__name__})
+                logger.exception("Alpaca position sync failed")
             try:
                 from . import public_execution
                 if public_execution.enabled():
                     await public_execution.reconcile()
                     await public_execution.process_protective_exits()
-            except Exception:
+            except Exception as exc:
+                failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
                 logger.exception("Public execution reconciliation failed")
             try:
                 from . import safety
                 await safety.check_daily_loss(source="position_monitor")
             except Exception as breaker_exc:
+                failures.append({"stage": "daily_loss_check", "reason": breaker_exc.__class__.__name__})
                 logger.warning("daily loss breaker: %s", breaker_exc)
-            await pm_ratchet.process_open_ratchets()
-            await options_desk.monitor_open_positions(enforce_hard_stop=True)
-            await tail_hunter.monitor_tail_positions()
-            # v5.3 - run the three-phase exit logic on every sync
-            await trade_floor_phases.process_phase_exits()
+            for stage, operation in (
+                ("pm_ratchet", pm_ratchet.process_open_ratchets),
+                ("options_monitor", lambda: options_desk.monitor_open_positions(enforce_hard_stop=True)),
+                ("tail_monitor", tail_hunter.monitor_tail_positions),
+                ("phase_exits", trade_floor_phases.process_phase_exits),
+            ):
+                try:
+                    await operation()
+                except Exception as exc:
+                    failures.append({"stage": stage, "reason": exc.__class__.__name__})
+                    logger.exception("%s failed", stage)
         except Exception as e:
+            failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
             logger.warning("position monitor: %s", e)
+        return {"ok": not failures, "failures": failures}
+
+    async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
+        if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
+            return
+        details = ", ".join(f"{item.get('stage', 'unknown')}={item.get('reason', 'unknown')}" for item in failures[:5])
+        await telegram_service.send_message(
+            f"<b>CASE CAPITAL | PORTFOLIO MONITOR FAILURE</b>\n"
+            f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
+            f"Stage: <b>{stage}</b>\n"
+            f"Failures: <code>{details}</code>\n"
+            f"Action: monitor status requires review; no new risk is authorized by this alert.",
+            chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+        )
     async def _position_monitor_with_snapshot():
         management: dict[str, dict] = {}
         try:
-            await _position_monitor()
-            management["legacy_position_monitor"] = {"ok": True}
+            result = await _position_monitor()
+            management["legacy_position_monitor"] = result
+            if not result.get("ok"):
+                await _send_position_monitor_failure(result.get("failures") or [])
         except Exception as e:
             logger.warning("position monitor wrapper: %s", e)
             management["legacy_position_monitor"] = {"ok": False, "reason": e.__class__.__name__}
+            await _send_position_monitor_failure([{"stage": "monitor_wrapper", "reason": e.__class__.__name__}], "wrapper")
         try:
             snapshot = await persist_live_position_snapshot(
                 triggered_by="scheduler_position_monitor_5m_24_5",
@@ -622,6 +653,7 @@ def start_scheduler():
             )
         except Exception as e:
             logger.warning("position monitor snapshot: %s", e)
+            await _send_position_monitor_failure([{"stage": "snapshot_persist", "reason": e.__class__.__name__}], "snapshot")
 
     _scheduler.add_job(
         _position_monitor_with_snapshot,
@@ -631,6 +663,40 @@ def start_scheduler():
             CronTrigger(day_of_week="fri", hour="0-19", minute="*/5", timezone=ET),
         ]),
         id="position_monitor", replace_existing=True,
+    )
+
+    async def _position_monitor_watchdog():
+        """Alert when the 5-minute monitor has not produced a fresh snapshot."""
+        try:
+            latest = await get_db().bot_state.find_one(
+                {"_id": "live_position_snapshot_latest"},
+                {"_id": 0, "snapshot_at": 1, "triggered_by": 1},
+            ) or {}
+            raw = latest.get("snapshot_at")
+            if isinstance(raw, str):
+                fetched = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            elif isinstance(raw, datetime):
+                fetched = raw
+            else:
+                fetched = None
+            from datetime import timezone
+            if fetched and fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - fetched).total_seconds() if fetched else None
+            if age_seconds is None or age_seconds > 8 * 60:
+                await _send_position_monitor_failure(
+                    [{"stage": "monitor_watchdog", "reason": "missing_or_stale_snapshot"}],
+                    "watchdog",
+                )
+        except Exception as exc:
+            logger.exception("position monitor watchdog failed")
+            await _send_position_monitor_failure([{"stage": "watchdog", "reason": exc.__class__.__name__}], "watchdog")
+
+    _scheduler.add_job(
+        _position_monitor_watchdog,
+        IntervalTrigger(minutes=5),
+        id="position_monitor_watchdog_5m",
+        replace_existing=True,
     )
     _scheduler.add_job(
         _lottery_active_monitor_job,

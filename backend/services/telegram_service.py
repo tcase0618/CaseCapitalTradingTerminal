@@ -68,6 +68,8 @@ def _outbound_kind(text: str) -> str:
     upper = str(text or "").upper()
     if "CASE CAPITAL | SCAN REPORT" in upper:
         return "scan_report"
+    if "CASE CAPITAL | PORTFOLIO MONITOR FAILURE" in upper:
+        return "ops_alert"
     if "CASE SCORE" in upper and ("PHARMA" in upper or "PDUFA" in upper or "BINARY FDA" in upper):
         return "pharma_alert"
     return "generic"
@@ -84,7 +86,7 @@ def _standalone_delivery_allowed(kind: str) -> bool:
     """Central policy guard used by every outbound send path."""
     if not _single_consolidated_scan_only():
         return True
-    return kind == "scan_report"
+    return kind in {"scan_report", "ops_alert"}
 
 
 def _outbound_cooldown(kind: str) -> timedelta:
@@ -92,6 +94,8 @@ def _outbound_cooldown(kind: str) -> timedelta:
         return timedelta(minutes=int(os.environ.get("TELEGRAM_SCAN_REPORT_THROTTLE_MINUTES", "10") or 10))
     if kind == "pharma_alert":
         return timedelta(minutes=int(os.environ.get("TELEGRAM_PHARMA_ALERT_COOLDOWN_MINUTES", "360") or 360))
+    if kind == "ops_alert":
+        return timedelta(minutes=int(os.environ.get("TELEGRAM_OPS_ALERT_COOLDOWN_MINUTES", "10") or 10))
     return timedelta(seconds=int(os.environ.get("TELEGRAM_EXACT_DUPLICATE_SECONDS", "45") or 45))
 
 

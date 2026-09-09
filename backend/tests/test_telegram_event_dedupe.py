@@ -18,6 +18,20 @@ def test_scan_report_throttle_allows_explicit_admin_dispatches():
     assert not telegram_events._scan_report_throttle_enabled("telegram_command")
 
 
+def test_portfolio_monitor_failure_alert_bypasses_consolidated_scan_only_policy():
+    text = "<b>CASE CAPITAL | PORTFOLIO MONITOR FAILURE</b>\nwatchdog"
+    assert telegram_service._outbound_kind(text) == "ops_alert"
+    assert telegram_service._standalone_delivery_allowed("ops_alert")
+
+
+def test_portfolio_monitor_failure_alert_has_cooldown():
+    import os
+    from datetime import timedelta
+
+    os.environ.pop("TELEGRAM_OPS_ALERT_COOLDOWN_MINUTES", None)
+    assert telegram_service._outbound_cooldown("ops_alert") == timedelta(minutes=10)
+
+
 def test_scheduler_core_scan_report_is_suppressed_without_full_terminal_variant():
     assert telegram_events._scan_report_suppressed_reason({"triggered_by": "scheduler"}) == "scheduled_core_scan_report_suppressed"
     assert telegram_events._scan_report_suppressed_reason({
