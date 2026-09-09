@@ -271,3 +271,45 @@ def test_live_price_meta_marks_stale_alpaca_without_hiding_it(monkeypatch):
     assert meta["fresh"] is False
     assert meta["premarket_confirmed"] is False
     assert meta["warning"] == "alpaca_trade_timestamp_stale"
+
+
+def test_live_price_meta_does_not_call_yfinance_by_default(monkeypatch):
+    async def no_provider(ticker, *, feed=None):
+        return None
+
+    async def should_not_call(ticker):
+        raise AssertionError("yfinance must not be part of live selection by default")
+
+    import asyncio
+
+    monkeypatch.delenv("YFINANCE_LIVE_FALLBACK_ENABLED", raising=False)
+    monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "overnight")
+    monkeypatch.setattr(pricer, "_alpaca_trade_meta", no_provider)
+    monkeypatch.setattr(pricer, "_finnhub_quote", lambda ticker: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(pricer, "_yf_latest_close", should_not_call)
+
+    meta = asyncio.run(pricer.live_price_meta("DELISTED"))
+    assert meta["price"] is None
+    assert meta["source"] == "unavailable"
+    assert meta["execution_eligible"] is False
+
+
+def test_live_price_meta_can_opt_in_to_display_only_yfinance(monkeypatch):
+    async def no_provider(ticker, *, feed=None):
+        return None
+
+    async def fake_yfinance(ticker):
+        return 12.34
+
+    import asyncio
+
+    monkeypatch.setenv("YFINANCE_LIVE_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("ALPACA_SCANNER_FEEDS", "overnight")
+    monkeypatch.setattr(pricer, "_alpaca_trade_meta", no_provider)
+    monkeypatch.setattr(pricer, "_finnhub_quote", lambda ticker: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(pricer, "_yf_latest_close", fake_yfinance)
+
+    meta = asyncio.run(pricer.live_price_meta("AAPL"))
+    assert meta["price"] == 12.34
+    assert meta["execution_eligible"] is False
+    assert meta["warning"] == "fallback_close_not_24h_market"

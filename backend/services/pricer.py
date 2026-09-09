@@ -107,6 +107,13 @@ def _live_price_max_age_seconds() -> int:
         return 1800
 
 
+def _allow_yfinance_live_fallback() -> bool:
+    """Allow Yahoo marks only when explicitly requested for display research."""
+    return os.environ.get("YFINANCE_LIVE_FALLBACK_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def _scanner_alpaca_feeds() -> list[str | None]:
     """Feed order for scanner live pricing.
 
@@ -194,6 +201,7 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
         "age_seconds": None,
         "fresh": False,
         "premarket_confirmed": False,
+        "execution_eligible": False,
         "warning": "no_live_price",
     }
     if not ticker:
@@ -275,18 +283,21 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
             "warning": "not_confirmed_24h_market",
         }
 
-    yf_price = await _yf_latest_close(ticker)
-    if yf_price is not None:
-        return {
-            "ticker": ticker,
-            "price": float(yf_price),
-            "source": "yfinance_latest_close",
-            "provider_ts": None,
-            "age_seconds": None,
-            "fresh": False,
-            "premarket_confirmed": False,
-            "warning": "fallback_close_not_24h_market",
-        }
+    if _allow_yfinance_live_fallback():
+        yf_price = await _yf_latest_close(ticker)
+        if yf_price is not None:
+            return {
+                "ticker": ticker,
+                "price": float(yf_price),
+                "source": "yfinance_latest_close",
+                "provider_ts": None,
+                "age_seconds": None,
+                "fresh": False,
+                "premarket_confirmed": False,
+                "delayed": True,
+                "execution_eligible": False,
+                "warning": "fallback_close_not_24h_market",
+            }
     return empty
 
 
@@ -800,9 +811,9 @@ async def batch_latest_closes(tickers: list[str], force: bool = False,
                 upsert=True,
             )
 
-    # 3) yfinance backfill — anything we still don't have a price for
+    # 3) Optional yfinance backfill for display-only research.
     still_missing = [t for t in missing if t not in result]
-    if still_missing:
+    if still_missing and _allow_yfinance_live_fallback():
         yf_data = await _yf_batch_latest(still_missing)
         for t, p in yf_data.items():
             result[t] = float(p)
