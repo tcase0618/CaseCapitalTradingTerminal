@@ -56,6 +56,23 @@ _SOURCE = (
 )
 
 
+def _alpaca_credentials() -> tuple[str, str]:
+    """Read credentials at call time so runtime config and tests are truthful."""
+    return (
+        os.environ.get("APCA_API_KEY_ID", "").strip(),
+        os.environ.get("APCA_API_SECRET_KEY", "").strip(),
+    )
+
+
+def _provider_configured(name: str) -> bool:
+    values = {
+        "alpaca": _alpaca_credentials()[0],
+        "finnhub": os.environ.get("FINNHUB_API_KEY", "").strip(),
+        "massive": os.environ.get("MASSIVE_API_KEY", "").strip(),
+    }
+    return bool(values.get(name, ""))
+
+
 def _public_configured() -> bool:
     try:
         from . import public_api
@@ -114,7 +131,8 @@ async def _alpaca_trade_meta(ticker: str, *, feed: str | None = None) -> dict[st
     a stale last-regular-session print. That distinction matters more than the
     price itself for the 00:00 and 08:00 scans.
     """
-    if not (ALPACA_KEY and ALPACA_SECRET):
+    alpaca_key, alpaca_secret = _alpaca_credentials()
+    if not (alpaca_key and alpaca_secret):
         return None
     try:
         async with httpx.AsyncClient(timeout=6.0) as c:
@@ -125,8 +143,8 @@ async def _alpaca_trade_meta(ticker: str, *, feed: str | None = None) -> dict[st
                 f"{ALPACA_DATA_BASE}/stocks/{ticker}/trades/latest",
                 params=params,
                 headers={
-                    "APCA-API-KEY-ID": ALPACA_KEY,
-                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+                    "APCA-API-KEY-ID": alpaca_key,
+                    "APCA-API-SECRET-KEY": alpaca_secret,
                 },
             )
             if r.status_code != 200:

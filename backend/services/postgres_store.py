@@ -8,6 +8,7 @@ runtime when ``DB_BACKEND=postgres``.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import math
 import os
@@ -437,11 +438,25 @@ def occurred_at(doc: dict[str, Any]) -> datetime:
 
 
 async def init_pool() -> bool:
-    global _pool, _last_error
+    global _pool, _last_error, _schema_ready
     if not enabled():
         return False
     if _pool is not None:
-        return True
+        # asyncpg pools are bound to the event loop that created them. Test
+        # runners and short-lived maintenance jobs may create a new loop;
+        # never hand an old-loop pool to it.
+        try:
+            current_loop = asyncio.get_running_loop()
+            pool_loop = getattr(_pool, "_loop", None)
+            if pool_loop is current_loop and not current_loop.is_closed():
+                return True
+            if pool_loop is not None and not pool_loop.is_closed() and pool_loop is not current_loop:
+                _last_error = "Postgres pool belongs to another event loop"
+                return False
+            _pool = None
+            _schema_ready = False
+        except RuntimeError:
+            return False
     if asyncpg is None:
         _last_error = "asyncpg is not installed"
         return False

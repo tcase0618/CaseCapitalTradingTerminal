@@ -252,8 +252,15 @@ async def reconcile() -> dict[str, Any]:
                 try:
                     cancel_result = await client.cancel_order(str(trade.get("public_order_id")))
                     cancel_status = str((cancel_result or {}).get("status") or (cancel_result or {}).get("orderStatus") or "").upper()
-                    if cancel_status and cancel_status not in {"CANCELLED", "CANCELED", "EXPIRED"}:
-                        raise RuntimeError(f"Public cancellation not confirmed: {cancel_status}")
+                    if cancel_status not in {"CANCELLED", "CANCELED", "EXPIRED"}:
+                        # Some broker cancel endpoints acknowledge with an
+                        # empty body. Confirm the terminal state before closing
+                        # the local ledger, otherwise a still-working order can
+                        # disappear from reconciliation forever.
+                        current = await client.get_order(str(trade.get("public_order_id")))
+                        confirmed = str((current or {}).get("status") or (current or {}).get("orderStatus") or "").upper()
+                        if confirmed not in {"CANCELLED", "CANCELED", "EXPIRED"}:
+                            raise RuntimeError(f"Public cancellation not confirmed: {confirmed or cancel_status or 'UNKNOWN'}")
                     await db.tf_trades.update_one(
                         {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                         {"$set": {"status": "CLOSED", "fill_status": "EXPIRED_BY_TERMINAL", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_pending_order_ttl"}},

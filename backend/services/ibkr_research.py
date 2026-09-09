@@ -247,15 +247,27 @@ def _make_option_contract(
     multiplier: str = "100",
     trading_class: str | None = None,
 ) -> Any:
+    # Validate caller input before loading the optional IBKR package. This
+    # keeps malformed research requests deterministic even when IBKR is not
+    # installed on the host, and avoids masking a caller error as dependency
+    # availability.
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise ValueError("Option symbol is required")
+    normalized_expiry = _normalize_expiry(expiry)
+    normalized_right = _normalize_right(right)
+    normalized_strike = float(strike)
+    if normalized_strike <= 0:
+        raise ValueError("Option strike must be positive")
     _, _, Contract, _, _ = _import_ibapi()
     c = Contract()
-    c.symbol = symbol.upper().strip()
+    c.symbol = normalized_symbol
     c.secType = "OPT"
     c.exchange = exchange
     c.currency = currency
-    c.lastTradeDateOrContractMonth = _normalize_expiry(expiry)
-    c.strike = float(strike)
-    c.right = _normalize_right(right)
+    c.lastTradeDateOrContractMonth = normalized_expiry
+    c.strike = normalized_strike
+    c.right = normalized_right
     c.multiplier = str(multiplier or "100")
     if trading_class:
         c.tradingClass = str(trading_class).strip().upper()
