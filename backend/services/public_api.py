@@ -402,6 +402,7 @@ class PublicAPIClient:
             payload["amount"] = f"{float(amount):.2f}"
         if quantity is not None:
             payload["quantity"] = f"{float(quantity):.8f}".rstrip("0").rstrip(".")
+        payload["useMargin"] = False
         if limit_price is not None:
             payload["limitPrice"] = f"{float(limit_price):.2f}"
         if stop_price is not None:
@@ -472,19 +473,19 @@ class PublicAPIClient:
             order_id=client_order_id,
         )
         preflight = await self.preflight_single_leg(payload, account_id=account_id)
-        # Never treat an unfamiliar or incomplete broker response as approval.
-        # Public can add response fields without preserving our assumptions;
-        # execution must require an explicit known-success outcome.
+        # Public communicates validation failures through HTTP errors. A
+        # successful preflight returns economics rather than a required verdict.
         outcome = str(
             preflight.get("outcome")
             or preflight.get("status")
             or preflight.get("result")
             or ""
         ).upper()
-        if not outcome:
-            raise PublicAPIError("Public preflight returned no explicit outcome")
-        if outcome not in {"SUCCESS", "VALID", "OK"}:
+        if outcome and outcome not in {"SUCCESS", "VALID", "OK"}:
             raise PublicAPIError(f"Public preflight rejected order: {outcome}")
+        economic_fields = {"orderValue", "estimatedCost", "buyingPowerRequirement", "estimatedQuantity"}
+        if not outcome and not any(preflight.get(key) is not None for key in economic_fields):
+            raise PublicAPIError("Public preflight returned no recognized validation or cost fields")
         placed = await self.place_order(payload, account_id=account_id)
         return {"preflight": preflight, "order": placed, "payload": payload}
 

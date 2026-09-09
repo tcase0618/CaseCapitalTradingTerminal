@@ -108,6 +108,31 @@ def _numeric_field(payload: Any, names: set[str]) -> float | None:
     return None
 
 
+def _cash_buying_power(payload: dict[str, Any]) -> float | None:
+    """Read Public's typed cash buying-power object without guessing."""
+    buying = payload.get("buyingPower") or payload.get("buying_power")
+    if isinstance(buying, dict):
+        for key in ("cashOnlyBuyingPower", "cash_only_buying_power", "availableCash", "available_cash"):
+            value = _num(buying.get(key), -1.0)
+            if value >= 0:
+                return value
+    return None
+
+
+def _account_allows_buys(accounts_payload: dict[str, Any], account_id: str) -> tuple[bool, str | None]:
+    """Reject restricted/close-only Public accounts before new orders."""
+    accounts = accounts_payload.get("accounts") or []
+    if isinstance(accounts, dict):
+        accounts = [accounts]
+    account = next((x for x in accounts if str(x.get("accountId") or x.get("account_id")) == account_id), None)
+    if not isinstance(account, dict):
+        return False, "public_account_not_found"
+    permission = str(account.get("tradePermissions") or account.get("trade_permissions") or "").upper()
+    if permission in {"RESTRICTED_CLOSE_ONLY", "CLOSE_ONLY", "LIQUIDATION_ONLY"}:
+        return False, f"public_account_{permission.lower()}"
+    return True, None
+
+
 def _quotes(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = payload.get("quotes") or payload.get("results") or payload.get("data") or []
     if isinstance(rows, dict):
@@ -157,11 +182,15 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             return {"skipped": False, "reason": safety_status.get("reason") or "safety_halt", "executed": [], "rejected": []}
         portfolio = await client.portfolio()
         account = await client.accounts()
-        buying_power = _numeric_field(account, {"buying_power", "buyingPower", "cash", "available_cash", "availableCash"})
+        account_id = public_api.config().account_id
+        allowed, permission_reason = _account_allows_buys(account, account_id)
+        if not allowed:
+            reason = permission_reason or "public_account_buy_permission_unavailable"
+            return {"skipped": False, "reason": reason, "executed": [], "rejected": [{"ticker": "", "reason": reason}]}
+        buying_power = _cash_buying_power(portfolio)
         if buying_power is None:
-            buying_power = _numeric_field(portfolio, {"buying_power", "buyingPower", "cash", "available_cash", "availableCash"})
-        if buying_power is None:
-            return {"skipped": False, "reason": "public_buying_power_unavailable", "executed": [], "rejected": [{"ticker": "", "reason": "public_buying_power_unavailable"}], "rejection_reason_counts": {"public_buying_power_unavailable": 1}}
+            reason = "public_cash_buying_power_unavailable"
+            return {"skipped": False, "reason": reason, "executed": [], "rejected": [{"ticker": "", "reason": reason}], "rejection_reason_counts": {reason: 1}}
         from . import trading_halts
         try:
             halt_payload = await trading_halts.fetch_halts()

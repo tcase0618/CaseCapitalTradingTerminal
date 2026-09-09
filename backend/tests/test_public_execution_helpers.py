@@ -19,6 +19,22 @@ def test_public_buying_power_prefers_buying_power_over_cash():
     assert public_execution._numeric_field({"cash": 0, "buyingPower": "12.00"}, {"cash", "buying_power"}) == 12.0
 
 
+def test_public_cash_buying_power_does_not_use_margin_buying_power():
+    assert public_execution._cash_buying_power({
+        "buyingPower": {"cashOnlyBuyingPower": "4.00", "buyingPower": "100.00"}
+    }) == 4.0
+    assert public_execution._cash_buying_power({
+        "buyingPower": {"buyingPower": "100.00"}
+    }) is None
+
+
+def test_public_account_permission_blocks_close_only_accounts():
+    assert public_execution._account_allows_buys(
+        {"accounts": [{"accountId": "acct-1", "tradePermissions": "CLOSE_ONLY"}]},
+        "acct-1",
+    ) == (False, "public_account_close_only")
+
+
 def test_trade_floor_learning_scope_allows_legacy_rows_only_in_paper(monkeypatch):
     monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
     assert trade_floor_learning._trade_scope() == {"$or": [{"broker_base": "https://paper-api.alpaca.markets"}, {"broker_base": {"$exists": False}}]}
@@ -77,10 +93,10 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
             return None
 
         async def portfolio(self):
-            return {"positions": []}
+            return {"positions": [], "buyingPower": {"cashOnlyBuyingPower": "12.00"}}
 
         async def accounts(self):
-            return {"accounts": [{"buyingPower": 12.0}]}
+            return {"accounts": [{"accountId": "acct-1", "tradePermissions": "FULL"}]}
 
         async def quotes(self, symbols):
             row = {"symbol": "AAPL", "ask": 150.25, "quoteTime": datetime.now(timezone.utc).isoformat()}
@@ -101,6 +117,7 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     fake_client = FakeClient()
     fake_trades = FakeCollection()
     monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda: fake_client)
+    monkeypatch.setattr(public_execution.public_api, "config", lambda: SimpleNamespace(account_id="acct-1"))
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
     monkeypatch.setattr(public_execution, "reconciliation_health", lambda: _healthy())
     monkeypatch.setattr(public_execution.execution_safety, "add_risk_allowed", lambda _scope: _allowed())
