@@ -64,7 +64,11 @@ def _qty(row: dict[str, Any]) -> float:
 
 
 def _quote_price(row: dict[str, Any]) -> float:
-    return _num(row.get("ask") or row.get("askPrice") or row.get("last") or row.get("lastPrice"))
+    bid = _num(row.get("bid") or row.get("bidPrice"))
+    ask = _num(row.get("ask") or row.get("askPrice"))
+    if bid > 0 and ask >= bid:
+        return round((bid + ask) / 2.0, 4)
+    return _num(row.get("last") or row.get("lastPrice") or ask or bid)
 
 
 def _quote_timestamp(row: dict[str, Any]) -> Any:
@@ -204,6 +208,10 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 continue
             order = result.get("order") or {}
             order_id = order.get("orderId") or order.get("id")
+            if not order_id:
+                await execution_safety.mark_execution_intent(client_id, "broker_response_invalid", {"response_keys": sorted(order.keys())})
+                rejected.append({"ticker": ticker, "reason": "public_submission_missing_order_id"})
+                continue
             attribution = _strategy_attribution(row)
             await get_db().tf_trades.insert_one(stamped({
                 "client_order_id": client_id, "public_order_id": order_id, "broker_base": BROKER_BASE,
@@ -242,7 +250,10 @@ async def reconcile() -> dict[str, Any]:
             ttl_seconds = max(60, int(_num(os.environ.get("PUBLIC_PENDING_ORDER_TTL_SECONDS"), 900)))
             if submitted_dt and (datetime.now(timezone.utc) - submitted_dt.astimezone(timezone.utc)).total_seconds() > ttl_seconds:
                 try:
-                    await client.cancel_order(str(trade.get("public_order_id")))
+                    cancel_result = await client.cancel_order(str(trade.get("public_order_id")))
+                    cancel_status = str((cancel_result or {}).get("status") or (cancel_result or {}).get("orderStatus") or "").upper()
+                    if cancel_status and cancel_status not in {"CANCELLED", "CANCELED", "EXPIRED"}:
+                        raise RuntimeError(f"Public cancellation not confirmed: {cancel_status}")
                     await db.tf_trades.update_one(
                         {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                         {"$set": {"status": "CLOSED", "fill_status": "EXPIRED_BY_TERMINAL", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_pending_order_ttl"}},

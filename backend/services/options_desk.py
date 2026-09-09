@@ -2021,7 +2021,7 @@ def _order_fill_price(order: dict[str, Any]) -> float:
 
 
 def _order_fill_qty(order: dict[str, Any]) -> int:
-    return _safe_int(order.get("filled_qty")) or _safe_int(order.get("qty"))
+    return max(0, _safe_int(order.get("filled_qty")))
 
 
 async def sync_fills(limit: int = 500) -> dict[str, Any]:
@@ -2052,8 +2052,13 @@ async def sync_fills(limit: int = 500) -> dict[str, Any]:
         status = str(order.get("status") or "").lower()
         side = str(order.get("side") or "").lower()
         filled_qty = _order_fill_qty(order)
+        # A filled order normally has filled_qty. Never treat the requested
+        # quantity as filled for partial/cancelled orders; that overstates
+        # positions and can create phantom exits.
+        if filled_qty <= 0 and status == "filled":
+            filled_qty = max(0, _safe_int(order.get("qty")))
         fill_price = _order_fill_price(order)
-        if filled_qty <= 0 or fill_price <= 0 or status not in {"filled", "partially_filled"}:
+        if filled_qty <= 0 or fill_price <= 0 or status not in {"filled", "partially_filled", "canceled", "cancelled", "expired"}:
             ignored += 1
             continue
         if side == "buy":

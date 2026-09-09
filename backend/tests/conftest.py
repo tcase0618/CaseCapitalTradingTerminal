@@ -15,6 +15,10 @@ if os.environ.get("RUN_LIVE_TRADING_TESTS", "").strip().lower() not in {"1", "tr
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 
+# API modules are integration tests and need an explicit target. Keep the
+# module-level constants importable when the target is intentionally absent;
+# the fixture will provide the actionable failure message for those tests.
+
 
 @pytest.fixture(scope="session")
 def base_url():
