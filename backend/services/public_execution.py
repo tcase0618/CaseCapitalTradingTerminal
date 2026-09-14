@@ -113,9 +113,22 @@ def _entry_order_shape(amount: float, price: float, *, now: datetime | None = No
     return {"quantity": float(quantity), "session": session}, None
 
 
-def _protective_expiration(now: datetime | None = None) -> datetime:
-    """GTD is Public's persistent protective-order mechanism; cap at 30 days."""
-    return (now or datetime.now(timezone.utc)) + timedelta(days=30)
+def _protective_order_terms(now: datetime | None = None) -> dict[str, Any]:
+    """Build a broker-valid stop order for the current Public session.
+
+    Public permits extended and 24-hour equity sessions only with DAY time in
+    force.  GTD can persist for core-session stops, but pairing it with a
+    24-hour session is rejected by the broker.  The monitor detects terminal
+    DAY-order states and re-arms an eligible stop on later cycles.
+    """
+    session = _public_session_now(now)
+    if session == "CORE":
+        return {
+            "time_in_force": "GTD",
+            "expiration_time": (now or datetime.now(timezone.utc)) + timedelta(days=30),
+            "session": "CORE",
+        }
+    return {"time_in_force": "DAY", "expiration_time": None, "session": session}
 
 
 def _numeric_field(payload: Any, names: set[str]) -> float | None:
@@ -380,7 +393,10 @@ async def reconcile() -> dict[str, Any]:
         return {"skipped": True, "reason": "public_live_equity_disabled"}
     db = get_db()
     async with public_api.PublicAPIClient(use_sdk=False) as client:
-        pending = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "PENDING", "public_order_id": {"$exists": True}}, {"_id": 0}).to_list(500)
+        # Keep polling filled entries as well as pending entries.  DAY
+        # protective stops can expire outside core hours and must be re-armed
+        # from the broker-confirmed fill rather than left unprotected.
+        pending = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "public_order_id": {"$exists": True}}, {"_id": 0}).to_list(500)
         order_updates = 0
         poll_errors = 0
         for trade in pending:
@@ -391,7 +407,7 @@ async def reconcile() -> dict[str, Any]:
             except ValueError:
                 submitted_dt = None
             ttl_seconds = max(60, int(_num(os.environ.get("PUBLIC_PENDING_ORDER_TTL_SECONDS"), 900)))
-            if submitted_dt and (datetime.now(timezone.utc) - submitted_dt.astimezone(timezone.utc)).total_seconds() > ttl_seconds:
+            if str(trade.get("fill_status") or "").upper() == "PENDING" and submitted_dt and (datetime.now(timezone.utc) - submitted_dt.astimezone(timezone.utc)).total_seconds() > ttl_seconds:
                 try:
                     cancel_result = await client.cancel_order(str(trade.get("public_order_id")))
                     cancel_status = str((cancel_result or {}).get("status") or (cancel_result or {}).get("orderStatus") or "").upper()
@@ -455,9 +471,7 @@ async def reconcile() -> dict[str, Any]:
                                 quantity=filled_qty,
                                 stop_price=stop,
                                 limit_price=round(stop * 0.99, 4 if stop < 1 else 2),
-                                time_in_force="GTD",
-                                expiration_time=_protective_expiration(),
-                                session="TWENTY_FOUR_HOURS",
+                                **_protective_order_terms(),
                                 client_order_id=stop_client_id,
                             )
                             protective_order = protective.get("order") or {}
@@ -470,7 +484,10 @@ async def reconcile() -> dict[str, Any]:
                             update.update({"protective_order_status": "FAILED", "protective_order_error": str(exc)[:220]})
                             await execution_safety.mark_execution_intent(stop_client_id, "broker_rejected", {"error": str(exc)[:220]})
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": update})
-                if filled_qty > 0:
+                # Record the entry exactly once. Reconciliation continues to
+                # poll filled orders so expired DAY stops can be re-armed.
+                newly_filled = str(trade.get("fill_status") or "").upper() not in {"FILLED", "PARTIALLY_FILLED"}
+                if filled_qty > 0 and newly_filled:
                     try:
                         from . import lottery
                         await lottery.record_filled_lottery_entry(
@@ -545,7 +562,13 @@ async def reconcile() -> dict[str, Any]:
             elif protective_status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                    {"$set": {"protective_order_status": protective_status, "last_order_status": protective_status}},
+                    {"$set": {
+                        "protective_order_id": None,
+                        "protective_order_qty": 0.0,
+                        "protective_order_status": protective_status,
+                        "last_order_status": protective_status,
+                        "protective_rearm_required": True,
+                    }},
                 )
                 order_updates += 1
         positions = {_symbol(row): row for row in _positions(await client.portfolio())}
@@ -610,9 +633,7 @@ async def process_protective_exits() -> dict[str, Any]:
                     quantity=quantity,
                     stop_price=stop,
                     limit_price=round(stop * 0.99, 4 if stop < 1 else 2),
-                    time_in_force="GTD",
-                    expiration_time=_protective_expiration(),
-                    session="TWENTY_FOUR_HOURS",
+                    **_protective_order_terms(),
                     client_order_id=client_id,
                 )
                 order = result.get("order") or {}

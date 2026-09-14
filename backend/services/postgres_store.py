@@ -163,14 +163,23 @@ class PostgresCursor:
         return self
 
     async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
-        rows = await self.collection._read(self.query)
-        for key, direction in reversed(self._sort):
-            rows.sort(key=lambda row: (_path_get(row, key) is None, _path_get(row, key)), reverse=direction < 0)
-        rows = rows[self._skip:]
-        if self._limit is not None:
-            rows = rows[:self._limit]
+        requested_limit = self._limit
         if length is not None:
-            rows = rows[:length]
+            requested_limit = min(requested_limit, length) if requested_limit is not None else length
+        rows, sql_windowed = await self.collection._read(
+            self.query,
+            sort=self._sort,
+            limit=requested_limit,
+            skip=self._skip,
+        )
+        if not sql_windowed:
+            for key, direction in reversed(self._sort):
+                rows.sort(key=lambda row: (_path_get(row, key) is None, _path_get(row, key)), reverse=direction < 0)
+            rows = rows[self._skip:]
+            if self._limit is not None:
+                rows = rows[:self._limit]
+            if length is not None:
+                rows = rows[:length]
         return [_project(row, self.projection) for row in rows]
 
     def __aiter__(self):
@@ -184,11 +193,55 @@ class PostgresCollection:
     def __init__(self, name: str):
         self.name = name
 
-    async def _read(self, query: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    async def _read(
+        self,
+        query: dict[str, Any] | None = None,
+        *,
+        sort: list[tuple[str, int]] | None = None,
+        limit: int | None = None,
+        skip: int = 0,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read a collection with a SQL fast path for common UI queries.
+
+        The compatibility layer must retain Python matching for legacy Mongo
+        predicates.  It must not, however, deserialize an entire collection
+        for the routine ``latest`` and activity-table queries used every few
+        seconds by the frontend.  Direct equality JSONB filters plus temporal
+        sorting are exact and safe to execute in PostgreSQL.
+        """
         if not await init_schema() or _pool is None:
             raise RuntimeError(_last_error or "Postgres is unavailable")
+        simple_query = query or {}
+        sql_exact = all(
+            not str(key).startswith("$") and not (isinstance(value, dict) and any(str(op).startswith("$") for op in value))
+            for key, value in simple_query.items()
+        )
+        temporal_keys = {
+            "ts", "created_at", "updated_at", "finished_at", "started_at",
+            "generated_at", "submitted_at", "scanned_at", "snapshot_at",
+            "run_at", "last_synced_at", "closed_at", "checked_at",
+        }
+        sql_sort = sort[0] if sort and len(sort) == 1 and sort[0][0] in temporal_keys else None
+        use_window = sql_exact and limit is not None and limit >= 0 and (not sort or sql_sort is not None)
         async with _pool.acquire() as conn:
-            rows = await conn.fetch("select payload from cc_collection_snapshots where collection=$1", self.name)
+            if use_window:
+                params: list[Any] = [self.name]
+                where = "collection=$1"
+                if simple_query:
+                    params.append(json.dumps(normalize_json(simple_query), default=_json_default))
+                    where += f" and payload @> ${len(params)}::jsonb"
+                order = ""
+                if sql_sort:
+                    params.append(sql_sort[0])
+                    direction = "DESC" if sql_sort[1] < 0 else "ASC"
+                    order = f" order by payload #>> string_to_array(${len(params)}, '.') {direction}"
+                params.extend([max(0, int(skip)), int(limit)])
+                rows = await conn.fetch(
+                    f"select payload from cc_collection_snapshots where {where}{order} offset ${len(params) - 1} limit ${len(params)}",
+                    *params,
+                )
+            else:
+                rows = await conn.fetch("select payload from cc_collection_snapshots where collection=$1", self.name)
         documents: list[dict[str, Any]] = []
         for row in rows:
             payload = row["payload"]
@@ -196,7 +249,10 @@ class PostgresCollection:
                 payload = json.loads(payload)
             if isinstance(payload, dict) and _matches(payload, query):
                 documents.append(payload)
-        return documents
+        # When this is true PostgreSQL already applied both the requested
+        # window and any supported ordering.  The cursor must not apply skip
+        # or limit a second time.
+        return documents, use_window
 
     def find(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None, **kwargs: Any) -> PostgresCursor:
         return PostgresCursor(self, query, projection)
@@ -272,7 +328,7 @@ class PostgresCollection:
         return PostgresResult(matched_count=0 if inserted else 1, modified_count=1 if existing != original else 0, upserted_id=key if inserted else None)
 
     async def update_many(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **kwargs: Any) -> PostgresResult:
-        rows = await self._read(query)
+        rows, _ = await self._read(query)
         if not rows and upsert:
             return await self.update_one(query, update, upsert=True)
         modified = 0
@@ -295,12 +351,12 @@ class PostgresCollection:
         return row
 
     async def delete_one(self, query: dict[str, Any], **kwargs: Any) -> PostgresResult:
-        rows = await self._read(query)
+        rows, _ = await self._read(query)
         if not rows: return PostgresResult(deleted_count=0)
         return await self._delete_doc(rows[0])
 
     async def delete_many(self, query: dict[str, Any], **kwargs: Any) -> PostgresResult:
-        rows = await self._read(query)
+        rows, _ = await self._read(query)
         deleted = 0
         for row in rows: deleted += (await self._delete_doc(row)).deleted_count
         return PostgresResult(deleted_count=deleted)
@@ -312,10 +368,12 @@ class PostgresCollection:
         return PostgresResult(deleted_count=1 if result.endswith("1") else 0)
 
     async def count_documents(self, query: dict[str, Any] | None = None, **kwargs: Any) -> int:
-        return len(await self._read(query))
+        rows, _ = await self._read(query)
+        return len(rows)
 
     async def distinct(self, key: str, query: dict[str, Any] | None = None, **kwargs: Any) -> list[Any]:
-        values = {_path_get(row, key) for row in await self._read(query)}
+        rows, _ = await self._read(query)
+        values = {_path_get(row, key) for row in rows}
         return list(values)
 
     async def create_index(self, *args: Any, **kwargs: Any) -> str:

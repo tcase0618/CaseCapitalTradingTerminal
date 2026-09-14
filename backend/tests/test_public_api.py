@@ -28,7 +28,7 @@ async def test_public_read_only_endpoints_use_bearer_and_never_mutate():
     seen = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.method, request.url.path, request.headers.get("authorization")))
+        seen.append((request.method, request.url.path, request.headers.get("authorization"), request.content))
         if request.url.path.endswith("/account"):
             return httpx.Response(200, json={"accounts": [{"accountId": "acct-1"}]})
         return httpx.Response(200, json={"quotes": []})
@@ -41,9 +41,29 @@ async def test_public_read_only_endpoints_use_bearer_and_never_mutate():
     assert accounts["accounts"][0]["accountId"] == "acct-1"
     assert quotes["quotes"] == []
     assert seen == [
-        ("GET", "/userapigateway/trading/account", "Bearer token"),
-        ("POST", "/userapigateway/marketdata/quotes", "Bearer token"),
+        ("GET", "/userapigateway/trading/account", "Bearer token", b""),
+        ("POST", "/userapigateway/marketdata/acct-1/quotes", "Bearer token", b'{"instruments":[{"symbol":"AAPL","type":"EQUITY"}]}'),
     ]
+
+
+@pytest.mark.asyncio
+async def test_public_rest_quotes_normalize_timestamp_for_execution_freshness():
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"quotes": [{
+            "instrument": {"symbol": "AAPL", "type": "EQUITY"},
+            "last": "200.00",
+            "lastTimestamp": "2026-09-14T12:00:00Z",
+            "bid": "199.90",
+            "bidTimestamp": "2026-09-14T12:00:01Z",
+            "ask": "200.10",
+            "askTimestamp": "2026-09-14T12:00:02Z",
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            quote = (await client.quotes(["AAPL"]))["quotes"][0]
+    assert quote["symbol"] == "AAPL"
+    assert quote["quoteTime"] == "2026-09-14T12:00:02Z"
 
 
 def test_public_sdk_quote_uses_newest_market_timestamp():
@@ -105,6 +125,15 @@ def test_public_gtd_stop_payload_keeps_subdollar_tick_precision():
     assert payload["expiration"] == {"timeInForce": "GTD", "expirationTime": "2026-10-01T12:00:00Z"}
     assert payload["stopPrice"] == "0.1234"
     assert payload["limitPrice"] == "0.1221"
+
+
+def test_public_rejects_invalid_gtd_24_hour_combination():
+    with pytest.raises(public_api.PublicAPIError, match="require DAY"):
+        public_api.PublicAPIClient._equity_order_payload(
+            symbol="AAPL", side="SELL", quantity=1, stop_price=10,
+            limit_price=9.9, time_in_force="GTD", session="TWENTY_FOUR_HOURS",
+            expiration_time=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        )
 
 
 @pytest.mark.asyncio
@@ -231,6 +260,27 @@ async def test_public_preflight_refreshes_rejected_bearer_token():
         async with public_api.PublicAPIClient(_cfg(), http) as client:
             result = await client.preflight_single_leg({"orderId": "x"})
     assert result["outcome"] == "SUCCESS"
+    assert calls[0][2] == "Bearer token"
+    assert calls[1][1].endswith("/access-tokens")
+    assert calls[2][2] == "Bearer refreshed-token"
+
+
+@pytest.mark.asyncio
+async def test_public_read_path_refreshes_expired_bearer_token_once():
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith("/portfolio/v2") and len([call for call in calls if call[1].endswith("/portfolio/v2")]) == 1:
+            return httpx.Response(401)
+        if request.url.path.endswith("/access-tokens"):
+            return httpx.Response(200, json={"accessToken": "refreshed-token"})
+        return httpx.Response(200, json={"positions": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            result = await client.portfolio()
+    assert result == {"positions": []}
     assert calls[0][2] == "Bearer token"
     assert calls[1][1].endswith("/access-tokens")
     assert calls[2][2] == "Bearer refreshed-token"

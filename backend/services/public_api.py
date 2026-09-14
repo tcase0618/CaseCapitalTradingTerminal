@@ -107,7 +107,7 @@ def _symbols(symbols: Iterable[str]) -> list[str]:
 
 def _sdk_quote_payload(quote: Any, option_type: str | None = None) -> dict[str, Any]:
     """Flatten the SDK's typed quote model for the terminal's adapters."""
-    row = quote.model_dump(by_alias=True, mode="json")
+    row = quote.model_dump(by_alias=True, mode="json") if hasattr(quote, "model_dump") else dict(quote)
     instrument = row.get("instrument") or {}
     details = row.get("optionDetails") or row.get("option_details") or {}
     greeks = details.get("greeks") or {}
@@ -227,20 +227,46 @@ class PublicAPIClient:
         return self._http
 
     async def _get(self, path: str, **params: Any) -> dict[str, Any]:
-        response = await self._client().get(
-            f"{self.cfg.api_base}{path}",
-            params=params or None,
-            headers=_auth_headers(self.cfg),
-        )
-        return self._decode(response)
+        return await self._request("GET", path, params=params or None)
 
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        response = await self._client().post(
-            f"{self.cfg.api_base}{path}",
-            json=payload,
-            headers=_auth_headers(self.cfg),
-        )
-        return self._decode(response)
+        return await self._request("POST", path, payload=payload)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        mutation: bool = False,
+    ) -> dict[str, Any]:
+        """Send an authenticated request and refresh once after a 401.
+
+        Public access tokens expire while the portfolio monitor is running.
+        All read and mutation paths must recover the same way; leaving the
+        refresh only on preflight caused reconciliation and stop maintenance
+        to fail after the first token expiry.
+        """
+        client = self._mutation_client() if mutation else self._client()
+        request = getattr(client, method.lower())
+        kwargs: dict[str, Any] = {"headers": _auth_headers(self.cfg)}
+        if payload is not None:
+            kwargs["json"] = payload
+        if params:
+            kwargs["params"] = params
+        response = await request(f"{self.cfg.api_base}{path}", **kwargs)
+        try:
+            return self._decode(response)
+        except PublicAPIError as exc:
+            if "HTTP 401" not in str(exc):
+                raise
+            await self._refresh_access_token()
+            client = self._mutation_client() if mutation else self._client()
+            request = getattr(client, method.lower())
+            kwargs["headers"] = _auth_headers(self.cfg)
+            response = await request(f"{self.cfg.api_base}{path}", **kwargs)
+            return self._decode(response)
 
     @staticmethod
     def _decode(response: httpx.Response) -> dict[str, Any]:
@@ -302,7 +328,14 @@ class PublicAPIClient:
                 account_id=self.cfg.account_id,
             )
             return {"quotes": [_sdk_quote_payload(quote) for quote in quotes]}
-        return await self._post("/userapigateway/marketdata/quotes", {"symbols": values})
+        payload = await self._post(
+            f"/userapigateway/marketdata/{self._account()}/quotes",
+            {"instruments": [{"symbol": symbol, "type": "EQUITY"} for symbol in values]},
+        )
+        rows = payload.get("quotes") or []
+        if isinstance(rows, list):
+            payload["quotes"] = [_sdk_quote_payload(row) if isinstance(row, dict) else row for row in rows]
+        return payload
 
     async def option_expirations(self, symbol: str) -> dict[str, Any]:
         if self._sdk:
@@ -456,6 +489,11 @@ class PublicAPIClient:
         tif = time_in_force.upper()
         if tif not in {"DAY", "GTD"}:
             raise PublicAPIError(f"Unsupported Public time-in-force: {time_in_force}")
+        market_session = session.upper()
+        if market_session not in {"CORE", "EXTENDED", "TWENTY_FOUR_HOURS"}:
+            raise PublicAPIError(f"Unsupported Public equity market session: {session}")
+        if market_session != "CORE" and tif != "DAY":
+            raise PublicAPIError("Public extended and 24-hour equity orders require DAY time-in-force")
         expiration: dict[str, str] = {"timeInForce": tif}
         if tif == "GTD":
             if not expiration_time:
@@ -479,7 +517,7 @@ class PublicAPIClient:
             "orderSide": side.upper(),
             "orderType": "STOP_LIMIT" if stop_price is not None else "LIMIT" if limit_price is not None else "MARKET",
             "expiration": expiration,
-            "equityMarketSession": session.upper(),
+            "equityMarketSession": market_session,
             "openCloseIndicator": "OPEN" if side.upper() == "BUY" else "CLOSE",
         }
         if amount is not None:
@@ -495,35 +533,19 @@ class PublicAPIClient:
 
     async def preflight_single_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
         account = self._account(account_id)
-        try:
-            response = await self._mutation_client().post(
-                f"{self.cfg.api_base}/userapigateway/trading/{account}/preflight/single-leg",
-                json=payload,
-                headers=_auth_headers(self.cfg),
-            )
-            return self._decode(response)
-        except PublicAPIError as exc:
-            if "HTTP 401" not in str(exc):
-                raise
-            await self._refresh_access_token()
-            response = await self._mutation_client().post(
-                f"{self.cfg.api_base}/userapigateway/trading/{account}/preflight/single-leg",
-                json=payload,
-                headers=_auth_headers(self.cfg),
-            )
-        return self._decode(response)
+        return await self._request(
+            "POST",
+            f"/userapigateway/trading/{account}/preflight/single-leg",
+            payload=payload,
+            mutation=True,
+        )
 
     async def place_order(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
         cfg = self.cfg
         if cfg.research_only or not cfg.live_equity_enabled:
             raise PublicTradingBlocked("Public equity order blocked by configuration")
         account = self._account(account_id)
-        response = await self._mutation_client().post(
-            f"{cfg.api_base}/userapigateway/trading/{account}/order",
-            json=payload,
-            headers=_auth_headers(cfg),
-        )
-        return self._decode(response)
+        return await self._request("POST", f"/userapigateway/trading/{account}/order", payload=payload, mutation=True)
 
     async def submit_equity_order(
         self,
@@ -577,34 +599,21 @@ class PublicAPIClient:
 
     async def get_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
         account = self._account(account_id)
-        response = await self._mutation_client().get(
-            f"{self.cfg.api_base}/userapigateway/trading/{account}/order/{order_id}",
-            headers=_auth_headers(self.cfg),
-        )
-        return self._decode(response)
+        return await self._request("GET", f"/userapigateway/trading/{account}/order/{order_id}", mutation=True)
 
     async def cancel_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
         cfg = self.cfg
         if cfg.research_only or not cfg.live_equity_enabled:
             raise PublicTradingBlocked("Public order cancellation blocked by configuration")
         account = self._account(account_id)
-        response = await self._mutation_client().delete(
-            f"{cfg.api_base}/userapigateway/trading/{account}/order/{order_id}",
-            headers=_auth_headers(cfg),
-        )
-        return self._decode(response)
+        return await self._request("DELETE", f"/userapigateway/trading/{account}/order/{order_id}", mutation=True)
 
     async def replace_order(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
         cfg = self.cfg
         if cfg.research_only or not cfg.live_equity_enabled:
             raise PublicTradingBlocked("Public order replacement blocked by configuration")
         account = self._account(account_id)
-        response = await self._mutation_client().put(
-            f"{cfg.api_base}/userapigateway/trading/{account}/order",
-            json=payload,
-            headers=_auth_headers(cfg),
-        )
-        return self._decode(response)
+        return await self._request("PUT", f"/userapigateway/trading/{account}/order", payload=payload, mutation=True)
 
 
 async def status() -> dict[str, Any]:

@@ -29,6 +29,14 @@ def test_public_entry_shape_obeys_session_and_notional_constraints():
     assert extended_reason == "public_24h_requires_whole_share_within_allocation"
 
 
+def test_public_protective_order_terms_follow_broker_session_contract():
+    core = public_execution._protective_order_terms(datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
+    assert core["time_in_force"] == "GTD"
+    assert core["session"] == "CORE"
+    overnight = public_execution._protective_order_terms(datetime(2026, 9, 14, 1, tzinfo=timezone.utc))
+    assert overnight == {"time_in_force": "DAY", "expiration_time": None, "session": "TWENTY_FOUR_HOURS"}
+
+
 def test_public_buying_power_prefers_buying_power_over_cash():
     assert public_execution._numeric_field({"cash": 0, "buyingPower": "12.00"}, {"cash", "buying_power"}) == 12.0
 

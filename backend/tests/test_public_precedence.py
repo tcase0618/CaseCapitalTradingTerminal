@@ -18,7 +18,10 @@ def test_public_is_first_price_source(monkeypatch):
         async def quotes(self, _symbols):
             return {"quotes": {"AAPL": {"lastPrice": 123.45}}}
 
-    monkeypatch.setattr(public_api, "PublicAPIClient", lambda: Client())
+    # High-frequency quote reads deliberately select the REST client instead
+    # of repeatedly constructing the SDK. The test double must accept that
+    # production constructor argument.
+    monkeypatch.setattr(public_api, "PublicAPIClient", lambda **_kwargs: Client())
     result = asyncio.run(pricer.live_price_meta("AAPL"))
     assert result["price"] == 123.45
     assert result["source"] == "public_quote"

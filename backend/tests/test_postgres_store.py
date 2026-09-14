@@ -48,3 +48,45 @@ async def test_postgres_status_disabled(monkeypatch):
     status = await postgres_store.status()
     assert status["enabled"] is False
     assert status["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_postgres_cursor_uses_sql_window_for_latest_dashboard_reads(monkeypatch):
+    class Connection:
+        def __init__(self):
+            self.sql = ""
+            self.params = ()
+
+        async def fetch(self, sql, *params):
+            self.sql, self.params = sql, params
+            return [{"payload": {"_id": "latest", "generated_at": "2026-09-14T12:00:00Z"}}]
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    connection = Connection()
+    monkeypatch.setattr(postgres_store, "_pool", Pool(connection))
+    monkeypatch.setattr(postgres_store, "init_schema", lambda: _schema_ready())
+    rows = await postgres_store.PostgresCollection("candidate_ledgers").find({"_id": "latest"}).sort("generated_at", -1).skip(0).to_list(1)
+    assert rows == [{"_id": "latest", "generated_at": "2026-09-14T12:00:00Z"}]
+    assert "payload @>" in connection.sql
+    assert "order by payload #>>" in connection.sql
+    assert connection.params[-2:] == (0, 1)
+
+
+async def _schema_ready():
+    return True
