@@ -1,9 +1,8 @@
 """Public.com Individual API adapter.
 
-This module is deliberately research-only by default.  It provides the
-read-side account and market-data boundary needed to validate Public as a
-future broker, while order mutation remains explicitly blocked until a
-separate live rollout enables it.
+This module is research-only by default. It provides the read-side account and
+market-data boundary, and permits order mutation only when the explicit live
+rollout flags are enabled.
 """
 from __future__ import annotations
 
@@ -84,7 +83,11 @@ def safety_state(cfg: PublicAPIConfig | None = None) -> dict[str, Any]:
         "live_order_mutation_allowed": live_allowed,
         "max_account_usd": cfg.max_account_usd,
         "max_order_usd": cfg.max_order_usd,
-        "order_mutation_policy": "blocked_by_default_before_public_rollout",
+        "order_mutation_policy": (
+            "explicit_live_rollout_enabled"
+            if live_allowed
+            else "blocked_until_explicit_live_rollout"
+        ),
         "sdk_enabled": cfg.sdk_enabled,
         "credential_policy": "sdk_api_secret_or_bearer_token; never log secret or token",
     }
