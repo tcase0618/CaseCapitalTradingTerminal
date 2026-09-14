@@ -136,6 +136,10 @@ def test_public_rejects_invalid_gtd_24_hour_combination():
         )
 
 
+def test_public_accepts_successful_empty_broker_response():
+    assert public_api.PublicAPIClient._decode(httpx.Response(204)) == {}
+
+
 @pytest.mark.asyncio
 async def test_public_order_mutations_fail_closed_in_research_mode():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(500))) as http:

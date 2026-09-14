@@ -272,6 +272,11 @@ class PublicAPIClient:
     def _decode(response: httpx.Response) -> dict[str, Any]:
         if response.status_code >= 400:
             raise PublicAPIError(f"Public API HTTP {response.status_code}: {response.text[:240]}")
+        # Public's successful DELETE responses may be intentionally empty.
+        # Treat any successful empty body as an acknowledgement so callers can
+        # confirm the resulting order state instead of failing JSON parsing.
+        if not response.content:
+            return {}
         try:
             payload = response.json()
         except ValueError as exc:
