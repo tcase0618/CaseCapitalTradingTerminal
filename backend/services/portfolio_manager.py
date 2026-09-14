@@ -1026,3 +1026,47 @@ async def latest_portfolio_plan(
             },
         },
     }
+
+
+async def latest_persisted_portfolio_plan() -> dict[str, Any] | None:
+    """Return the PM artifact produced by the most recent terminal cycle.
+
+    The browser must not rerun every specialist scanner merely to paint the
+    PM tab.  That creates a different decision set from the one execution
+    consumed and can exhaust the VPS while the user is looking at the page.
+    Explicit manual PM requests still use ``latest_portfolio_plan``.
+    """
+    db = get_db()
+    scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+    finished_at = (scan or {}).get("finished_at")
+    if not finished_at:
+        return None
+    cached = await db.portfolio_manager_history.find_one(
+        {"_id": f"pm:{finished_at}"},
+        {"_id": 0},
+    )
+    if not cached:
+        return None
+    summary = cached.get("summary") or {}
+    return {
+        "generated_at": cached.get("generated_at"),
+        "scan_finished_at": finished_at,
+        "mode": summary.get("mode") or "BALANCED",
+        "requested_mode": "AUTO",
+        "ruleset": {"ruleset_id": None, "name": None, "active": True},
+        "claude_required": False,
+        "summary": summary,
+        "input_rows": {
+            "core": len((scan or {}).get("results") or []),
+            "strategy_pm": None,
+            "merged": len(cached.get("recommendations") or []),
+            "case_court_active_routing": False,
+            "sec_bearish_veto_enabled": False,
+        },
+        "strategy_screeners": {"cache_state": "PERSISTED_CYCLE_ARTIFACT"},
+        "opportunity_cost": {"enabled": False, "reason": "cached_plan_no_live_reassessment"},
+        "exposure": _exposure(cached.get("recommendations") or []),
+        "recommendations": cached.get("recommendations") or [],
+        "rules": {"cache_state": "PERSISTED_CYCLE_ARTIFACT"},
+        "cache_state": "PERSISTED_CYCLE_ARTIFACT",
+    }

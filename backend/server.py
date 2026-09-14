@@ -1690,26 +1690,14 @@ async def scan_tabs():
             or ""
         ).upper()
 
-    previous = None
-    if scan and scan.get("finished_at"):
-        previous = await get_db().scan_results.find_one(
-            {"finished_at": {"$lt": scan.get("finished_at")}},
-            {
-                "_id": 0,
-                "finished_at": 1,
-                "results.ticker": 1,
-                "results.options": 1,
-                "results.signals": 1,
-                "results.earnings_this_week": 1,
-                "results.earnings_summary": 1,
-                "lottery_picks.ticker": 1,
-                "earnings_week.by_day": 1,
-                "candidate_ledger.candidates.ticker": 1,
-                "candidate_ledger.candidates.sources": 1,
-                "candidate_ledger.candidates.rows": 1,
-            },
-            sort=[("finished_at", -1)],
-        )
+    # Fetch two snapshots through PostgreSQL's bounded temporal cursor. The
+    # former `$lt` compatibility query forced deserialization of every scan
+    # snapshot just to identify the immediately preceding cycle.
+    recent_scans = await db.scan_results.find({}, {"_id": 0}).sort("finished_at", -1).to_list(2)
+    previous = next(
+        (row for row in recent_scans if row.get("finished_at") != (scan or {}).get("finished_at")),
+        None,
+    )
 
     current_docket = (ledger or {}).get("candidates") or []
     previous_docket = (((previous or {}).get("candidate_ledger") or {}).get("candidates") or [])
@@ -2736,6 +2724,10 @@ async def tf_engine_recal():
 @api.get("/portfolio_manager/latest")
 async def portfolio_manager_latest(equity: float | None = None, mode: str = "AUTO", ruleset_id: str | None = None):
     from services import portfolio_manager
+    if equity is None and (mode or "AUTO").upper() == "AUTO" and not ruleset_id:
+        cached = await portfolio_manager.latest_persisted_portfolio_plan()
+        if cached is not None:
+            return cached
     return await portfolio_manager.latest_portfolio_plan(equity=equity, mode=mode, ruleset_id=ruleset_id)
 
 

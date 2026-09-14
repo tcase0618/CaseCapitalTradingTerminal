@@ -104,13 +104,16 @@ def _final_bucket(key: str, bucket: dict[str, Any]) -> dict[str, Any]:
 
 async def overview(limit_scans: int = 120, limit_trades: int = 200) -> dict[str, Any]:
     db = get_db()
-    scans = await db.scan_results.find({}, {"_id": 0}).sort("finished_at", -1).allow_disk_use(True).to_list(limit_scans)
+    # Replaying 120 full scan snapshots on every journal page view needlessly
+    # loaded tens of megabytes into the VPS. The PM cycle artifacts preserve
+    # the decisions needed for this report in a much smaller persisted form.
+    pm_history = await db.portfolio_manager_history.find({}, {"_id": 0}).sort("generated_at", -1).to_list(limit_scans)
+    latest_scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)]) or {}
     trades = await db.tf_trades.find({}, {"_id": 0}).sort("submitted_at", -1).to_list(limit_trades)
     phase_outcomes = await db.tf_phase_outcomes.find({}, {"_id": 0}).sort("closed_at", -1).to_list(limit_trades)
     ratchets = await db.pm_ratchet_events.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit_trades)
     signal_perf_count = await db.signal_performance.count_documents({})
 
-    latest_scan = scans[0] if scans else {}
     latest_date = _date_key(latest_scan)
     try:
         from . import pm_rules
@@ -119,7 +122,7 @@ async def overview(limit_scans: int = 120, limit_trades: int = 200) -> dict[str,
     except Exception:
         ruleset = {"ruleset_id": "pm-default-v1", "name": "PM Default v1"}
         profile_override = {}
-    latest_pm = portfolio_manager.evaluate_rows(
+    latest_pm = (pm_history[0].get("recommendations") or []) if pm_history else portfolio_manager.evaluate_rows(
         latest_scan.get("results") or [],
         equity=portfolio_manager.DEFAULT_EQUITY,
         mode="BALANCED",
@@ -211,12 +214,11 @@ async def overview(limit_scans: int = 120, limit_trades: int = 200) -> dict[str,
     missed_winners = 0
     avoided_losers = 0
 
-    for scan in scans:
-        date = _date_key(scan)
-        rows = scan.get("results") or []
-        if not date or not rows:
+    for plan in pm_history:
+        date = _date_key({"finished_at": plan.get("scan_finished_at")})
+        pm_rows = plan.get("recommendations") or []
+        if not date or not pm_rows:
             continue
-        pm_rows = portfolio_manager.evaluate_rows(rows, equity=portfolio_manager.DEFAULT_EQUITY, mode="BALANCED")
         decision_count += len(pm_rows)
         for row in pm_rows:
             accepted = row["action"] in {"ACCUMULATE", "STARTER"} and _num(row.get("allocation_usd")) > 0
@@ -285,7 +287,7 @@ async def overview(limit_scans: int = 120, limit_trades: int = 200) -> dict[str,
     return {
         "generated_at": _now(),
         "source_counts": {
-            "scan_results": len(scans),
+            "scan_results": len(pm_history),
             "signal_performance": signal_perf_count,
             "tf_trades": trade_count,
             "tf_journal": await db.tf_journal.count_documents({}),
