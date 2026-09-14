@@ -24,9 +24,11 @@ export function TradeJournalView() {
   const [instrument, setInstrument] = useState("EQUITIES");
   const [tab, setTab] = useState("CAPSULES");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   const load = async () => {
     setLoading(true);
+    setError(null);
     try {
       const r = await axios.get(`${API}/trade_journal/overview`);
       setJournal(r.data);
@@ -35,6 +37,8 @@ export function TradeJournalView() {
         axios.get(`${API}/options_desk/candidates`).catch(() => ({ data: { candidates: [], summary: {} } })),
       ]);
       setOptionsJournal({ orders: orders.data.orders || [], candidates: candidates.data.candidates || [], summary: candidates.data.summary || {} });
+    } catch (err) {
+      setError(err?.response?.data?.detail || err?.message || "Trade journal unavailable");
     } finally {
       setLoading(false);
     }
@@ -95,6 +99,14 @@ export function TradeJournalView() {
           { label: "Mode", value: "APPEND", color: "#4ade80" },
         ]}
       />
+
+      {error && (
+        <Card title="JOURNAL SYNC DEGRADED" accentColor="#f87171">
+          <div style={{ color: "#f87171", padding: 14, fontSize: 12, letterSpacing: "0.04em" }}>
+            {error}
+          </div>
+        </Card>
+      )}
 
       {instrument === "OPTIONS" && <OptionsJournalView data={optionsJournal} />}
 

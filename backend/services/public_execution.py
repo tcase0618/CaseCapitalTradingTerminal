@@ -4,8 +4,9 @@ from __future__ import annotations
 import logging
 import os
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import execution_safety, public_api, safety
 from .db import get_db, log_activity, stamped
@@ -13,6 +14,8 @@ from .db import get_db, log_activity, stamped
 logger = logging.getLogger(__name__)
 BROKER_BASE = "public"
 ALLOCATIONS = (2.0, 4.0, 6.0)
+ET = ZoneInfo("America/New_York")
+PUBLIC_MIN_FRACTIONAL_NOTIONAL_USD = 5.0
 
 
 def enabled() -> bool:
@@ -87,6 +90,32 @@ def _quote_timestamp(row: dict[str, Any]) -> Any:
 def _stop_price(row: dict[str, Any]) -> float:
     """Accept the PM contract's ``stop`` field and legacy ``stop_price``."""
     return _num(row.get("stop") or row.get("stop_price"))
+
+
+def _public_session_now(now: datetime | None = None) -> str:
+    """Return Public's legal equity session for the current ET clock."""
+    now_et = (now or datetime.now(timezone.utc)).astimezone(ET)
+    if now_et.weekday() < 5 and (now_et.hour, now_et.minute) >= (9, 30) and (now_et.hour, now_et.minute) < (16, 0):
+        return "CORE"
+    return "TWENTY_FOUR_HOURS"
+
+
+def _entry_order_shape(amount: float, price: float, *, now: datetime | None = None) -> tuple[dict[str, float | str] | None, str | None]:
+    """Build only broker-valid equity order shapes for the current session."""
+    session = _public_session_now(now) if now is not None else _public_session_now()
+    if session == "CORE":
+        if amount < PUBLIC_MIN_FRACTIONAL_NOTIONAL_USD:
+            return None, "public_core_fractional_minimum_5_usd"
+        return {"amount": amount, "session": session}, None
+    quantity = int(amount // price) if price > 0 else 0
+    if quantity < 1:
+        return None, "public_24h_requires_whole_share_within_allocation"
+    return {"quantity": float(quantity), "session": session}, None
+
+
+def _protective_expiration(now: datetime | None = None) -> datetime:
+    """GTD is Public's persistent protective-order mechanism; cap at 30 days."""
+    return (now or datetime.now(timezone.utc)) + timedelta(days=30)
 
 
 def _numeric_field(payload: Any, names: set[str]) -> float | None:
@@ -293,13 +322,28 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if not (0 < stop_price < price):
                 rejected.append({"ticker": ticker, "reason": "public_final_stop_not_below_limit", "limit_price": price, "stop_price": stop_price})
                 continue
+            # Session legality depends on the final executable quote. In
+            # extended hours Public accepts whole shares only, so calculate
+            # the integer quantity after the revalidation quote, not before.
+            order_shape, shape_reason = _entry_order_shape(amount, price)
+            if not order_shape:
+                rejected.append({"ticker": ticker, "reason": shape_reason, "allocation_usd": amount, "limit_price": price})
+                continue
             client_id = execution_safety.stable_client_order_id("public_pm", cycle_id or "", ticker, amount, round(price, 4), prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity", client_order_id=client_id, symbol=ticker, side="buy", metadata={"amount": amount, "price": price, "cycle_id": cycle_id})
             if not claim.get("ok"):
                 rejected.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_execution_intent"})
                 continue
             try:
-                result = await client.submit_equity_order(symbol=ticker, side="BUY", amount=amount, limit_price=price, session="TWENTY_FOUR_HOURS", client_order_id=client_id)
+                result = await client.submit_equity_order(
+                    symbol=ticker,
+                    side="BUY",
+                    amount=order_shape.get("amount"),
+                    quantity=order_shape.get("quantity"),
+                    limit_price=price,
+                    session=str(order_shape["session"]),
+                    client_order_id=client_id,
+                )
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
                 rejected.append({"ticker": ticker, "reason": "public_preflight_or_submission_failed", "detail": str(exc)[:220]})
@@ -410,7 +454,9 @@ async def reconcile() -> dict[str, Any]:
                                 side="SELL",
                                 quantity=filled_qty,
                                 stop_price=stop,
-                                limit_price=round(stop * 0.99, 2),
+                                limit_price=round(stop * 0.99, 4 if stop < 1 else 2),
+                                time_in_force="GTD",
+                                expiration_time=_protective_expiration(),
                                 session="TWENTY_FOUR_HOURS",
                                 client_order_id=stop_client_id,
                             )
@@ -558,7 +604,17 @@ async def process_protective_exits() -> dict[str, Any]:
             if not claim.get("ok"):
                 continue
             try:
-                result = await client.submit_equity_order(symbol=ticker, side="SELL", quantity=quantity, stop_price=stop, limit_price=round(stop * 0.99, 4), session="TWENTY_FOUR_HOURS", client_order_id=client_id)
+                result = await client.submit_equity_order(
+                    symbol=ticker,
+                    side="SELL",
+                    quantity=quantity,
+                    stop_price=stop,
+                    limit_price=round(stop * 0.99, 4 if stop < 1 else 2),
+                    time_in_force="GTD",
+                    expiration_time=_protective_expiration(),
+                    session="TWENTY_FOUR_HOURS",
+                    client_order_id=client_id,
+                )
                 order = result.get("order") or {}
                 order_id = order.get("orderId") or order.get("id")
                 if not order_id:

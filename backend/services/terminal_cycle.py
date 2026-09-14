@@ -48,7 +48,12 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     await log_activity(f"Full terminal scan started ({triggered_by})", "info")
     from . import candidate_ledger, lottery, options_desk, pharma, portfolio_manager, scanner, strategy_screeners
 
-    core_task = asyncio.create_task(timed("core_scan", scanner.run_scan(triggered_by=triggered_by, auto_execute=False)))
+    core_task = asyncio.create_task(
+        timed(
+            "core_scan",
+            scanner.run_scan(triggered_by=triggered_by, auto_execute=False, run_sidecars=False),
+        )
+    )
     lottery_task = asyncio.create_task(timed("lottery_scan", lottery.run_dedicated_lottery_scan(triggered_by=triggered_by)))
     # The full-cycle report owns scheduled Telegram delivery.  The underlying
     # scanners still persist and return their findings, but must not fan out

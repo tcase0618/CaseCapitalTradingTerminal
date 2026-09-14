@@ -157,6 +157,11 @@ class PostgresCursor:
         self._skip = value
         return self
 
+    def allow_disk_use(self, _value: bool = True):
+        # Mongo compatibility no-op. PostgreSQL reads are already backed by the
+        # collection snapshot table, but legacy services still chain this call.
+        return self
+
     async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
         rows = await self.collection._read(self.query)
         for key, direction in reversed(self._sort):

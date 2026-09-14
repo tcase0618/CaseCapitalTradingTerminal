@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
@@ -86,6 +88,23 @@ def test_public_equity_order_payload_is_deterministic_and_not_market():
     assert payload["limitPrice"] == "150.25"
     assert payload["useMargin"] is False
     assert "quantity" not in payload
+
+
+def test_public_gtd_stop_payload_keeps_subdollar_tick_precision():
+    expires = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+    payload = public_api.PublicAPIClient._equity_order_payload(
+        symbol="penny",
+        side="SELL",
+        quantity=2,
+        stop_price=0.1234,
+        limit_price=0.1221,
+        time_in_force="GTD",
+        expiration_time=expires,
+    )
+    assert payload["orderType"] == "STOP_LIMIT"
+    assert payload["expiration"] == {"timeInForce": "GTD", "expirationTime": "2026-10-01T12:00:00Z"}
+    assert payload["stopPrice"] == "0.1234"
+    assert payload["limitPrice"] == "0.1221"
 
 
 @pytest.mark.asyncio

@@ -155,7 +155,11 @@ def _merge_congress_signals(by_ticker: dict[str, dict[str, Any]],
     return by_ticker
 
 
-async def run_scan(triggered_by: str = "manual", auto_execute: bool = True) -> dict[str, Any]:
+async def run_scan(
+    triggered_by: str = "manual",
+    auto_execute: bool = True,
+    run_sidecars: bool = True,
+) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     await log_activity(f"Scan started ({triggered_by})", "info")
 
@@ -503,20 +507,22 @@ async def run_scan(triggered_by: str = "manual", auto_execute: bool = True) -> d
         await learning_engine.refresh_combo_stats_live()
     except Exception as e:
         logger.warning("Live combo stats refresh failed: %s", e)
-    # AXIOM Pharma — fully isolated parallel pipeline. Errors here NEVER
-    # affect the main scan record.
-    try:
-        from . import pharma as _pharma
-        asyncio.create_task(_pharma.run_pharma_scan(triggered_by="main_scan"))
-    except Exception as e:
-        logger.warning("Pharma parallel scan dispatch failed: %s", e)
-
-    # v5.0 — SEC EDGAR poll + Trade Floor execution in background
-    try:
-        from . import sec_filings as _sec
-        asyncio.create_task(_sec.poll_edgar_filings())
-    except Exception as e:
-        logger.warning("SEC poll dispatch failed: %s", e)
+    # A standalone Core scan owns these sidecars.  The coordinated terminal
+    # cycle runs its own named family stages, so launching them here would
+    # duplicate provider work and create competing persisted snapshots.
+    if run_sidecars:
+        try:
+            from . import pharma as _pharma
+            asyncio.create_task(_pharma.run_pharma_scan(triggered_by="main_scan"))
+        except Exception as e:
+            logger.warning("Pharma parallel scan dispatch failed: %s", e)
+        try:
+            from . import sec_filings as _sec
+            asyncio.create_task(_sec.poll_edgar_filings())
+        except Exception as e:
+            logger.warning("SEC poll dispatch failed: %s", e)
+    else:
+        await log_activity("Core scan sidecars deferred to coordinated terminal cycle", "info")
     if auto_execute and _execution_enabled():
         try:
             from . import trade_floor as _tf

@@ -1624,7 +1624,7 @@ async def scan_strategy_screeners(persist: bool = True):
 
 @api.get("/scan/tabs")
 async def scan_tabs():
-    from services import candidate_ledger, lottery, options_desk, pharma, strategy_screeners
+    from services import candidate_ledger, lottery, options_desk, strategy_screeners
     scan = await scanner.latest_scan()
     db = get_db()
     # Scanner tabs are read views of persisted scan artifacts. Rebuilding the
@@ -1657,15 +1657,11 @@ async def scan_tabs():
         "strategy_screeners": "CACHED" if cached_screeners else "REFRESHED_ON_READ",
         "ledger": "CACHED" if ledger else "EMPTY",
     }
-    try:
-        pharma_rows = await pharma.get_pdufa_within_days(days=90)
-    except Exception as exc:
-        pharma_rows = {"ok": False, "error": str(exc), "results": []}
     tab_rows = {
         "core": (scan or {}).get("results") or [],
         "lottery": [] if isinstance(lottery_board, Exception) else lottery_board.get("candidates", []),
         "options": [] if isinstance(options_payload, Exception) else options_payload.get("candidates", []),
-        "pharma": pharma_rows if isinstance(pharma_rows, list) else pharma_rows.get("results", []),
+        "pharma": [],
         "earnings": (scan or {}).get("earnings_week") or {},
         "strategy_screeners": [] if isinstance(screeners_payload, Exception) else screeners_payload.get("candidates", []),
         "case_court": [],
@@ -1681,6 +1677,7 @@ async def scan_tabs():
         tab_rows["options"] = options_strategy_rows
     if pharma_strategy_rows:
         tab_rows["pharma"] = pharma_strategy_rows
+    pharma_error = None
 
     def _ticker_from_row(row):
         if not isinstance(row, dict):
@@ -1796,7 +1793,7 @@ async def scan_tabs():
             "options": str(options_payload) if isinstance(options_payload, Exception) else None,
             "strategy_screeners": str(screeners_payload) if isinstance(screeners_payload, Exception) else None,
             "case_court": None,
-            "pharma": pharma_rows.get("error") if isinstance(pharma_rows, dict) else None,
+            "pharma": pharma_error,
         },
     }
 

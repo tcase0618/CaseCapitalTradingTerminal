@@ -15,6 +15,20 @@ def test_public_trade_quantity_supports_portfolio_quantity():
     assert public_execution._qty({"quantity": "2.5"}) == 2.5
 
 
+def test_public_entry_shape_obeys_session_and_notional_constraints():
+    core, core_reason = public_execution._entry_order_shape(6.0, 100.0, now=datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
+    assert core == {"amount": 6.0, "session": "CORE"}
+    assert core_reason is None
+
+    too_small, too_small_reason = public_execution._entry_order_shape(4.0, 100.0, now=datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
+    assert too_small is None
+    assert too_small_reason == "public_core_fractional_minimum_5_usd"
+
+    extended, extended_reason = public_execution._entry_order_shape(6.0, 10.0, now=datetime(2026, 9, 14, 1, tzinfo=timezone.utc))
+    assert extended is None
+    assert extended_reason == "public_24h_requires_whole_share_within_allocation"
+
+
 def test_public_buying_power_prefers_buying_power_over_cash():
     assert public_execution._numeric_field({"cash": 0, "buyingPower": "12.00"}, {"cash", "buying_power"}) == 12.0
 
@@ -155,6 +169,7 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", lambda *_args, **_kwargs: _marked())
     monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=fake_trades))
     monkeypatch.setattr(public_execution, "log_activity", _marked)
+    monkeypatch.setattr(public_execution, "_public_session_now", lambda: "CORE")
     monkeypatch.setattr("services.trading_halts.fetch_halts", lambda: _clear_halts())
 
     pm_row = portfolio_manager.evaluate_rows([{
@@ -175,7 +190,7 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
 
     assert len(result["executed"]) == 1
     assert result["rejected"] == []
-    assert fake_client.submitted[0]["session"] == "TWENTY_FOUR_HOURS"
+    assert fake_client.submitted[0]["session"] == "CORE"
     assert fake_trades.docs[0]["strategy_id"] == "lottery_gap"
     assert fake_trades.docs[0]["screener_id"] == "lottery_gap"
     assert fake_trades.docs[0]["scanner_family"] == "LOTTERY"

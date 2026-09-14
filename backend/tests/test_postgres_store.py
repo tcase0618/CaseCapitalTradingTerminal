@@ -35,6 +35,13 @@ def test_postgres_json_normalization_nulls_nonfinite_numbers():
     assert payload == {"bad": None, "nested": [None, None, 1.5]}
 
 
+def test_postgres_cursor_allow_disk_use_is_chainable():
+    collection = postgres_store.PostgresCollection("scan_results")
+    cursor = collection.find({}, {"_id": 0}).sort("finished_at", -1).allow_disk_use(True).limit(10)
+    assert isinstance(cursor, postgres_store.PostgresCursor)
+    assert cursor._limit == 10
+
+
 @pytest.mark.asyncio
 async def test_postgres_status_disabled(monkeypatch):
     monkeypatch.setenv("POSTGRES_ENABLED", "false")

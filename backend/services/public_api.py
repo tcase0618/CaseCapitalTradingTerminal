@@ -437,17 +437,38 @@ class PublicAPIClient:
         limit_price: float | None = None,
         stop_price: float | None = None,
         time_in_force: str = "DAY",
+        expiration_time: datetime | str | None = None,
         session: str = "CORE",
         order_id: str | None = None,
     ) -> dict[str, Any]:
         if (amount is None) == (quantity is None):
             raise PublicAPIError("Public equity order requires exactly one of amount or quantity")
+        tif = time_in_force.upper()
+        if tif not in {"DAY", "GTD"}:
+            raise PublicAPIError(f"Unsupported Public time-in-force: {time_in_force}")
+        expiration: dict[str, str] = {"timeInForce": tif}
+        if tif == "GTD":
+            if not expiration_time:
+                raise PublicAPIError("Public GTD order requires expiration_time")
+            if isinstance(expiration_time, datetime):
+                expires_at = expiration_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            else:
+                expires_at = str(expiration_time)
+            expiration["expirationTime"] = expires_at
+
+        def _format_price(value: float) -> str:
+            # Public documents a $0.0001 increment below $1 and $0.01 at or
+            # above $1. Formatting to two decimals silently changes penny-
+            # stock limits and stops, so retain the correct tick size here.
+            precision = 4 if value < 1 else 2
+            return f"{value:.{precision}f}"
+
         payload: dict[str, Any] = {
             "orderId": PublicAPIClient._order_id(order_id),
             "instrument": {"symbol": symbol.upper().strip(), "type": "EQUITY"},
             "orderSide": side.upper(),
             "orderType": "STOP_LIMIT" if stop_price is not None else "LIMIT" if limit_price is not None else "MARKET",
-            "expiration": {"timeInForce": time_in_force.upper()},
+            "expiration": expiration,
             "equityMarketSession": session.upper(),
             "openCloseIndicator": "OPEN" if side.upper() == "BUY" else "CLOSE",
         }
@@ -457,9 +478,9 @@ class PublicAPIClient:
             payload["quantity"] = f"{float(quantity):.8f}".rstrip("0").rstrip(".")
         payload["useMargin"] = False
         if limit_price is not None:
-            payload["limitPrice"] = f"{float(limit_price):.2f}"
+            payload["limitPrice"] = _format_price(float(limit_price))
         if stop_price is not None:
-            payload["stopPrice"] = f"{float(stop_price):.2f}"
+            payload["stopPrice"] = _format_price(float(stop_price))
         return payload
 
     async def preflight_single_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
@@ -504,6 +525,7 @@ class PublicAPIClient:
         limit_price: float | None = None,
         stop_price: float | None = None,
         time_in_force: str = "DAY",
+        expiration_time: datetime | str | None = None,
         session: str = "CORE",
         client_order_id: str | None = None,
         account_id: str | None = None,
@@ -522,6 +544,7 @@ class PublicAPIClient:
             limit_price=limit_price,
             stop_price=stop_price,
             time_in_force=time_in_force,
+            expiration_time=expiration_time,
             session=session,
             order_id=client_order_id,
         )
