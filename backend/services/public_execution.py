@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -189,6 +190,100 @@ def _quotes(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(rows, dict):
         return list(rows.values())
     return rows if isinstance(rows, list) else []
+
+
+async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Refresh execution-grade marks immediately before the equity order stage.
+
+    This is diagnostic and deliberately does *not* authorize an order. The
+    execution path re-reads every accepted quote again just before submission.
+    Keeping this separate makes stale-provider behavior visible in the cycle
+    record instead of looking like a scanner delay.
+    """
+    approved = [
+        row
+        for row in pm_rows
+        if str(row.get("action") or "").upper() in {"ACCUMULATE", "STARTER"}
+        and _allocation(row) > 0
+        and _symbol(row)
+    ]
+    tickers = sorted({_symbol(row) for row in approved})
+    attempts = max(1, min(3, int(_num(os.environ.get("EXECUTION_FRESHNESS_ATTEMPTS"), 2))))
+    retry_seconds = max(0.0, min(5.0, _num(os.environ.get("EXECUTION_FRESHNESS_RETRY_SECONDS"), 1.0)))
+    rows: dict[str, dict[str, Any]] = {
+        ticker: {"ticker": ticker, "fresh": False, "price": None, "age_seconds": None, "source": "unavailable"}
+        for ticker in tickers
+    }
+    pending = set(tickers)
+    errors: list[str] = []
+
+    if not tickers:
+        return {"checked_at": datetime.now(timezone.utc).isoformat(), "attempts": 0, "fresh": 0, "stale": 0, "rows": []}
+
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
+        for attempt in range(1, attempts + 1):
+            if not pending:
+                break
+            try:
+                payload = await client.quotes(sorted(pending))
+                by_symbol = {_symbol(row): row for row in _quotes(payload)}
+            except Exception as exc:
+                errors.append(f"public_quote_refresh:{exc.__class__.__name__}")
+                by_symbol = {}
+            for ticker in list(pending):
+                quote = by_symbol.get(ticker) or {}
+                price = _quote_price(quote)
+                fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
+                rows[ticker] = {
+                    "ticker": ticker,
+                    "fresh": bool(fresh and price > 0),
+                    "price": price or None,
+                    "age_seconds": age,
+                    "source": "public",
+                    "quote_time": _quote_timestamp(quote),
+                    "attempt": attempt,
+                }
+                if fresh and price > 0:
+                    pending.discard(ticker)
+            if pending and attempt < attempts and retry_seconds:
+                await asyncio.sleep(retry_seconds)
+
+    # The execution path uses this same Alpaca fallback when Public is stale.
+    # Include it in the preflight evidence, but do not treat delayed feeds as
+    # execution-grade marks.
+    if pending:
+        try:
+            from . import pricer
+            feeds = [os.environ.get("ALPACA_STOCK_FEED", "").strip() or None, "iex", None]
+            for ticker in list(pending):
+                for feed in dict.fromkeys(feeds):
+                    meta = await pricer._alpaca_trade_meta(ticker, feed=feed)
+                    if not meta:
+                        continue
+                    rows[ticker] = {
+                        "ticker": ticker,
+                        "fresh": bool(meta.get("execution_eligible")),
+                        "price": meta.get("price"),
+                        "age_seconds": meta.get("age_seconds"),
+                        "source": meta.get("source") or "alpaca",
+                        "quote_time": meta.get("provider_ts"),
+                        "attempt": attempts,
+                    }
+                    if meta.get("execution_eligible"):
+                        pending.discard(ticker)
+                        break
+        except Exception as exc:
+            errors.append(f"alpaca_quote_refresh:{exc.__class__.__name__}")
+
+    ordered = [rows[ticker] for ticker in tickers]
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "attempts": attempts,
+        "fresh": sum(1 for row in ordered if row.get("fresh")),
+        "stale": sum(1 for row in ordered if not row.get("fresh")),
+        "rows": ordered,
+        "errors": errors,
+    }
 
 
 async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:

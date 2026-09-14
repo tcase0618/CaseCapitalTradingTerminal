@@ -133,6 +133,35 @@ async def test_public_reconciliation_health_fails_closed_without_success_marker(
 
 
 @pytest.mark.asyncio
+async def test_execution_freshness_refreshes_approved_rows_before_execution(monkeypatch):
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def quotes(self, symbols):
+            assert symbols == ["AAPL"]
+            return {"quotes": [{
+                "symbol": "AAPL",
+                "ask": 150.25,
+                "quoteTime": datetime.now(timezone.utc).isoformat(),
+            }]}
+
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: FakeClient())
+    result = await public_execution.refresh_execution_freshness([{
+        "ticker": "AAPL", "action": "STARTER", "allocation_usd": 6,
+    }])
+
+    assert result["attempts"] == 2
+    assert result["fresh"] == 1
+    assert result["stale"] == 0
+    assert result["rows"][0]["source"] == "public"
+    assert result["rows"][0]["fresh"] is True
+
+
+@pytest.mark.asyncio
 async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     class FakeClient:
         def __init__(self):

@@ -62,6 +62,10 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     shock_task = asyncio.create_task(timed("pharma_shock_scan", pharma.run_catalyst_shock_scan(triggered_by=triggered_by, force_refresh=True, notify=False)))
 
     scan = await core_task
+    # Core scans predate full-cycle orchestration and may not carry an id. A
+    # full cycle must always have one so execution idempotency and replay point
+    # to the same immutable PM packet.
+    scan["cycle_id"] = scan.get("cycle_id") or f"{triggered_by}:{scan.get('finished_at') or started.isoformat()}"
     family_results = await asyncio.gather(lottery_task, pharma_task, shock_task, return_exceptions=True)
     lottery_result = family_results[0] if not isinstance(family_results[0], Exception) else {"ok": False, "error": str(family_results[0])}
     pharma_result = family_results[1] if not isinstance(family_results[1], Exception) else {"ok": False, "error": str(family_results[1])}
@@ -160,12 +164,17 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     scan["lottery_summary"] = lottery_summary
 
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
+    execution_freshness: dict[str, Any] = {"skipped": True, "reason": "public_equity_execution_not_enabled"}
     if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
         from . import public_execution, trade_floor
         if pm_payload.get("scan_finished_at") != scan.get("finished_at"):
             equity_execution = {"skipped": True, "reason": "pm_scan_mismatch", "executed": [], "rejected": []}
         else:
             if public_execution.enabled():
+                execution_freshness = await timed(
+                    "execution_freshness",
+                    public_execution.refresh_execution_freshness(pm_payload.get("recommendations") or []),
+                )
                 equity_execution = await timed("public_equity_execution", public_execution.execute_pm_equity(pm_payload.get("recommendations") or [], cycle_id=scan.get("cycle_id")))
             else:
                 equity_execution = await timed("equity_execution", trade_floor.evaluate_and_execute(scan.get("results") or [], pm_rows=pm_payload.get("recommendations") or [], strategy_rows=strategy_pm_rows, pm_scan_finished_at=pm_payload.get("scan_finished_at")))
@@ -185,6 +194,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "equity_rejected": len(equity_execution.get("rejected") or []),
         "equity_rejection_reason_counts": equity_execution.get("rejection_reason_counts") or _reason_counts(equity_execution.get("rejected")),
         "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],
+        "equity_freshness": execution_freshness,
         "equity_submitted_rows": equity_execution.get("executed") or [],
         "options_ready": options_execution.get("ready"),
         "options_submitted": _row_count(options_execution.get("submitted")),
@@ -214,6 +224,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                 "options_payload": options_payload,
                 "pm_payload": pm_payload,
                 "execution_summary": scan.get("execution_summary"),
+                "execution_freshness": execution_freshness,
                 "telegram_report_variant": scan.get("telegram_report_variant"),
             }},
         )
@@ -259,6 +270,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "options_desk": options_payload.get("summary") or {},
         "portfolio_manager": pm_payload.get("summary") or {},
         "equity_execution": equity_execution,
+        "execution_freshness": execution_freshness,
         "options_execution": options_execution,
         "telegram": telegram_result,
     }
