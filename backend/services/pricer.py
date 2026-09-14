@@ -212,7 +212,7 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
     if _public_configured():
         try:
             from . import public_api
-            async with public_api.PublicAPIClient() as client:
+            async with public_api.PublicAPIClient(use_sdk=False) as client:
                 payload = await client.quotes([ticker])
             quote_rows = payload.get("quotes") or payload.get("results") or payload.get("data") or []
             if isinstance(quote_rows, dict):

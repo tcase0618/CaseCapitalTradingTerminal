@@ -159,14 +159,24 @@ def _sdk_bar_period(days: int) -> Any:
 
 
 class PublicAPIClient:
-    def __init__(self, cfg: PublicAPIConfig | None = None, http_client: httpx.AsyncClient | None = None):
+    def __init__(
+        self,
+        cfg: PublicAPIConfig | None = None,
+        http_client: httpx.AsyncClient | None = None,
+        *,
+        use_sdk: bool | None = None,
+    ):
         self.cfg = cfg or config()
         self._http = http_client
         self._owned = http_client is None
         self._sdk = None
+        # The SDK is retained for its typed bars/options functionality. High-
+        # frequency account and quote reads can choose the documented REST
+        # path to avoid rebuilding the SDK subscription manager per request.
+        self._use_sdk = self.cfg.sdk_enabled if use_sdk is None else bool(use_sdk)
 
     def _should_use_sdk(self) -> bool:
-        return bool(self.cfg.sdk_enabled and self.cfg.secret and self.cfg.account_id)
+        return bool(self._use_sdk and self.cfg.sdk_enabled and self.cfg.secret and self.cfg.account_id)
 
     async def __aenter__(self) -> "PublicAPIClient":
         if self._should_use_sdk():
@@ -605,7 +615,7 @@ async def status() -> dict[str, Any]:
     if not (cfg.access_token or cfg.secret):
         return {"ok": False, "connected": False, "reason": "PUBLIC_API_SECRET or PUBLIC_API_ACCESS_TOKEN not configured", "config": state}
     try:
-        async with PublicAPIClient(cfg) as client:
+        async with PublicAPIClient(cfg, use_sdk=False) as client:
             accounts = await client.accounts()
         return {
             "ok": True,

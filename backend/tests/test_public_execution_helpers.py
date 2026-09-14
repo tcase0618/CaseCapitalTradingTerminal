@@ -160,7 +160,7 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
 
     fake_client = FakeClient()
     fake_trades = FakeCollection()
-    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda: fake_client)
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: fake_client)
     monkeypatch.setattr(public_execution.public_api, "config", lambda: SimpleNamespace(account_id="acct-1"))
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
     monkeypatch.setattr(public_execution, "reconciliation_health", lambda: _healthy())
@@ -265,7 +265,7 @@ async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monk
     }
     fake_client = FakeClient()
     fake_trades = FakeCollection([trade])
-    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda: fake_client)
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: fake_client)
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
     monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", lambda **_kwargs: _claimed())
     monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", lambda *_args, **_kwargs: _marked())

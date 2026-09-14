@@ -202,7 +202,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
     rejected: list[dict[str, Any]] = []
     if not approved:
         return {"skipped": False, "reason": "no_pm_equity_approvals", "executed": [], "rejected": []}
-    async with public_api.PublicAPIClient() as client:
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
         health = await reconciliation_health()
         if not health.get("ok"):
             # Bootstrap the health record once after deployment. This performs
@@ -379,7 +379,7 @@ async def reconcile() -> dict[str, Any]:
     if not enabled():
         return {"skipped": True, "reason": "public_live_equity_disabled"}
     db = get_db()
-    async with public_api.PublicAPIClient() as client:
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
         pending = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "PENDING", "public_order_id": {"$exists": True}}, {"_id": 0}).to_list(500)
         order_updates = 0
         poll_errors = 0
@@ -587,7 +587,7 @@ async def process_protective_exits() -> dict[str, Any]:
     if not rows:
         return {"skipped": False, "checked": 0, "submitted": []}
     submitted: list[dict[str, Any]] = []
-    async with public_api.PublicAPIClient() as client:
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
         quote_rows = _quotes(await client.quotes([_symbol(row) for row in rows]))
         by_symbol = {_symbol(row): row for row in quote_rows}
         for trade in rows:
