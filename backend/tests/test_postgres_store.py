@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from services import postgres_store
+from services import pricer
 
 
 def test_postgres_disabled_without_env(monkeypatch):
@@ -40,6 +41,11 @@ def test_postgres_cursor_allow_disk_use_is_chainable():
     cursor = collection.find({}, {"_id": 0}).sort("finished_at", -1).allow_disk_use(True).limit(10)
     assert isinstance(cursor, postgres_store.PostgresCursor)
     assert cursor._limit == 10
+
+
+def test_yahoo_symbol_translation_does_not_change_terminal_identity():
+    assert pricer._yahoo_symbol("len.b") == "LEN-B"
+    assert pricer._yahoo_symbol("NVDA") == "NVDA"
 
 
 @pytest.mark.asyncio

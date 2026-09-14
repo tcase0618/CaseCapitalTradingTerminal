@@ -566,12 +566,22 @@ async def grouped_latest() -> tuple[str, dict[str, float]]:
 
 
 # ─────────────────────────── yfinance fallback ───────────────────────────
+def _yahoo_symbol(ticker: str) -> str:
+    """Translate US class-share symbols to Yahoo's dash notation only.
+
+    Terminal and broker identifiers remain canonical (for example ``LEN.B``),
+    while Yahoo Finance expects ``LEN-B``. Keeping translation at the provider
+    edge avoids poisoning security identity and execution symbols.
+    """
+    return str(ticker or "").upper().strip().replace(".", "-")
+
+
 async def _yf_latest_close(ticker: str) -> float | None:
     try:
         import yfinance as yf
 
         def _sync():
-            t = yf.Ticker(ticker)
+            t = yf.Ticker(_yahoo_symbol(ticker))
             h = t.history(period="5d")
             if not len(h):
                 return None
@@ -588,7 +598,7 @@ async def _yf_range(ticker: str, from_iso: str, to_iso: str) -> dict[str, float]
         import yfinance as yf
 
         def _sync():
-            t = yf.Ticker(ticker)
+            t = yf.Ticker(_yahoo_symbol(ticker))
             h = t.history(start=from_iso, end=to_iso)
             if not len(h):
                 return {}
@@ -717,8 +727,9 @@ async def _yf_batch_latest(tickers: list[str]) -> dict[str, float]:
         import yfinance as yf
 
         def _sync():
+            yahoo_symbols = {_yahoo_symbol(ticker): ticker for ticker in tickers}
             data = yf.download(
-                tickers=" ".join(tickers), period="2d", interval="1d",
+                tickers=" ".join(yahoo_symbols), period="2d", interval="1d",
                 progress=False, threads=True, group_by="ticker", auto_adjust=True,
             )
             if data is None or len(data) == 0:
@@ -731,9 +742,9 @@ async def _yf_batch_latest(tickers: list[str]) -> dict[str, float]:
                 except Exception:
                     pass
                 return out
-            for t in tickers:
+            for yahoo_symbol, t in yahoo_symbols.items():
                 try:
-                    series = data[t]["Close"].dropna()
+                    series = data[yahoo_symbol]["Close"].dropna()
                     if len(series):
                         out[t] = float(series.iloc[-1])
                 except Exception:

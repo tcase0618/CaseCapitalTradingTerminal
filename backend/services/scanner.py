@@ -675,7 +675,8 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
         try:
             import yfinance as yf
             def _vol():
-                data = yf.download(tickers=" ".join(tickers), period="35d",
+                yahoo_symbols = {str(t).upper().replace(".", "-"): t for t in tickers}
+                data = yf.download(tickers=" ".join(yahoo_symbols), period="35d",
                                     interval="1d", progress=False, threads=True,
                                     group_by="ticker", auto_adjust=False)
                 if data is None or len(data) == 0:
@@ -687,9 +688,9 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
                     except Exception:
                         pass
                     return out
-                for t in tickers:
+                for yahoo_symbol, t in yahoo_symbols.items():
                     try:
-                        out[t] = float(data[t]["Volume"].dropna().tail(30).mean())
+                        out[t] = float(data[yahoo_symbol]["Volume"].dropna().tail(30).mean())
                     except Exception:
                         continue
                 return out
