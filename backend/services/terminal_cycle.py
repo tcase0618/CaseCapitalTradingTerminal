@@ -106,7 +106,6 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     scan["lottery_result"] = lottery_result
     scan["pharma_result"] = pharma_result
     scan["pharma_shock_result"] = pharma_shock_result
-    ledger_payload = await timed("candidate_ledger", candidate_ledger.build_from_scan(scan=scan, include_external=True, persist=True))
     pm_payload = await timed(
         "portfolio_manager",
         portfolio_manager.latest_portfolio_plan(
@@ -138,6 +137,22 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             persist=True,
             scan=scan,
             pm_recommendations=pm_payload.get("recommendations") or [],
+        ),
+    )
+    # This is a read model of the frozen cycle outputs. Passing the already
+    # computed packets prevents the ledger from re-running scanners, calendars,
+    # and PM routing with potentially different data mid-cycle.
+    ledger_payload = await timed(
+        "candidate_ledger",
+        candidate_ledger.build_from_scan(
+            scan=scan,
+            include_external=True,
+            persist=True,
+            strategy_payload=strategy_payload,
+            options_payload=options_payload,
+            pharma_payload=pharma_result,
+            pm_payload=pm_payload,
+            include_earnings=False,
         ),
     )
     scan["options_payload"] = options_payload

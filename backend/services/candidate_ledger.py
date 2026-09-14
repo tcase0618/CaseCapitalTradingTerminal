@@ -142,7 +142,17 @@ def _route_tags_for_core(row: dict[str, Any]) -> list[str]:
     return tags
 
 
-async def build_from_scan(scan: dict[str, Any] | None = None, *, include_external: bool = True, persist: bool = False) -> dict[str, Any]:
+async def build_from_scan(
+    scan: dict[str, Any] | None = None,
+    *,
+    include_external: bool = True,
+    persist: bool = False,
+    strategy_payload: dict[str, Any] | None = None,
+    options_payload: dict[str, Any] | None = None,
+    pharma_payload: dict[str, Any] | None = None,
+    pm_payload: dict[str, Any] | None = None,
+    include_earnings: bool = True,
+) -> dict[str, Any]:
     db = get_db()
     if scan is None:
         scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
@@ -186,9 +196,11 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
 
     if include_external:
         try:
-            from . import strategy_screeners
-
-            screeners = await strategy_screeners.run_all(scan=scan, persist=True, include_options_native=True)
+            if strategy_payload is None:
+                from . import strategy_screeners
+                screeners = await strategy_screeners.run_all(scan=scan, persist=True, include_options_native=True)
+            else:
+                screeners = strategy_payload
             for row in _rows(screeners, "candidates"):
                 ticker = _ticker(row.get("ticker") or row.get("underlying"))
                 if not ticker:
@@ -207,9 +219,11 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
             pass
 
         try:
-            from . import options_desk
-
-            options = await options_desk.candidates()
+            if options_payload is None:
+                from . import options_desk
+                options = await options_desk.candidates()
+            else:
+                options = options_payload
             for row in _rows(options, "candidates"):
                 ticker = _ticker(row.get("ticker") or row.get("underlying"))
                 if ticker:
@@ -219,9 +233,11 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
             pass
 
         try:
-            from . import pharma
-
-            pdufa = await pharma.get_pdufa_within_days(days=90)
+            if pharma_payload is None:
+                from . import pharma
+                pdufa = await pharma.get_pdufa_within_days(days=90)
+            else:
+                pdufa = pharma_payload
             for row in _rows(pdufa, "results"):
                 ticker = _ticker(row.get("ticker"))
                 if ticker:
@@ -229,22 +245,25 @@ async def build_from_scan(scan: dict[str, Any] | None = None, *, include_externa
         except Exception:
             pass
 
+        if include_earnings:
+            try:
+                from . import earnings_engine
+
+                earnings = await earnings_engine.current_week_cached(scan_tickers=set(by_ticker.keys()))
+                for day_rows in (earnings.get("by_day") or {}).values():
+                    for row in day_rows:
+                        ticker = _ticker(row.get("ticker"))
+                        if ticker:
+                            _merge_source(ensure(ticker), "earnings", row, ["EARNINGS"])
+            except Exception:
+                pass
+
         try:
-            from . import earnings_engine
-
-            earnings = await earnings_engine.current_week_cached(scan_tickers=set(by_ticker.keys()))
-            for day_rows in (earnings.get("by_day") or {}).values():
-                for row in day_rows:
-                    ticker = _ticker(row.get("ticker"))
-                    if ticker:
-                        _merge_source(ensure(ticker), "earnings", row, ["EARNINGS"])
-        except Exception:
-            pass
-
-        try:
-            from . import portfolio_manager
-
-            pm = await portfolio_manager.latest_portfolio_plan()
+            if pm_payload is None:
+                from . import portfolio_manager
+                pm = await portfolio_manager.latest_portfolio_plan()
+            else:
+                pm = pm_payload
             for row in _rows(pm, "recommendations"):
                 ticker = _ticker(row.get("ticker"))
                 if ticker:
