@@ -260,7 +260,7 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                     meta = await pricer._alpaca_trade_meta(ticker, feed=feed)
                     if not meta:
                         continue
-                    rows[ticker] = {
+                    candidate = {
                         "ticker": ticker,
                         "fresh": bool(meta.get("execution_eligible")),
                         "price": meta.get("price"),
@@ -269,6 +269,15 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                         "quote_time": meta.get("provider_ts"),
                         "attempt": attempts,
                     }
+                    # Do not replace a newer stale Public quote with an older
+                    # Alpaca mark. The dashboard needs the newest observation
+                    # even when no provider is fresh enough for execution.
+                    prior_age = rows[ticker].get("age_seconds")
+                    candidate_age = candidate.get("age_seconds")
+                    if candidate.get("fresh") or prior_age is None or (
+                        candidate_age is not None and candidate_age < prior_age
+                    ):
+                        rows[ticker] = candidate
                     if meta.get("execution_eligible"):
                         pending.discard(ticker)
                         break

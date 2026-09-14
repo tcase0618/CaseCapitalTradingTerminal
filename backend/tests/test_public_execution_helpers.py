@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -159,6 +159,41 @@ async def test_execution_freshness_refreshes_approved_rows_before_execution(monk
     assert result["stale"] == 0
     assert result["rows"][0]["source"] == "public"
     assert result["rows"][0]["fresh"] is True
+
+
+@pytest.mark.asyncio
+async def test_execution_freshness_keeps_newer_stale_public_quote(monkeypatch):
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def quotes(self, _symbols):
+            return {"quotes": [{
+                "symbol": "AAPL",
+                "ask": 150.25,
+                "quoteTime": (datetime.now(timezone.utc) - timedelta(seconds=180)).isoformat(),
+            }]}
+
+    async def older_alpaca(*_args, **_kwargs):
+        return {
+            "price": 149.0,
+            "source": "alpaca_latest_trade_iex",
+            "provider_ts": (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat(),
+            "age_seconds": 600,
+            "execution_eligible": False,
+        }
+
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr("services.pricer._alpaca_trade_meta", older_alpaca)
+    result = await public_execution.refresh_execution_freshness([{
+        "ticker": "AAPL", "action": "STARTER", "allocation_usd": 6,
+    }])
+
+    assert result["rows"][0]["source"] == "public"
+    assert 150 <= result["rows"][0]["age_seconds"] <= 190
 
 
 @pytest.mark.asyncio
