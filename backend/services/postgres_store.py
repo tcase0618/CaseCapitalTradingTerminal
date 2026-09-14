@@ -541,7 +541,12 @@ async def init_pool() -> bool:
         _last_error = "POSTGRES_DSN is empty"
         return False
     try:
-        _pool = await asyncpg.create_pool(dsn(), min_size=1, max_size=int(os.environ.get("POSTGRES_POOL_MAX", "5")))
+        # The terminal runs on a memory-constrained VPS and stores wide JSONB
+        # scan artifacts. A small bounded pool prevents concurrent dashboard
+        # reads from retaining several copies of those payloads in separate
+        # PostgreSQL backends. Individual requests already use explicit
+        # timeouts at their service boundary.
+        _pool = await asyncpg.create_pool(dsn(), min_size=1, max_size=max(1, min(2, int(os.environ.get("POSTGRES_POOL_MAX", "2")))))
         _last_error = None
         return True
     except Exception as exc:
