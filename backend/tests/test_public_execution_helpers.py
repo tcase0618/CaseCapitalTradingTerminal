@@ -342,6 +342,7 @@ async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monk
     monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", lambda **_kwargs: _claimed())
     monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", lambda *_args, **_kwargs: _marked())
     monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=fake_trades, bot_state=FakeState()))
+    monkeypatch.setattr(public_execution, "_public_session_now", lambda *_args: "TWENTY_FOUR_HOURS")
 
     result = await public_execution.reconcile()
 

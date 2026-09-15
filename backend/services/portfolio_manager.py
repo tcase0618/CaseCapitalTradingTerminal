@@ -900,6 +900,103 @@ async def _account_equity() -> tuple[float | None, str]:
     return None, "fallback"
 
 
+async def _equity_book_context() -> dict[str, Any]:
+    """Resolve the broker book that actually receives equity orders.
+
+    Public live equity must never be sized from Alpaca paper equity. If the
+    Public read fails while Public execution is active, return a fail-closed
+    zero-cash context rather than quietly reverting to a different broker.
+    """
+    try:
+        from . import public_execution
+        if public_execution.enabled():
+            state = await asyncio.wait_for(public_execution.portfolio_state(), timeout=6.0)
+            if state.get("ok"):
+                return {
+                    "broker": "public",
+                    "equity": _num(state.get("equity")),
+                    "cash_buying_power": state.get("cash_buying_power"),
+                    "positions": state.get("positions") or [],
+                    "read_ok": True,
+                }
+            return {
+                "broker": "public",
+                "equity": 0.0,
+                "cash_buying_power": 0.0,
+                "positions": [],
+                "read_ok": False,
+                "reason": state.get("reason") or "public_portfolio_unavailable",
+            }
+    except Exception as exc:
+        return {
+            "broker": "public",
+            "equity": 0.0,
+            "cash_buying_power": 0.0,
+            "positions": [],
+            "read_ok": False,
+            "reason": f"public_portfolio_unavailable:{exc.__class__.__name__}",
+        }
+    account_equity, source = await _account_equity()
+    return {
+        "broker": source,
+        "equity": _num(account_equity or DEFAULT_EQUITY),
+        "cash_buying_power": None,
+        "positions": [],
+        "read_ok": account_equity is not None,
+    }
+
+
+def _apply_equity_book_constraints(recommendations: list[dict[str, Any]], book: dict[str, Any]) -> dict[str, Any]:
+    """Align equity PM approvals with the actual broker cash and holdings."""
+    if book.get("broker") != "public":
+        return {"applied": False}
+    held = {_position_ticker(position) for position in book.get("positions") or []}
+    cash = _num(book.get("cash_buying_power"), -1.0)
+    minimum = 6.0  # Public core fractional minimum is $5; $6 is this PM's smallest legal live allocation.
+    blocked = {"existing_position": 0, "cash_unavailable": 0, "cash_insufficient": 0}
+    for row in recommendations:
+        route = str(row.get("route") or row.get("preferred_route") or "").upper()
+        if row.get("action") not in {"ACCUMULATE", "STARTER"} or route == "OPTION":
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        reason = None
+        if ticker in held:
+            reason = "already held in Public equity book"
+            blocked["existing_position"] += 1
+        elif cash < 0:
+            reason = "Public cash buying power unavailable"
+            blocked["cash_unavailable"] += 1
+        elif cash < minimum:
+            reason = f"Public cash buying power ${cash:.2f} is below ${minimum:.2f} minimum live allocation"
+            blocked["cash_insufficient"] += 1
+        if reason:
+            row["action"] = "WATCH"
+            row["allocation_usd"] = 0.0
+            row["shares"] = 0.0
+            row["risk_usd"] = 0.0
+            row["position_pct"] = 0.0
+            row["ratchet_plan"] = {"enabled": False}
+            row.setdefault("cautions", []).append(reason)
+            row["equity_execution_blocker"] = reason
+            continue
+        # Execution normalizes approved Public orders to $6. Reflect that in
+        # PM output so planned deployment matches the broker request.
+        row["allocation_usd"] = minimum
+        row["shares"] = round(minimum / _num(row.get("price")), 4) if _num(row.get("price")) > 0 else 0.0
+        row["risk_usd"] = round(minimum * max(0.0, _num(row.get("downside_pct")) / 100.0), 2)
+        row["position_pct"] = round((minimum / _num(book.get("equity"))) * 100.0, 2) if _num(book.get("equity")) > 0 else 0.0
+        row["equity_execution_blocker"] = None
+        cash -= minimum
+    return {
+        "applied": True,
+        "broker": "public",
+        "cash_buying_power": book.get("cash_buying_power"),
+        "position_count": len(held),
+        "blocked": blocked,
+        "remaining_cash_after_pm": round(max(0.0, cash), 2),
+    }
+
+
 async def latest_portfolio_plan(
     equity: float | None = None,
     mode: str = "AUTO",
@@ -932,7 +1029,9 @@ async def latest_portfolio_plan(
             "summary": {"pm_rows": 0, "case_court_active_routing": False, "sec_bearish_veto_enabled": False},
         }
     rows = _merge_strategy_rows(core_rows, strategy_rows)
-    account_equity, equity_source = await _account_equity()
+    equity_book = await _equity_book_context()
+    account_equity = _num(equity_book.get("equity"))
+    equity_source = str(equity_book.get("broker") or "fallback")
     equity_basis = float(equity or account_equity or DEFAULT_EQUITY)
     if equity:
         equity_source = "manual"
@@ -954,6 +1053,16 @@ async def latest_portfolio_plan(
         profile_override = {}
     profile = _profile_for(active_mode, profile_override)
     recommendations = evaluate_rows(rows, equity=equity_basis, mode=active_mode, profile_override=profile_override, regime=regime)
+    equity_execution_context = _apply_equity_book_constraints(recommendations, equity_book) if not equity else {"applied": False, "reason": "manual_equity_override"}
+    summary = _summary(recommendations, equity_basis, active_mode, equity_source, regime)
+    summary["equity_execution_book"] = {
+        "broker": equity_book.get("broker"),
+        "cash_buying_power": equity_book.get("cash_buying_power"),
+        "position_count": len(equity_book.get("positions") or []),
+        "read_ok": bool(equity_book.get("read_ok")),
+        "reason": equity_book.get("reason"),
+    }
+    summary["equity_execution_constraints"] = equity_execution_context
     if scan and scan.get("finished_at"):
         try:
             await db.portfolio_manager_history.update_one(
@@ -961,7 +1070,7 @@ async def latest_portfolio_plan(
                 {"$set": {
                     "scan_finished_at": scan.get("finished_at"),
                     "generated_at": datetime.now(timezone.utc).isoformat(),
-                    "summary": _summary(recommendations, equity_basis, active_mode, equity_source, regime),
+                    "summary": summary,
                     "recommendations": recommendations,
                 }},
                 upsert=True,
@@ -970,9 +1079,10 @@ async def latest_portfolio_plan(
             # Historical funnel telemetry must never block PM recommendations.
             pass
     try:
-        from . import trade_floor
-
-        live_positions = await asyncio.wait_for(trade_floor.list_positions(), timeout=5.0)
+        live_positions = equity_book.get("positions") or []
+        if equity_book.get("broker") != "public":
+            from . import trade_floor
+            live_positions = await asyncio.wait_for(trade_floor.list_positions(), timeout=5.0)
         opportunity_cost = _opportunity_cost_review(recommendations, live_positions, equity_basis)
     except Exception as exc:
         live_positions = []
@@ -995,7 +1105,7 @@ async def latest_portfolio_plan(
             "active": ruleset.get("active"),
         },
         "claude_required": False,
-        "summary": _summary(recommendations, equity_basis, active_mode, equity_source, regime),
+        "summary": summary,
         "input_rows": {
             "core": len(core_rows),
             "strategy_pm": len(strategy_rows),
@@ -1005,6 +1115,7 @@ async def latest_portfolio_plan(
         },
         "strategy_screeners": strategy_payload.get("summary") or {},
         "opportunity_cost": opportunity_cost,
+        "equity_execution_book": summary["equity_execution_book"],
         "exposure": _exposure(recommendations),
         "recommendations": recommendations,
         "rules": {

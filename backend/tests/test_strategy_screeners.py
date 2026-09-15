@@ -317,6 +317,21 @@ def test_portfolio_plan_does_not_skip_strategy_payload(monkeypatch):
     assert plan["input_rows"]["merged"] == 1
 
 
+def test_public_equity_book_constraints_remove_unfundable_and_duplicate_buys():
+    recommendations = [
+        {"ticker": "HELD", "action": "STARTER", "allocation_usd": 20.0, "shares": 2.0, "risk_usd": 1.0, "position_pct": 2.0, "cautions": [], "ratchet_plan": {"enabled": True}},
+        {"ticker": "NEW", "action": "ACCUMULATE", "allocation_usd": 20.0, "shares": 2.0, "risk_usd": 1.0, "position_pct": 2.0, "cautions": [], "ratchet_plan": {"enabled": True}},
+    ]
+    result = portfolio_manager._apply_equity_book_constraints(recommendations, {
+        "broker": "public", "equity": 100.0, "cash_buying_power": 3.99,
+        "positions": [{"ticker": "HELD"}],
+    })
+
+    assert result["blocked"] == {"existing_position": 1, "cash_unavailable": 0, "cash_insufficient": 1}
+    assert all(row["action"] == "WATCH" for row in recommendations)
+    assert all(row["allocation_usd"] == 0.0 for row in recommendations)
+
+
 def test_strategy_ideology_unknown_has_safe_defaults():
     case = strategy_ideology.case_score(
         strategy_id="missing_strategy",

@@ -171,6 +171,52 @@ def _cash_buying_power(payload: dict[str, Any]) -> float | None:
     return None
 
 
+async def portfolio_state() -> dict[str, Any]:
+    """Return the live Public equity book in a PM-safe normalized shape.
+
+    Portfolio construction must use the same broker book that will receive an
+    equity order. This read-only adapter intentionally exposes cash buying
+    power separately from total account value.
+    """
+    if not enabled():
+        return {"ok": False, "reason": "public_live_equity_disabled", "broker": BROKER_BASE}
+    try:
+        async with public_api.PublicAPIClient(use_sdk=False) as client:
+            payload = await client.portfolio()
+    except Exception as exc:
+        return {"ok": False, "reason": f"public_portfolio_unavailable:{exc.__class__.__name__}", "broker": BROKER_BASE}
+
+    positions: list[dict[str, Any]] = []
+    for raw in _positions(payload):
+        ticker = _symbol(raw)
+        if not ticker:
+            continue
+        last_price = raw.get("lastPrice") or raw.get("last_price") or {}
+        gain = raw.get("instrumentGain") or raw.get("instrument_gain") or {}
+        positions.append({
+            "ticker": ticker,
+            "quantity": _qty(raw),
+            "market_value": _num(raw.get("currentValue") or raw.get("current_value")),
+            "current_price": _num(last_price.get("value") if isinstance(last_price, dict) else last_price),
+            "unrealized_pct": _num(gain.get("percentage") if isinstance(gain, dict) else None),
+            "broker_base": BROKER_BASE,
+        })
+    total_value = _num(payload.get("totalAccountValue") or payload.get("total_account_value"))
+    cash = _cash_buying_power(payload)
+    if total_value <= 0:
+        total_value = (cash or 0.0) + sum(_num(position.get("market_value")) for position in positions)
+    return {
+        "ok": bool(total_value > 0 and cash is not None),
+        "reason": None if total_value > 0 and cash is not None else "public_portfolio_incomplete",
+        "broker": BROKER_BASE,
+        "equity": round(total_value, 2),
+        "cash_buying_power": round(cash, 2) if cash is not None else None,
+        "positions": positions,
+        "position_count": len(positions),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _account_allows_buys(accounts_payload: dict[str, Any], account_id: str) -> tuple[bool, str | None]:
     """Reject restricted/close-only Public accounts before new orders."""
     accounts = accounts_payload.get("accounts") or []
