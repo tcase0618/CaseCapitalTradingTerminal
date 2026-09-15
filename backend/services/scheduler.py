@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 from datetime import datetime
+from typing import Any
 
 import httpx
 import pytz
@@ -578,6 +579,7 @@ def start_scheduler():
 
     async def _position_monitor():
         failures: list[dict[str, str]] = []
+        rebalance_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
             from . import options_desk, pm_ratchet, tail_hunter, trade_floor, trade_floor_phases
             try:
@@ -589,8 +591,21 @@ def start_scheduler():
             try:
                 from . import public_execution
                 if public_execution.enabled():
-                    await public_execution.reconcile()
-                    await public_execution.process_protective_exits()
+                    public_reconciliation = await public_execution.reconcile()
+                    public_protection = await public_execution.process_protective_exits()
+                    failures.extend(
+                        {"stage": stage, "reason": "reconciliation_degraded"}
+                        for stage, result in (("public_reconciliation", public_reconciliation), ("public_protective_exits", public_protection))
+                        if not result.get("skipped") and not result.get("ok", True)
+                    )
+                    # Capital rotation is deliberately downstream of broker
+                    # reconciliation and stop maintenance. A replacement buy
+                    # cannot be released until its preceding sale is observed
+                    # as filled by the broker on a later monitor tick.
+                    from . import pm_rebalance
+                    rebalance_status = await pm_rebalance.run_rebalance_cycle()
+                    if not rebalance_status.get("skipped") and rebalance_status.get("errors"):
+                        failures.append({"stage": "pm_rebalance", "reason": "rebalance_errors"})
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
                 logger.exception("Public execution reconciliation failed")
@@ -614,7 +629,7 @@ def start_scheduler():
         except Exception as e:
             failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
             logger.warning("position monitor: %s", e)
-        return {"ok": not failures, "failures": failures}
+        return {"ok": not failures, "failures": failures, "pm_rebalance": rebalance_status}
 
     async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
         if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
@@ -633,6 +648,7 @@ def start_scheduler():
         try:
             result = await _position_monitor()
             management["legacy_position_monitor"] = result
+            management["pm_rebalance"] = result.get("pm_rebalance") or {"skipped": True, "reason": "not_run"}
             if not result.get("ok"):
                 await _send_position_monitor_failure(result.get("failures") or [])
         except Exception as e:

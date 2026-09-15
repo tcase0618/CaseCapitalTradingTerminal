@@ -958,6 +958,11 @@ def _apply_equity_book_constraints(recommendations: list[dict[str, Any]], book: 
         route = str(row.get("route") or row.get("preferred_route") or "").upper()
         if row.get("action") not in {"ACCUMULATE", "STARTER"} or route == "OPTION":
             continue
+        # Keep the unconstrained PM verdict.  The rebalance service needs this
+        # to distinguish a genuinely weak WATCH from a funded candidate that
+        # was temporarily demoted only because the current book has no cash.
+        row.setdefault("pre_execution_action", row.get("action"))
+        row.setdefault("pre_execution_allocation_usd", row.get("allocation_usd"))
         ticker = str(row.get("ticker") or "").upper()
         reason = None
         if ticker in held:
