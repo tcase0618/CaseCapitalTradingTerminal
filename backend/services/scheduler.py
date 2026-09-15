@@ -604,7 +604,8 @@ def start_scheduler():
                     # as filled by the broker on a later monitor tick.
                     from . import pm_rebalance
                     rebalance_status = await pm_rebalance.run_rebalance_cycle()
-                    if not rebalance_status.get("skipped") and rebalance_status.get("errors"):
+                    rebalance_errors = rebalance_status.get("errors") or (rebalance_status.get("reconciled") or {}).get("errors")
+                    if not rebalance_status.get("skipped") and rebalance_errors:
                         failures.append({"stage": "pm_rebalance", "reason": "rebalance_errors"})
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
