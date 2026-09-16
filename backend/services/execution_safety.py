@@ -12,6 +12,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _expired(value: Any, *, now: datetime) -> bool:
+    """Return whether a persisted intent lease has expired.
+
+    The Postgres compatibility store intentionally does not implement Mongo TTL
+    deletion.  A lease must therefore be reclaimable in-process when an order
+    died before reaching the broker.
+    """
+    if isinstance(value, datetime):
+        expires_at = value
+    elif isinstance(value, str):
+        try:
+            expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    else:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= now
+
+
 def stable_client_order_id(*parts: Any, prefix: str = "cc", max_len: int = 48) -> str:
     """Build a deterministic broker-safe idempotency key."""
     normalized = "|".join(str(part or "").strip().upper() for part in parts)
@@ -52,6 +73,16 @@ async def claim_execution_intent(
         result = await db.execution_intents.insert_one(doc)
         if getattr(result, "duplicate", False):
             existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
+            if (
+                existing
+                and _expired(existing.get("expires_at"), now=now)
+                and existing.get("status") in {"claimed", "broker_rejected", "broker_response_invalid", "expired"}
+            ):
+                await db.execution_intents.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {k: v for k, v in doc.items() if k != "_id"}},
+                )
+                return {"ok": True, "claimed": True, "reclaimed": True, "intent": {k: v for k, v in doc.items() if k != "_id"}}
             return {
                 "ok": False,
                 "claimed": False,
@@ -71,6 +102,16 @@ async def claim_execution_intent(
         if not is_duplicate:
             raise
         existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
+        if (
+            existing
+            and _expired(existing.get("expires_at"), now=now)
+            and existing.get("status") in {"claimed", "broker_rejected", "broker_response_invalid", "expired"}
+        ):
+            await db.execution_intents.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {k: v for k, v in doc.items() if k != "_id"}},
+            )
+            return {"ok": True, "claimed": True, "reclaimed": True, "intent": {k: v for k, v in doc.items() if k != "_id"}}
         return {
             "ok": False,
             "claimed": False,

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 import sys
 from pathlib import Path
 
@@ -32,6 +33,9 @@ def test_claim_execution_intent_blocks_duplicate(monkeypatch):
         async def find_one(self, query, projection=None):
             return inserted.get(query["_id"])
 
+        async def update_one(self, query, update):
+            inserted[query["_id"]].update(update["$set"])
+
     class FakeDB:
         execution_intents = FakeCollection()
 
@@ -51,3 +55,39 @@ def test_claim_execution_intent_blocks_duplicate(monkeypatch):
     assert first["ok"] is True
     assert second["ok"] is False
     assert second["reason"] == "duplicate_execution_intent"
+
+
+def test_claim_execution_intent_reclaims_expired_pre_submit_lease(monkeypatch):
+    now = execution_safety._now()
+    inserted = {
+        "intent:tf-expired": {
+            "_id": "intent:tf-expired",
+            "status": "claimed",
+            "expires_at": (now - timedelta(seconds=1)).isoformat(),
+        }
+    }
+
+    class FakeCollection:
+        async def insert_one(self, _doc):
+            from pymongo.errors import DuplicateKeyError
+
+            raise DuplicateKeyError("dup")
+
+        async def find_one(self, query, projection=None):
+            return inserted.get(query["_id"])
+
+        async def update_one(self, query, update):
+            inserted[query["_id"]].update(update["$set"])
+
+    class FakeDB:
+        execution_intents = FakeCollection()
+
+    monkeypatch.setattr(execution_safety, "get_db", lambda: FakeDB())
+
+    result = asyncio.run(execution_safety.claim_execution_intent(
+        scope="equity_pm", client_order_id="tf-expired", symbol="AAPL", side="buy", ttl_seconds=60
+    ))
+
+    assert result["ok"] is True
+    assert result["reclaimed"] is True
+    assert inserted["intent:tf-expired"]["symbol"] == "AAPL"

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import copy
 import json
 import math
 import os
@@ -416,7 +417,7 @@ class PostgresCollection:
                     _path_set(existing, key, arr)
 
     async def _persist_updated(self, existing: dict[str, Any], update: dict[str, Any], *, inserted: bool) -> PostgresResult:
-        original = dict(existing)
+        original = copy.deepcopy(existing)
         self._apply_update(existing, update, inserted=inserted)
         key = doc_key(self.name, existing)
         if not await upsert_snapshot(self.name, key, existing):
