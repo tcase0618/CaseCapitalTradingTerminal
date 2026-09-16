@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover - optional dependency at import time
 _pool: Any | None = None
 _last_error: str | None = None
 _schema_ready = False
+_MISSING = object()
 
 
 class PostgresResult:
@@ -68,12 +69,12 @@ def _value_equal(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def _match_value(actual: Any, condition: Any) -> bool:
+def _match_value(actual: Any, condition: Any, *, exists: bool = True) -> bool:
     if not isinstance(condition, dict) or not any(str(k).startswith("$") for k in condition):
         return _value_equal(actual, condition)
     for op, expected in condition.items():
         if op == "$exists":
-            if bool(expected) != (actual is not None):
+            if bool(expected) != exists:
                 return False
         elif op == "$in":
             values = actual if isinstance(actual, list) else [actual]
@@ -83,8 +84,9 @@ def _match_value(actual: Any, condition: Any) -> bool:
             values = actual if isinstance(actual, list) else [actual]
             if any(any(_value_equal(v, e) for e in expected) for v in values):
                 return False
-        elif op == "$ne" and _value_equal(actual, expected):
-            return False
+        elif op == "$ne":
+            if _value_equal(actual, expected):
+                return False
         elif op in {"$gt", "$gte", "$lt", "$lte"}:
             if actual is None:
                 return False
@@ -117,8 +119,10 @@ def _matches(doc: dict[str, Any], query: dict[str, Any] | None) -> bool:
         elif key == "$and":
             if not all(_matches(doc, item) for item in condition):
                 return False
-        elif not _match_value(_path_get(doc, key), condition):
-            return False
+        else:
+            actual = _path_get(doc, key, _MISSING)
+            if not _match_value(None if actual is _MISSING else actual, condition, exists=actual is not _MISSING):
+                return False
     return True
 
 
@@ -128,7 +132,11 @@ def _project(doc: dict[str, Any], projection: dict[str, Any] | None) -> dict[str
     include = {k for k, v in projection.items() if v and k != "_id"}
     exclude = {k for k, v in projection.items() if not v}
     if include:
-        out = {k: _path_get(doc, k) for k in include if _path_get(doc, k) is not None}
+        out: dict[str, Any] = {}
+        for key in include:
+            value = _path_get(doc, key, _MISSING)
+            if value is not _MISSING:
+                _path_set(out, key, value)
         if projection.get("_id", 1) and "_id" in doc:
             out["_id"] = doc["_id"]
         return out
@@ -189,6 +197,95 @@ class PostgresCursor:
         return gen()
 
 
+def _aggregate_expression(doc: dict[str, Any], expression: Any) -> Any:
+    if isinstance(expression, str) and expression.startswith("$"):
+        return _path_get(doc, expression[1:])
+    return expression
+
+
+class PostgresAggregateCursor:
+    """Small, explicit aggregation subset used by remaining terminal code."""
+    def __init__(self, collection: "PostgresCollection", pipeline: list[dict[str, Any]]):
+        self.collection = collection
+        self.pipeline = pipeline
+
+    async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
+        rows, _ = await self.collection._read({})
+        for stage in self.pipeline:
+            if "$match" in stage:
+                rows = [row for row in rows if _matches(row, stage["$match"])]
+            elif "$sort" in stage:
+                for key, direction in reversed(list(stage["$sort"].items())):
+                    rows.sort(key=lambda row: (_path_get(row, key) is None, _path_get(row, key)), reverse=direction < 0)
+            elif "$skip" in stage:
+                rows = rows[max(0, int(stage["$skip"])):]
+            elif "$limit" in stage:
+                rows = rows[:max(0, int(stage["$limit"]))]
+            elif "$project" in stage:
+                spec = stage["$project"]
+                projected: list[dict[str, Any]] = []
+                for row in rows:
+                    out: dict[str, Any] = {}
+                    for key, expression in spec.items():
+                        if expression in (0, False):
+                            continue
+                        if expression in (1, True):
+                            value = _path_get(row, key, _MISSING)
+                        else:
+                            value = _aggregate_expression(row, expression)
+                        if value is not _MISSING:
+                            _path_set(out, key, value)
+                    projected.append(out)
+                rows = projected
+            elif "$group" in stage:
+                spec = stage["$group"]
+                grouped: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    group_id = _aggregate_expression(row, spec.get("_id"))
+                    serialized_id = json.dumps(normalize_json(group_id), sort_keys=True, default=_json_default)
+                    bucket = grouped.setdefault(serialized_id, {"_id": group_id, "__seen": set()})
+                    for field, accumulator in spec.items():
+                        if field == "_id" or not isinstance(accumulator, dict) or len(accumulator) != 1:
+                            continue
+                        operator, expression = next(iter(accumulator.items()))
+                        value = _aggregate_expression(row, expression)
+                        if operator == "$sum":
+                            bucket[field] = (bucket.get(field) or 0) + (_num_for_aggregate(value) if expression != 1 else 1)
+                        elif operator == "$first" and field not in bucket:
+                            bucket[field] = value
+                        elif operator == "$last":
+                            bucket[field] = value
+                        elif operator == "$max":
+                            if field not in bucket or (value is not None and (bucket[field] is None or value > bucket[field])):
+                                bucket[field] = value
+                        elif operator == "$min":
+                            if field not in bucket or (value is not None and (bucket[field] is None or value < bucket[field])):
+                                bucket[field] = value
+                        elif operator == "$push":
+                            bucket.setdefault(field, []).append(value)
+                        elif operator == "$addToSet":
+                            marker = json.dumps(normalize_json(value), sort_keys=True, default=_json_default)
+                            seen_key = f"{field}:{marker}"
+                            if seen_key not in bucket["__seen"]:
+                                bucket["__seen"].add(seen_key)
+                                bucket.setdefault(field, []).append(value)
+                rows = [{key: value for key, value in row.items() if key != "__seen"} for row in grouped.values()]
+        return rows[:length] if length is not None else rows
+
+    def __aiter__(self):
+        async def gen():
+            for row in await self.to_list(None):
+                yield row
+        return gen()
+
+
+def _num_for_aggregate(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class PostgresCollection:
     def __init__(self, name: str):
         self.name = name
@@ -213,13 +310,15 @@ class PostgresCollection:
             raise RuntimeError(_last_error or "Postgres is unavailable")
         simple_query = query or {}
         sql_exact = all(
-            not str(key).startswith("$") and not (isinstance(value, dict) and any(str(op).startswith("$") for op in value))
+            not str(key).startswith("$") and "." not in str(key)
+            and not (isinstance(value, dict) and any(str(op).startswith("$") for op in value))
             for key, value in simple_query.items()
         )
         temporal_keys = {
             "ts", "created_at", "updated_at", "finished_at", "started_at",
             "generated_at", "submitted_at", "scanned_at", "snapshot_at",
-            "run_at", "last_synced_at", "closed_at", "checked_at",
+            "run_at", "last_synced_at", "closed_at", "checked_at", "decision_at",
+            "observed_at", "resolved_at", "last_attempt_at", "filled_at",
         }
         sql_sort = sort[0] if sort and len(sort) == 1 and sort[0][0] in temporal_keys else None
         use_window = sql_exact and limit is not None and limit >= 0 and (not sort or sql_sort is not None)
@@ -234,7 +333,7 @@ class PostgresCollection:
                 if sql_sort:
                     params.append(sql_sort[0])
                     direction = "DESC" if sql_sort[1] < 0 else "ASC"
-                    order = f" order by payload #>> string_to_array(${len(params)}, '.') {direction}"
+                    order = f" order by payload #>> string_to_array(${len(params)}, '.') {direction} nulls last"
                 params.extend([max(0, int(skip)), int(limit)])
                 rows = await conn.fetch(
                     f"select payload from cc_collection_snapshots where {where}{order} offset ${len(params) - 1} limit ${len(params)}",
@@ -295,15 +394,8 @@ class PostgresCollection:
             ids.append(result.inserted_id)
         return PostgresResult(inserted_ids=ids)
 
-    async def update_one(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **kwargs: Any) -> PostgresResult:
-        existing = await self.find_one(query)
-        inserted = False
-        if existing is None:
-            if not upsert:
-                return PostgresResult(matched_count=0, modified_count=0, upserted_id=None)
-            existing = {k: v for k, v in query.items() if not k.startswith("$") and not isinstance(v, dict)}
-            inserted = True
-        original = dict(existing)
+    @staticmethod
+    def _apply_update(existing: dict[str, Any], update: dict[str, Any], *, inserted: bool) -> None:
         for op, values in update.items():
             if op == "$set" or (op == "$setOnInsert" and inserted):
                 for key, value in values.items(): _path_set(existing, key, normalize_json(value))
@@ -322,10 +414,24 @@ class PostgresCollection:
                     for item in additions:
                         if op == "$push" or item not in arr: arr.append(item)
                     _path_set(existing, key, arr)
+
+    async def _persist_updated(self, existing: dict[str, Any], update: dict[str, Any], *, inserted: bool) -> PostgresResult:
+        original = dict(existing)
+        self._apply_update(existing, update, inserted=inserted)
         key = doc_key(self.name, existing)
         if not await upsert_snapshot(self.name, key, existing):
             raise RuntimeError(_last_error or "Postgres update failed")
         return PostgresResult(matched_count=0 if inserted else 1, modified_count=1 if existing != original else 0, upserted_id=key if inserted else None)
+
+    async def update_one(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **kwargs: Any) -> PostgresResult:
+        existing = await self.find_one(query)
+        inserted = False
+        if existing is None:
+            if not upsert:
+                return PostgresResult(matched_count=0, modified_count=0, upserted_id=None)
+            existing = {k: v for k, v in query.items() if not k.startswith("$") and not isinstance(v, dict)}
+            inserted = True
+        return await self._persist_updated(existing, update, inserted=inserted)
 
     async def update_many(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **kwargs: Any) -> PostgresResult:
         rows, _ = await self._read(query)
@@ -333,7 +439,7 @@ class PostgresCollection:
             return await self.update_one(query, update, upsert=True)
         modified = 0
         for row in rows:
-            result = await self.update_one({"_id": row.get("_id")} if row.get("_id") else {"_key": doc_key(self.name, row)}, update)
+            result = await self._persist_updated(row, update, inserted=False)
             modified += result.modified_count
         return PostgresResult(matched_count=len(rows), modified_count=modified)
 
@@ -379,15 +485,8 @@ class PostgresCollection:
     async def create_index(self, *args: Any, **kwargs: Any) -> str:
         return "postgres_jsonb_compat"
 
-    def aggregate(self, pipeline: list[dict[str, Any]], **kwargs: Any) -> PostgresCursor:
-        query: dict[str, Any] = {}
-        cursor = PostgresCursor(self, query, None)
-        for stage in pipeline:
-            if "$match" in stage: query.update(stage["$match"]); cursor.query = query
-            elif "$sort" in stage: cursor.sort(list(stage["$sort"].items()))
-            elif "$skip" in stage: cursor.skip(stage["$skip"])
-            elif "$limit" in stage: cursor.limit(stage["$limit"])
-        return cursor
+    def aggregate(self, pipeline: list[dict[str, Any]], **kwargs: Any) -> PostgresAggregateCursor:
+        return PostgresAggregateCursor(self, pipeline)
 
 
 class PostgresDatabase:
@@ -477,6 +576,19 @@ def normalize_json(value: Any) -> Any:
 
 def doc_key(collection: str, doc: dict[str, Any]) -> str:
     """Stable best-effort natural key for collection-style documents."""
+    collection_keys = {
+        "pm_company_observations": ("observation_id",),
+        "pm_decision_ledger": ("decision_id",),
+        "pm_decision_outcomes": ("outcome_id",),
+        "pm_portfolio_snapshots": ("snapshot_id",),
+        "pm_policy_reports": ("report_id",),
+        "pm_rebalance_intents": ("intent_id",),
+        "signal_performance": ("ticker", "date", "screener_id"),
+        "pm_ratchet_events": ("client_order_id", "event_at", "ratchet_level"),
+    }
+    natural = collection_keys.get(collection)
+    if natural and all(doc.get(key) not in (None, "") for key in natural):
+        return ":".join(str(doc[key]) for key in natural)
     for key in (
         "_id",
         "id",

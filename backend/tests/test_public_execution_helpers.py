@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from services import portfolio_manager, public_execution
+from services import portfolio_manager, public_execution, safety
 from services import trade_floor_learning
 
 
@@ -105,7 +105,7 @@ async def test_public_execution_analytics_reports_slippage_protection_and_strate
             return [{
                 "broker_base": "public", "fill_status": "FILLED", "limit_price": 10,
                 "filled_avg_price": 10.05, "qty_remaining": 1,
-                "protective_order_id": "stop-1", "strategy_id": "lottery_gap",
+                "protective_order_id": "stop-1", "protective_order_status": "SUBMITTED", "strategy_id": "lottery_gap",
             }]
 
     class FakeCollection:
@@ -119,6 +119,22 @@ async def test_public_execution_analytics_reports_slippage_protection_and_strate
     assert result["protection_coverage_pct"] == 100.0
     assert result["slippage_bps"]["avg"] == 50.0
     assert result["by_strategy"] == {"lottery_gap": 1}
+
+
+def test_public_portfolio_mark_uses_documented_public_v2_fields():
+    price, pnl, timestamp = public_execution._public_position_mark({
+        "lastPrice": {"lastPrice": "129.60", "timestamp": "2026-09-16T14:00:00Z"},
+        "instrumentGain": {"gainPercentage": "-2.56"},
+    })
+    assert price == 129.60
+    assert pnl == -2.56
+    assert timestamp == "2026-09-16T14:00:00Z"
+
+
+def test_quote_timestamp_far_in_the_future_is_not_fresh():
+    future = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+    assert safety.quote_age_seconds(future) is None
+    assert safety.quote_is_fresh({"ts": future}) == (False, None)
 
 
 @pytest.mark.asyncio

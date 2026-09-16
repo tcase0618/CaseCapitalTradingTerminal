@@ -200,7 +200,12 @@ def quote_age_seconds(ts: Any) -> int | None:
         parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
     except Exception:
         return None
-    return max(0, int((_now() - parsed.astimezone(timezone.utc)).total_seconds()))
+    delta = (_now() - parsed.astimezone(timezone.utc)).total_seconds()
+    # A materially future provider timestamp usually means a clock or parsing
+    # error. Treating it as age zero silently authorizes an unverifiable mark.
+    if delta < -max(0, int(os.environ.get("QUOTE_MAX_FUTURE_S", "5") or 5)):
+        return None
+    return max(0, int(delta))
 
 
 def quote_is_fresh(meta: dict[str, Any], max_age_s: int | None = None) -> tuple[bool, int | None]:

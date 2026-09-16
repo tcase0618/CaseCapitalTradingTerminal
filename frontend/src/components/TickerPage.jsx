@@ -15,15 +15,28 @@ export default function TickerPage() {
   const [freeData, setFreeData] = useState(null);
   const [kronos, setKronos] = useState(null);
   const [pmDossier, setPmDossier] = useState(null);
+  const [dossierStatus, setDossierStatus] = useState("loading");
 
   useEffect(() => {
-    if (!ticker) return;
-    axios.get(`${API}/ticker/${ticker}`).then(r => setData(r.data)).catch(() => setData({ ticker }));
-    axios.get(`${API}/options/${ticker}`).then(r => setOpts(r.data.options)).catch(() => {});
-    axios.get(`${API}/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
-    axios.get(`${API}/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => setFreeData(null));
-    axios.get(`${API}/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(e => setKronos({ error: e.message }));
-    axios.get(`${API}/pm/company/${ticker}?limit=12`).then(r => setPmDossier(r.data)).catch(() => setPmDossier(null));
+    if (!ticker) return undefined;
+    const controller = new AbortController();
+    const request = (path) => axios.get(`${API}${path}`, { signal: controller.signal });
+    setData(null); setOpts(null); setFlow(null); setFreeData(null); setKronos(null);
+    setPmDossier(null); setDossierStatus("loading");
+    request(`/ticker/${ticker}`).then(r => setData(r.data)).catch(error => {
+      if (error.name !== "CanceledError") setData({ ticker });
+    });
+    request(`/options/${ticker}`).then(r => setOpts(r.data.options)).catch(() => {});
+    request(`/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
+    request(`/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => setFreeData(null));
+    request(`/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(error => setKronos({ error: error.message }));
+    request(`/pm/company/${ticker}?limit=12`).then(r => {
+      setPmDossier(r.data);
+      setDossierStatus("ready");
+    }).catch(error => {
+      if (error.name !== "CanceledError") setDossierStatus("unavailable");
+    });
+    return () => controller.abort();
   }, [ticker]);
 
   if (!data) return (
@@ -66,7 +79,7 @@ export default function TickerPage() {
       <TradingViewMiniChart ticker={t} companyName={companyName} />
 
       <CompanyProfileCard profile={companyProfile} />
-      <PmDossierCard dossier={pmDossier} />
+      <PmDossierCard dossier={pmDossier} status={dossierStatus} />
 
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
         <Stat label="SIGNAL SCORE" value={`${data.signal_score || 0}/10`} color={accent} />
@@ -223,7 +236,7 @@ export default function TickerPage() {
   );
 }
 
-function PmDossierCard({ dossier }) {
+function PmDossierCard({ dossier, status }) {
   const profile = dossier?.profile;
   const decisions = dossier?.decisions || [];
   const action = profile?.latest_action || "UNREVIEWED";
@@ -234,8 +247,10 @@ function PmDossierCard({ dossier }) {
 
   return (
     <Card title="PM DOSSIER // DECISION MEMORY">
-      {!dossier ? (
+      {status === "loading" ? (
         <div style={{ color: muted, fontSize: 13 }}>Loading PM decision history...</div>
+      ) : status === "unavailable" ? (
+        <div style={{ color: "#fbbf24", fontSize: 13 }}>PM decision history is temporarily unavailable.</div>
       ) : !profile ? (
         <div style={{ color: muted, fontSize: 13 }}>No PM dossier exists yet. It will be created by the next full terminal cycle.</div>
       ) : (

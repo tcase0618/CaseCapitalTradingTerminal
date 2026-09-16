@@ -44,8 +44,27 @@ def _summary(key: str, bucket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _resolution_close(ticker: str, decision_at: datetime, horizon_days: int) -> tuple[float, str | None]:
+    """Return the first daily close at/after a fixed decision horizon.
+
+    This prevents the shadow learner from repeatedly grading an old decision
+    against today's moving price, which would overwrite historical outcomes.
+    """
+    target = (decision_at.astimezone(timezone.utc) + timedelta(days=horizon_days)).date()
+    closes = await pricer.get_history_range(
+        ticker,
+        target.isoformat(),
+        (target + timedelta(days=7)).isoformat(),
+    )
+    for day in sorted(closes):
+        price = _num(closes[day])
+        if price > 0:
+            return price, day
+    return 0.0, None
+
+
 async def run_shadow_learning(*, horizon_days: int = 1, limit: int = 1000) -> dict[str, Any]:
-    """Grade mature ledger decisions using a current close, without reweighting."""
+    """Grade mature ledger decisions at a fixed historical close, shadow-only."""
     db = get_db()
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, horizon_days))
     decisions = await db.pm_decision_ledger.find({}, {"_id": 0}).sort("decision_at", -1).to_list(limit)
@@ -58,19 +77,26 @@ async def run_shadow_learning(*, horizon_days: int = 1, limit: int = 1000) -> di
         if decision_at > cutoff or _num(decision.get("price")) <= 0:
             continue
         matured.append(decision)
-    closes = await pricer.batch_latest_closes(sorted({str(row.get("ticker") or "").upper() for row in matured if row.get("ticker")})) if matured else {}
     action_buckets: dict[str, dict[str, Any]] = defaultdict(_bucket)
     lane_buckets: dict[str, dict[str, Any]] = defaultdict(_bucket)
     written = unavailable = 0
     for decision in matured:
         ticker = str(decision.get("ticker") or "").upper()
-        close = _num(closes.get(ticker))
         entry = _num(decision.get("price"))
-        if close <= 0 or entry <= 0:
+        outcome_id = f"pm-outcome:{decision.get('decision_id')}:{horizon_days}d"
+        existing = await db.pm_decision_outcomes.find_one({"outcome_id": outcome_id}, {"_id": 0})
+        if existing:
+            result = _num(existing.get("return_pct"))
+            _add(action_buckets[str(decision.get("action") or "UNKNOWN")], result)
+            evidence = await db.pm_company_observations.find_one({"observation_id": decision.get("evidence_ref")}, {"_id": 0, "strategy_lanes": 1}) or {}
+            for lane in evidence.get("strategy_lanes") or []:
+                _add(lane_buckets[str(lane)], result)
+            continue
+        close, close_date = await _resolution_close(ticker, decision_at, horizon_days)
+        if close <= 0 or entry <= 0 or not close_date:
             unavailable += 1
             continue
         result = round((close / entry - 1.0) * 100.0, 4)
-        outcome_id = f"pm-outcome:{decision.get('decision_id')}:{horizon_days}d"
         doc = stamped({
             "outcome_id": outcome_id,
             "decision_id": decision.get("decision_id"),
@@ -78,10 +104,11 @@ async def run_shadow_learning(*, horizon_days: int = 1, limit: int = 1000) -> di
             "horizon_days": horizon_days,
             "entry_price": entry,
             "observed_close": close,
+            "observed_close_date": close_date,
             "return_pct": result,
             "action": decision.get("action"),
             "observed_at": datetime.now(timezone.utc).isoformat(),
-            "source": "pm_decision_ledger+latest_close",
+            "source": "pm_decision_ledger+point_in_time_daily_close",
         })
         await db.pm_decision_outcomes.update_one({"outcome_id": outcome_id}, {"$set": doc}, upsert=True)
         _add(action_buckets[str(decision.get("action") or "UNKNOWN")], result)

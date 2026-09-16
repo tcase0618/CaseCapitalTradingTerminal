@@ -42,6 +42,18 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _plan_is_fresh(plan: dict[str, Any]) -> bool:
+    raw = plan.get("scan_finished_at") or plan.get("generated_at")
+    try:
+        generated = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if generated.tzinfo is None:
+            generated = generated.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    max_age = max(60, _int_env("PUBLIC_PM_REBALANCE_PLAN_MAX_AGE_SECONDS", 4 * 60 * 60))
+    return (datetime.now(timezone.utc) - generated.astimezone(timezone.utc)).total_seconds() <= max_age
+
+
 def _ticker(row: dict[str, Any]) -> str:
     return public_execution._symbol(row)
 
@@ -209,7 +221,7 @@ async def _reconcile_intents(client: Any) -> dict[str, Any]:
                 continue
             broker_status = str(order.get("status") or order.get("orderStatus") or "").upper()
             update = {"sell_order_status": broker_status, "last_checked_at": datetime.now(timezone.utc).isoformat()}
-            if broker_status in {"FILLED", "PARTIALLY_FILLED"}:
+            if broker_status == "FILLED":
                 filled = _num(order.get("filledQuantity") or order.get("filled_quantity"))
                 if filled > 0:
                     update.update({"status": "SELL_FILLED", "sell_filled_qty": filled, "sell_fill_price": _num(order.get("averagePrice") or order.get("average_price")), "sell_filled_at": datetime.now(timezone.utc).isoformat()})
@@ -248,6 +260,8 @@ async def run_rebalance_cycle() -> dict[str, Any]:
     pm_doc = await db.portfolio_manager_history.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
     if not pm_doc:
         return {"skipped": True, "reason": "pm_plan_unavailable"}
+    if not _plan_is_fresh(pm_doc):
+        return {"skipped": True, "reason": "pm_plan_stale_for_rebalance"}
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         reconciled = await _reconcile_intents(client)
         state = await public_execution.portfolio_state()

@@ -41,7 +41,7 @@ def test_holding_score_requires_portfolio_review_before_rebalance():
 
 
 def test_holding_score_labels_only_genuinely_weak_replacement_candidate():
-    position = {"ticker": "WEAK", "market_value": 30, "unrealized_pct": -0.06, "lastPrice": 10}
+    position = {"ticker": "WEAK", "market_value": 30, "unrealized_pct": -6.0, "lastPrice": 10}
     score = pm_portfolio._holding_score(
         position,
         {"ticker": "WEAK", "pm_score": 30, "case_score": 30},

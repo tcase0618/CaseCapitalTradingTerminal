@@ -30,7 +30,10 @@ def _pct(value: Any) -> float | None:
     result = _num(value, float("nan"))
     if result != result:
         return None
-    return result * 100.0 if -1.0 < result < 1.0 and result != 0 else result
+    # Public's normalized portfolio adapter already returns percentage units.
+    # Do not infer fractions here: a small real gain such as 0.28% must remain
+    # 0.28 rather than becoming 28%.
+    return result
 
 
 def _ticker(row: dict[str, Any]) -> str:
@@ -105,12 +108,19 @@ def _holding_score(position: dict[str, Any], recommendation: dict[str, Any] | No
     ticker = _ticker(position)
     market_value = _num(position.get("market_value") or position.get("marketValue"))
     pnl = _pct(position.get("unrealized_pct") if position.get("unrealized_pct") is not None else position.get("unrealizedPLPercent"))
+    has_current_recommendation = recommendation is not None
     pm_score = _clamp(_num((recommendation or {}).get("pm_score"), 45.0)) if recommendation else 45.0
     path_quality = _clamp(50.0 + (pnl or 0.0) * 3.0) if pnl is not None else 45.0
     stop = _holding_stop(position, trade)
-    price = _num(position.get("price") or position.get("last_price") or position.get("lastPrice"))
+    price = _num(position.get("current_price") or position.get("price") or position.get("last_price") or position.get("lastPrice"))
+    broker_protected = bool(
+        (trade or {}).get("protective_order_id")
+        and str((trade or {}).get("protective_order_status") or "").upper() == "SUBMITTED"
+    )
     if stop <= 0 or price <= 0:
         risk_state, risk_quality = "UNVERIFIED", 25.0
+    elif not broker_protected:
+        risk_state, risk_quality = "UNPROTECTED", 15.0
     else:
         stop_distance = ((price - stop) / price) * 100.0
         risk_state, risk_quality = ("PROTECTED", _clamp(60.0 + stop_distance * 4.0))
@@ -123,8 +133,12 @@ def _holding_score(position: dict[str, Any], recommendation: dict[str, Any] | No
     overall = _clamp(pm_score * 0.35 + path_quality * 0.20 + risk_quality * 0.20 + fit_quality * 0.10 + opportunity_quality * 0.15)
     state = "HOLD"
     reasons: list[str] = []
+    if not has_current_recommendation:
+        reasons.append("holding has no fresh PM recommendation; default score is informational only")
     if risk_state == "UNVERIFIED":
         reasons.append("stop coverage is unavailable in the portfolio record")
+    elif risk_state == "UNPROTECTED":
+        reasons.append("broker-side protective order is not confirmed; monitored emergency exit remains fallback only")
     if pnl is not None and pnl <= -7.0 and pm_score <= 35.0:
         state, reasons = "EXIT_REVIEW", reasons + ["deep loss and weak current PM thesis"]
     elif pnl is not None and pnl <= -3.0 and (edge_gap or 0.0) >= 18.0 and overall < 55.0:

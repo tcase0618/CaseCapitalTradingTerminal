@@ -93,6 +93,21 @@ def _stop_price(row: dict[str, Any]) -> float:
     return _num(row.get("stop") or row.get("stop_price"))
 
 
+def _public_position_mark(raw: dict[str, Any]) -> tuple[float, float, Any]:
+    """Normalize Public's documented Portfolio v2 position mark exactly once.
+
+    Public returns nested ``lastPrice.lastPrice`` and
+    ``instrumentGain.gainPercentage`` fields.  The canonical terminal value is
+    a percentage (for example ``-2.56`` means -2.56%), never a fraction.
+    """
+    last = raw.get("lastPrice") or raw.get("last_price") or {}
+    gain = raw.get("instrumentGain") or raw.get("instrument_gain") or {}
+    price = _num(last.get("lastPrice") or last.get("value") if isinstance(last, dict) else last)
+    pnl = _num(gain.get("gainPercentage") or gain.get("percentage") if isinstance(gain, dict) else None)
+    timestamp = (last.get("timestamp") or last.get("updatedAt")) if isinstance(last, dict) else None
+    return price, pnl, timestamp
+
+
 def _public_session_now(now: datetime | None = None) -> str:
     """Return Public's legal equity session for the current ET clock."""
     now_et = (now or datetime.now(timezone.utc)).astimezone(ET)
@@ -191,14 +206,15 @@ async def portfolio_state() -> dict[str, Any]:
         ticker = _symbol(raw)
         if not ticker:
             continue
-        last_price = raw.get("lastPrice") or raw.get("last_price") or {}
-        gain = raw.get("instrumentGain") or raw.get("instrument_gain") or {}
+        current_price, unrealized_pct, price_timestamp = _public_position_mark(raw)
         positions.append({
             "ticker": ticker,
             "quantity": _qty(raw),
             "market_value": _num(raw.get("currentValue") or raw.get("current_value")),
-            "current_price": _num(last_price.get("value") if isinstance(last_price, dict) else last_price),
-            "unrealized_pct": _num(gain.get("percentage") if isinstance(gain, dict) else None),
+            "current_price": current_price,
+            "unrealized_pct": unrealized_pct,
+            "return_units": "percent",
+            "price_timestamp": price_timestamp,
             "broker_base": BROKER_BASE,
         })
     total_value = _num(payload.get("totalAccountValue") or payload.get("total_account_value"))
@@ -353,7 +369,39 @@ async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:
         return {"ok": False, "reason": "public_reconciliation_timestamp_invalid"}
     if age > max_age_seconds:
         return {"ok": False, "reason": "public_reconciliation_stale", "age_seconds": age}
-    return {"ok": True, "age_seconds": age, "last_success_at": checked_at}
+    coverage = await protection_coverage()
+    if coverage["unprotected_open"]:
+        return {
+            "ok": False,
+            "reason": "public_protection_coverage_incomplete",
+            "age_seconds": age,
+            "last_success_at": checked_at,
+            **coverage,
+        }
+    return {"ok": True, "age_seconds": age, "last_success_at": checked_at, **coverage}
+
+
+async def protection_coverage() -> dict[str, Any]:
+    """Report actual broker protection; a local stop value is not coverage."""
+    rows = await get_db().tf_trades.find(
+        {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": {"$in": ["FILLED", "PARTIALLY_FILLED"]}},
+        {"_id": 0, "ticker": 1, "protective_order_id": 1, "protective_order_status": 1, "protective_order_error": 1},
+    ).to_list(500)
+    unprotected = [
+        {
+            "ticker": _symbol(row),
+            "status": str(row.get("protective_order_status") or "MISSING").upper(),
+            "reason": str(row.get("protective_order_error") or "broker_protective_order_missing")[:220],
+        }
+        for row in rows
+        if not (row.get("protective_order_id") and str(row.get("protective_order_status") or "").upper() == "SUBMITTED")
+    ]
+    return {
+        "filled_open": len(rows),
+        "protected_open": len(rows) - len(unprotected),
+        "unprotected_open": len(unprotected),
+        "unprotected": unprotected[:25],
+    }
 
 
 async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | None = None) -> dict[str, Any]:
@@ -492,7 +540,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if not order_shape:
                 rejected.append({"ticker": ticker, "reason": shape_reason, "allocation_usd": amount, "limit_price": price})
                 continue
-            client_id = execution_safety.stable_client_order_id("public_pm", cycle_id or "", ticker, amount, round(price, 4), prefix="public")
+            client_id = execution_safety.stable_client_order_id("public_pm", cycle_id or "", ticker, amount, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity", client_order_id=client_id, symbol=ticker, side="buy", metadata={"amount": amount, "price": price, "cycle_id": cycle_id})
             if not claim.get("ok"):
                 rejected.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_execution_intent"})
@@ -626,6 +674,8 @@ async def reconcile() -> dict[str, Any]:
                             )
                             protective_order = protective.get("order") or {}
                             protective_id = protective_order.get("orderId") or protective_order.get("id")
+                            if not protective_id:
+                                raise RuntimeError("Public protective order response missing order id")
                             update.update({"protective_order_id": protective_id, "protective_order_qty": filled_qty, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
                             update["protective_order_type"] = "STOP_LIMIT"
                             update["protective_order_gap_risk"] = "STOP_LIMIT_MAY_NOT_FILL_BELOW_LIMIT"
@@ -752,14 +802,20 @@ async def reconcile() -> dict[str, Any]:
 
 
 async def process_protective_exits() -> dict[str, Any]:
-    """Submit a Public stop-limit when a reconciled position breaches its stop."""
+    """Emergency fresh-quote limit exit after a monitored stop breach.
+
+    Public has rejected resting stop orders for the configured routing profile.
+    This is intentionally not called broker-side stop protection: it is a
+    five-minute monitored fallback used only after the PM stop has breached.
+    """
     if not enabled():
         return {"skipped": True, "reason": "public_live_equity_disabled"}
     db = get_db()
     rows = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "FILLED", "qty_remaining": {"$gt": 0}}, {"_id": 0}).to_list(500)
     if not rows:
-        return {"skipped": False, "checked": 0, "submitted": []}
+        return {"skipped": False, "ok": True, "checked": 0, "submitted": [], "errors": []}
     submitted: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         quote_rows = _quotes(await client.quotes([_symbol(row) for row in rows]))
         by_symbol = {_symbol(row): row for row in quote_rows}
@@ -777,13 +833,18 @@ async def process_protective_exits() -> dict[str, Any]:
             if not claim.get("ok"):
                 continue
             try:
+                # A conditional order is rejected by the current broker
+                # routing profile. Submit a plainly labelled, fresh-quote
+                # limit close instead; it can still remain unfilled, which is
+                # why the position stays reconciled until broker confirmation.
+                exit_limit = round(current * 0.995, 4 if current < 1 else 2)
                 result = await client.submit_equity_order(
                     symbol=ticker,
                     side="SELL",
                     quantity=quantity,
-                    stop_price=stop,
-                    limit_price=round(stop * 0.99, 4 if stop < 1 else 2),
-                    **_protective_order_terms(),
+                    limit_price=exit_limit,
+                    time_in_force="DAY",
+                    session=_public_session_now(),
                     client_order_id=client_id,
                 )
                 order = result.get("order") or {}
@@ -792,13 +853,14 @@ async def process_protective_exits() -> dict[str, Any]:
                     raise RuntimeError("Public protective order response missing order id")
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                    {"$set": {"protective_order_id": order_id, "protective_order_qty": quantity, "protective_order_status": "SUBMITTED", "protective_order_preflight": result.get("preflight")}},
+                    {"$set": {"emergency_exit_order_id": order_id, "emergency_exit_order_qty": quantity, "emergency_exit_status": "SUBMITTED", "emergency_exit_limit": exit_limit, "emergency_exit_preflight": result.get("preflight")}},
                 )
-                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "order_type": "STOP_LIMIT", "gap_risk": "STOP_LIMIT_MAY_NOT_FILL_BELOW_LIMIT"})
+                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "limit_price": exit_limit, "order_type": "EMERGENCY_LIMIT_EXIT"})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id})
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
-    return {"skipped": False, "checked": len(rows), "submitted": submitted}
+                errors.append({"ticker": ticker, "reason": f"emergency_exit_submit_failed:{exc.__class__.__name__}"})
+    return {"skipped": False, "ok": not errors, "checked": len(rows), "submitted": submitted, "errors": errors}
 
 
 async def analytics(limit: int = 500) -> dict[str, Any]:
@@ -819,7 +881,7 @@ async def analytics(limit: int = 500) -> dict[str, Any]:
             slippage_bps.append(round(((fill_price - limit_price) / limit_price) * 10000, 2))
         if str(row.get("fill_status") or "").upper() in {"FILLED", "PARTIALLY_FILLED"} or _qty(row) > 0:
             filled += 1
-            if row.get("protective_order_id") or row.get("protective_order_status") == "SUBMITTED":
+            if row.get("protective_order_id") and row.get("protective_order_status") == "SUBMITTED":
                 protected += 1
     return {
         "ok": True,
