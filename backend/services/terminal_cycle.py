@@ -46,7 +46,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             stage_times[label] = round((_now() - t0).total_seconds(), 2)
 
     await log_activity(f"Full terminal scan started ({triggered_by})", "info")
-    from . import candidate_ledger, lottery, options_desk, pharma, portfolio_manager, scanner, strategy_screeners
+    from . import candidate_ledger, lottery, options_desk, pharma, pm_brain, portfolio_manager, scanner, strategy_screeners
 
     core_task = asyncio.create_task(
         timed(
@@ -124,6 +124,22 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             lottery_result=lottery_result,
         ),
     )
+    # PM memory is written from this frozen decision packet before execution.
+    # It records the rationale of both traded and untraded decisions without
+    # granting new execution authority.
+    try:
+        pm_brain_result = await timed(
+            "pm_brain_memory",
+            pm_brain.record_pm_cycle(
+                pm_payload,
+                cycle_id=str(scan["cycle_id"]),
+                observed_at=pm_payload.get("generated_at") or scan.get("finished_at"),
+            ),
+        )
+    except Exception as exc:
+        pm_brain_result = {"ok": False, "reason": f"pm_memory_persist_failed:{exc.__class__.__name__}"}
+        await log_activity("PM brain memory persistence failed", "warning", pm_brain_result)
+    pm_payload["pm_brain"] = pm_brain_result
     for pm in pm_payload.get("recommendations") or []:
         ticker = str(pm.get("ticker") or "").upper()
         if ticker not in lottery_tickers:

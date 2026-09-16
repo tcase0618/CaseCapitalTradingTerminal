@@ -14,6 +14,7 @@ export default function TickerPage() {
   const [flow, setFlow] = useState(null);
   const [freeData, setFreeData] = useState(null);
   const [kronos, setKronos] = useState(null);
+  const [pmDossier, setPmDossier] = useState(null);
 
   useEffect(() => {
     if (!ticker) return;
@@ -22,6 +23,7 @@ export default function TickerPage() {
     axios.get(`${API}/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
     axios.get(`${API}/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => setFreeData(null));
     axios.get(`${API}/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(e => setKronos({ error: e.message }));
+    axios.get(`${API}/pm/company/${ticker}?limit=12`).then(r => setPmDossier(r.data)).catch(() => setPmDossier(null));
   }, [ticker]);
 
   if (!data) return (
@@ -64,6 +66,7 @@ export default function TickerPage() {
       <TradingViewMiniChart ticker={t} companyName={companyName} />
 
       <CompanyProfileCard profile={companyProfile} />
+      <PmDossierCard dossier={pmDossier} />
 
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
         <Stat label="SIGNAL SCORE" value={`${data.signal_score || 0}/10`} color={accent} />
@@ -217,6 +220,52 @@ export default function TickerPage() {
         </Link>
       </div>
     </CrtShell>
+  );
+}
+
+function PmDossierCard({ dossier }) {
+  const profile = dossier?.profile;
+  const decisions = dossier?.decisions || [];
+  const action = profile?.latest_action || "UNREVIEWED";
+  const actionColor = action === "ACCUMULATE" ? "#4ade80"
+    : action === "STARTER" ? "#2dd4bf"
+    : action === "EXIT" || action === "REJECT" ? "#f87171"
+    : action === "TRIM" ? "#fb923c" : accent;
+
+  return (
+    <Card title="PM DOSSIER // DECISION MEMORY">
+      {!dossier ? (
+        <div style={{ color: muted, fontSize: 13 }}>Loading PM decision history...</div>
+      ) : !profile ? (
+        <div style={{ color: muted, fontSize: 13 }}>No PM dossier exists yet. It will be created by the next full terminal cycle.</div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 18, alignItems: "start" }}>
+            <div style={{ borderRight: hairline, paddingRight: 16 }}>
+              <div style={{ color: actionColor, fontSize: 18, fontWeight: 900, letterSpacing: "0.1em" }}>{action}</div>
+              <div style={{ color: dim, fontSize: 10, letterSpacing: "0.12em", marginTop: 8 }}>PM SCORE</div>
+              <div style={{ color: "#fff", fontFamily: "Courier New", fontWeight: 800, fontSize: 20 }}>{Number(profile.latest_pm_score || 0).toFixed(1)}</div>
+              <div style={{ color: dim, fontSize: 10, marginTop: 8 }}>{profile.updated_at ? `UPDATED ${String(profile.updated_at).replace("T", " ").slice(0, 16)} UTC` : ""}</div>
+            </div>
+            <div>
+              <div style={{ color: "#e5e7eb", fontSize: 13, lineHeight: 1.7 }}>{profile.latest_synopsis}</div>
+              {!!profile.latest_change_reasons?.length && <div style={{ marginTop: 10, color: labelLight, fontSize: 12 }}>WHY: {profile.latest_change_reasons.join(" | ")}</div>}
+              {!!profile.latest_strategy_lanes?.length && <div style={{ marginTop: 8, color: accent, fontSize: 11, letterSpacing: "0.08em" }}>LANES: {profile.latest_strategy_lanes.join(" · ")}</div>}
+            </div>
+          </div>
+          <div style={{ marginTop: 16, paddingTop: 12, borderTop: hairline }}>
+            <div style={{ fontSize: 10, color: dim, letterSpacing: "0.14em", marginBottom: 8 }}>// DATED PM DECISIONS</div>
+            {decisions.slice(0, 6).map((decision, index) => (
+              <div key={decision.decision_id || index} style={{ display: "grid", gridTemplateColumns: "132px 112px 1fr", gap: 10, borderTop: index ? hairline : "none", padding: "8px 0", fontSize: 11 }}>
+                <span style={{ color: dim }}>{decision.decision_at ? String(decision.decision_at).replace("T", " ").slice(0, 16) : "—"}</span>
+                <span style={{ color: decision.action === "ACCUMULATE" ? "#4ade80" : decision.action === "REJECT" ? "#f87171" : accent, fontWeight: 800 }}>{decision.action || "WATCH"} {decision.pm_score != null ? Number(decision.pm_score).toFixed(1) : ""}</span>
+                <span style={{ color: labelLight }}>{(decision.reason_codes || []).join("; ") || "PM state recorded"}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

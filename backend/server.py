@@ -1497,6 +1497,13 @@ async def ticker_detail(ticker: str):
     return result
 
 
+@api.get("/pm/company/{ticker}")
+async def pm_company_dossier(ticker: str, limit: int = 20):
+    """Read-only PM memory: latest company state and dated decision history."""
+    from services import pm_brain
+    return await pm_brain.company_dossier(ticker, limit=limit)
+
+
 @api.get("/fy/status")
 async def fy_status():
     from services.time_target import fiscal_year_multiplier_active, fy_days_remaining
