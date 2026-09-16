@@ -24,6 +24,17 @@ def enabled() -> bool:
     return bool(cfg.enabled and cfg.account_id and cfg.access_token and cfg.live_equity_enabled and not cfg.research_only)
 
 
+def monitored_exit_override_enabled() -> bool:
+    """Allow entries only when every unprotected fill has known broker routing limits.
+
+    This does not describe a broker-side stop as present.  It permits the
+    operator to use the terminal's 24/5 five-minute protective-exit monitor
+    when Public rejects stop orders solely due to its configured routing.
+    Unknown, malformed, or failed protection records remain fail-closed.
+    """
+    return os.getenv("PUBLIC_ALLOW_MONITORED_EXIT_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _num(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -377,6 +388,15 @@ async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:
         return {"ok": False, "reason": "public_reconciliation_stale", "age_seconds": age}
     coverage = await protection_coverage()
     if coverage["unprotected_open"]:
+        if coverage["unresolved_unprotected_open"] == 0 and monitored_exit_override_enabled():
+            return {
+                "ok": True,
+                "warning": "public_monitored_exit_only_override",
+                "monitored_exit_override": True,
+                "age_seconds": age,
+                "last_success_at": checked_at,
+                **coverage,
+            }
         return {
             "ok": False,
             "reason": "public_protection_coverage_incomplete",
@@ -402,10 +422,13 @@ async def protection_coverage() -> dict[str, Any]:
         for row in rows
         if not (row.get("protective_order_id") and str(row.get("protective_order_status") or "").upper() == "SUBMITTED")
     ]
+    monitored_only = [row for row in unprotected if row["status"] == "MONITORED_EXIT_ONLY"]
     return {
         "filled_open": len(rows),
         "protected_open": len(rows) - len(unprotected),
         "unprotected_open": len(unprotected),
+        "monitored_exit_only_open": len(monitored_only),
+        "unresolved_unprotected_open": len(unprotected) - len(monitored_only),
         "unprotected": unprotected[:25],
     }
 

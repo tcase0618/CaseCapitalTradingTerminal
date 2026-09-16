@@ -155,6 +155,58 @@ async def test_public_reconciliation_health_fails_closed_without_success_marker(
 
 
 @pytest.mark.asyncio
+async def test_public_reconciliation_health_allows_explicit_monitored_exit_override(monkeypatch):
+    class FakeCollection:
+        async def find_one(self, *_args, **_kwargs):
+            return {"last_success_at": datetime.now(timezone.utc).isoformat()}
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(bot_state=FakeCollection()))
+
+    async def monitored_coverage():
+        return {
+            "filled_open": 1,
+            "protected_open": 0,
+            "unprotected_open": 1,
+            "monitored_exit_only_open": 1,
+            "unresolved_unprotected_open": 0,
+            "unprotected": [{"ticker": "AAPL", "status": "MONITORED_EXIT_ONLY"}],
+        }
+
+    monkeypatch.setattr(public_execution, "protection_coverage", monitored_coverage)
+    monkeypatch.setenv("PUBLIC_ALLOW_MONITORED_EXIT_ONLY", "true")
+
+    result = await public_execution.reconciliation_health()
+    assert result["ok"] is True
+    assert result["monitored_exit_override"] is True
+
+
+@pytest.mark.asyncio
+async def test_public_reconciliation_health_keeps_unknown_protection_fail_closed(monkeypatch):
+    class FakeCollection:
+        async def find_one(self, *_args, **_kwargs):
+            return {"last_success_at": datetime.now(timezone.utc).isoformat()}
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(bot_state=FakeCollection()))
+
+    async def unknown_coverage():
+        return {
+            "filled_open": 1,
+            "protected_open": 0,
+            "unprotected_open": 1,
+            "monitored_exit_only_open": 0,
+            "unresolved_unprotected_open": 1,
+            "unprotected": [{"ticker": "AAPL", "status": "MISSING"}],
+        }
+
+    monkeypatch.setattr(public_execution, "protection_coverage", unknown_coverage)
+    monkeypatch.setenv("PUBLIC_ALLOW_MONITORED_EXIT_ONLY", "true")
+
+    result = await public_execution.reconciliation_health()
+    assert result["ok"] is False
+    assert result["reason"] == "public_protection_coverage_incomplete"
+
+
+@pytest.mark.asyncio
 async def test_execution_freshness_refreshes_approved_rows_before_execution(monkeypatch):
     class FakeClient:
         async def __aenter__(self):
