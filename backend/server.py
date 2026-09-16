@@ -1504,6 +1504,35 @@ async def pm_company_dossier(ticker: str, limit: int = 20):
     return await pm_brain.company_dossier(ticker, limit=limit)
 
 
+@api.get("/pm/portfolio/latest")
+async def pm_portfolio_latest():
+    """Latest advisory-only five-minute PM holding scorecard."""
+    from services import pm_portfolio
+    return await pm_portfolio.latest_portfolio_monitor() or {"ok": False, "reason": "portfolio_scorecard_unavailable"}
+
+
+@api.get("/pm/policy/latest")
+async def pm_policy_latest():
+    """Shadow learner status. It has no execution authority."""
+    from services import pm_policy
+    return await pm_policy.latest_status() or {"ok": False, "reason": "pm_policy_scorecard_unavailable", "mode": "SHADOW_ONLY"}
+
+
+@api.post("/pm/prediction-markets/bind")
+async def pm_prediction_market_bind(payload: dict):
+    """Add an operator-verified external-market research binding."""
+    from services import prediction_markets
+    return await prediction_markets.bind_market(
+        ticker=payload.get("ticker"),
+        market_id=payload.get("market_id"),
+        question=payload.get("question"),
+        relation=payload.get("relation"),
+        token_id=payload.get("token_id"),
+        mapping_confidence=payload.get("mapping_confidence", 0.0),
+        verified_by="operator",
+    )
+
+
 @api.get("/fy/status")
 async def fy_status():
     from services.time_target import fiscal_year_multiplier_active, fy_days_remaining

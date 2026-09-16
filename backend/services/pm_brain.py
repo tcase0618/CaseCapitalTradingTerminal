@@ -216,11 +216,19 @@ async def company_dossier(ticker: str, *, limit: int = 20) -> dict[str, Any]:
     profile = await db.pm_company_profiles.find_one({"ticker": symbol}, {"_id": 0}) or {}
     decisions = await db.pm_decision_ledger.find({"ticker": symbol}, {"_id": 0}).sort("decision_at", -1).to_list(max(1, min(limit, 100)))
     observations = await db.pm_company_observations.find({"ticker": symbol}, {"_id": 0}).sort("observed_at", -1).to_list(max(1, min(limit, 100)))
+    # External market evidence remains a separately labelled research input.
+    # A missing adapter or DB row must never make a company dossier unavailable.
+    try:
+        from . import prediction_markets
+        prediction_evidence = await prediction_markets.ticker_evidence(symbol, limit=limit)
+    except Exception:
+        prediction_evidence = []
     return {
         "ok": bool(profile or decisions),
         "ticker": symbol,
         "profile": profile or None,
         "decisions": decisions,
         "observations": observations,
+        "prediction_markets": prediction_evidence,
         "data_role": "pm_memory_and_decision_audit",
     }

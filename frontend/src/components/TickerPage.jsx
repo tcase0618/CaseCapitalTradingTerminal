@@ -245,6 +245,12 @@ function PmDossierCard({ dossier }) {
               <div style={{ color: actionColor, fontSize: 18, fontWeight: 900, letterSpacing: "0.1em" }}>{action}</div>
               <div style={{ color: dim, fontSize: 10, letterSpacing: "0.12em", marginTop: 8 }}>PM SCORE</div>
               <div style={{ color: "#fff", fontFamily: "Courier New", fontWeight: 800, fontSize: 20 }}>{Number(profile.latest_pm_score || 0).toFixed(1)}</div>
+              {profile.latest_portfolio_score != null && <>
+                <div style={{ color: dim, fontSize: 10, letterSpacing: "0.12em", marginTop: 8 }}>PORTFOLIO SCORE</div>
+                <div style={{ color: profile.latest_portfolio_state === "HOLD" ? "#4ade80" : accent, fontFamily: "Courier New", fontWeight: 800, fontSize: 16 }}>
+                  {Number(profile.latest_portfolio_score).toFixed(1)} {profile.latest_portfolio_state || ""}
+                </div>
+              </>}
               <div style={{ color: dim, fontSize: 10, marginTop: 8 }}>{profile.updated_at ? `UPDATED ${String(profile.updated_at).replace("T", " ").slice(0, 16)} UTC` : ""}</div>
             </div>
             <div>
@@ -263,6 +269,17 @@ function PmDossierCard({ dossier }) {
               </div>
             ))}
           </div>
+          {!!dossier.prediction_markets?.length && <div style={{ marginTop: 16, paddingTop: 12, borderTop: hairline }}>
+            <div style={{ fontSize: 10, color: dim, letterSpacing: "0.14em", marginBottom: 8 }}>// EXTERNAL PREDICTION MARKETS · RESEARCH ONLY</div>
+            {dossier.prediction_markets.slice(0, 3).map((item, index) => {
+              const binding = item.binding || {};
+              const observation = item.latest_observation || {};
+              return <div key={binding.binding_id || index} style={{ borderTop: index ? hairline : "none", padding: "8px 0", fontSize: 11 }}>
+                <div style={{ color: labelLight }}>{binding.question}</div>
+                <div style={{ color: dim, marginTop: 4 }}>{binding.relation} · PRICE {observation.outcome_price ?? "UNAVAILABLE"} · RESEARCH ONLY</div>
+              </div>;
+            })}
+          </div>}
         </>
       )}
     </Card>

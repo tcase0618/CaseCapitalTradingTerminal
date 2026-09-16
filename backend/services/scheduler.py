@@ -580,6 +580,7 @@ def start_scheduler():
     async def _position_monitor():
         failures: list[dict[str, str]] = []
         rebalance_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        portfolio_score_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
             from . import options_desk, pm_ratchet, tail_hunter, trade_floor, trade_floor_phases
             try:
@@ -602,7 +603,10 @@ def start_scheduler():
                     # reconciliation and stop maintenance. A replacement buy
                     # cannot be released until its preceding sale is observed
                     # as filled by the broker on a later monitor tick.
-                    from . import pm_rebalance
+                    from . import pm_portfolio, pm_rebalance
+                    portfolio_score_status = await pm_portfolio.run_portfolio_monitor()
+                    if not portfolio_score_status.get("ok") and not portfolio_score_status.get("skipped"):
+                        failures.append({"stage": "pm_portfolio_scores", "reason": portfolio_score_status.get("reason") or "score_persist_failed"})
                     rebalance_status = await pm_rebalance.run_rebalance_cycle()
                     rebalance_errors = rebalance_status.get("errors") or (rebalance_status.get("reconciled") or {}).get("errors")
                     if not rebalance_status.get("skipped") and rebalance_errors:
@@ -630,7 +634,7 @@ def start_scheduler():
         except Exception as e:
             failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
             logger.warning("position monitor: %s", e)
-        return {"ok": not failures, "failures": failures, "pm_rebalance": rebalance_status}
+        return {"ok": not failures, "failures": failures, "pm_rebalance": rebalance_status, "pm_portfolio_scores": portfolio_score_status}
 
     async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
         if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
@@ -650,6 +654,7 @@ def start_scheduler():
             result = await _position_monitor()
             management["legacy_position_monitor"] = result
             management["pm_rebalance"] = result.get("pm_rebalance") or {"skipped": True, "reason": "not_run"}
+            management["pm_portfolio_scores"] = result.get("pm_portfolio_scores") or {"skipped": True, "reason": "not_run"}
             if not result.get("ok"):
                 await _send_position_monitor_failure(result.get("failures") or [])
         except Exception as e:
@@ -908,6 +913,43 @@ def start_scheduler():
         _lottery_learning_job,
         CronTrigger(day_of_week="sun", hour=2, minute=20, timezone=ET),
         id="lottery_learning_cycle",
+        replace_existing=True,
+    )
+    # PM policy grading is deliberately shadow-only. It writes a scorecard
+    # from dated PM decisions but never changes thresholds or execution.
+    async def _pm_policy_learning_job():
+        try:
+            from . import pm_policy
+            res = await pm_policy.run_shadow_learning(horizon_days=1)
+            await log_activity(
+                f"PM shadow learning: {res.get('resolved_outcomes', 0)} resolved decisions",
+                "info",
+                {"mode": res.get("mode"), "unavailable_prices": res.get("unavailable_prices", 0)},
+            )
+        except Exception as e:
+            logger.exception("PM shadow learning failed: %s", e)
+
+    _scheduler.add_job(
+        _pm_policy_learning_job,
+        CronTrigger(day_of_week="sun", hour=2, minute=40, timezone=ET),
+        id="pm_policy_shadow_learning",
+        replace_existing=True,
+    )
+    # External prediction-market evidence is opt-in and research-only.  This
+    # job refreshes only explicitly verified bindings and cannot place trades.
+    async def _prediction_market_refresh():
+        try:
+            from . import prediction_markets
+            result = await prediction_markets.refresh_bound_markets()
+            if not result.get("skipped"):
+                await log_activity("Prediction-market evidence refreshed", "info", result)
+        except Exception as e:
+            logger.warning("prediction-market refresh failed: %s", e)
+
+    _scheduler.add_job(
+        _prediction_market_refresh,
+        CronTrigger(minute=15, timezone=ET),
+        id="prediction_market_research_refresh",
         replace_existing=True,
     )
     async def _truth_review_weekly_job():

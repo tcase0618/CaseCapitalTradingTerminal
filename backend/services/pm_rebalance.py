@@ -74,9 +74,10 @@ def _eligible_candidate(row: dict[str, Any], held: set[str]) -> bool:
     )
 
 
-def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, Any]]) -> dict[str, Any]:
+def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, Any]], portfolio_scores: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Create a deterministic, read-only replacement plan from one PM cycle."""
     recommendations = list(pm_payload.get("recommendations") or [])
+    portfolio_scores = portfolio_scores or {}
     held = {_ticker(position) for position in positions if _ticker(position)}
     candidates = [row for row in recommendations if _eligible_candidate(row, held)]
     candidates.sort(key=lambda row: (_candidate_score(row), _num(row.get("pm_score"))), reverse=True)
@@ -99,6 +100,7 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
         pnl = portfolio_manager._pct(position.get("unrealized_pct"))
         holding_edge = portfolio_manager._holding_edge(position, incumbent)
         protected_winner = bool(pnl is not None and pnl >= 8 and holding_edge >= 50)
+        scorecard = portfolio_scores.get(ticker) or {}
         review = {
             "ticker": ticker,
             "action": "HOLD",
@@ -108,6 +110,8 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
             "market_value": _num(position.get("market_value")),
             "quantity": _num(position.get("quantity")),
             "protected_winner": protected_winner,
+            "portfolio_score": scorecard.get("portfolio_score"),
+            "portfolio_state": scorecard.get("recommended_state"),
         }
         if not best:
             reviews.append(review)
@@ -118,6 +122,8 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
             review.update({"reason": "protected winner retained unless independently invalidated", "replacement": _ticker(best), "edge_gap": gap})
         elif pnl is None:
             review.update({"reason": "unrealized performance unavailable; no discretionary sale", "replacement": _ticker(best), "edge_gap": gap})
+        elif scorecard and scorecard.get("recommended_state") not in {"EXIT_REVIEW", "REPLACE_REVIEW"}:
+            review.update({"reason": "portfolio-quality review retains holding; no automatic rotation", "replacement": _ticker(best), "edge_gap": gap})
         elif pnl <= exit_loss and holding_edge < exit_edge_ceiling and gap >= edge_gap_required:
             review.update({"action": "EXIT_AND_REPLACE", "reason": "weak loser fails PM edge threshold and stronger replacement clears edge gap", "replacement": _ticker(best), "edge_gap": gap})
             actions.append({**review, "candidate": best})
@@ -140,6 +146,7 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
             "minimum_edge_gap": edge_gap_required,
             "protected_winners": "retain",
             "replacement_sequence": "sell fill confirmed before replacement buy",
+            "portfolio_score_gate": "when present, only EXIT_REVIEW or REPLACE_REVIEW may rotate",
         },
         "best_candidate": _ticker(best) if best else None,
         "candidate_count": len(candidates),
@@ -246,7 +253,9 @@ async def run_rebalance_cycle() -> dict[str, Any]:
         state = await public_execution.portfolio_state()
         if not state.get("ok"):
             return {"skipped": True, "reason": state.get("reason") or "public_portfolio_unavailable", "reconciled": reconciled}
-        plan = build_rebalance_plan(pm_doc, state.get("positions") or [])
+        latest_scores = await db.bot_state.find_one({"_id": "pm_portfolio_latest"}, {"_id": 0}) or {}
+        score_map = {str(row.get("ticker") or "").upper(): row for row in latest_scores.get("holdings") or []}
+        plan = build_rebalance_plan(pm_doc, state.get("positions") or [], score_map)
         protected = await _open_protective_tickers()
         submitted: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
