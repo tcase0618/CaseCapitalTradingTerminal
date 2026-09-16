@@ -93,6 +93,12 @@ def _stop_price(row: dict[str, Any]) -> float:
     return _num(row.get("stop") or row.get("stop_price"))
 
 
+def _routing_rejects_stop(trade: dict[str, Any]) -> bool:
+    """Recognize Public's documented routing rejection without retry storms."""
+    error = str(trade.get("protective_order_error") or "").lower()
+    return "not allowed on lit exchanges" in error or '"code":145' in error.replace(" ", "")
+
+
 def _public_position_mark(raw: dict[str, Any]) -> tuple[float, float, Any]:
     """Normalize Public's documented Portfolio v2 position mark exactly once.
 
@@ -390,7 +396,7 @@ async def protection_coverage() -> dict[str, Any]:
     unprotected = [
         {
             "ticker": _symbol(row),
-            "status": str(row.get("protective_order_status") or "MISSING").upper(),
+            "status": "MONITORED_EXIT_ONLY" if _routing_rejects_stop(row) else str(row.get("protective_order_status") or "MISSING").upper(),
             "reason": str(row.get("protective_order_error") or "broker_protective_order_missing")[:220],
         }
         for row in rows
@@ -643,6 +649,13 @@ async def reconcile() -> dict[str, Any]:
                 needs_protective = filled_qty > 0 and stop > 0 and (
                     not protective_id or abs(protective_qty - filled_qty) > 1e-8
                 )
+                if filled_qty > 0 and stop > 0 and _routing_rejects_stop(trade):
+                    update.update({
+                        "protection_state": "MONITORED_EXIT_ONLY",
+                        "protective_order_status": "ROUTING_UNSUPPORTED",
+                        "protection_note": "Public routing rejected stop orders; fresh-quote monitor can only submit an emergency limit exit after breach.",
+                    })
+                    needs_protective = False
                 if needs_protective:
                     if protective_id:
                         try:

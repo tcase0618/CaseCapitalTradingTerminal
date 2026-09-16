@@ -137,6 +137,12 @@ def test_quote_timestamp_far_in_the_future_is_not_fresh():
     assert safety.quote_is_fresh({"ts": future}) == (False, None)
 
 
+def test_public_routing_stop_rejection_is_suppressed_not_retried():
+    assert public_execution._routing_rejects_stop({
+        "protective_order_error": "Public API HTTP 400: Order type Stop and Stop limit are not allowed on lit exchanges."
+    })
+
+
 @pytest.mark.asyncio
 async def test_public_reconciliation_health_fails_closed_without_success_marker(monkeypatch):
     class FakeCollection:
