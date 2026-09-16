@@ -81,6 +81,41 @@ def _positions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
+def _orders_by_id(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index Public's portfolio order feed for read-path reconciliation.
+
+    Some Public accounts return UUID order identifiers from placement that the
+    single-order endpoint cannot parse.  Portfolio v2 returns those same
+    orders authoritatively, so use it as a read-only fallback rather than
+    declaring a working broker order unobservable.
+    """
+    rows = payload.get("orders") or []
+    if not isinstance(rows, list):
+        return {}
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        order_id = row.get("orderId") or row.get("id")
+        if order_id:
+            indexed[str(order_id)] = row
+    return indexed
+
+
+async def _get_order_with_portfolio_fallback(
+    client: public_api.PublicAPIClient,
+    order_id: str,
+    portfolio_orders: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    try:
+        return await client.get_order(order_id)
+    except Exception:
+        fallback = portfolio_orders.get(str(order_id))
+        if fallback is not None:
+            return fallback
+        raise
+
+
 def _qty(row: dict[str, Any]) -> float:
     # Trade-floor rows store the broker-confirmed holding in qty_remaining;
     # Public portfolio rows normally expose quantity/shares instead.
@@ -620,6 +655,8 @@ async def reconcile() -> dict[str, Any]:
         return {"skipped": True, "reason": "public_live_equity_disabled"}
     db = get_db()
     async with public_api.PublicAPIClient(use_sdk=False) as client:
+        portfolio_snapshot = await client.portfolio()
+        portfolio_orders = _orders_by_id(portfolio_snapshot)
         # Keep polling filled entries as well as pending entries.  DAY
         # protective stops can expire outside core hours and must be re-armed
         # from the broker-confirmed fill rather than left unprotected.
@@ -643,7 +680,11 @@ async def reconcile() -> dict[str, Any]:
                         # empty body. Confirm the terminal state before closing
                         # the local ledger, otherwise a still-working order can
                         # disappear from reconciliation forever.
-                        current = await client.get_order(str(trade.get("public_order_id")))
+                        current = await _get_order_with_portfolio_fallback(
+                            client,
+                            str(trade.get("public_order_id")),
+                            portfolio_orders,
+                        )
                         confirmed = str((current or {}).get("status") or (current or {}).get("orderStatus") or "").upper()
                         if confirmed not in {"CANCELLED", "CANCELED", "EXPIRED"}:
                             raise RuntimeError(f"Public cancellation not confirmed: {confirmed or cancel_status or 'UNKNOWN'}")
@@ -658,7 +699,11 @@ async def reconcile() -> dict[str, Any]:
                     poll_errors += 1
                 continue
             try:
-                order = await client.get_order(str(trade.get("public_order_id")))
+                order = await _get_order_with_portfolio_fallback(
+                    client,
+                    str(trade.get("public_order_id")),
+                    portfolio_orders,
+                )
             except Exception:
                 poll_errors += 1
                 continue
@@ -749,7 +794,11 @@ async def reconcile() -> dict[str, Any]:
         for trade in protective_trades:
             protective_id = trade.get("protective_order_id")
             try:
-                protective = await client.get_order(str(protective_id))
+                protective = await _get_order_with_portfolio_fallback(
+                    client,
+                    str(protective_id),
+                    portfolio_orders,
+                )
             except Exception:
                 poll_errors += 1
                 continue

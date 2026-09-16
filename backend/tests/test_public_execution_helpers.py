@@ -15,6 +15,33 @@ def test_public_trade_quantity_supports_portfolio_quantity():
     assert public_execution._qty({"quantity": "2.5"}) == 2.5
 
 
+def test_public_portfolio_order_index_uses_public_uuid_order_id():
+    orders = public_execution._orders_by_id({
+        "orders": [
+            {"orderId": "1aadded0-0931-5a4a-9837-1165dfd4f3e7", "status": "NEW"},
+            {"id": "legacy-order", "status": "FILLED"},
+        ]
+    })
+
+    assert orders["1aadded0-0931-5a4a-9837-1165dfd4f3e7"]["status"] == "NEW"
+    assert orders["legacy-order"]["status"] == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_public_order_lookup_falls_back_to_portfolio_order_feed():
+    class Client:
+        async def get_order(self, _order_id):
+            raise RuntimeError("single order endpoint unavailable")
+
+    row = await public_execution._get_order_with_portfolio_fallback(
+        Client(),
+        "uuid-order",
+        {"uuid-order": {"orderId": "uuid-order", "status": "NEW"}},
+    )
+
+    assert row["status"] == "NEW"
+
+
 def test_public_entry_shape_obeys_session_and_notional_constraints():
     core, core_reason = public_execution._entry_order_shape(6.0, 100.0, now=datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
     assert core == {"amount": 6.0, "session": "CORE"}
