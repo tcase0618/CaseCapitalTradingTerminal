@@ -230,8 +230,10 @@ def _research_report(records: list[dict[str, Any]], *, episode_gap_days: int = 5
     episodes = research_replay.episodeize(records, cooldown_days=episode_gap_days)
     qualified = [item for item in episodes if item.get("replayable")]
     return {
-        "method": "frozen PM decisions joined to explicit strategy performance; repeated ticker/strategy sightings collapsed by inactivity gap",
+        "method": "frozen PM decisions joined to a single explicit 7-trading-session outcome; repeated ticker/strategy sightings collapsed by inactivity gap",
+        "outcome_horizon": "7_trading_sessions",
         "limitations": [
+            "seven sessions is a standardized diagnostic, not a substitute for each strategy's intended lifecycle horizon",
             "close-to-close returns do not establish intraday stop, target, ratchet, or limit-order fill order",
             "options strategy results are underlying returns until contract-level outcomes exist",
             "episode reset is a conservative inactivity approximation until explicit lifecycle exits are persisted",
@@ -243,6 +245,17 @@ def _research_report(records: list[dict[str, Any]], *, episode_gap_days: int = 5
         "quality_exclusion_counts": dict(quality_reasons),
         "by_strategy": by_strategy,
     }
+
+
+def _research_return(perf: dict[str, Any] | None) -> tuple[float | None, str | None]:
+    """Use one horizon in comparisons; never mix 7/30/90-day outcomes."""
+    if not perf:
+        return None, None
+    try:
+        value = perf.get("return_7d")
+        return (float(value), "7d") if value is not None else (None, None)
+    except (TypeError, ValueError):
+        return None, None
 
 
 async def run(
@@ -308,14 +321,15 @@ async def run(
                     {"_id": 0, "return_7d": 1, "return_30d": 1, "return_90d": 1},
                 )
             ret, basis = _ret_basis(perf)
+            research_ret, research_basis = _research_return(perf)
             replayable, quality_reasons = research_replay.observation_quality(pm_row)
             research_records.append({
                 "ticker": ticker,
                 "strategy_id": strategy,
                 "observed_at": scan.get("finished_at"),
-                "return_pct": ret,
-                "benchmark_return_pct": await _spy_return(date, basis, spy_cache) if ret is not None else None,
-                "return_basis": basis,
+                "return_pct": research_ret,
+                "benchmark_return_pct": await _spy_return(date, research_basis, spy_cache) if research_ret is not None else None,
+                "return_basis": research_basis,
                 "replayable": replayable,
                 "quality_reasons": quality_reasons,
             })

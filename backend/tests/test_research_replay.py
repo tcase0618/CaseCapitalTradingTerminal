@@ -122,3 +122,8 @@ def test_research_report_keeps_raw_and_episode_metrics_separate():
     assert lane["episode_deduped"]["matured"] == 2
     assert lane["episode_quality_qualified"]["matured"] == 2
     assert report["quality_exclusion_counts"]["proxy_target"] == 1
+
+
+def test_research_return_never_substitutes_a_longer_horizon_for_7d():
+    assert pm_backtest._research_return({"return_30d": 22, "return_7d": None}) == (None, None)
+    assert pm_backtest._research_return({"return_7d": 3.5, "return_30d": 22}) == (3.5, "7d")
