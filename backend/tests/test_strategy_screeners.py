@@ -2,6 +2,7 @@ import asyncio
 
 from services import options_desk, pharma, pm_ratchet, portfolio_manager, pricer, scrapers, strategy_ideology, strategy_screeners, trade_floor, x_factor
 from services import lottery
+from services import strategy_lifecycle
 
 
 def test_options_finviz_screeners_require_optionable_filter():
@@ -220,6 +221,36 @@ def test_lottery_ratchet_has_no_capped_take_profit():
     assert all(level["target_gain_pct"] is None for level in plan["levels"])
     assert levels["active_target"] is None
     assert levels["active_stop"] > 0
+
+
+def test_day2_continuation_gets_tactical_shadow_lifecycle_not_generic_hold():
+    row = strategy_screeners._base_row(
+        row={"ticker": "DAY2", "price": 10, "signals": ["GAP_SURGE", "RVOL", "ROTATION"]},
+        screener_id="lottery_day2_continuation",
+        family="LOTTERY",
+        lane="DAY2_CONTINUATION",
+        score=72,
+    )
+
+    result = portfolio_manager.evaluate_rows([row], equity=1000, mode="BALANCED", regime={"status": "green"})[0]
+
+    plan = result["lifecycle_plan"]
+    assert plan["status"] == "SHADOW_ONLY"
+    assert plan["horizon"] == "TACTICAL_1_TO_2_SESSIONS"
+    assert plan["max_hold_trading_days"] == 2
+    assert "generic_30_day_hold_is_incompatible" in plan["cautions"]
+    assert plan["execution_effect"] == "none"
+
+
+def test_lifecycle_contracts_keep_intraday_red_green_out_of_overnight_assumption():
+    plan = strategy_lifecycle.plan_for(
+        {"source_scan": "lottery_red_green", "scanner_family": "LOTTERY"},
+        action="STARTER",
+        regime={"status": "green"},
+    )
+
+    assert plan["horizon"] == "INTRADAY"
+    assert plan["overnight_allowed"] is False
 
 
 def test_merged_core_lottery_row_uses_lottery_profile():

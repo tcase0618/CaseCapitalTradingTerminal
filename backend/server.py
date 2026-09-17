@@ -2814,6 +2814,13 @@ async def portfolio_manager_options_latest():
     return await options_desk.candidates()
 
 
+@api.get("/portfolio_manager/strategy-contracts/latest")
+async def portfolio_manager_strategy_contracts_latest(limit: int = 200):
+    """Read-only, forward shadow plans; this endpoint has no order authority."""
+    from services import strategy_contracts
+    return await strategy_contracts.latest(limit=max(1, min(int(limit or 200), 500)))
+
+
 @api.get("/portfolio_manager/options/learning/status")
 async def portfolio_manager_options_learning_status(limit: int = 200):
     from services import options_desk
