@@ -139,6 +139,19 @@ def _stop_price(row: dict[str, Any]) -> float:
     return _num(row.get("stop") or row.get("stop_price"))
 
 
+def _lottery_proxy_target_can_execute(row: dict[str, Any]) -> bool:
+    """Authorize a Lottery proxy target only when risk is independently real.
+
+    Strategy lanes may estimate upside for research, but that estimate is not
+    an executable price target.  A PM-approved Lottery order may therefore
+    proceed without a structural target only when it has its own validated
+    stop and an enabled ratchet plan to govern the exit.
+    """
+    attribution = _strategy_attribution(row)
+    ratchet = row.get("ratchet_plan") or {}
+    return bool(attribution.get("strategy_is_lottery") and ratchet.get("enabled"))
+
+
 def _routing_rejects_stop(trade: dict[str, Any]) -> bool:
     """Recognize Public's documented routing rejection without retry storms."""
     error = str(trade.get("protective_order_error") or "").lower()
@@ -524,9 +537,6 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if intended_route == "OPTION" or preferred_route == "OPTION":
                 rejected.append({"ticker": ticker, "reason": "public_equity_route_not_authorized", "intended_route": intended_route or preferred_route})
                 continue
-            if bool(row.get("target_is_proxy")) or str(row.get("target_source") or "") == "thesis_lane_proxy_pending_validation":
-                rejected.append({"ticker": ticker, "reason": "lottery_proxy_target_not_live_authorized"})
-                continue
             quote_row = quote_by_symbol.get(ticker) or {}
             quote_source = "public"
             price = _quote_price(quote_row)
@@ -570,6 +580,10 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                     "limit_price": round(price, 4),
                     "stop_price": stop_price,
                 })
+                continue
+            proxy_target = bool(row.get("target_is_proxy")) or str(row.get("target_source") or "") == "thesis_lane_proxy_pending_validation"
+            if proxy_target and not _lottery_proxy_target_can_execute(row):
+                rejected.append({"ticker": ticker, "reason": "proxy_target_requires_lottery_ratchet_plan"})
                 continue
             if ticker in held:
                 rejected.append({"ticker": ticker, "reason": "public_position_exists"})
@@ -635,6 +649,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
                 "quote_source": quote_source,
+                "execution_target_mode": "RATCHET_ONLY_PROXY_TARGET" if proxy_target else "STRUCTURAL_TARGET",
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
                 "current_stop": stop_price, "pm_active_stop": stop_price,
                 "pm_ratchet_plan": row.get("ratchet_plan") or {"enabled": False}, "submitted_at": datetime.now(timezone.utc).isoformat(),

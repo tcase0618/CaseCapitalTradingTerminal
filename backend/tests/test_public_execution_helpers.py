@@ -355,7 +355,13 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
         "signals": ["GAP/SURGE", "RVOL"],
         "strategy_views": [{"screener_id": "lottery_gap", "family": "LOTTERY", "lane": "DAY2_CONTINUATION"}],
     }], equity=1000, mode="BALANCED")[0]
-    pm_row.update({"action": "STARTER", "allocation_usd": 6})
+    pm_row.update({
+        "action": "STARTER",
+        "allocation_usd": 6,
+        "target_is_proxy": True,
+        "target_source": "thesis_lane_proxy_pending_validation",
+        "ratchet_plan": {"enabled": True, "exit_policy": "STOP_RATCHET_ONLY"},
+    })
     result = await public_execution.execute_pm_equity(
         [pm_row],
         cycle_id="cycle-1",
@@ -371,6 +377,7 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     assert fake_trades.docs[0]["strategy_attribution"]["strategy_id"] == "lottery_gap"
     assert fake_trades.docs[0]["current_stop"] == 140.0
     assert fake_trades.docs[0]["pm_active_stop"] == 140.0
+    assert fake_trades.docs[0]["execution_target_mode"] == "RATCHET_ONLY_PROXY_TARGET"
 
 
 @pytest.mark.asyncio
