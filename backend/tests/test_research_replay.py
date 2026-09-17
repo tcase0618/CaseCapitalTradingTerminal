@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 from services import pm_backtest, pm_learning, pnl_tracker, research_replay
@@ -127,3 +129,7 @@ def test_research_report_keeps_raw_and_episode_metrics_separate():
 def test_research_return_never_substitutes_a_longer_horizon_for_7d():
     assert pm_backtest._research_return({"return_30d": 22, "return_7d": None}) == (None, None)
     assert pm_backtest._research_return({"return_7d": 3.5, "return_30d": 22}) == (3.5, "7d")
+
+
+def test_observed_trading_date_uses_eastern_date_for_late_utc_observations():
+    assert pnl_tracker._observed_trading_date("2026-09-18T00:30:00Z") == date(2026, 9, 17)
