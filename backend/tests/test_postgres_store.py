@@ -19,6 +19,7 @@ def test_postgres_doc_key_prefers_business_keys():
     assert postgres_store.doc_key("pharma_pdufa", {"ticker": "MRNA", "pdufa_date": "2026-09-01"}) == "MRNA:2026-09-01"
     assert postgres_store.doc_key("options_desk_orders", {"order_id": "abc"}) == "abc"
     assert postgres_store.doc_key("pm_company_observations", {"observation_id": "decision-1:AI"}) == "decision-1:AI"
+    assert postgres_store.doc_key("options_performance", {"observation_id": "cycle-1:ABC:contract"}) == "cycle-1:ABC:contract"
     assert postgres_store.doc_key("signal_performance", {"ticker": "AAPL", "date": "2026-09-16", "screener_id": "lottery_gap"}) == "AAPL:2026-09-16:lottery_gap"
 
 
