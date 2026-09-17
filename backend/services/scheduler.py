@@ -190,14 +190,15 @@ async def _pharma_catalyst_shock_job():
 
 
 async def _pnl_refresh_job():
-    """Nightly: fill 7/30/90d returns, refresh options proxy + actual,
+    """Nightly: fill signal and episode returns, refresh options proxy + actual,
     refresh lottery track-record settlements (live ask + expired settle)."""
     try:
         sig = await pnl_tracker.refresh_due_returns()
+        observations = await pnl_tracker.refresh_due_strategy_observations()
         opt = await pnl_tracker.refresh_due_options_returns()
         lot = await lottery.refresh_settlements()
         await log_activity(
-            f"P&L refresh: signals={sig} options_rows={opt} lottery={lot}", "info",
+            f"P&L refresh: signals={sig} observations={observations} options_rows={opt} lottery={lot}", "info",
         )
     except Exception as e:
         logger.exception("P&L refresh job failed: %s", e)

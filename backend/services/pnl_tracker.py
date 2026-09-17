@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import logging
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -302,6 +302,66 @@ async def refresh_due_returns() -> dict[str, int]:
             await db.signal_performance.update_one(
                 {"ticker": r["ticker"], "date": r["date"], "screener_id": r.get("screener_id", "CORE")},
                 {"$set": updates},
+            )
+    return counters
+
+
+def _observed_trading_date(value: Any) -> date | None:
+    """Resolve a frozen observation timestamp to its US trading date."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo("America/New_York")).date()
+
+
+async def refresh_due_strategy_observations(limit: int = 2000) -> dict[str, int]:
+    """Resolve 1/3/5/7-session outcomes for immutable candidate observations.
+
+    Observations stay distinct from the daily signal ledger: multiple scans on
+    one ET date have different entry evidence and must not share one synthetic
+    price. Missing historical prices remain unresolved rather than inferred.
+    """
+    db = get_db()
+    horizons = (1, 3, 5, 7)
+    counters = {f"r{horizon}": 0 for horizon in horizons}
+    rows = await db.strategy_observations.find(
+        {"$or": [{f"return_{horizon}d": None} for horizon in horizons]},
+        {"_id": 0},
+    ).to_list(limit)
+    today = _today_et()
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        observation_id = row.get("observation_id")
+        observed = _observed_trading_date(row.get("observed_at"))
+        try:
+            entry = float(row.get("entry_price") or 0)
+        except (TypeError, ValueError):
+            entry = 0.0
+        if not ticker or not observation_id or not observed or entry <= 0:
+            continue
+        age = trading_days_between(observed, today)
+        updates: dict[str, Any] = {}
+        for horizon in horizons:
+            key = f"return_{horizon}d"
+            if age < horizon or row.get(key) is not None:
+                continue
+            target = add_trading_days(observed, horizon)
+            close = await pricer.get_close_on_date(ticker, target.isoformat())
+            if close is None:
+                continue
+            updates[key] = round((float(close) - entry) / entry * 100.0, 2)
+            updates[f"return_{horizon}d_close"] = round(float(close), 4)
+            updates[f"return_{horizon}d_date"] = target.isoformat()
+            counters[f"r{horizon}"] += 1
+        if updates:
+            updates["outcomes_refreshed_at"] = _now().isoformat()
+            await db.strategy_observations.update_one(
+                {"observation_id": observation_id}, {"$set": updates},
             )
     return counters
 
