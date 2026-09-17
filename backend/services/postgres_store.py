@@ -584,6 +584,7 @@ def doc_key(collection: str, doc: dict[str, Any]) -> str:
         "pm_portfolio_snapshots": ("snapshot_id",),
         "pm_policy_reports": ("report_id",),
         "pm_rebalance_intents": ("intent_id",),
+        "strategy_observations": ("observation_id",),
         "signal_performance": ("ticker", "date", "screener_id"),
         "pm_ratchet_events": ("client_order_id", "event_at", "ratchet_level"),
     }
