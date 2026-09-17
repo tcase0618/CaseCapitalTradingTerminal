@@ -1,7 +1,7 @@
 """Lottery League v2.
 
 The League is a fenced moonshot research book. It does not borrow the old
-options-lottery probability model and it never calls yfinance. Candidates are
+options-lottery probability model and it never calls third-party fallback feeds. Candidates are
 scored from observable low-float runner evidence, stored in ll_* collections,
 and graded with a synthetic haircut so paper fills cannot look cleaner than
 the data deserves.

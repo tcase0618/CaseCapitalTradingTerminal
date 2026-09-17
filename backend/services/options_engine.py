@@ -88,7 +88,7 @@ def _days_to_expiration(expiration: Any) -> int:
         return 30
 
 
-# All yfinance access is sync → wrap each call in run_in_executor.
+# Provider access is async or isolated behind provider adapters.
 async def _to_thread(fn, *a, **kw):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: fn(*a, **kw))
@@ -152,7 +152,7 @@ async def _fetch_alpaca_options_data(
     spot_hint: float | None = None,
     horizon: str = "tactical",
 ) -> dict[str, Any] | None:
-    """Fetch a broad Alpaca indicative chain and normalize it to yfinance-like frames."""
+    """Fetch a broad Alpaca indicative chain and normalize it to internal frames."""
     if not _alpaca_options_configured():
         return None
     try:
@@ -400,136 +400,7 @@ async def get_options_data(
     alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
     if alpaca_chain:
         return alpaca_chain
-    try:
-        import yfinance as yf
-
-        def _sync():
-            t = yf.Ticker(ticker)
-            expirations = list(t.options or [])
-            if not expirations:
-                return None
-
-            # Pick expiry: 5–14d after catalyst, else 21d from today
-            target_min, target_max = 5, 14
-            if catalyst_date:
-                try:
-                    base = datetime.fromisoformat(catalyst_date).date()
-                except Exception:
-                    base = date.today()
-            else:
-                base = date.today()
-                target_min = 18
-                target_max = 24
-            ideal_lo = base + timedelta(days=target_min)
-            ideal_hi = base + timedelta(days=target_max)
-
-            best = None
-            best_score = float("inf")
-            for e in expirations:
-                try:
-                    ed = datetime.fromisoformat(e).date()
-                except Exception:
-                    continue
-                if ideal_lo <= ed <= ideal_hi:
-                    score = 0  # in window
-                else:
-                    score = min(abs((ed - ideal_lo).days), abs((ed - ideal_hi).days))
-                if score < best_score:
-                    best_score = score
-                    best = e
-            if best is None:
-                best = expirations[0]
-
-            chain = t.option_chain(best)
-            calls = chain.calls
-            puts = chain.puts
-
-            # current price
-            price = None
-            try:
-                fast = getattr(t, "fast_info", None)
-                if fast:
-                    price = fast.get("last_price") if hasattr(fast, "get") else getattr(fast, "last_price", None)
-            except Exception:
-                pass
-            if price is None:
-                try:
-                    info = t.info
-                    price = info.get("currentPrice") or info.get("regularMarketPrice")
-                except Exception:
-                    pass
-            if price is None:
-                try:
-                    h = t.history(period="5d")
-                    if len(h):
-                        price = float(h["Close"].iloc[-1])
-                except Exception:
-                    pass
-            if price is None:
-                return None
-            price = float(price)
-
-            # ATM IV — pick call closest to spot
-            atm_iv = None
-            try:
-                if "impliedVolatility" in calls.columns and len(calls):
-                    # Filter out NaN/inf rows first
-                    valid = calls[calls["impliedVolatility"].notna() &
-                                  (calls["impliedVolatility"] != math.inf) &
-                                  (calls["impliedVolatility"] != -math.inf)]
-                    if len(valid):
-                        idx = (valid["strike"] - price).abs().idxmin()
-                        iv = valid.loc[idx, "impliedVolatility"]
-                        if not _is_nan(iv):
-                            atm_iv = _safe_float(iv)
-            except Exception:
-                pass
-
-            # historical vol → IV rank proxy (Part 5)
-            iv_rank = None
-            iv_label = "FAIR"
-            try:
-                hist = t.history(period="1y")
-                if len(hist) >= 30 and atm_iv is not None and atm_iv > 0:
-                    rets = hist["Close"].pct_change().dropna()
-                    hv = _safe_float(rets.std() * (252 ** 0.5))
-                    if hv > 0:
-                        rank = (atm_iv - hv) / hv * 100.0
-                        if not _is_nan(rank):
-                            iv_rank = max(0, min(100, _safe_int(rank, 50)))
-            except Exception:
-                pass
-            if iv_rank is None:
-                iv_rank = 50  # neutral fallback when no IV data available
-            if iv_rank < 30:
-                iv_label = "CHEAP"
-            elif iv_rank < 60:
-                iv_label = "FAIR"
-            elif iv_rank < 80:
-                iv_label = "ELEVATED"
-            else:
-                iv_label = "EXPENSIVE"
-
-            return {
-                "ticker": ticker,
-                "calls": calls,
-                "puts": puts,
-                "price": price,
-                "expirations": expirations,
-                "expiration": best,
-                "atm_iv": atm_iv,
-                "iv_rank": iv_rank,
-                "iv_label": iv_label,
-                "data_provider": "YFINANCE",
-                "data_feed": "fallback",
-                "data_quality": "FALLBACK_RESEARCH",
-                "execution_eligible": False,
-            }
-
-        return await _to_thread(_sync)
-    except Exception as e:
-        logger.warning("get_options_data failed for %s: %s", ticker, e)
-        return None
+    return None
 
 
 # ---------------- contract finder (Part 3) ----------------
@@ -723,7 +594,7 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
         return {
             "symbol": str(row.get("contractSymbol") or ""),
             "contractSymbol": str(row.get("contractSymbol") or ""),
-            "data_provider": chain_data.get("data_provider") or row.get("dataProvider") or "YFINANCE",
+            "data_provider": chain_data.get("data_provider") or row.get("dataProvider") or "UNAVAILABLE",
             "data_feed": chain_data.get("data_feed") or row.get("dataFeed"),
             "data_quality": chain_data.get("data_quality") or "FALLBACK_RESEARCH",
             "open_interest_source": row.get("openInterestSource") or ("reported" if oi >= 0 else "unavailable"),
@@ -826,19 +697,17 @@ async def calculate_iv_rank(ticker: str) -> dict[str, Any]:
     chain = await get_options_data(ticker)
     if not chain:
         return {"iv_rank": None, "iv_label": "UNKNOWN", "atm_iv": None, "hv_30": None}
+    hv = None
     try:
-        import yfinance as yf
-
-        def _hv():
-            t = yf.Ticker(ticker)
-            h = t.history(period="1y")
-            if len(h) < 30:
-                return None
-            rets = h["Close"].pct_change().dropna()
-            return float(rets.std() * (252 ** 0.5))
-        hv = await _to_thread(_hv)
+        from . import pricer
+        closes = [float(value) for _, value in sorted((await pricer.get_history(ticker, days=260)).items()) if value]
+        if len(closes) >= 30:
+            returns = [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes)) if closes[i - 1] > 0]
+            if returns:
+                mean = sum(returns) / len(returns)
+                hv = (sum((value - mean) ** 2 for value in returns) / len(returns)) ** 0.5 * (252 ** 0.5)
     except Exception:
-        hv = None
+        pass
     return {
         "iv_rank": chain.get("iv_rank"),
         "iv_label": chain.get("iv_label"),

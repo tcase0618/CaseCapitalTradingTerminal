@@ -1,4 +1,4 @@
-"""V5 regression tests — Massive rate-limit fix, yfinance batch current prices,
+"""V5 regression tests — Massive rate-limit fix, primary current prices,
 intraday entry-price restore, learning engine LIVE-basis trades."""
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class TestSignalsTrackerRealGains:
         d = r.json()
         rows = d["rows"]
         assert len(rows) > 0, "tracker returned empty"
-        # At least some tickers must have non-zero gains (yfinance fix)
+        # At least some tickers must have non-zero gains when price data exists.
         non_zero = [r for r in rows if r.get("gain_pct") is not None and abs(r["gain_pct"]) > 0.5]
         assert len(non_zero) >= 5, f"expected >=5 movers, got {len(non_zero)} out of {len(rows)}"
         # Winners + losers both > 0

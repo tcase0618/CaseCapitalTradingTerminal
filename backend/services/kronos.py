@@ -116,15 +116,7 @@ async def _spy_history() -> list[float]:
     except Exception as exc:
         logger.debug("kronos pricer SPY history failed: %s", exc)
 
-    def _yf() -> list[float]:
-        try:
-            import yfinance as yf
-            hist = yf.Ticker("SPY").history(period="90d")["Close"]
-            return [float(x) for x in hist.dropna().tolist()]
-        except Exception:
-            return []
-
-    return await asyncio.to_thread(_yf)
+    return []
 
 
 def _norm_candle(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -688,7 +680,7 @@ async def market_forecast() -> dict[str, Any]:
         "r5_pct": round(r5, 2),
         "r20_pct": round(r20, 2),
         "realized_vol_20d": round(vol, 2),
-        "source": "pricer_normalized/yfinance",
+        "source": "primary_price_provider",
         "reason": "momentum plus realized-vol cone",
     }
 

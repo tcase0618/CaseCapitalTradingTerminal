@@ -89,7 +89,7 @@ def _observation_contract(row: dict[str, Any], *, cycle_id: str, observed_at: st
 
 
 async def _fetch_close(ticker: str, days_ago: int = 0) -> float | None:
-    """Get a close price `days_ago` ago via Massive API (yfinance fallback).
+    """Get a close price `days_ago` ago via configured primary providers.
     days_ago=0 returns the latest available close."""
     if days_ago <= 0:
         return await pricer.get_latest_close(ticker)
@@ -384,31 +384,11 @@ async def refresh_due_strategy_observations(limit: int = 2000) -> dict[str, int]
 
 # ============== Options performance refresh (Day+3 actual + proxy) ==============
 async def _fetch_option_last(ticker: str, expiration: str, strike: float, is_call: bool) -> float | None:
-    """Re-fetch a specific option's last price."""
-    try:
-        import yfinance as yf
+    """Historical option marks require an execution-grade provider snapshot.
 
-        def _sync():
-            t = yf.Ticker(ticker)
-            chain = t.option_chain(expiration)
-            df = chain.calls if is_call else chain.puts
-            if not len(df):
-                return None
-            # nearest strike row
-            d = (df["strike"] - strike).abs()
-            idx = d.idxmin()
-            row = df.loc[idx]
-            last = float(row.get("lastPrice") or 0)
-            if last > 0:
-                return last
-            bid = float(row.get("bid") or 0)
-            ask = float(row.get("ask") or 0)
-            return (bid + ask) / 2 if bid and ask else None
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync)
-    except Exception as e:
-        logger.warning("option last fetch failed %s/%s/%s: %s", ticker, expiration, strike, e)
-        return None
+    Do not synthesize an option outcome from an unverified public chain.
+    """
+    return None
 
 
 async def refresh_due_options_returns() -> int:
@@ -557,7 +537,7 @@ async def ensure_first_seen_backfill() -> int:
 
 async def refresh_all_entry_prices(force: bool = False) -> dict[str, int]:
     """Fill MISSING entry prices using Massive's historical close. Never
-    overwrites an existing valid price — the original intraday yfinance
+    overwrites an existing valid price — the original intraday fallback
     fill is the truth-of-entry. Set `force=True` only if you want to
     rewrite every row (typically only after a data corruption)."""
     db = get_db()
@@ -574,7 +554,7 @@ async def refresh_all_entry_prices(force: bool = False) -> dict[str, int]:
         if not ticker or not d:
             continue
         cur = r.get("first_seen_price")
-        # Skip rows that already have a valid entry price (the intraday yfinance
+        # Skip rows that already have a valid entry price (the original intraday
         # fill is more accurate than a day-end close).
         if cur and cur > 0 and not force:
             continue
@@ -611,7 +591,7 @@ async def refresh_all_entry_prices(force: bool = False) -> dict[str, int]:
 
 async def restore_intraday_entry_prices() -> dict[str, int]:
     """Restore first_seen_price from the earliest scan_results record where
-    we recorded the actual intraday yfinance price at scan time. This
+    we recorded the actual intraday price at scan time. This
     rebuilds entries the Massive-refresh overwrote with day-end closes."""
     db = get_db()
     rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
@@ -672,7 +652,7 @@ async def refresh_current_prices_only() -> dict[str, Any]:
 
 
 async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
-    """Robinhood-style stock curve via Massive API (yfinance fallback). For
+    """Robinhood-style stock curve via configured primary providers. For
     each date in the last N days, average % gain across every ticker that
     had been signaled by that date. Equal-weight."""
     db = get_db()
@@ -929,24 +909,8 @@ async def signals_tracker_summary(limit: int = 200) -> list[dict[str, Any]]:
             pass
         is_active = bool(hold_end and hold_end >= today)
 
-        # Peak gain — strictly within window
+        # Daily close providers do not supply trustworthy intraday highs here.
         peak_gain = None
-        if first_seen_dt and entry:
-            # Bound: from first_seen to MIN(today, hold_end)
-            cutoff = min(today, hold_end) if hold_end else today
-            try:
-                def _peak_in_window():
-                    import yfinance as yf
-                    df = yf.Ticker(t).history(start=first_seen_iso, end=(cutoff + timedelta(days=1)).isoformat())
-                    if df is None or df.empty:
-                        return None
-                    peak_high = float(df["High"].max())
-                    return round((peak_high - entry) / entry * 100, 2)
-                pg = await asyncio.get_event_loop().run_in_executor(None, _peak_in_window)
-                if pg is not None:
-                    peak_gain = pg
-            except Exception:
-                pass
 
         gain_pct = None
         gain_abs = None

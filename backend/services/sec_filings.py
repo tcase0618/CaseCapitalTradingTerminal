@@ -406,7 +406,7 @@ async def _one_month_reaction(ticker: str, filing_date: str | None) -> dict[str,
             "target_close": round(float(target), 2),
             "base_date": base_date.isoformat(),
             "target_date": target_date.isoformat(),
-            "source": "Massive/yfinance daily close",
+            "source": "primary-provider daily close",
         }
     except Exception as exc:
         logger.debug("SEC 30d reaction %s %s: %s", ticker, filing_date, exc)
@@ -490,9 +490,9 @@ async def battle_card(ticker: str, limit: int = 25) -> dict[str, Any]:
         logger.debug("EdgarTools battle-card enrichment skipped for %s: %s", t, exc)
         edgartools_snapshot = {"ok": False, "provider": "edgartools", "reason": str(exc), "ticker": t}
 
-    source = "SEC filings + Massive/yfinance daily closes"
+    source = "SEC filings + primary-provider daily closes"
     if edgartools_snapshot.get("ok"):
-        source = "SEC filings + EdgarTools + Massive/yfinance daily closes"
+        source = "SEC filings + EdgarTools + primary-provider daily closes"
 
     return {
         "ticker": t,

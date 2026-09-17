@@ -22,7 +22,7 @@ time). Unfilled orders auto-cancel after 24 hours via
 appears in a future scan as a fresh signal.
 
 Stops are produced by `stop_engine.compute_stop(...)` — analytical,
-learnable, NO ATR, NO yfinance.
+learnable, NO ATR, no unverified fallback provider.
 
 Hard absolute risk caps (NEVER exceeded):
   Fractional: 20-24=$10 · 25-29=$20 · 30-49=$30 · 50+=$50
@@ -739,30 +739,18 @@ async def close_position(ticker: str) -> dict[str, Any] | None:
 async def regime_status() -> dict[str, Any]:
     """Four-weather market snapshot.
 
-    GREEN: SPY above 200d EMA and VIX below 25.
-    DOWNTREND: SPY below 200d EMA while volatility is not a shock.
-    RED: VIX shock. This dominates downtrend.
+    GREEN: SPY above 200d EMA.
+    DOWNTREND: SPY below 200d EMA.
+    RED: large SPY session loss where a volatility feed is unavailable.
     DOOMSDAY: crash/data-failure posture. This is the only automatic
     hard-halt from this regime function.
     """
-    import yfinance as yf
-
-    def _yf_calc():
-        try:
-            spy_hist = yf.Ticker("SPY").history(period="220d")
-            spy = spy_hist["Close"]
-            ema200 = spy.ewm(span=200, adjust=False).mean()
-            spy_last = float(spy.iloc[-1])
-            spy_prev = float(spy.iloc[-2]) if len(spy) >= 2 else spy_last
-            spy_ema = float(ema200.iloc[-1])
-            vix = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-            spy_day_change_pct = ((spy_last - spy_prev) / spy_prev * 100.0) if spy_prev else 0.0
-            return spy_last, spy_ema, vix, spy_day_change_pct
-        except Exception:
-            return None, None, None, None
-    loop = asyncio.get_event_loop()
-    spy_last, spy_ema, vix, spy_day_change_pct = await loop.run_in_executor(None, _yf_calc)
-    if vix is None or spy_last is None:
+    try:
+        from . import pricer
+        values = [float(value) for _, value in sorted((await pricer.get_history("SPY", days=220)).items()) if value]
+    except Exception:
+        values = []
+    if len(values) < 2:
         return {
             "status": "unknown",
             "weather": "UNKNOWN",
@@ -773,22 +761,30 @@ async def regime_status() -> dict[str, Any]:
             "halt_new_entries": True,
             "reason": "regime_data_unavailable",
             "playbook": "DATA_FAIL_SAFE",
-            "source": "yfinance_degraded_failed",
+            "source": "primary_market_data_unavailable",
             "checked_at": _now().isoformat(),
         }
 
+    spy_last = values[-1]
+    spy_prev = values[-2]
+    alpha = 2.0 / (min(200, len(values)) + 1)
+    spy_ema = values[0]
+    for value in values[1:]:
+        spy_ema = alpha * value + (1.0 - alpha) * spy_ema
+    spy_day_change_pct = ((spy_last - spy_prev) / spy_prev * 100.0) if spy_prev else 0.0
+    vix = None
     below_ema = spy_last < spy_ema
-    doomsday = vix >= VIX_DOOMSDAY_THRESHOLD or spy_day_change_pct <= SPY_INTRADAY_DOOMSDAY_DROP_PCT
+    doomsday = spy_day_change_pct <= SPY_INTRADAY_DOOMSDAY_DROP_PCT
     if doomsday:
         status = "doomsday"
         playbook = "FREEZE_AND_TRIAGE"
         halt = True
         reason = "doomsday_trigger"
-    elif vix >= VIX_RED_THRESHOLD:
+    elif spy_day_change_pct <= -2.0:
         status = "red"
         playbook = "VOL_SHOCK_HALF_SIZE"
         halt = False
-        reason = "volatility_shock"
+        reason = "spy_drawdown_without_volatility_feed"
     elif below_ema:
         status = "downtrend"
         playbook = "GRIND_RAISED_LONG_BAR"
@@ -802,7 +798,7 @@ async def regime_status() -> dict[str, Any]:
     return {
         "status": status,
         "weather": status.upper(),
-        "vix": round(vix, 2),
+        "vix": None,
         "spy_last": round(spy_last, 2),
         "spy_ema200": round(spy_ema, 2),
         "spy_day_change_pct": round(spy_day_change_pct, 2),
@@ -810,6 +806,7 @@ async def regime_status() -> dict[str, Any]:
         "halt_new_entries": bool(halt),
         "reason": reason,
         "playbook": playbook,
+        "source": "primary_spy_history_no_volatility_feed",
         "checked_at": _now().isoformat(),
     }
 
@@ -863,7 +860,7 @@ async def _risk_pct(score: float, instrument: str) -> float:
 
 # ─────── Stop engine ───────
 # Stops are produced by services.stop_engine.compute_stop(...). No ATR.
-# No yfinance for volatility. Alpaca is the sole price/volatility source.
+# No unverified fallback for volatility. Primary providers are the sole source.
 
 
 # ─────── Execution gates ───────

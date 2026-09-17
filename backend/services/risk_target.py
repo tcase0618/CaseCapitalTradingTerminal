@@ -1,6 +1,5 @@
 """Pure-Python risk score + 3-method price target. ZERO Claude tokens."""
 from __future__ import annotations
-import asyncio
 import logging
 from typing import Any
 
@@ -37,45 +36,18 @@ SIGNAL_UPLIFT: dict[frozenset, float] = {
 }
 
 
-def _yf_info(ticker: str) -> dict[str, Any]:
-    try:
-        import yfinance as yf
-        # Retry on empty info (yfinance is flaky under concurrent load)
-        info: dict = {}
-        for attempt in range(2):
-            t = yf.Ticker(ticker)
-            try:
-                info = t.info or {}
-            except Exception:
-                info = {}
-            if info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose"):
-                break
-        return {
-            "price": info.get("currentPrice") or info.get("regularMarketPrice")
-                      or info.get("previousClose"),
-            "market_cap": info.get("marketCap"),
-            "sector": (info.get("sector") or "").lower(),
-            "industry": info.get("industry"),
-            "beta": info.get("beta"),
-            "trailing_eps": info.get("trailingEps"),
-            "trailing_revenue": info.get("totalRevenue"),
-            "ps_ratio": info.get("priceToSalesTrailing12Months"),
-            "analyst_target_mean": info.get("targetMeanPrice"),
-            "analyst_target_low": info.get("targetLowPrice"),
-            "analyst_target_high": info.get("targetHighPrice"),
-            "avg_volume": info.get("averageDailyVolume10Day") or info.get("averageVolume"),
-            "float_shares": info.get("floatShares") or info.get("sharesOutstanding"),
-            "short_ratio": info.get("shortRatio"),
-            "name": info.get("longName") or info.get("shortName"),
-        }
-    except Exception as e:
-        logger.warning("yf.info failed for %s: %s", ticker, e)
-        return {}
-
-
 async def fetch_fundamentals(ticker: str) -> dict[str, Any]:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _yf_info, ticker)
+    """Return only primary-provider facts; missing fields stay unavailable."""
+    try:
+        from . import pricer
+        history = await pricer.get_history(ticker, days=25)
+        closes = [float(value) for _, value in sorted(history.items()) if value]
+        price = closes[-1] if closes else None
+        momentum = ((closes[-1] - closes[-21]) / closes[-21] * 100.0) if len(closes) >= 21 and closes[-21] else None
+        return {"price": price, "momentum_20d_pct": round(momentum, 2) if momentum is not None else None}
+    except Exception as exc:
+        logger.debug("primary fundamentals unavailable for %s: %s", ticker, exc)
+        return {}
 
 
 # ---------- RISK ----------

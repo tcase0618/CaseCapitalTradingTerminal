@@ -608,7 +608,7 @@ async def _attempt_remediation(row: dict[str, Any]) -> dict[str, Any]:
             outcome = "fallback_confirmed"
             reason = {
                 "reddit": "Public Reddit mode is intentionally rate-limited until OAuth keys are configured",
-                "yahoo_news": "Yahoo public endpoints can fall back to yfinance/news mirrors",
+                "yahoo_news": "Yahoo public RSS and trending endpoints",
                 "nih_cdc": "NIH/CDC prevalence is currently a static curated research dataset",
             }.get(source_key, "Fallback confirmed")
             return _finish_attempt(attempt, outcome, reason, trading_impact="display_only_fallback")

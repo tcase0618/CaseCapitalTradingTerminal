@@ -6,7 +6,7 @@ Tests:
   * Hard caps by score tier
   * Alpaca direct: ALL open tf- orders are limit+day, limit_price>0
   * Dedup: 2nd scan rejects with 'ticker_has_pending_open_order' / already_open
-  * No ATR / yfinance in stop_engine.py + manual_send works (and dedups)
+  * No ATR / unverified fallback in stop_engine.py + manual_send works (and dedups)
   * /api/trade_floor/sweep_stale_orders endpoint
   * Stop engine spec example: LDOS stop_pct in [0.10, 0.18]
   * Risk tier resolver (notional<=cap by score band)
@@ -197,12 +197,12 @@ class TestDedup:
         assert dedup_hits, f"no dedup rejections found; reasons={reasons[:10]}"
 
 
-# ─────── Phase 4 — No ATR / yfinance + manual_send ───────
+# ─────── Phase 4 — No ATR / fallback + manual_send ───────
 class TestNoAtrAndManualSend:
-    def test_stop_engine_no_atr_no_yfinance(self):
+    def test_stop_engine_no_atr_no_fallback_provider(self):
         with open("/app/backend/services/stop_engine.py") as f:
             src = f.read()
-        assert "yfinance" not in src, "yfinance still referenced in stop_engine.py"
+        assert "unverified fallback" not in src, "fallback provider still referenced in stop_engine.py"
         assert "fetch_atr_14d" not in src, "fetch_atr_14d still referenced in stop_engine.py"
         assert "atr_14d" not in src.lower() or "atr" not in src.lower(), \
             "ATR keyword still present — manually inspect"

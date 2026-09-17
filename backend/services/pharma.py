@@ -10,7 +10,7 @@ Data sources (all free):
   • ClinicalTrials.gov v2 API (https://clinicaltrials.gov/api/v2/studies)
   • OpenInsider — biotech insider buying inside 60d of PDUFA
   • Finviz — short interest
-  • yfinance — IV rank
+  • primary options provider — IV rank
   • NIH/CDC curated prevalence map (US population percentages)
 
 Binary Event Score / 100:
