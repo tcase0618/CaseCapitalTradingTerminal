@@ -213,14 +213,29 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
         opts = r.get("options")
         if opts and opts.get("contract"):
             ct = opts["contract"]
+            contract_symbol = str(ct.get("contractSymbol") or ct.get("symbol") or "").upper()
+            if not contract_symbol:
+                # A strike/date-only row is research metadata, not a distinct
+                # contract outcome. Do not overwrite another contract record.
+                continue
+            option_observation_id = _observation_id(
+                cycle_id=cycle_id,
+                ticker=str(ticker),
+                screener_id=f"{screener_id}:{contract_symbol}",
+            )
             await db.options_performance.update_one(
-                {"ticker": ticker, "date": today, "expiration": ct.get("expiration")},
+                {"observation_id": option_observation_id},
                 {"$set": stamped({
+                    "observation_id": option_observation_id,
+                    "cycle_id": cycle_id,
+                    "observed_at": observed_at,
                     "ticker": ticker,
                     "date": today,
                     "ts": _now().isoformat(),
+                    "screener_id": screener_id,
                     "strategy_type": opts.get("strategy"),
                     "direction": opts.get("direction"),
+                    "contract_symbol": contract_symbol,
                     "buy_strike": ct.get("strike"),
                     "expiration": ct.get("expiration"),
                     "estimated_premium": ct.get("premium"),
@@ -232,10 +247,11 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
                     "crush_risk": opts.get("crush_risk"),
                     "entry_spot": opts.get("spot"),
                     "spread": opts.get("spread"),
+                }), "$setOnInsert": {
                     "estimated_return_proxy": None,
                     "estimated_return_actual": None,
                     "actual_stock_return": None,
-                })},
+                }},
                 upsert=True,
             )
         written += 1
@@ -448,7 +464,7 @@ async def refresh_due_options_returns() -> int:
 
         if updates:
             await db.options_performance.update_one(
-                {"ticker": ticker, "date": r["date"], "expiration": r["expiration"]},
+                {"observation_id": r.get("observation_id")},
                 {"$set": updates},
             )
             updated += 1

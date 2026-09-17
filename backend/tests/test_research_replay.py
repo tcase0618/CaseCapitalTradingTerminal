@@ -133,3 +133,37 @@ def test_research_return_never_substitutes_a_longer_horizon_for_7d():
 
 def test_observed_trading_date_uses_eastern_date_for_late_utc_observations():
     assert pnl_tracker._observed_trading_date("2026-09-18T00:30:00Z") == date(2026, 9, 17)
+
+
+@pytest.mark.asyncio
+async def test_options_performance_identity_includes_contract_and_cycle(monkeypatch):
+    class Collection:
+        def __init__(self):
+            self.calls = []
+
+        async def update_one(self, query, update, upsert=False):
+            self.calls.append((query, update, upsert))
+
+    class DB:
+        strategy_observations = Collection()
+        signal_performance = Collection()
+        options_performance = Collection()
+
+    async def no_log(*_args, **_kwargs):
+        return None
+
+    db = DB()
+    monkeypatch.setattr(pnl_tracker, "get_db", lambda: db)
+    monkeypatch.setattr(pnl_tracker, "log_activity", no_log)
+    await pnl_tracker.record_scan_picks({
+        "cycle_id": "cycle-2", "scan_finished_at": "2026-09-17T14:15:00Z",
+        "results": [{
+            "ticker": "ABC", "price": 10, "options": {"strategy": "LONG_CALL", "direction": "BULL", "contract": {
+                "contractSymbol": "ABC260918C00010000", "expiration": "2026-09-18", "strike": 10, "premium": 0.5,
+            }},
+        }],
+    }, include_first_seen=False)
+
+    query, update, _ = db.options_performance.calls[0]
+    assert query["observation_id"] == update["$set"]["observation_id"]
+    assert update["$set"]["contract_symbol"] == "ABC260918C00010000"
