@@ -94,3 +94,30 @@ def test_profile_returns_not_configured_without_key(monkeypatch):
     assert result["ok"] is False
     assert result["configured"] is False
     assert result["reason"] == "missing_fmp_api_key"
+
+
+def test_earnings_context_is_research_only_and_normalizes_fmp_rows(monkeypatch):
+    async def fake_bundle(ticker, sections):
+        assert ticker == "AAPL"
+        assert sections == "profile,income,estimates,earnings"
+        return {
+            "ok": True,
+            "configured": True,
+            "provider": "Financial Modeling Prep",
+            "data": {
+                "profile": [{"sector": "Technology", "industry": "Consumer Electronics", "mktCap": 1000}],
+                "income": [{"revenue": 150}, {"revenue": 100}, {"revenue": 80}],
+                "estimates": [{"estimatedEpsAvg": 2.5, "numberAnalystEstimatedEps": 18}],
+                "earnings": [{"date": "2026-06-30", "actualEarningResult": 3.0, "estimatedEarning": 2.5}],
+            },
+        }
+
+    monkeypatch.setattr(finance_toolkit_source, "research_bundle", fake_bundle)
+    result = asyncio.run(finance_toolkit_source.earnings_context("AAPL"))
+
+    assert result["ok"] is True
+    assert result["research_only"] is True
+    assert result["decision_authority"] == "NONE"
+    assert result["fundamentals"]["sector"] == "Technology"
+    assert result["earnings_history"][0]["surprise_pct"] == 20.0
+    assert result["estimates"]["eps_forecast"] == 2.5

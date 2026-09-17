@@ -209,6 +209,86 @@ def _research_metrics(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rows(value: Any) -> list[dict[str, Any]]:
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
+def _value(row: dict[str, Any] | None, *keys: str) -> float | None:
+    return _number(row, *keys)
+
+
+async def earnings_context(ticker: str) -> dict[str, Any]:
+    """Normalize FMP earnings evidence for research displays only.
+
+    This intentionally exposes no trade action, quote authority, or sizing
+    fields. The Earnings scanner may use the evidence to explain a research
+    setup, but execution still uses the frozen PM packet and broker-grade data.
+    """
+    bundle = await research_bundle(ticker, "profile,income,estimates,earnings")
+    out: dict[str, Any] = {
+        "ok": bool(bundle.get("ok")),
+        "configured": bool(bundle.get("configured")),
+        "provider": bundle.get("provider") or "Financial Modeling Prep",
+        "research_only": True,
+        "decision_authority": "NONE",
+        "fundamentals": {},
+        "earnings_history": [],
+        "estimates": {},
+        "reason": bundle.get("reason"),
+    }
+    if not bundle.get("ok"):
+        return out
+
+    data = bundle.get("data") or {}
+    profile = _latest(data.get("profile")) or {}
+    income = _rows(data.get("income"))
+    estimates = _latest(data.get("estimates")) or {}
+    earnings = _rows(data.get("earnings"))
+
+    revenue_growth = None
+    revenue_accel = None
+    revenues = [_value(row, "revenue", "salesRevenue") for row in income[:3]]
+    if len(revenues) >= 2 and revenues[0] and revenues[1]:
+        revenue_growth = (revenues[0] - revenues[1]) / revenues[1]
+    if len(revenues) >= 3 and all(revenues[:3]):
+        previous_growth = (revenues[1] - revenues[2]) / revenues[2]
+        revenue_accel = revenue_growth - previous_growth if revenue_growth is not None else None
+
+    history: list[dict[str, Any]] = []
+    for row in earnings[:8]:
+        actual = _value(row, "actualEarningResult", "epsActual", "actualEPS")
+        estimate = _value(row, "estimatedEarning", "epsEstimate", "estimatedEPS")
+        surprise = _value(row, "surprisePercent", "surprise")
+        if surprise is None and actual is not None and estimate not in (None, 0):
+            surprise = (actual - estimate) / abs(estimate) * 100.0
+        history.append({
+            "quarter": row.get("date") or row.get("fiscalDateEnding") or row.get("period"),
+            "eps_actual": actual,
+            "eps_estimate": estimate,
+            "surprise_pct": surprise or 0.0,
+        })
+
+    out["fundamentals"] = {
+        "industry": profile.get("industry"),
+        "sector": profile.get("sector"),
+        "market_cap": _value(profile, "mktCap", "marketCap"),
+        "average_volume": _value(profile, "volAvg", "averageVolume"),
+        "trailing_pe": _value(profile, "pe", "priceEarningsRatio"),
+        "revenue_growth": revenue_growth,
+        "revenue_accel": revenue_accel,
+        "earnings_growth": _value(estimates, "estimatedEpsGrowth", "epsGrowth"),
+        "target_mean_price": _value(estimates, "estimatedPriceAvg", "targetMeanPrice"),
+        "source": "fmp_research",
+    }
+    out["earnings_history"] = history
+    out["estimates"] = {
+        "eps_forecast": _value(estimates, "estimatedEpsAvg", "epsEstimated"),
+        "revenue_forecast": _value(estimates, "estimatedRevenueAvg", "revenueEstimated"),
+        "analyst_count": _value(estimates, "numberAnalystEstimatedEps", "numberAnalysts"),
+    }
+    return out
+
+
 async def _fetch_section(client: httpx.AsyncClient, symbol: str, section: str, api_key: str) -> tuple[Any, dict[str, Any]]:
     paths = {
         "profile": ("profile", {"symbol": symbol}),

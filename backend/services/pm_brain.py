@@ -223,6 +223,18 @@ async def company_dossier(ticker: str, *, limit: int = 20) -> dict[str, Any]:
         prediction_evidence = await prediction_markets.ticker_evidence(symbol, limit=limit)
     except Exception:
         prediction_evidence = []
+    try:
+        from . import finance_toolkit_source
+        fundamental_research = await finance_toolkit_source.research_bundle(
+            symbol, "profile,income,balance,cashflow,ratios,metrics,estimates,earnings"
+        )
+    except Exception:
+        fundamental_research = {
+            "ok": False,
+            "research_only": True,
+            "decision_authority": "NONE",
+            "reason": "fundamental_research_unavailable",
+        }
     return {
         "ok": bool(profile or decisions),
         "ticker": symbol,
@@ -230,5 +242,6 @@ async def company_dossier(ticker: str, *, limit: int = 20) -> dict[str, Any]:
         "decisions": decisions,
         "observations": observations,
         "prediction_markets": prediction_evidence,
+        "fundamental_research": fundamental_research,
         "data_role": "pm_memory_and_decision_audit",
     }
