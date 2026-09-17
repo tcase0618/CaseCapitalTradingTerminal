@@ -2821,6 +2821,13 @@ async def portfolio_manager_strategy_contracts_latest(limit: int = 200):
     return await strategy_contracts.latest(limit=max(1, min(int(limit or 200), 500)))
 
 
+@api.get("/execution/funnel/latest")
+async def execution_funnel_latest(limit: int = 200):
+    """Audited PM-to-broker state records; read-only endpoint."""
+    from services import execution_funnel
+    return await execution_funnel.latest(limit=limit)
+
+
 @api.get("/portfolio_manager/options/learning/status")
 async def portfolio_manager_options_learning_status(limit: int = 200):
     from services import options_desk
