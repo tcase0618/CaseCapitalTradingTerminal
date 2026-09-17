@@ -34,6 +34,28 @@ def _reason_counts(rows: Any) -> dict[str, int]:
     return counts
 
 
+async def _persist_execution_funnel(
+    funnel,
+    *,
+    cycle_id: str,
+    pm_recommendations: list[dict[str, Any]],
+    equity_execution: dict[str, Any],
+    options_payload: dict[str, Any],
+    options_execution: dict[str, Any],
+    observed_at: str | None,
+) -> dict[str, Any]:
+    payload = funnel.build_cycle(
+        cycle_id=cycle_id,
+        pm_recommendations=pm_recommendations,
+        equity_execution=equity_execution,
+        options_payload=options_payload,
+        options_execution=options_execution,
+        observed_at=observed_at,
+    )
+    await funnel.persist(payload)
+    return payload
+
+
 async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
     started = _now()
     stage_times: dict[str, float] = {}
@@ -219,6 +241,20 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             options_desk.auto_execute_latest(candidate_set=options_payload),
         )
 
+    from . import execution_funnel
+    execution_funnel_payload = await timed(
+        "execution_funnel",
+        _persist_execution_funnel(
+            execution_funnel,
+            cycle_id=str(scan["cycle_id"]),
+            pm_recommendations=pm_payload.get("recommendations") or [],
+            equity_execution=equity_execution,
+            options_payload=options_payload,
+            options_execution=options_execution,
+            observed_at=scan.get("finished_at"),
+        ),
+    )
+
     scan["execution_summary"] = {
         "equity_status": "SKIPPED" if equity_execution.get("skipped") else "ATTEMPTED",
         "equity_skip_reason": equity_execution.get("reason") if equity_execution.get("skipped") else None,
@@ -234,6 +270,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "options_skipped": _row_count(options_execution.get("skipped")),
         "options_submitted_rows": options_execution.get("submitted") or [],
         "options_skipped_sample": (options_execution.get("skipped") if isinstance(options_execution.get("skipped"), list) else [])[:8],
+        "funnel": execution_funnel_payload.get("summary") or {},
     }
     telegram_result: dict[str, Any] = {"skipped": True, "reason": "telegram_env_missing"}
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
@@ -258,6 +295,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                 "strategy_contracts_shadow": strategy_contract_payload,
                 "pm_payload": pm_payload,
                 "execution_summary": scan.get("execution_summary"),
+                "execution_funnel": execution_funnel_payload,
                 "execution_freshness": execution_freshness,
                 "telegram_report_variant": scan.get("telegram_report_variant"),
             }},
@@ -279,6 +317,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "equity_executed": len(equity_execution.get("executed") or []),
         "equity_rejected": len(equity_execution.get("rejected") or []),
         "options_submitted": _row_count(options_execution.get("submitted")),
+        "execution_funnel": execution_funnel_payload.get("summary") or {},
         "options_skipped": _row_count(options_execution.get("skipped")),
         "pharma_rows": len(pharma_result.get("results") or []) if isinstance(pharma_result, dict) else None,
         "pharma_shocks": pharma_shock_result.get("candidate_count") if isinstance(pharma_shock_result, dict) else None,
@@ -308,6 +347,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "equity_execution": equity_execution,
         "execution_freshness": execution_freshness,
         "options_execution": options_execution,
+        "execution_funnel": execution_funnel_payload,
         "telegram": telegram_result,
     }
 
