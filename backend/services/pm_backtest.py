@@ -5,12 +5,13 @@ the live blotter. It does not call Claude and does not place orders.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from . import portfolio_manager
+from . import portfolio_manager, pricer, research_replay
 from .db import get_db
+from .market_dates import add_trading_days
 from .pm_learning import _date_key, _ret_basis
 
 
@@ -173,6 +174,77 @@ def _clean_overrides(overrides: dict[str, Any] | None) -> dict[str, Any]:
     return cleaned
 
 
+def _research_key(row: dict[str, Any]) -> str:
+    """Keep strategy evidence separate even when a ticker shares a PM docket."""
+    source = row.get("source_scan") or row.get("screener_id")
+    if source:
+        return str(source)
+    family = row.get("scanner_family")
+    return str(family or "CORE").upper()
+
+
+async def _spy_return(
+    date_key: str,
+    basis: str | None,
+    cache: dict[tuple[str, str], float | None],
+) -> float | None:
+    """Return a matched SPY close-to-close benchmark for the stored horizon."""
+    if basis not in {"7d", "30d", "90d"}:
+        return None
+    cache_key = (date_key, basis)
+    if cache_key in cache:
+        return cache[cache_key]
+    try:
+        start = datetime.fromisoformat(date_key).date()
+        end = add_trading_days(start, int(basis[:-1]))
+        entry = await pricer.get_close_on_date("SPY", start.isoformat())
+        exit_price = await pricer.get_close_on_date("SPY", end.isoformat())
+        result = round((float(exit_price) - float(entry)) / float(entry) * 100.0, 4) if entry and exit_price else None
+    except Exception:
+        result = None
+    cache[cache_key] = result
+    return result
+
+
+def _research_report(records: list[dict[str, Any]], *, episode_gap_days: int = 5) -> dict[str, Any]:
+    """Return raw and conservative episode views without inventing outcomes."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    quality_reasons: Counter[str] = Counter()
+    for record in records:
+        grouped[str(record["strategy_id"])].append(record)
+        for reason in record.get("quality_reasons") or []:
+            quality_reasons[reason] += 1
+    by_strategy: list[dict[str, Any]] = []
+    for strategy, items in grouped.items():
+        episodes = research_replay.episodeize(items, cooldown_days=episode_gap_days)
+        qualified = [item for item in episodes if item.get("replayable")]
+        by_strategy.append({
+            "strategy_id": strategy,
+            "raw_sightings": research_replay.summarize_returns(items),
+            "episode_deduped": research_replay.summarize_returns(episodes),
+            "episode_quality_qualified": research_replay.summarize_returns(qualified),
+            "episode_count": len(episodes),
+            "replayable_episode_count": len(qualified),
+        })
+    by_strategy.sort(key=lambda item: item["strategy_id"])
+    episodes = research_replay.episodeize(records, cooldown_days=episode_gap_days)
+    qualified = [item for item in episodes if item.get("replayable")]
+    return {
+        "method": "frozen PM decisions joined to explicit strategy performance; repeated ticker/strategy sightings collapsed by inactivity gap",
+        "limitations": [
+            "close-to-close returns do not establish intraday stop, target, ratchet, or limit-order fill order",
+            "options strategy results are underlying returns until contract-level outcomes exist",
+            "episode reset is a conservative inactivity approximation until explicit lifecycle exits are persisted",
+        ],
+        "episode_gap_calendar_days": episode_gap_days,
+        "overall_raw_sightings": research_replay.summarize_returns(records),
+        "overall_episode_deduped": research_replay.summarize_returns(episodes),
+        "overall_quality_qualified": research_replay.summarize_returns(qualified),
+        "quality_exclusion_counts": dict(quality_reasons),
+        "by_strategy": by_strategy,
+    }
+
+
 async def run(
     limit_scans: int = 120,
     equity: float = portfolio_manager.DEFAULT_EQUITY,
@@ -205,6 +277,8 @@ async def run(
     total = _bucket()
     sim_total = _sim_bucket()
     sample_rows: list[dict[str, Any]] = []
+    research_records: list[dict[str, Any]] = []
+    spy_cache: dict[tuple[str, str], float | None] = {}
     scan_count = 0
     basis_counts: dict[str, int] = defaultdict(int)
 
@@ -214,19 +288,37 @@ async def run(
         if not date or not rows:
             continue
         scan_count += 1
-        pm_rows = portfolio_manager.evaluate_rows(
-            rows,
-            equity=equity,
-            mode=active_mode,
-            profile_override=clean_override,
+        # Stored PM recommendations are the historical decision record. Only
+        # old scans without that packet are reconstructed under this run's
+        # declared ruleset and remain visibly mixed in the legacy summary.
+        pm_rows = (scan.get("pm_payload") or {}).get("recommendations") or portfolio_manager.evaluate_rows(
+            rows, equity=equity, mode=active_mode, profile_override=clean_override,
         )
         for pm_row in pm_rows:
             ticker = pm_row["ticker"]
+            strategy = _research_key(pm_row)
             perf = await db.signal_performance.find_one(
-                {"ticker": ticker, "date": date},
+                {"ticker": ticker, "date": date, "screener_id": strategy},
                 {"_id": 0, "return_7d": 1, "return_30d": 1, "return_90d": 1},
             )
+            # Legacy Core performance rows predate screener attribution.
+            if perf is None and strategy == "CORE":
+                perf = await db.signal_performance.find_one(
+                    {"ticker": ticker, "date": date, "screener_id": "CORE"},
+                    {"_id": 0, "return_7d": 1, "return_30d": 1, "return_90d": 1},
+                )
             ret, basis = _ret_basis(perf)
+            replayable, quality_reasons = research_replay.observation_quality(pm_row)
+            research_records.append({
+                "ticker": ticker,
+                "strategy_id": strategy,
+                "observed_at": scan.get("finished_at"),
+                "return_pct": ret,
+                "benchmark_return_pct": await _spy_return(date, basis, spy_cache) if ret is not None else None,
+                "return_basis": basis,
+                "replayable": replayable,
+                "quality_reasons": quality_reasons,
+            })
             sim = _simulate_exit(pm_row, ret, basis)
             if basis:
                 basis_counts[basis] += 1
@@ -278,4 +370,5 @@ async def run(
         "ratchet_stats": _ranked(ratchet_stats),
         "exit_simulation_by_ratchet": [_finalize_sim(k, v) for k, v in sorted(sim_stats.items())],
         "sample_decisions": sample_rows,
+        "research_replay": _research_report(research_records),
     }

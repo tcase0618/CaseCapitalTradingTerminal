@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import portfolio_manager
 from .db import get_db
@@ -22,7 +23,10 @@ def _date_key(scan: dict[str, Any]) -> str | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date().isoformat()
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(ZoneInfo("America/New_York")).date().isoformat()
     except Exception:
         return str(raw)[:10] if len(str(raw)) >= 10 else None
 

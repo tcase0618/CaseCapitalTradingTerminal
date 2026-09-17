@@ -78,7 +78,11 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     try:
         from . import pnl_tracker
         await pnl_tracker.record_scan_picks(
-            {"results": strategy_payload.get("candidates") or []},
+            {
+                "results": strategy_payload.get("candidates") or [],
+                "cycle_id": scan.get("cycle_id"),
+                "scan_finished_at": scan.get("finished_at"),
+            },
             include_first_seen=False,
         )
     except Exception as exc:

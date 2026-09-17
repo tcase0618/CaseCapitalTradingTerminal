@@ -10,6 +10,7 @@ Public API:
 """
 from __future__ import annotations
 import asyncio
+import hashlib
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,56 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _observed_at(scan_doc: dict[str, Any]) -> str:
+    """Use the frozen scan timestamp, never the delayed ledger-write time."""
+    for key in ("scan_finished_at", "finished_at", "generated_at", "observed_at"):
+        if scan_doc.get(key):
+            return str(scan_doc[key])
+    return _now().isoformat()
+
+
+def _observation_id(*, cycle_id: str, ticker: str, screener_id: str) -> str:
+    value = f"{cycle_id}|{ticker.upper()}|{screener_id}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+
+
+def _observation_contract(row: dict[str, Any], *, cycle_id: str, observed_at: str) -> dict[str, Any]:
+    """Immutable candidate evidence used by the episode/replay research path."""
+    ticker = str(row.get("ticker") or "").upper()
+    scanner = row.get("strategy_scanner") if isinstance(row.get("strategy_scanner"), dict) else {}
+    screener_id = str(scanner.get("screener_id") or row.get("source_scan") or "CORE")
+    risk = row.get("risk") if isinstance(row.get("risk"), dict) else {}
+    targets = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+    quote = row.get("quote") if isinstance(row.get("quote"), dict) else {}
+    return stamped({
+        "observation_id": _observation_id(cycle_id=cycle_id, ticker=ticker, screener_id=screener_id),
+        "cycle_id": cycle_id,
+        "observed_at": observed_at,
+        "ticker": ticker,
+        "screener_id": screener_id,
+        "scanner_family": str(scanner.get("family") or row.get("scanner_family") or "CORE"),
+        "strategy_lane": scanner.get("lane"),
+        "strategy_version": scanner.get("version"),
+        "pm_routable": bool(row.get("pm_routable")),
+        "read_only": bool(row.get("read_only")),
+        "entry_price": row.get("price"),
+        "entry_quote_timestamp": row.get("quote_timestamp") or quote.get("timestamp") or quote.get("ts"),
+        "entry_quote_age_seconds": row.get("quote_age_seconds") or quote.get("age_seconds"),
+        "entry_price_source": row.get("price_source") or row.get("data_provider"),
+        "signals": list(row.get("signals") or []),
+        "signal_groups": list(row.get("signal_groups") or []),
+        "independent_signal_count": row.get("independent_signal_count"),
+        "case_score": row.get("case_score"),
+        "strategy_confidence": row.get("strategy_confidence"),
+        "target": targets.get("target_blended") or row.get("target"),
+        "target_source": row.get("target_source"),
+        "target_is_proxy": bool(row.get("target_is_proxy")),
+        "stop": row.get("stop_loss") or risk.get("stop_loss") or row.get("stop"),
+        "risk_plan_source": row.get("risk_plan_source"),
+        "raw_source": row.get("raw_source") or {},
+    })
+
+
 async def _fetch_close(ticker: str, days_ago: int = 0) -> float | None:
     """Get a close price `days_ago` ago via Massive API (yfinance fallback).
     days_ago=0 returns the latest available close."""
@@ -55,7 +106,12 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
     very first price + signal combo we surfaced, so the Performance page
     can show 'as if I bought on day-one of signal' P&L."""
     db = get_db()
-    today = _today_iso()
+    observed_at = _observed_at(scan_doc)
+    try:
+        today = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except (TypeError, ValueError):
+        today = _today_iso()
+    cycle_id = str(scan_doc.get("cycle_id") or scan_doc.get("scan_finished_at") or scan_doc.get("finished_at") or observed_at)
     written = 0
     for r in scan_doc.get("results", []):
         ticker = r.get("ticker")
@@ -66,6 +122,16 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
         scanner = r.get("strategy_scanner") or {}
         screener_id = str(scanner.get("screener_id") or r.get("source_scan") or "CORE")
         scanner_family = str(scanner.get("family") or r.get("scanner_family") or "CORE")
+
+        # Preserve every frozen strategy decision. The daily signal ledger
+        # below is useful for UI aggregation but too coarse for an episode
+        # replay or a later policy comparison.
+        observation = _observation_contract(r, cycle_id=cycle_id, observed_at=observed_at)
+        await db.strategy_observations.update_one(
+            {"observation_id": observation["observation_id"]},
+            {"$setOnInsert": observation},
+            upsert=True,
+        )
 
         # signal_first_seen remains a ticker-level Core discovery ledger.
         if include_first_seen:
@@ -121,7 +187,7 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
                     if isinstance(scanner.get("lanes"), (list, tuple))
                     else ([str(scanner.get("lane"))] if scanner.get("lane") else [])
                 ),
-                "ts": _now().isoformat(),
+                "last_seen_at": _now().isoformat(),
                 "signals": signals,
                 "signal_score": r.get("signal_score", 0),
                 "regime": r.get("regime"),
@@ -133,8 +199,10 @@ async def record_scan_picks(scan_doc: dict[str, Any], *, include_first_seen: boo
                 "catalyst_date": (r.get("time_target") or {}).get("target_date") or r.get("catalyst_date", ""),
             }),
              "$setOnInsert": {
-                 "entry_price": entry_price,
-                 "return_7d": None,
+                "entry_price": entry_price,
+                "observed_at": observed_at,
+                "cycle_id": cycle_id,
+                "return_7d": None,
                  "return_30d": None,
                  "return_90d": None,
              }},
@@ -554,7 +622,6 @@ async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
 
     first_seen_map = {r["ticker"]: (r["first_seen_date"], r["first_seen_price"]) for r in rows}
     sorted_dates = sorted(closes_by_date.keys())
-    today = _today_iso()
     floor = (_today_et() - timedelta(days=days)).isoformat()
     out: list[dict[str, Any]] = []
     for d in sorted_dates:
