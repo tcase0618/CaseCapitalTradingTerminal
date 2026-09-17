@@ -27,10 +27,10 @@ class TestContracts:
 class TestRisk:
     def test_risk_lmt(self, api_client, base_url):
         r = api_client.get(f"{base_url}/api/risk/LMT", timeout=60)
-        # yfinance may rate-limit; treat 404 as degraded but acceptable
+        # Primary providers may be unavailable; treat 404 as degraded but acceptable.
         assert r.status_code in (200, 404), r.text
         if r.status_code != 200:
-            pytest.skip("yfinance unavailable for LMT")
+            pytest.skip("primary provider unavailable for LMT")
         d = r.json()
         assert d["ticker"] == "LMT"
         assert "fundamentals" in d
@@ -57,7 +57,7 @@ class TestTarget:
         r = api_client.get(f"{base_url}/api/target/AAPL", timeout=60)
         assert r.status_code in (200, 404), r.text
         if r.status_code != 200:
-            pytest.skip("yfinance unavailable for AAPL")
+            pytest.skip("primary provider unavailable for AAPL")
         d = r.json()
         assert d["ticker"] == "AAPL"
         targets = d["targets"]

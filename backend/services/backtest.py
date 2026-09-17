@@ -3,10 +3,10 @@
 1) Forward-looking — every scan adds rows to signal_performance via pnl_tracker;
    over weeks, this gives real backtest data. See pnl_tracker.refresh_due_returns.
 
-2) Synthetic — replays the curated congressional dataset against historical
-   yfinance prices to seed initial backtest data immediately. Each curated
+2) Synthetic — replays the curated congressional dataset against configured
+   primary historical prices to seed initial backtest data immediately. Each curated
    trade becomes a "signal_performance" row with real 7/30/90d returns
-   computed retroactively from yfinance history.
+   computed retroactively from configured primary-provider history.
 """
 from __future__ import annotations
 import asyncio
@@ -54,29 +54,19 @@ async def _fetch_close_on_or_after(ticker: str, target_date: datetime) -> float 
         logger.warning("LSE close lookup %s @ %s failed: %s", ticker, target_date, e)
 
     try:
-        import yfinance as yf
-
-        def _sync():
-            t = yf.Ticker(ticker)
-            start = (target_date - timedelta(days=2)).date()
-            end = (target_date + timedelta(days=10)).date()
-            h = t.history(start=start.isoformat(), end=end.isoformat())
-            if len(h) == 0:
-                return None
-            # Find first row >= target_date (UTC-naive comparison via date)
-            for ts, row in h.iterrows():
-                if ts.date() >= target_date.date():
-                    return float(row["Close"])
-            return float(h["Close"].iloc[-1])
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync)
+        from . import pricer
+        start = (target_date - timedelta(days=2)).date().isoformat()
+        end = (target_date + timedelta(days=10)).date().isoformat()
+        history = await pricer.get_history_range(ticker, start, end, force=True)
+        future = [day for day in sorted(history) if day >= target_date.date().isoformat()]
+        return float(history[future[0]]) if future else None
     except Exception as e:
         logger.warning("close lookup %s @ %s failed: %s", ticker, target_date, e)
         return None
 
 
 async def synthetic_congress_backtest() -> dict[str, Any]:
-    """Replay the curated congressional buys against yfinance historical
+    """Replay the curated congressional buys against primary-provider historical
     prices. Writes signal_performance rows with real returns.
     Idempotent — keys on (ticker, date)."""
     db = get_db()

@@ -72,7 +72,7 @@ async def compute_squeeze(ticker: str, short_pct: float | None, fund: dict[str, 
     avg_vol = (fund or {}).get("avg_volume") or 0
     float_shares = (fund or {}).get("float_shares") or 0
 
-    # Days-to-cover: prefer yfinance shortRatio; else compute from short_pct + float / avg_vol
+    # Days-to-cover: compute from short_pct, float, and average volume when available.
     dtc = (fund or {}).get("short_ratio")
     if not dtc and short_pct and avg_vol and float_shares:
         short_shares = float_shares * (short_pct / 100.0)

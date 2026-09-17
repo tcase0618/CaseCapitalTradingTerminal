@@ -31,7 +31,7 @@ def applicability_map() -> list[dict[str, str]]:
         {"area": "Scanner", "use": "Reserved for later; current scanner routing is unchanged."},
         {"area": "Earnings", "use": "Pre/post earnings price reaction history, fundamentals, reports, and macro backdrop."},
         {"area": "Intel Feed", "use": "Insider trades, economic calendar, dividends, splits, and market-wide unusual options flow."},
-        {"area": "Performance", "use": "Reprice historical signals from an independent source and audit Alpaca/yfinance drift."},
+        {"area": "Performance", "use": "Reprice historical signals from an independent source and audit provider drift."},
         {"area": "GeoRisk", "use": "FX, commodities, indices, bond yields, and crypto reaction data around mapped geopolitical events."},
         {"area": "Audit/Data Quality", "use": "Provider freshness, coverage, and fallback reason logging for every market-data pull."},
     ]

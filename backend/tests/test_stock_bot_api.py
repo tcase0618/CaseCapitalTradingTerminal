@@ -114,7 +114,7 @@ class TestWatchlist:
         items = r2.json()
         tickers = [i["ticker"] for i in items]
         assert ticker in tickers
-        # price/name attached (may be None if yfinance blocked; but key must exist)
+        # price/name attached (may be None when providers are unavailable; key must exist)
         item = next(i for i in items if i["ticker"] == ticker)
         assert "price" in item and "name" in item
         for i in items:
@@ -158,7 +158,7 @@ class TestAlerts:
 class TestQuoteAnalyze:
     def test_quote(self, api_client, base_url):
         r = api_client.get(f"{base_url}/api/quote/AAPL", timeout=60)
-        # yfinance occasionally 404s due to rate limit — accept 200 or 404 gracefully
+        # Provider errors can return 404 — accept a graceful degraded response.
         assert r.status_code in (200, 404)
         if r.status_code == 200:
             d = r.json()

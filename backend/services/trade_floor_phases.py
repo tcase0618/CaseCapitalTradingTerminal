@@ -27,7 +27,7 @@ Every open Trade Floor position runs through up to three exit phases:
 Hard stop: every open portion respects `current_stop`. Stop only moves
 favorably — never widened, never moved against the position.
 
-Price source for all trigger checks: Alpaca → Finnhub → yfinance (the
+Price source for all trigger checks: Alpaca → Finnhub → primary historical data (the
 existing pricer waterfall). No exceptions.
 
 Learning Engine integration: every closed trade logs the three phase

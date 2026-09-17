@@ -1,7 +1,7 @@
 """Earnings Engine — full current-week schedule + Beat Probability model.
 
-Pulls every stock reporting Mon-Fri of the current calendar week via yfinance
-calendar API. For each ticker, computes a 5-95% Beat Probability blending:
+Pulls every stock reporting Mon-Fri of the current calendar week from the
+configured calendar providers. For each ticker, computes a 5-95% Beat Probability blending:
 
   • EPS surprise streak (last 8 quarters)        — strongest predictor
   • Analyst revision direction (last 30 days)    — quiet ups before earnings
@@ -54,183 +54,28 @@ def _target_week_window(today: date | None = None) -> tuple[date, date]:
     return monday, monday + timedelta(days=4)
 
 
-# ─────────────────────────── yfinance helpers ───────────────────────────
-async def _yf_earnings_history(ticker: str) -> list[dict[str, Any]]:
-    """Returns last N quarterly EPS prints with actual vs estimate."""
-    def _sync():
-        try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            h = t.get_earnings_history()
-            if h is None or len(h) == 0:
-                return []
-            rows = []
-            for _, r in h.iterrows():
-                rows.append({
-                    "quarter": str(r.get("quarter") or ""),
-                    "eps_actual": float(r.get("epsActual") or 0),
-                    "eps_estimate": float(r.get("epsEstimate") or 0),
-                    "surprise_pct": float(r.get("surprisePercent") or 0),
-                })
-            return rows[-8:]
-        except Exception as e:
-            logger.debug("yf earnings hist %s: %s", ticker, e)
-            return []
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+async def _primary_earnings_history(ticker: str) -> list[dict[str, Any]]:
+    """Historical surprise data is unavailable without a verified provider."""
+    return []
 
 
-async def _yf_fundamentals(ticker: str) -> dict[str, Any]:
-    """Returns {industry, sector, market_cap, current_price, momentum_20d,
-    revenue_accel, iv_rank, implied_move}."""
-    def _sync():
-        try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            info = t.info or {}
-            hist = t.history(period="30d")
-            momentum_20d = None
-            if len(hist) >= 20:
-                cur = float(hist["Close"].iloc[-1])
-                prev = float(hist["Close"].iloc[-20])
-                momentum_20d = round((cur - prev) / prev * 100, 2)
-            rev_accel = None
-            try:
-                fin = t.quarterly_financials
-                if fin is not None and "Total Revenue" in fin.index:
-                    rev = fin.loc["Total Revenue"].dropna()[:3]
-                    if len(rev) == 3:
-                        # Most recent is column 0
-                        latest, mid, old = float(rev.iloc[0]), float(rev.iloc[1]), float(rev.iloc[2])
-                        g1 = (latest - mid) / mid if mid else 0
-                        g2 = (mid - old) / old if old else 0
-                        rev_accel = round((g1 - g2) * 100, 1)
-            except Exception:
-                pass
-            return {
-                "industry": info.get("industry"),
-                "sector": info.get("sector"),
-                "market_cap": info.get("marketCap"),
-                "current_price": info.get("regularMarketPrice"),
-                "average_volume": info.get("averageVolume") or info.get("averageDailyVolume10Day"),
-                "trailing_pe": info.get("trailingPE"),
-                "forward_pe": info.get("forwardPE"),
-                "profit_margin": info.get("profitMargins"),
-                "revenue_growth": info.get("revenueGrowth"),
-                "earnings_growth": info.get("earningsGrowth"),
-                "target_mean_price": info.get("targetMeanPrice"),
-                "momentum_20d_pct": momentum_20d,
-                "revenue_accel": rev_accel,
-                "short_pct": info.get("shortPercentOfFloat"),
-                "earnings_time": info.get("earningsTimestamp"),
-            }
-        except Exception as e:
-            logger.debug("yf fund %s: %s", ticker, e)
-            return {}
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+async def _primary_fundamentals(ticker: str) -> dict[str, Any]:
+    """Use primary price history; unavailable fundamentals stay blank."""
+    try:
+        from . import pricer
+        closes = [float(value) for _, value in sorted((await pricer.get_history(ticker, days=25)).items()) if value]
+        momentum = ((closes[-1] - closes[-21]) / closes[-21] * 100.0) if len(closes) >= 21 and closes[-21] else None
+        return {"current_price": closes[-1] if closes else None, "momentum_20d_pct": round(momentum, 2) if momentum is not None else None}
+    except Exception:
+        return {}
 
 
-async def _yf_earnings_moves(ticker: str, hist_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Approximate next-session earnings reactions from yfinance price history."""
-    quarters = [h.get("quarter") for h in hist_rows if h.get("quarter")]
-    if not quarters:
-        return {"moves": [], "avg_abs_move_pct": None, "avg_signed_move_pct": None, "gap_fade_rate": None}
-
-    def _sync():
-        try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            px = t.history(period="3y")
-            if px is None or px.empty:
-                return {"moves": [], "avg_abs_move_pct": None, "avg_signed_move_pct": None, "gap_fade_rate": None}
-            px = px.reset_index()
-            px["date_only"] = px["Date"].dt.date
-            moves = []
-            for q in quarters[-8:]:
-                try:
-                    qd = datetime.fromisoformat(str(q)).date()
-                except Exception:
-                    continue
-                idxs = px.index[px["date_only"] >= qd].tolist()
-                if len(idxs) < 2:
-                    continue
-                i = idxs[0]
-                if i == 0:
-                    continue
-                prev_close = float(px.loc[i - 1, "Close"])
-                close = float(px.loc[i, "Close"])
-                open_px = float(px.loc[i, "Open"])
-                if prev_close <= 0:
-                    continue
-                signed = (close - prev_close) / prev_close * 100
-                gap = (open_px - prev_close) / prev_close * 100
-                faded = (gap > 0 and close < open_px) or (gap < 0 and close > open_px)
-                moves.append({
-                    "date": qd.isoformat(),
-                    "move_pct": round(signed, 2),
-                    "gap_pct": round(gap, 2),
-                    "faded": bool(faded),
-                })
-            if not moves:
-                return {"moves": [], "avg_abs_move_pct": None, "avg_signed_move_pct": None, "gap_fade_rate": None}
-            return {
-                "moves": moves,
-                "avg_abs_move_pct": round(sum(abs(m["move_pct"]) for m in moves) / len(moves), 2),
-                "avg_signed_move_pct": round(sum(m["move_pct"] for m in moves) / len(moves), 2),
-                "gap_fade_rate": round(sum(1 for m in moves if m["faded"]) / len(moves) * 100, 1),
-            }
-        except Exception as e:
-            logger.debug("yf earnings moves %s: %s", ticker, e)
-            return {"moves": [], "avg_abs_move_pct": None, "avg_signed_move_pct": None, "gap_fade_rate": None}
-
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+async def _primary_earnings_moves(ticker: str, hist_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"moves": [], "avg_abs_move_pct": None, "avg_signed_move_pct": None, "gap_fade_rate": None}
 
 
-async def _yf_news_synopsis(ticker: str) -> dict[str, Any]:
-    """Short earnings-call proxy from recent finance headlines.
-
-    This intentionally does not pretend to be a full transcript parser. It
-    surfaces earnings/call/guidance headlines when available and labels the
-    synopsis as news-derived.
-    """
-    def _sync():
-        try:
-            import yfinance as yf
-            news = yf.Ticker(ticker).news or []
-            hits = []
-            for item in news[:20]:
-                content = item.get("content") if isinstance(item, dict) else {}
-                title = (content or {}).get("title") or item.get("title") or ""
-                summary = (content or {}).get("summary") or item.get("summary") or ""
-                publisher = (content or {}).get("provider", {}).get("displayName") if content else item.get("publisher")
-                hay = f"{title} {summary}".lower()
-                if any(word in hay for word in ["earnings", "guidance", "quarter", "results", "call", "eps", "revenue"]):
-                    hits.append({"title": title, "summary": summary, "publisher": publisher})
-                if len(hits) >= 3:
-                    break
-            if not hits:
-                return {
-                    "available": False,
-                    "source": "yfinance news",
-                    "text": "No recent earnings-call headline context found. Attach a transcript source later for a true management-call recap.",
-                    "headlines": [],
-                }
-            points = [h["title"] for h in hits if h.get("title")]
-            return {
-                "available": True,
-                "source": "yfinance news headlines",
-                "text": "Recent earnings context centers on " + "; ".join(points[:2]) + ".",
-                "headlines": hits,
-            }
-        except Exception as e:
-            logger.debug("yf news synopsis %s: %s", ticker, e)
-            return {
-                "available": False,
-                "source": "yfinance news",
-                "text": "Earnings-call synopsis unavailable from current free sources.",
-                "headlines": [],
-            }
-
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+async def _primary_news_synopsis(ticker: str) -> dict[str, Any]:
+    return {"available": False, "source": "no_primary_transcript_source", "text": "Earnings-call synopsis unavailable from configured primary sources.", "headlines": []}
 
 
 async def _options_snapshot(ticker: str, earnings_date: str | None) -> dict[str, Any]:
@@ -260,12 +105,12 @@ async def _options_snapshot(ticker: str, earnings_date: str | None) -> dict[str,
         "atm_iv": chain.get("atm_iv"),
         "implied_move_pct": implied,
         "expiration": chain.get("expiration"),
-        "source": "yfinance options",
+        "source": chain.get("data_provider") or "options_primary_provider",
     }
 
 
-async def _yf_post_earnings_reaction(ticker: str, earnings_date: str | None,
-                                     am_pm: str | None = None) -> dict[str, Any]:
+async def _primary_post_earnings_reaction(ticker: str, earnings_date: str | None,
+                                          am_pm: str | None = None) -> dict[str, Any]:
     """Regular-session reaction after an earnings print.
 
     AM reports compare report-day close to prior close. PM reports compare the
@@ -280,58 +125,24 @@ async def _yf_post_earnings_reaction(ticker: str, earnings_date: str | None,
     if report_date >= _now().date():
         return {"status": "pending", "reaction_pct": None, "reaction_label": "PENDING"}
 
-    def _sync():
-        try:
-            import yfinance as yf
-            start = report_date - timedelta(days=7)
-            end = report_date + timedelta(days=10)
-            px = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat())
-            if px is None or px.empty or len(px) < 2:
-                return {"status": "unavailable", "reaction_pct": None, "reaction_label": "NO PRICE DATA"}
-            px = px.reset_index()
-            px["date_only"] = px["Date"].dt.date
-            trade_dates = list(px["date_only"])
-            report_idxs = [i for i, d in enumerate(trade_dates) if d >= report_date]
-            if not report_idxs:
-                return {"status": "unavailable", "reaction_pct": None, "reaction_label": "NO PRICE DATA"}
-            report_idx = report_idxs[0]
-            if (am_pm or "").upper() == "PM":
-                base_idx = report_idx
-                react_idx = report_idx + 1
-            else:
-                base_idx = report_idx - 1
-                react_idx = report_idx
-            if base_idx < 0 or react_idx >= len(px):
-                return {"status": "pending", "reaction_pct": None, "reaction_label": "PENDING"}
-            base_close = float(px.loc[base_idx, "Close"])
-            react_close = float(px.loc[react_idx, "Close"])
-            if base_close <= 0:
-                return {"status": "unavailable", "reaction_pct": None, "reaction_label": "NO PRICE DATA"}
-            reaction = round((react_close - base_close) / base_close * 100, 2)
-            if reaction >= 3:
-                label = "BULLISH REACTION"
-            elif reaction <= -3:
-                label = "BEARISH REACTION"
-            elif reaction > 0:
-                label = "POSITIVE DRIFT"
-            elif reaction < 0:
-                label = "NEGATIVE DRIFT"
-            else:
-                label = "FLAT"
-            return {
-                "status": "complete",
-                "reaction_pct": reaction,
-                "reaction_label": label,
-                "base_close": round(base_close, 2),
-                "reaction_close": round(react_close, 2),
-                "reaction_date": px.loc[react_idx, "date_only"].isoformat(),
-                "source": "yfinance regular-session closes",
-            }
-        except Exception as e:
-            logger.debug("yf post earnings reaction %s: %s", ticker, e)
+    try:
+        from . import pricer
+        prices = await pricer.get_history_range(ticker, (report_date - timedelta(days=7)).isoformat(), (report_date + timedelta(days=10)).isoformat(), force=True)
+        dates = sorted(day for day in prices if day >= report_date.isoformat())
+        if not dates:
             return {"status": "unavailable", "reaction_pct": None, "reaction_label": "NO PRICE DATA"}
-
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
+        report_idx = dates.index(dates[0])
+        all_dates = sorted(prices)
+        current_idx = all_dates.index(dates[0])
+        base_idx, react_idx = (current_idx, current_idx + 1) if (am_pm or "").upper() == "PM" else (current_idx - 1, current_idx)
+        if base_idx < 0 or react_idx >= len(all_dates):
+            return {"status": "pending", "reaction_pct": None, "reaction_label": "PENDING"}
+        base_close, react_close = float(prices[all_dates[base_idx]]), float(prices[all_dates[react_idx]])
+        reaction = round((react_close - base_close) / base_close * 100, 2) if base_close else None
+        label = "BULLISH REACTION" if reaction is not None and reaction >= 3 else "BEARISH REACTION" if reaction is not None and reaction <= -3 else "POSITIVE DRIFT" if reaction and reaction > 0 else "NEGATIVE DRIFT" if reaction and reaction < 0 else "FLAT"
+        return {"status": "complete", "reaction_pct": reaction, "reaction_label": label, "base_close": round(base_close, 2), "reaction_close": round(react_close, 2), "reaction_date": all_dates[react_idx], "source": "primary_daily_closes"}
+    except Exception:
+        return {"status": "unavailable", "reaction_pct": None, "reaction_label": "NO PRICE DATA"}
 
 
 # ─────────────────────────── Beat Probability ───────────────────────────
@@ -1104,15 +915,15 @@ async def current_week_with_probability(scan_tickers: set[str] | None = None,
         async with sem:
             t = item["ticker"]
             fund, hist = await asyncio.gather(
-                _yf_fundamentals(t), _yf_earnings_history(t),
+                _primary_fundamentals(t), _primary_earnings_history(t),
             )
             data = {**fund, "eps_history": hist,
                      "flow_score": (flow_scores or {}).get(t)}
             beat = _compute_beat_probability(data)
             moves, option_snap, synopsis = await asyncio.gather(
-                _yf_earnings_moves(t, hist),
+                _primary_earnings_moves(t, hist),
                 _options_snapshot(t, item.get("earnings_date")),
-                _yf_news_synopsis(t),
+                _primary_news_synopsis(t),
             )
             # AM/PM flag
             ts = fund.get("earnings_time")
@@ -1164,7 +975,7 @@ async def current_week_with_probability(scan_tickers: set[str] | None = None,
                 "beat_miss_history": _beat_miss_stats(hist, moves),
                 "eps_history": hist,
             }
-            reaction = await _yf_post_earnings_reaction(t, item.get("earnings_date"), am_pm)
+            reaction = await _primary_post_earnings_reaction(t, item.get("earnings_date"), am_pm)
             row["post_earnings_reaction"] = reaction
             row["earnings_call_tone"] = _earnings_call_tone(row, synopsis)
             row["earnings_divergence"] = _earnings_divergence(row)

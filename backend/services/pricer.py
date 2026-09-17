@@ -52,7 +52,7 @@ _SOURCE = (
     else "finnhub+massive" if FINNHUB_KEY and MASSIVE_KEY
     else "finnhub" if FINNHUB_KEY
     else "massive" if MASSIVE_KEY
-    else "yfinance"
+    else "unavailable"
 )
 
 
@@ -105,13 +105,6 @@ def _live_price_max_age_seconds() -> int:
         return int(os.environ.get("SCANNER_LIVE_PRICE_MAX_AGE_SECONDS", "1800"))
     except Exception:
         return 1800
-
-
-def _allow_yfinance_live_fallback() -> bool:
-    """Allow Yahoo marks only when explicitly requested for display research."""
-    return os.environ.get("YFINANCE_LIVE_FALLBACK_ENABLED", "false").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
 
 
 def _scanner_alpaca_feeds() -> list[str | None]:
@@ -283,21 +276,6 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
             "warning": "not_confirmed_24h_market",
         }
 
-    if _allow_yfinance_live_fallback():
-        yf_price = await _yf_latest_close(ticker)
-        if yf_price is not None:
-            return {
-                "ticker": ticker,
-                "price": float(yf_price),
-                "source": "yfinance_latest_close",
-                "provider_ts": None,
-                "age_seconds": None,
-                "fresh": False,
-                "premarket_confirmed": False,
-                "delayed": True,
-                "execution_eligible": False,
-                "warning": "fallback_close_not_24h_market",
-            }
     return empty
 
 
@@ -376,7 +354,7 @@ def has_finnhub() -> bool:
 def source_label() -> str:
     """Describe the research/scan price waterfall for reporting."""
     if _public_configured():
-        fallback = "alpaca" if ALPACA_KEY else "finnhub" if FINNHUB_KEY else "massive" if MASSIVE_KEY else "yfinance"
+        fallback = "alpaca" if ALPACA_KEY else "finnhub" if FINNHUB_KEY else "massive" if MASSIVE_KEY else "unavailable"
         return f"public+{fallback}"
     return _SOURCE
 
@@ -565,54 +543,6 @@ async def grouped_latest() -> tuple[str, dict[str, float]]:
     return today.isoformat(), {}
 
 
-# ─────────────────────────── yfinance fallback ───────────────────────────
-def _yahoo_symbol(ticker: str) -> str:
-    """Translate US class-share symbols to Yahoo's dash notation only.
-
-    Terminal and broker identifiers remain canonical (for example ``LEN.B``),
-    while Yahoo Finance expects ``LEN-B``. Keeping translation at the provider
-    edge avoids poisoning security identity and execution symbols.
-    """
-    return str(ticker or "").upper().strip().replace(".", "-")
-
-
-async def _yf_latest_close(ticker: str) -> float | None:
-    try:
-        import yfinance as yf
-
-        def _sync():
-            t = yf.Ticker(_yahoo_symbol(ticker))
-            h = t.history(period="5d")
-            if not len(h):
-                return None
-            return float(h["Close"].dropna().iloc[-1])
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync)
-    except Exception as e:
-        logger.debug("yf latest %s failed: %s", ticker, e)
-        return None
-
-
-async def _yf_range(ticker: str, from_iso: str, to_iso: str) -> dict[str, float]:
-    try:
-        import yfinance as yf
-
-        def _sync():
-            t = yf.Ticker(_yahoo_symbol(ticker))
-            h = t.history(start=from_iso, end=to_iso)
-            if not len(h):
-                return {}
-            out: dict[str, float] = {}
-            for ts, v in h["Close"].dropna().items():
-                out[ts.date().isoformat()] = float(v)
-            return out
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync)
-    except Exception as e:
-        logger.debug("yf range %s failed: %s", ticker, e)
-        return {}
-
-
 # ───────────────────────────── Cache helpers ─────────────────────────────
 async def _cached_latest(ticker: str) -> float | None:
     db = get_db()
@@ -700,12 +630,7 @@ async def get_latest_close(ticker: str, force: bool = False) -> float | None:
     if price is not None:
         await _store_latest(ticker, price, "finnhub")
         return price
-    # 4) Explicitly permitted display-only yfinance fallback.
-    price = await _yf_latest_close(ticker) if _allow_yfinance_live_fallback() else None
-    if price is not None:
-        await _store_latest(ticker, price, "yfinance")
-        return price
-    # 5) Massive grouped EOD as last resort.
+    # 4) Massive grouped EOD as the final non-execution fallback.
     if MASSIVE_KEY:
         _, grouped = await grouped_latest()
         if grouped and ticker in grouped:
@@ -715,59 +640,17 @@ async def get_latest_close(ticker: str, force: bool = False) -> float | None:
     return None
 
 
-async def _yf_batch_latest(tickers: list[str]) -> dict[str, float]:
-    """Single yfinance call that returns latest intraday close for many
-    tickers in one shot. Returns {ticker: price}. yfinance intraday data
-    is ~15-min delayed but shows real movement (Massive free tier is EOD
-    only, so daily close = entry price for same-day signals = 0% gain
-    forever — yfinance fixes that)."""
-    if not tickers:
-        return {}
-    try:
-        import yfinance as yf
-
-        def _sync():
-            yahoo_symbols = {_yahoo_symbol(ticker): ticker for ticker in tickers}
-            data = yf.download(
-                tickers=" ".join(yahoo_symbols), period="2d", interval="1d",
-                progress=False, threads=True, group_by="ticker", auto_adjust=True,
-            )
-            if data is None or len(data) == 0:
-                return {}
-            out: dict[str, float] = {}
-            if len(tickers) == 1:
-                t = tickers[0]
-                try:
-                    out[t] = float(data["Close"].dropna().iloc[-1])
-                except Exception:
-                    pass
-                return out
-            for yahoo_symbol, t in yahoo_symbols.items():
-                try:
-                    series = data[yahoo_symbol]["Close"].dropna()
-                    if len(series):
-                        out[t] = float(series.iloc[-1])
-                except Exception:
-                    continue
-            return out
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync)
-    except Exception as e:
-        logger.debug("yf batch latest failed: %s", e)
-        return {}
-
-
 async def batch_latest_closes(tickers: list[str], force: bool = False,
                                 concurrency: int = 8) -> dict[str, float | None]:
     """Latest price for many tickers.
 
-    Strategy (Massive first, Finnhub for real-time freshness, yfinance fallback):
+    Strategy (Public first, Massive/Finnhub fallback):
       1. **Massive grouped daily** — 1 HTTP call returns yesterday's close for
          all 12,000+ US stocks. Free, instant, no rate-limit pain.
       2. **Finnhub /quote** — overrides Massive's EOD close with TODAY's
          intraday quote (real-time, 60 req/min). Throttled internally.
-      3. **yfinance batch** — fallback for anything both APIs missed
-         (delisted tickers, etc.).
+      3. Missing symbols remain unavailable rather than receiving an
+         unverified third-party mark.
 
     All results cached in `price_cache` for `LATEST_TTL_MIN` minutes."""
     tickers = [t.upper().strip() for t in tickers if t]
@@ -841,19 +724,6 @@ async def batch_latest_closes(tickers: list[str], force: bool = False,
                 upsert=True,
             )
 
-    # 3) Optional yfinance backfill for display-only research.
-    still_missing = [t for t in missing if t not in result]
-    if still_missing and _allow_yfinance_live_fallback():
-        yf_data = await _yf_batch_latest(still_missing)
-        for t, p in yf_data.items():
-            result[t] = float(p)
-            await db.price_cache.update_one(
-                {"ticker": t},
-                {"$set": {"ticker": t, "price": float(p),
-                          "fetched_at": now_iso, "source": "yfinance"}},
-                upsert=True,
-            )
-
     # Any leftovers stay None
     for t in tickers:
         result.setdefault(t, None)
@@ -890,12 +760,8 @@ async def get_history(ticker: str, days: int = 120,
     to_d = _now().date()
     from_d = to_d - timedelta(days=days + 10)
     closes = await _massive_range(ticker, from_d.isoformat(), to_d.isoformat())
-    src = "massive"
-    if not closes:
-        closes = await _yf_range(ticker, from_d.isoformat(), to_d.isoformat())
-        src = "yfinance"
     if closes:
-        await _store_history(ticker, closes, src)
+        await _store_history(ticker, closes, "massive")
     return closes
 
 
@@ -923,10 +789,7 @@ async def get_history_range(ticker: str, from_iso: str, to_iso: str,
                 return closes
         except Exception as exc:
             logger.debug("public history range %s failed; falling back: %s", ticker, exc)
-    closes = await _massive_range(ticker, from_iso, to_iso)
-    if not closes:
-        closes = await _yf_range(ticker, from_iso, to_iso)
-    return closes
+    return await _massive_range(ticker, from_iso, to_iso)
 
 
 async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
@@ -949,12 +812,11 @@ async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
             grouped = await _massive_grouped(d.isoformat())
             if grouped and ticker in grouped:
                 return grouped[ticker]
-        # If we got here, Massive has no data for this ticker in the window
-        # — fall through to yfinance
-    # yfinance fallback (per-ticker range)
+        # If we got here, Massive has no data for this ticker in the window.
+    # Public/Massive range fallback, preserving a missing close as missing.
     from_d = (target - timedelta(days=10)).isoformat()
     to_d = (target + timedelta(days=2)).isoformat()
-    closes = await _yf_range(ticker, from_d, to_d)
+    closes = await get_history_range(ticker, from_d, to_d, force=True)
     if not closes:
         return None
     if date_iso in closes:
@@ -1000,7 +862,7 @@ async def batch_history(tickers: list[str], days: int = 120,
                 px = data.get(t)
                 if px is not None:
                     out[t][d.isoformat()] = float(px)
-        # Drop tickers with no data (delisted) — yfinance fallback for those
+        # Fill gaps only through the configured primary historical providers.
         missing = [t for t in tickers if not out[t]]
         if missing:
             sem = asyncio.Semaphore(concurrency)
@@ -1008,8 +870,8 @@ async def batch_history(tickers: list[str], days: int = 120,
             async def _one(t: str) -> tuple[str, dict[str, float]]:
                 async with sem:
                     return t, await get_history(t, days=days, force=force)
-            yres = await asyncio.gather(*[_one(t) for t in missing])
-            for t, series in yres:
+            provider_results = await asyncio.gather(*[_one(t) for t in missing])
+            for t, series in provider_results:
                 if series:
                     out[t] = series
         return out

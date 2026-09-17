@@ -7,7 +7,7 @@ This file reports per-ticker, per-day:
   • TotalVolume — total volume reported to FINRA via off-exchange / dark pool
   • ShortVolume — the short-sale slice of that total
 
-We compare FINRA's off-exchange volume to total market volume (yfinance) to
+We compare FINRA's off-exchange volume to total market volume (primary providers) to
 compute the off-exchange ratio. A Dark Horse alert fires when ALL three are
 true on the most recent published date:
 
@@ -136,7 +136,7 @@ async def evaluate_dark_horse(ticker: str, *,
                                 avg_volume_30d: float | None = None) -> dict[str, Any] | None:
     """Evaluate Dark Horse conditions for ONE ticker. Returns alert dict if
     triggered, else None. Caller supplies the OHLC + ADV context (already
-    fetched via pricer/yfinance — avoids redundant fetches)."""
+    fetched via the shared price provider — avoids redundant fetches)."""
     finra = await get_finra_for_ticker(ticker)
     if not finra:
         return None
@@ -145,7 +145,7 @@ async def evaluate_dark_horse(ticker: str, *,
     if finra_total <= 0 or avg_volume_30d is None or avg_volume_30d <= 0:
         return None
 
-    # Total market volume on FINRA's reporting day. yfinance/Massive gives
+    # Total market volume on FINRA's reporting day. Primary market data gives
     # composite volume; FINRA total IS the off-exchange chunk.
     # Off-exchange ratio = FINRA / (FINRA + on-exchange).
     # We don't always have on-exchange split, so approximate by comparing to ADV.

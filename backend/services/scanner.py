@@ -187,7 +187,7 @@ async def run_scan(
         elif v.get("concentration_provisional"):
             needs_fund.add(v["ticker"])
 
-    # yfinance is rate-sensitive under high concurrency — limit to 2 at a time
+    # Provider requests are rate-sensitive under high concurrency — limit to 2 at a time
     sem = asyncio.Semaphore(2)
     async def _bounded(tk):
         async with sem:
@@ -280,7 +280,7 @@ async def run_scan(
         ]
         enriched.append(c)
 
-    # Options intelligence — bounded concurrency (yfinance is rate-sensitive)
+    # Options intelligence — bounded provider concurrency
     opt_sem = asyncio.Semaphore(2)
     async def _bounded_opts(stock):
         async with opt_sem:
@@ -671,35 +671,6 @@ async def _run_v32_pipeline(final: list[dict[str, Any]]) -> dict[str, Any]:
                 "vwap_proxy": close,  # fall back to close if no intraday
                 "avg_volume_30d": None,  # filled below
             }
-        # Volume ADV via yfinance (one batch)
-        try:
-            import yfinance as yf
-            def _vol():
-                yahoo_symbols = {str(t).upper().replace(".", "-"): t for t in tickers}
-                data = yf.download(tickers=" ".join(yahoo_symbols), period="35d",
-                                    interval="1d", progress=False, threads=True,
-                                    group_by="ticker", auto_adjust=False)
-                if data is None or len(data) == 0:
-                    return {}
-                out = {}
-                if len(tickers) == 1:
-                    try:
-                        out[tickers[0]] = float(data["Volume"].dropna().tail(30).mean())
-                    except Exception:
-                        pass
-                    return out
-                for yahoo_symbol, t in yahoo_symbols.items():
-                    try:
-                        out[t] = float(data[yahoo_symbol]["Volume"].dropna().tail(30).mean())
-                    except Exception:
-                        continue
-                return out
-            vol_map = await asyncio.get_event_loop().run_in_executor(None, _vol)
-            for t, v in vol_map.items():
-                if t in ctx:
-                    ctx[t]["avg_volume_30d"] = v
-        except Exception as e:
-            logger.warning("ADV fetch failed: %s", e)
         return ctx
 
     # 2) Run independent modules in parallel

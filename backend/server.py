@@ -1065,7 +1065,7 @@ async def signals_benchmark_curve(days: int = 90):
 
 @api.post("/admin/refresh_prices")
 async def admin_refresh_prices():
-    """Refresh CURRENT prices for every tracked ticker (yfinance batch +
+    """Refresh CURRENT prices for every tracked ticker (primary providers +
     Massive grouped backfill). Does NOT touch entry prices — those were
     captured intraday at scan time and are the truth-of-entry."""
     from services import pnl_tracker, pricer

@@ -59,7 +59,7 @@ def test_paper_scout_profile_cannot_be_used_on_live_endpoint(monkeypatch):
 
 def test_research_fallback_is_never_execution_eligible():
     assert options_policy.execution_data_allowed({
-        "data_provider": "YFINANCE",
+        "data_provider": "UNAVAILABLE",
         "data_quality": "FALLBACK_RESEARCH",
         "execution_eligible": False,
     }) is False

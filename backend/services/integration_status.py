@@ -79,19 +79,6 @@ async def _ping(url: str, headers: dict | None = None, timeout: float = 6.0) -> 
         return False
 
 
-async def _yfinance_news_probe() -> bool:
-    def _sync() -> bool:
-        try:
-            import yfinance as yf
-
-            return bool(yf.Ticker("AAPL").news)
-        except Exception:
-            return False
-    import asyncio
-
-    return await asyncio.get_event_loop().run_in_executor(None, _sync)
-
-
 async def integration_status() -> list[dict[str, Any]]:
     """All integrations with explicit quality labels.
 
@@ -330,17 +317,16 @@ async def integration_status() -> list[dict[str, Any]]:
     yahoo_trending_ok = await _ping(
         "https://query1.finance.yahoo.com/v1/finance/trending/US?count=5"
     )
-    yahoo_yf_ok = await _yfinance_news_probe()
-    yahoo_ok = yahoo_rss_ok or yahoo_trending_ok or yahoo_yf_ok
-    yahoo_quality = "live" if (yahoo_rss_ok or yahoo_trending_ok) else "fallback" if yahoo_yf_ok else "down"
+    yahoo_ok = yahoo_rss_ok or yahoo_trending_ok
+    yahoo_quality = "live" if yahoo_ok else "down"
     out.append(_row(
         "yahoo_news",
         "Yahoo Finance RSS / Trending",
         yahoo_ok,
         last=await _last_activity(["X-Factor"]),
         quality=yahoo_quality,
-        detail=f"rss={yahoo_rss_ok}, trending={yahoo_trending_ok}, yfinance_news={yahoo_yf_ok}",
-        reason=None if yahoo_ok else "RSS, trending, and yfinance news probes failed",
+        detail=f"rss={yahoo_rss_ok}, trending={yahoo_trending_ok}",
+        reason=None if yahoo_ok else "RSS and trending probes failed",
     ))
 
     out.append(_row(
