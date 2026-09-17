@@ -46,7 +46,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             stage_times[label] = round((_now() - t0).total_seconds(), 2)
 
     await log_activity(f"Full terminal scan started ({triggered_by})", "info")
-    from . import candidate_ledger, lottery, options_desk, pharma, pm_brain, portfolio_manager, scanner, strategy_screeners
+    from . import candidate_ledger, lottery, options_desk, pharma, pm_brain, portfolio_manager, scanner, strategy_contracts, strategy_screeners
 
     core_task = asyncio.create_task(
         timed(
@@ -179,7 +179,20 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             include_earnings=False,
         ),
     )
+    # This compares target, lifecycle, and selected option evidence without
+    # changing the PM decision or either broker execution path.
+    strategy_contract_payload = await timed(
+        "strategy_contracts_shadow",
+        strategy_contracts.build_shadow_contracts(
+            pm_payload.get("recommendations") or [],
+            options_payload=options_payload,
+            cycle_id=str(scan["cycle_id"]),
+            observed_at=pm_payload.get("generated_at") or scan.get("finished_at"),
+            persist=True,
+        ),
+    )
     scan["options_payload"] = options_payload
+    scan["strategy_contracts_shadow"] = strategy_contract_payload
     scan["pm_payload"] = pm_payload
     scan["lottery_summary"] = lottery_summary
 
@@ -242,6 +255,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                 "pharma_result": pharma_result,
                 "pharma_shock_result": pharma_shock_result,
                 "options_payload": options_payload,
+                "strategy_contracts_shadow": strategy_contract_payload,
                 "pm_payload": pm_payload,
                 "execution_summary": scan.get("execution_summary"),
                 "execution_freshness": execution_freshness,
@@ -260,6 +274,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "pm_routable": (strategy_payload.get("summary") or {}).get("pm_routable"),
         "ledger_candidates": (ledger_payload.get("summary") or {}).get("total") or len(ledger_payload.get("candidates") or []),
         "options_candidates": len(options_payload.get("candidates") or []),
+        "strategy_shadow_contracts": (strategy_contract_payload.get("summary") or {}).get("total"),
         "pm_actions": (pm_payload.get("summary") or {}),
         "equity_executed": len(equity_execution.get("executed") or []),
         "equity_rejected": len(equity_execution.get("rejected") or []),
@@ -288,6 +303,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "strategy_screeners": strategy_payload.get("summary") or {},
         "candidate_ledger": ledger_payload.get("summary") or {},
         "options_desk": options_payload.get("summary") or {},
+        "strategy_contracts": strategy_contract_payload.get("summary") or {},
         "portfolio_manager": pm_payload.get("summary") or {},
         "equity_execution": equity_execution,
         "execution_freshness": execution_freshness,

@@ -585,6 +585,8 @@ def doc_key(collection: str, doc: dict[str, Any]) -> str:
         "pm_policy_reports": ("report_id",),
         "pm_rebalance_intents": ("intent_id",),
         "strategy_observations": ("observation_id",),
+        "strategy_shadow_contracts": ("contract_id",),
+        "strategy_shadow_contract_history": ("contract_id", "history_recorded_at"),
         "options_performance": ("observation_id",),
         "signal_performance": ("ticker", "date", "screener_id"),
         "pm_ratchet_events": ("client_order_id", "event_at", "ratchet_level"),

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import get_db
+from . import strategy_lifecycle
 
 DEFAULT_EQUITY = 1000.0
 MODE_PROFILES = {
@@ -530,6 +531,7 @@ def evaluate_rows(
             no_capped_tp=_is_lottery_row(row),
         )
         strategy_case = row.get("strategy_case") or {}
+        lifecycle_plan = strategy_lifecycle.plan_for(row, action=action, regime=regime)
         out.append({
             "ticker": ticker,
             "action": action,
@@ -556,6 +558,7 @@ def evaluate_rows(
             "target_is_proxy": bool(row.get("target_is_proxy")),
             "signals": signals,
             "ratchet_plan": ratchet,
+            "lifecycle_plan": lifecycle_plan,
             "strategy_case": strategy_case,
             "case_score": _num(row.get("case_score") or strategy_case.get("case_score")),
             "strategy_confidence": _num(row.get("strategy_confidence") or strategy_case.get("confidence")),
