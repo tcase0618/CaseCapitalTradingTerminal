@@ -54,20 +54,37 @@ def _target_week_window(today: date | None = None) -> tuple[date, date]:
     return monday, monday + timedelta(days=4)
 
 
-async def _primary_earnings_history(ticker: str) -> list[dict[str, Any]]:
-    """Historical surprise data is unavailable without a verified provider."""
-    return []
+async def _fmp_earnings_context(ticker: str) -> dict[str, Any]:
+    """Return labelled FMP research evidence without making it trade authority."""
+    try:
+        from . import finance_toolkit_source
+        return await finance_toolkit_source.earnings_context(ticker)
+    except Exception:
+        return {"ok": False, "reason": "fmp_context_unavailable", "fundamentals": {}, "earnings_history": {}, "estimates": {}}
 
 
-async def _primary_fundamentals(ticker: str) -> dict[str, Any]:
-    """Use primary price history; unavailable fundamentals stay blank."""
+async def _primary_earnings_history(ticker: str, context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    return list((context or {}).get("earnings_history") or [])
+
+
+async def _primary_fundamentals(ticker: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Use labelled FMP research facts plus primary-provider price history."""
+    facts = dict((context or {}).get("fundamentals") or {})
+    estimates = dict((context or {}).get("estimates") or {})
     try:
         from . import pricer
         closes = [float(value) for _, value in sorted((await pricer.get_history(ticker, days=25)).items()) if value]
         momentum = ((closes[-1] - closes[-21]) / closes[-21] * 100.0) if len(closes) >= 21 and closes[-21] else None
-        return {"current_price": closes[-1] if closes else None, "momentum_20d_pct": round(momentum, 2) if momentum is not None else None}
+        return {
+            **facts,
+            "current_price": closes[-1] if closes else None,
+            "momentum_20d_pct": round(momentum, 2) if momentum is not None else None,
+            "eps_forecast": estimates.get("eps_forecast"),
+            "estimates_count": estimates.get("analyst_count"),
+            "research_provider": (context or {}).get("provider") if (context or {}).get("ok") else None,
+        }
     except Exception:
-        return {}
+        return {**facts, "eps_forecast": estimates.get("eps_forecast"), "estimates_count": estimates.get("analyst_count")}
 
 
 async def _primary_earnings_moves(ticker: str, hist_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -914,8 +931,9 @@ async def current_week_with_probability(scan_tickers: set[str] | None = None,
     async def _one(item):
         async with sem:
             t = item["ticker"]
+            fmp_context = await _fmp_earnings_context(t)
             fund, hist = await asyncio.gather(
-                _primary_fundamentals(t), _primary_earnings_history(t),
+                _primary_fundamentals(t, fmp_context), _primary_earnings_history(t, fmp_context),
             )
             data = {**fund, "eps_history": hist,
                      "flow_score": (flow_scores or {}).get(t)}
