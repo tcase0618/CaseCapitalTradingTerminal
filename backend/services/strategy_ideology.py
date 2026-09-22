@@ -234,6 +234,22 @@ def apply_lottery_learning(
     if not learned_config:
         return {**case, "learning_adjustment": {"active": False, "badges": ["LEARNING_ARMED"]}}
 
+    # A configuration is persisted from the first learning cycle, including
+    # when it contains zero resolved tickets. It is not evidence. Keep the
+    # prior neutral until there are enough observations for the learning loop
+    # itself to make a segment decision.
+    sample_count = int(learned_config.get("sample_count") or 0)
+    if sample_count < 10:
+        return {
+            **case,
+            "learning_adjustment": {
+                "active": False,
+                "badges": ["LEARNING_GATHERING"],
+                "config_version": learned_config.get("version"),
+                "sample_count": sample_count,
+            },
+        }
+
     score = float(case.get("case_score") or 0)
     confidence = float(case.get("confidence") or 0)
     badges: list[str] = []
@@ -290,7 +306,7 @@ def apply_lottery_learning(
             "delta": round(delta, 1),
             "badges": badges[:4],
             "config_version": learned_config.get("version"),
-            "sample_count": learned_config.get("sample_count"),
+            "sample_count": sample_count,
         },
     }
     return updated
