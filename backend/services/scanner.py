@@ -524,11 +524,9 @@ async def run_scan(
     else:
         await log_activity("Core scan sidecars deferred to coordinated terminal cycle", "info")
     if auto_execute and _execution_enabled():
-        try:
-            from . import trade_floor as _tf
-            asyncio.create_task(_tf.evaluate_and_execute(final))
-        except Exception as e:
-            logger.warning("Trade Floor dispatch failed: %s", e)
+        # Coordinated terminal cycles own Public equity execution. A standalone
+        # Core scan must never dispatch the retired Alpaca equity path.
+        await log_activity("Core scan equity execution deferred to coordinated Public terminal cycle", "info")
     elif not auto_execute:
         await log_activity("Scan execution dispatch deferred to full terminal cycle", "info")
     else:

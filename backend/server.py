@@ -2525,9 +2525,7 @@ async def tf_24h_status(ticker: str = "SPY"):
 
 @api.post("/trade_floor/close")
 async def tf_close(ticker: str):
-    from services import trade_floor
-    res = await trade_floor.close_position(ticker)
-    return {"closed": res is not None, "result": res}
+    raise HTTPException(status_code=410, detail="Alpaca equity execution is retired; Public is the sole equity broker.")
 
 
 @api.post("/trade_floor/sync")
@@ -2544,28 +2542,12 @@ async def tf_reconcile_positions():
 
 @api.post("/trade_floor/execute_pm_ticker")
 async def tf_execute_pm_ticker(ticker: str):
-    from services import execution_safety, trade_floor
-    from services.db import get_db
-    t = ticker.upper()
-    allowed, guard = await execution_safety.add_risk_allowed("api_equity_execute_pm_ticker")
-    if not allowed:
-        return {"ok": False, "reason": "safety_halt", "ticker": t, "guard": guard}
-    scan = await get_db().scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
-    rows = [r for r in ((scan or {}).get("results") or []) if str(r.get("ticker") or "").upper() == t]
-    if not rows:
-        return {"ok": False, "reason": "ticker_not_in_latest_scan", "ticker": t}
-    result = await trade_floor.evaluate_and_execute(rows, only_tickers={t})
-    return {"ok": bool(result.get("executed")), "ticker": t, "scan_finished_at": (scan or {}).get("finished_at"), **result}
+    raise HTTPException(status_code=410, detail="Alpaca equity execution is retired; PM equity orders route through Public only.")
 
 
 @api.post("/trade_floor/execution_probe")
 async def tf_execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_order: bool = False):
-    from services import execution_safety, trade_floor
-    if place_order:
-        allowed, guard = await execution_safety.add_risk_allowed("api_equity_execution_probe")
-        if not allowed:
-            return {"ok": False, "reason": "safety_halt", "guard": guard, "place_order": place_order}
-    return await trade_floor.execution_probe(ticker=ticker, notional=notional, place_order=place_order)
+    raise HTTPException(status_code=410, detail="Alpaca equity execution is retired; use the Public equity readiness and execution workflow.")
 
 
 @api.get("/trade_floor/history")
@@ -2588,107 +2570,14 @@ async def trade_journal_overview(limit_scans: int = 120, limit_trades: int = 200
 
 @api.post("/trade_floor/manual_send")
 async def tf_manual_send(ticker: str, risk_dollars: float, source: str = "manual"):
-    """Send a ticker straight to the Trade Floor with EXACT risk amount —
-    no scan gates, no recalc. Still enforces: (a) dedup vs Alpaca open
-    positions AND open orders; (b) limit DAY order at current ask;
-    (c) absolute risk hard cap by score tier; (d) analytical stop engine."""
-    from services import execution_safety, trade_floor, stop_engine, trade_floor_learning as tfle
-    if not trade_floor._alpaca_ready():
-        return {"ok": False, "reason": "alpaca_not_configured"}
-    ticker = ticker.upper()
-    allowed, guard = await execution_safety.add_risk_allowed("api_equity_manual_send")
-    if not allowed:
-        return {"ok": False, "reason": "safety_halt", "ticker": ticker, "guard": guard}
-    # Dedup
-    held = {p.get("symbol", "").upper() for p in await trade_floor.list_positions()}
-    pending = {o.get("symbol", "").upper() for o in await trade_floor.list_orders(status="open")}
-    if ticker in held:
-        return {"ok": False, "reason": "ticker_already_open_in_alpaca"}
-    if ticker in pending:
-        return {"ok": False, "reason": "ticker_has_pending_open_order"}
-    # Entry price = Alpaca ask
-    ask = await trade_floor.get_latest_ask(ticker)
-    if not ask:
-        from services import pricer
-        ask = await pricer.get_latest_close(ticker)
-    if not ask or ask <= 0:
-        return {"ok": False, "reason": "no_ask_quote"}
-    # Stop via analytical engine (assume score 30 if not provided so manual
-    # plays land in the middle tier of stop adjustment)
-    stop_calc = await stop_engine.compute_stop(
-        ticker=ticker, entry_price=ask,
-        signal_combo=[source.upper()], score=30, hold_window_days=30,
-        sector=None, instrument="fractional",
-    )
-    # Hard cap by score (manual = treated as 30-49 tier unless explicitly higher)
-    hard_cap = trade_floor.hard_cap_for(30, "fractional")
-    notional = round(min(float(risk_dollars), hard_cap), 2)
-    if notional < 1.0:
-        return {"ok": False, "reason": f"notional_too_small (cap=${hard_cap})"}
-    cli = execution_safety.stable_client_order_id(
-        "manual_send",
-        ticker,
-        "buy",
-        round(notional, 2),
-        source,
-        datetime.now(timezone.utc).date().isoformat(),
-        prefix="tf-manual",
-    )
-    claim = await execution_safety.claim_execution_intent(
-        scope="equity_manual_send",
-        client_order_id=cli,
-        symbol=ticker,
-        side="buy",
-        metadata={"source": source, "notional": notional},
-    )
-    if not claim.get("ok"):
-        return {"ok": False, "reason": claim.get("reason"), "client_order_id": cli, "intent": claim}
-    order = await trade_floor.submit_fractional_limit_buy(
-        ticker, notional, limit_price=round(ask, 4), client_order_id=cli,
-    )
-    await execution_safety.mark_execution_intent(
-        cli,
-        "submitted" if order else "broker_rejected",
-        {"order_id": (order or {}).get("id"), "ticker": ticker},
-    )
-    if order:
-        from services.db import get_db, stamped
-        trade_doc = stamped({
-            "client_order_id": cli,
-            "order_id": order.get("id"),
-            "ticker": ticker,
-            "entry_score": None,
-            "trade_score": 30,
-            "signal_combo": [source.upper()],
-            "instrument": "fractional",
-            "notional": notional,
-            "hard_cap_applied": hard_cap,
-            "limit_price": round(ask, 4),
-            "entry_price_ref": round(ask, 4),
-            "stop_price": stop_calc["stop_price"],
-            "stop_pct": stop_calc["stop_pct"],
-            "stop_breakdown": stop_calc["breakdown"],
-            "hold_window_days": 30,
-            "status": "OPEN",
-            "fill_status": "PENDING",
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-            "source": source,
-        })
-        await get_db().tf_trades.insert_one(trade_doc)
-        try:
-            await tfle.log_trade_initiation(trade_doc)
-        except Exception:
-            pass
-    return {"ok": order is not None, "notional": notional,
-             "stop": stop_calc["stop_price"], "limit_price": round(ask, 4),
-             "hard_cap": hard_cap, "order": order}
+    """Retired legacy Alpaca-equity endpoint."""
+    raise HTTPException(status_code=410, detail="Alpaca equity execution is retired; Public is the sole equity broker.")
 
 
 @api.post("/trade_floor/sweep_stale_orders")
 async def tf_sweep_stale():
     """Manually trigger the 24h stale-order cancel sweep."""
-    from services import trade_floor
-    return await trade_floor.cancel_stale_orders(max_age_hours=24)
+    raise HTTPException(status_code=410, detail="Alpaca equity execution is retired; no Alpaca equity orders are managed.")
 
 
 @api.post("/admin/reset_learning_engines")
@@ -2725,8 +2614,7 @@ async def reset_learning_engines(confirm: str = ""):
 async def tf_process_phases():
     """Manually trigger the three-phase exit processor (normally runs every
     15 min via position_monitor)."""
-    from services import trade_floor_phases
-    return await trade_floor_phases.process_phase_exits()
+    raise HTTPException(status_code=410, detail="Alpaca equity execution is retired; Public manages equity exits.")
 
 
 @api.get("/trade_floor/phase_outcomes")
