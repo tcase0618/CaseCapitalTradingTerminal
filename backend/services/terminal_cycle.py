@@ -221,7 +221,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
     execution_freshness: dict[str, Any] = {"skipped": True, "reason": "public_equity_execution_not_enabled"}
     if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
-        from . import public_execution, trade_floor
+        from . import public_execution
         if pm_payload.get("scan_finished_at") != scan.get("finished_at"):
             equity_execution = {"skipped": True, "reason": "pm_scan_mismatch", "executed": [], "rejected": []}
         else:
@@ -232,7 +232,15 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                 )
                 equity_execution = await timed("public_equity_execution", public_execution.execute_pm_equity(pm_payload.get("recommendations") or [], cycle_id=scan.get("cycle_id")))
             else:
-                equity_execution = await timed("equity_execution", trade_floor.evaluate_and_execute(scan.get("results") or [], pm_rows=pm_payload.get("recommendations") or [], strategy_rows=strategy_pm_rows, pm_scan_finished_at=pm_payload.get("scan_finished_at")))
+                # Public is the sole equity broker. Alpaca is intentionally
+                # isolated to the options desk and must never become an equity
+                # execution fallback when Public is unavailable or disabled.
+                equity_execution = {
+                    "skipped": True,
+                    "reason": "public_equity_execution_not_enabled_no_alpaca_fallback",
+                    "executed": [],
+                    "rejected": [],
+                }
 
     options_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_OPTIONS_EXECUTION is off"}
     if options_desk.options_execution_enabled():

@@ -43,6 +43,15 @@ from .db import get_db, log_activity, stamped
 
 logger = logging.getLogger(__name__)
 
+# Equity execution migrated to Public. This module remains read-only for
+# historical Paper records and legacy diagnostics; no code may submit, queue,
+# cancel, or close Alpaca equity orders.
+ALPACA_EQUITY_EXECUTION_RETIRED = True
+
+
+def _legacy_equity_execution_disabled() -> bool:
+    return ALPACA_EQUITY_EXECUTION_RETIRED
+
 ALPACA_KEY = os.environ.get("APCA_API_KEY_ID", "").strip()
 ALPACA_SECRET = os.environ.get("APCA_API_SECRET_KEY", "").strip()
 ALPACA_TRADE_BASE = os.environ.get(
@@ -362,6 +371,13 @@ async def _submit_fractional_limit_buy_now(
 async def submit_fractional_limit_buy(ticker: str, notional: float, limit_price: float,
                                           client_order_id: str | None = None) -> dict[str, Any] | None:
     """Limit DAY order for fractional notional. NEVER market."""
+    if _legacy_equity_execution_disabled():
+        await log_activity(
+            "Alpaca equity submit blocked: Public is the sole equity broker",
+            "info",
+            {"ticker": ticker, "notional": notional},
+        )
+        return None
     if not _alpaca_ready() or notional <= 0 or limit_price <= 0:
         return None
     try:
@@ -510,6 +526,13 @@ async def execution_probe(ticker: str = "AAPL", notional: float = 1.0, place_ord
 
 async def flush_queued_equity_orders(limit: int = 25) -> dict[str, Any]:
     """Submit PM-approved queued equity intents when Alpaca can accept them."""
+    if _legacy_equity_execution_disabled():
+        return {
+            "ok": True,
+            "submitted": [],
+            "skipped": [],
+            "reason": "alpaca_equity_execution_retired_public_is_sole_equity_broker",
+        }
     session = equity_order_session()
     if not session["tradable_now"]:
         return {"ok": True, "submitted": [], "skipped": [], "session": session, "reason": "equity_session_closed"}
@@ -723,6 +746,13 @@ async def cancel_stale_orders(max_age_hours: int = 24) -> dict[str, Any]:
 
 
 async def close_position(ticker: str) -> dict[str, Any] | None:
+    if _legacy_equity_execution_disabled():
+        await log_activity(
+            "Alpaca equity close blocked: Public is the sole equity broker",
+            "info",
+            {"ticker": ticker},
+        )
+        return None
     if not _alpaca_ready():
         return None
     try:
@@ -986,6 +1016,14 @@ async def evaluate_and_execute(
     orders happens immediately before EVERY single submit attempt. A
     ticker that already has a position or a queued/working order will
     never receive a duplicate order."""
+    if _legacy_equity_execution_disabled():
+        return {
+            "executed": [],
+            "queued": [],
+            "rejected": [],
+            "skipped": True,
+            "reason": "alpaca_equity_execution_retired_public_is_sole_equity_broker",
+        }
     from . import execution_gate, execution_safety, portfolio_manager, pm_rules, safety, stop_engine, trade_floor_learning as tfle  # local to avoid cycle
     db = get_db()
     executed: list[dict[str, Any]] = []

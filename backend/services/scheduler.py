@@ -583,13 +583,7 @@ def start_scheduler():
         rebalance_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         portfolio_score_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
-            from . import options_desk, pm_ratchet, tail_hunter, trade_floor, trade_floor_phases
-            try:
-                await trade_floor.flush_queued_equity_orders(limit=25)
-                await trade_floor.sync_positions_and_close_settled()
-            except Exception as exc:
-                failures.append({"stage": "alpaca_position_sync", "reason": exc.__class__.__name__})
-                logger.exception("Alpaca position sync failed")
+            from . import options_desk, tail_hunter
             try:
                 from . import public_execution
                 if public_execution.enabled():
@@ -634,10 +628,8 @@ def start_scheduler():
                 failures.append({"stage": "daily_loss_check", "reason": breaker_exc.__class__.__name__})
                 logger.warning("daily loss breaker: %s", breaker_exc)
             for stage, operation in (
-                ("pm_ratchet", pm_ratchet.process_open_ratchets),
                 ("options_monitor", lambda: options_desk.monitor_open_positions(enforce_hard_stop=True)),
                 ("tail_monitor", tail_hunter.monitor_tail_positions),
-                ("phase_exits", trade_floor_phases.process_phase_exits),
             ):
                 try:
                     await operation()
@@ -744,25 +736,6 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    async def _equity_queue_flush_job():
-        try:
-            from . import trade_floor
-            result = await trade_floor.flush_queued_equity_orders(limit=25)
-            if result.get("submitted"):
-                await log_activity(
-                    f"Equity queue flush: {len(result.get('submitted', []))} order(s) submitted",
-                    "success",
-                    result,
-                )
-        except Exception as e:
-            logger.warning("equity queue flush: %s", e)
-    _scheduler.add_job(
-        _equity_queue_flush_job,
-        CronTrigger(hour="0-23", minute="*", timezone=ET),
-        id="equity_queue_flush_24h",
-        replace_existing=True,
-    )
-
     async def _execution_authority_refresh_job():
         try:
             from . import options_desk
@@ -837,19 +810,6 @@ def start_scheduler():
         IntervalTrigger(minutes=10),
         id="schedule_watchdog_10m",
         replace_existing=True,
-    )
-
-    # v5.2 - stale-order sweep every hour: cancel any TF buy still unfilled > 24h
-    async def _stale_order_sweep():
-        try:
-            from . import trade_floor
-            await trade_floor.cancel_stale_orders(max_age_hours=24)
-        except Exception as e:
-            logger.warning("stale order sweep: %s", e)
-    _scheduler.add_job(
-        _stale_order_sweep,
-        CronTrigger(minute="5", timezone=ET),  # top of every hour + 5 min
-        id="stale_order_sweep", replace_existing=True,
     )
 
     # v5.0 - daily database backup at 2am ET
