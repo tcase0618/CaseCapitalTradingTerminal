@@ -126,14 +126,24 @@ def _persistence_blocker(error: Exception) -> dict[str, Any]:
 
 
 def _execution_flags() -> dict[str, Any]:
+    # Public is the live equity broker.  Alpaca's equity URL remains in the
+    # environment for its paper-only legacy/reporting paths and must not be
+    # used to describe or gate Public equity execution.
+    public_live = (
+        os.environ.get("PUBLIC_API_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        and os.environ.get("PUBLIC_LIVE_EQUITY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        and not os.environ.get("PUBLIC_RESEARCH_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    )
     equity_enabled = os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
     options_enabled = os.environ.get("ENABLE_OPTIONS_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
     opt_base = os.environ.get("OPTIONS_APCA_API_BASE_URL", "")
     eq_base = os.environ.get("APCA_API_BASE_URL", "")
     return {
-        "equity_execution_enabled": equity_enabled,
+        "equity_execution_enabled": equity_enabled and public_live,
+        "equity_broker": "public" if public_live else "disabled",
+        "public_equity_enabled": public_live,
         "options_execution_enabled": options_enabled,
-        "equity_paper": "paper-api.alpaca.markets" in eq_base,
+        "equity_paper": False,
         "options_paper": "paper-api.alpaca.markets" in opt_base,
         "options_indicative_allowed": os.environ.get("OPTIONS_ALLOW_INDICATIVE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"},
     }

@@ -103,8 +103,26 @@ async def _revalidate_stale_execution_authority(
     if not any((row.get("key") or row.get("label")) in critical for row in scoped_blockers):
         return scoped_blockers
     try:
-        from . import pricer, trade_floor
+        if scope == "equity" and (truth.get("execution") or {}).get("equity_broker") == "public":
+            # Alpaca paper is not an authority for Public live equities. The
+            # Public execution path will independently re-read a fresh quote
+            # immediately before every submission.
+            from . import public_execution
 
+            portfolio = await asyncio.wait_for(public_execution.portfolio_state(), timeout=6.0)
+            if not portfolio.get("ok"):
+                return scoped_blockers
+            truth["execution_authority_revalidated_at"] = _now()
+            truth["execution_authority_revalidation"] = {
+                "public_portfolio": True,
+                "scope": scope,
+            }
+            return [
+                row for row in scoped_blockers
+                if (row.get("key") or row.get("label")) not in critical
+            ]
+
+        from . import pricer, trade_floor
         account = await asyncio.wait_for(trade_floor.get_account(), timeout=6.0)
         price_source = pricer.execution_source_label()
         if not account or not str(price_source).lower().startswith("alpaca"):
@@ -213,7 +231,9 @@ async def check(
     if scope == "equity":
         if not execution.get("equity_execution_enabled"):
             blockers.append("equity_execution_disabled")
-        if not execution.get("equity_paper") and not _env_bool("ALLOW_LIVE_EQUITY_EXECUTION"):
+        if execution.get("equity_broker") == "public" and not execution.get("public_equity_enabled"):
+            blockers.append("public_equity_execution_unavailable")
+        elif execution.get("equity_broker") != "public" and not execution.get("equity_paper") and not _env_bool("ALLOW_LIVE_EQUITY_EXECUTION"):
             blockers.append("equity_account_not_paper")
     if scope == "options":
         if not execution.get("options_execution_enabled"):

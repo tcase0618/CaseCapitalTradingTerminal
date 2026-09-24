@@ -26,6 +26,21 @@ def test_same_scan_normalizes_zulu_suffix():
     assert telegram_events._same_scan("2026-08-13T12:00:30Z", "2026-08-13T12:00:30+00:00")
 
 
+def test_data_truth_reports_public_as_the_live_equity_broker(monkeypatch):
+    monkeypatch.setenv("PUBLIC_API_ENABLED", "true")
+    monkeypatch.setenv("PUBLIC_LIVE_EQUITY_ENABLED", "true")
+    monkeypatch.setenv("PUBLIC_RESEARCH_ONLY", "false")
+    monkeypatch.setenv("ENABLE_TRADE_EXECUTION", "true")
+    monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+
+    flags = data_truth._execution_flags()
+
+    assert flags["equity_broker"] == "public"
+    assert flags["public_equity_enabled"] is True
+    assert flags["equity_execution_enabled"] is True
+    assert flags["equity_paper"] is False
+
+
 def test_execution_gate_blocks_all_scopes_on_truth_block():
     truth = {
         "decision": "BLOCK",

@@ -173,6 +173,192 @@ def _public_position_mark(raw: dict[str, Any]) -> tuple[float, float, Any]:
     return price, pnl, timestamp
 
 
+def _public_position_cost_basis(raw: dict[str, Any]) -> tuple[float, float]:
+    """Return broker-reported unit and total cost basis, never a guess."""
+    basis = raw.get("costBasis") or raw.get("cost_basis") or {}
+    if not isinstance(basis, dict):
+        return 0.0, 0.0
+    return (
+        _num(basis.get("unitCost") or basis.get("unit_cost")),
+        _num(basis.get("totalCost") or basis.get("total_cost")),
+    )
+
+
+def _public_position_opened_at(raw: dict[str, Any]) -> str | None:
+    value = raw.get("openedAt") or raw.get("opened_at")
+    return str(value) if value else None
+
+
+def _import_client_order_id(ticker: str, opened_at: str | None) -> str:
+    # An imported broker holding has no terminal order id.  This stable id
+    # makes it visible and idempotent without pretending it was terminal-made.
+    stamp = (opened_at or "unknown").replace(" ", "T").replace(":", "-")[:32]
+    return f"public-import-{ticker.lower()}-{stamp}"
+
+
+def _history_transactions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = payload.get("transactions") or payload.get("history") or []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _history_timestamp(row: dict[str, Any]) -> datetime | None:
+    value = row.get("timestamp") or row.get("createdAt") or row.get("date")
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _matching_broker_sell(
+    transactions: list[dict[str, Any]],
+    *,
+    ticker: str,
+    quantity: float,
+    after: datetime | None,
+) -> dict[str, Any] | None:
+    """Return only an exact, post-entry broker sell; never infer a partial exit."""
+    for row in transactions:
+        if str(row.get("type") or "").upper() != "TRADE":
+            continue
+        if str(row.get("side") or "").upper() != "SELL":
+            continue
+        if _symbol(row) != ticker:
+            continue
+        sold = abs(_num(row.get("quantity")))
+        when = _history_timestamp(row)
+        if quantity <= 0 or abs(sold - quantity) > max(1e-5, quantity * 0.001):
+            continue
+        if after and (not when or when < after):
+            continue
+        proceeds = _num(row.get("netAmount"))
+        if proceeds > 0:
+            return row
+    return None
+
+
+async def _reconcile_closed_broker_history(
+    client: public_api.PublicAPIClient,
+) -> dict[str, Any]:
+    """Backfill only exact Public sell fills into closed terminal records.
+
+    Terminal state used to mark positions closed merely because a broker
+    holding disappeared.  This pass upgrades those records only when Public's
+    activity history provides an exact quantity match, preventing fabricated
+    realized P&L from entering learning.
+    """
+    db = get_db()
+    rows = await db.tf_trades.find(
+        {"broker_base": BROKER_BASE, "status": "CLOSED"}, {"_id": 0},
+    ).to_list(500)
+    candidates = [row for row in rows if _num(row.get("realized_pnl")) == 0 and not row.get("broker_exit_verified")]
+    if not candidates:
+        return {"checked": 0, "verified": 0, "unmatched": 0}
+    starts = [_parse_history_start(row.get("filled_at") or row.get("submitted_at")) for row in candidates]
+    starts = [value for value in starts if value]
+    start = min(starts).isoformat().replace("+00:00", "Z") if starts else "2020-01-01T00:00:00Z"
+    try:
+        payload = await client.history(start=start, end=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), page_size=500)
+    except Exception as exc:
+        return {"checked": len(candidates), "verified": 0, "unmatched": len(candidates), "error": exc.__class__.__name__}
+    transactions = _history_transactions(payload)
+    verified = 0
+    for row in candidates:
+        entry_time = _parse_history_start(row.get("filled_at") or row.get("submitted_at"))
+        quantity = _qty(row)
+        if quantity <= 0:
+            quantity = _num(row.get("qty_total"))
+        sell = _matching_broker_sell(transactions, ticker=_symbol(row), quantity=quantity, after=entry_time)
+        if not sell:
+            continue
+        proceeds = _num(sell.get("netAmount"))
+        entry_cost = _num(row.get("notional")) or (_num(row.get("filled_avg_price")) * quantity)
+        if proceeds <= 0 or entry_cost <= 0:
+            continue
+        realized = round(proceeds - entry_cost, 4)
+        await db.tf_trades.update_one(
+            {"client_order_id": row.get("client_order_id"), "broker_base": BROKER_BASE},
+            {"$set": {
+                "broker_exit_verified": True,
+                "broker_exit_transaction_id": sell.get("id"),
+                "broker_exit_price": round(proceeds / quantity, 6),
+                "broker_exit_proceeds": proceeds,
+                "realized_pnl": realized,
+                "realized_pl_pct": round(realized / entry_cost * 100, 4),
+                "realized_pnl_source": "public_history_exact_quantity_match",
+                "last_synced_at": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+        verified += 1
+    return {"checked": len(candidates), "verified": verified, "unmatched": len(candidates) - verified}
+
+
+def _parse_history_start(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _import_unmanaged_broker_positions(
+    positions: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Create explicit ledger rows for broker holdings the terminal missed.
+
+    We intentionally do not manufacture a strategy, stop, or target for a
+    holding that predates the terminal's durable order record.  Importing it
+    exposes the position to the PM and protection coverage report; it remains
+    non-executable for automated stop management until a real plan exists.
+    """
+    db = get_db()
+    open_rows = await db.tf_trades.find(
+        {"broker_base": BROKER_BASE, "status": "OPEN"},
+        {"_id": 0, "ticker": 1},
+    ).to_list(500)
+    known = {_symbol(row) for row in open_rows}
+    imported: list[str] = []
+    for ticker, raw in positions.items():
+        if not ticker or ticker in known:
+            continue
+        quantity = _qty(raw)
+        if quantity <= 0:
+            continue
+        unit_cost, total_cost = _public_position_cost_basis(raw)
+        opened_at = _public_position_opened_at(raw)
+        current_price, unrealized_pct, price_timestamp = _public_position_mark(raw)
+        await db.tf_trades.insert_one(stamped({
+            "client_order_id": _import_client_order_id(ticker, opened_at),
+            "broker_base": BROKER_BASE,
+            "ticker": ticker,
+            "instrument": "EQUITY",
+            "status": "OPEN",
+            "fill_status": "FILLED",
+            "qty_total": quantity,
+            "qty_remaining": quantity,
+            "filled_avg_price": unit_cost,
+            "filled_at": opened_at,
+            "submitted_at": opened_at or datetime.now(timezone.utc).isoformat(),
+            "notional": total_cost,
+            "allocation_usd": total_cost,
+            "broker_imported": True,
+            "management_state": "REQUIRES_STRATEGY_RECONCILIATION",
+            "strategy_id": None,
+            "screener_id": None,
+            "scanner_family": None,
+            "strategy_lanes": [],
+            "current_stop": 0.0,
+            "pm_active_stop": 0.0,
+            "protection_state": "UNMANAGED_NO_STOP",
+            "protective_order_status": "NOT_ATTEMPTED_NO_VERIFIED_PLAN",
+            "protection_note": "Imported from broker portfolio without a durable terminal entry plan; no stop or strategy was invented.",
+            "broker_mark_price": current_price,
+            "broker_mark_timestamp": price_timestamp,
+            "broker_unrealized_pct": unrealized_pct,
+            "last_synced_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        imported.append(ticker)
+    return {"imported": imported, "count": len(imported)}
+
+
 def _public_session_now(now: datetime | None = None) -> str:
     """Return Public's legal equity session for the current ET clock."""
     now_et = (now or datetime.now(timezone.utc)).astimezone(ET)
@@ -872,6 +1058,7 @@ async def reconcile() -> dict[str, Any]:
                 )
                 order_updates += 1
         positions = {_symbol(row): row for row in _positions(await client.portfolio())}
+        imported = await _import_unmanaged_broker_positions(positions)
         rows = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN"}, {"_id": 0}).to_list(500)
         updated = closed = 0
         for trade in rows:
@@ -879,7 +1066,23 @@ async def reconcile() -> dict[str, Any]:
             position = positions.get(ticker)
             if position:
                 qty = _qty(position)
-                await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"fill_status": "FILLED" if qty > 0 else trade.get("fill_status", "PENDING"), "qty_remaining": qty, "qty_total": max(qty, _num(trade.get("qty_total"))), "last_synced_at": datetime.now(timezone.utc).isoformat()}})
+                unit_cost, total_cost = _public_position_cost_basis(position)
+                mark_price, unrealized_pct, mark_timestamp = _public_position_mark(position)
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": {
+                        "fill_status": "FILLED" if qty > 0 else trade.get("fill_status", "PENDING"),
+                        "qty_remaining": qty,
+                        "qty_total": max(qty, _num(trade.get("qty_total"))),
+                        "filled_avg_price": _num(trade.get("filled_avg_price")) or unit_cost,
+                        "broker_cost_basis_unit": unit_cost,
+                        "broker_cost_basis_total": total_cost,
+                        "broker_mark_price": mark_price,
+                        "broker_mark_timestamp": mark_timestamp,
+                        "broker_unrealized_pct": unrealized_pct,
+                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                    }},
+                )
                 updated += 1
             elif trade.get("fill_status") == "FILLED":
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
@@ -893,7 +1096,18 @@ async def reconcile() -> dict[str, Any]:
                 except Exception:
                     logger.exception("Lottery exit reconciliation flag failed for Public order %s", trade.get("public_order_id"))
                 closed += 1
-    result = {"skipped": False, "ok": poll_errors == 0, "order_updates": order_updates, "updated": updated, "closed": closed, "poll_errors": poll_errors, "broker": BROKER_BASE}
+        history_reconciliation = await _reconcile_closed_broker_history(client)
+    result = {
+        "skipped": False,
+        "ok": poll_errors == 0,
+        "order_updates": order_updates,
+        "updated": updated,
+        "closed": closed,
+        "poll_errors": poll_errors,
+        "broker_position_imported": imported,
+        "broker_history_reconciliation": history_reconciliation,
+        "broker": BROKER_BASE,
+    }
     state_update = {"last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_result": result}
     if poll_errors == 0:
         state_update["last_success_at"] = datetime.now(timezone.utc).isoformat()

@@ -61,6 +61,7 @@ OPTION_ACTIVE_STATUSES = {
     "pending_protective_close_market_closed",
 }
 OPTIONS_POLICY = get_policy()
+PM_EXECUTABLE_ACTIONS = {"ACCUMULATE", "STARTER"}
 MIN_OPEN_INTEREST = OPTIONS_POLICY.min_open_interest
 MIN_VOLUME_WHEN_LOW_OI = OPTIONS_POLICY.min_volume_when_low_oi
 MIN_OPTION_VOLUME_IF_OI_UNKNOWN = OPTIONS_POLICY.min_volume_if_oi_unknown
@@ -1243,13 +1244,13 @@ async def build_candidates(
                 or opts.get("preferred_route") == "OPTION"
                 or str(scanner.get("family") or row.get("scanner_family") or "").upper() == "OPTIONS"
             )
+            # Options research may score a WATCH name, but only the PM's two
+            # risk-add actions may consume an Alpaca quote or become an order.
+            # This preserves the PM as the sole authority to add risk.
             should_refresh = (
-                pm_action in {"ACCUMULATE", "STARTER", "WATCH"}
-                and (
-                    (pm_action == "WATCH" and pm_score >= OPTIONS_WATCH_MIN_SCORE and pm_rr >= OPTIONS_WATCH_MIN_RR)
-                    or (pm_action in {"ACCUMULATE", "STARTER"} and pm_score >= OPTIONS_PM_MIN_SCORE and pm_rr >= OPTIONS_PM_MIN_RR)
-                    or (options_intent and pm_score >= OPTIONS_WATCH_MIN_SCORE)
-                )
+                pm_action in PM_EXECUTABLE_ACTIONS
+                and pm_score >= OPTIONS_PM_MIN_SCORE
+                and pm_rr >= OPTIONS_PM_MIN_RR
             )
             if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
                 from . import options_engine
@@ -1293,6 +1294,8 @@ async def build_candidates(
         data_quality = execution_view.get("data_quality") or instrument.get("data_quality") or opts.get("data_quality")
         quality_state = "EXECUTION_GRADE" if data_provider == "ALPACA_OPTIONS" and _execution_grade_allowed(data_quality) else "RESEARCH_ONLY"
         if route in {"OPTION", "BOTH"}:
+            if str(pm_row.get("action") or "").upper() not in PM_EXECUTABLE_ACTIONS:
+                blocked.append("pm_action_not_risk_add")
             if not OPTIONS_EXECUTION_ENABLED:
                 blocked.append("options execution is disabled")
             if not paper_only():
@@ -1380,7 +1383,12 @@ async def build_candidates(
             "quality_state": quality_state,
             "options_live_refresh_attempted": attempted_live_refresh,
             "contracts": contracts,
-            "manual_fire_ready": route in {"OPTION", "BOTH"} and not blocked and contracts > 0,
+            "manual_fire_ready": (
+                str(pm_row.get("action") or "").upper() in PM_EXECUTABLE_ACTIONS
+                and route in {"OPTION", "BOTH"}
+                and not blocked
+                and contracts > 0
+            ),
             "blocked_reasons": blocked,
             "route_reasons": route_reasons,
             "scan_finished_at": (scan or {}).get("finished_at"),
@@ -1612,6 +1620,8 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         return {"ok": False, "reason": "options_market_closed", "market_status": market_status, "candidate": ticket}
     if not ticket.get("manual_fire_ready"):
         return {"ok": False, "reason": "candidate_not_manual_fire_ready", "blocked": ticket.get("blocked_reasons"), "candidate": ticket}
+    if str(ticket.get("pm_action") or "").upper() not in PM_EXECUTABLE_ACTIONS:
+        return {"ok": False, "reason": "pm_action_not_risk_add", "candidate": ticket}
     instrument = ticket.get("instrument") or {}
     if (ticket.get("data_provider") or instrument.get("data_provider")) != "ALPACA_OPTIONS":
         return {"ok": False, "reason": "missing_alpaca_execution_grade_options_data", "candidate": ticket}
