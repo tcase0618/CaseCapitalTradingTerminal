@@ -253,7 +253,10 @@ async def _reconcile_closed_broker_history(
     candidates = [row for row in rows if _num(row.get("realized_pnl")) == 0 and not row.get("broker_exit_verified")]
     if not candidates:
         return {"checked": 0, "verified": 0, "unmatched": 0}
-    starts = [_parse_history_start(row.get("filled_at") or row.get("submitted_at")) for row in candidates]
+    # Some legacy rows populated filled_at only when a later reconciliation
+    # observed the position. Submitted_at is the safe lower bound for an exact
+    # broker-history match; a sell before it can never be attributed here.
+    starts = [_parse_history_start(row.get("submitted_at") or row.get("filled_at")) for row in candidates]
     starts = [value for value in starts if value]
     start = min(starts).isoformat().replace("+00:00", "Z") if starts else "2020-01-01T00:00:00Z"
     try:
@@ -263,7 +266,7 @@ async def _reconcile_closed_broker_history(
     transactions = _history_transactions(payload)
     verified = 0
     for row in candidates:
-        entry_time = _parse_history_start(row.get("filled_at") or row.get("submitted_at"))
+        entry_time = _parse_history_start(row.get("submitted_at") or row.get("filled_at"))
         quantity = _qty(row)
         if quantity <= 0:
             quantity = _num(row.get("qty_total"))
