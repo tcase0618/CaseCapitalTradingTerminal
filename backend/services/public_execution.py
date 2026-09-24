@@ -706,11 +706,23 @@ async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:
         return {"ok": False, "reason": "public_reconciliation_stale", "age_seconds": age}
     coverage = await protection_coverage()
     if coverage["unprotected_open"]:
-        if coverage["unresolved_unprotected_open"] == 0 and monitored_exit_override_enabled():
+        # Imported broker positions predate the terminal's decision ledger. They
+        # remain visibly unmanaged, but must not make unrelated new PM entries
+        # impossible. Fresh terminal-owned positions still fail closed unless
+        # they have broker protection or an explicit monitored-exit routing
+        # rejection.
+        if coverage["managed_unresolved_unprotected_open"] == 0 and monitored_exit_override_enabled():
+            warnings = []
+            if coverage["monitored_exit_only_open"]:
+                warnings.append("public_monitored_exit_only_override")
+            if coverage["legacy_unmanaged_open"]:
+                warnings.append("public_legacy_positions_unmanaged")
             return {
                 "ok": True,
-                "warning": "public_monitored_exit_only_override",
+                "warning": warnings[0] if warnings else "public_protection_override",
+                "warnings": warnings,
                 "monitored_exit_override": True,
+                "legacy_unmanaged_override": bool(coverage["legacy_unmanaged_open"]),
                 "age_seconds": age,
                 "last_success_at": checked_at,
                 **coverage,
@@ -729,23 +741,41 @@ async def protection_coverage() -> dict[str, Any]:
     """Report actual broker protection; a local stop value is not coverage."""
     rows = await get_db().tf_trades.find(
         {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": {"$in": ["FILLED", "PARTIALLY_FILLED"]}},
-        {"_id": 0, "ticker": 1, "protective_order_id": 1, "protective_order_status": 1, "protective_order_error": 1},
-    ).to_list(500)
-    unprotected = [
         {
+            "_id": 0,
+            "ticker": 1,
+            "protective_order_id": 1,
+            "protective_order_status": 1,
+            "protective_order_error": 1,
+            "broker_imported": 1,
+            "management_state": 1,
+        },
+    ).to_list(500)
+    unprotected = []
+    for row in rows:
+        if row.get("protective_order_id") and str(row.get("protective_order_status") or "").upper() == "SUBMITTED":
+            continue
+        is_legacy_unmanaged = bool(row.get("broker_imported")) and row.get("management_state") == "REQUIRES_STRATEGY_RECONCILIATION"
+        unprotected.append({
             "ticker": _symbol(row),
-            "status": "MONITORED_EXIT_ONLY" if _routing_rejects_stop(row) else str(row.get("protective_order_status") or "MISSING").upper(),
+            "status": "LEGACY_UNMANAGED" if is_legacy_unmanaged else (
+                "MONITORED_EXIT_ONLY" if _routing_rejects_stop(row) else str(row.get("protective_order_status") or "MISSING").upper()
+            ),
             "reason": str(row.get("protective_order_error") or "broker_protective_order_missing")[:220],
-        }
-        for row in rows
-        if not (row.get("protective_order_id") and str(row.get("protective_order_status") or "").upper() == "SUBMITTED")
-    ]
+            "legacy_unmanaged": is_legacy_unmanaged,
+        })
     monitored_only = [row for row in unprotected if row["status"] == "MONITORED_EXIT_ONLY"]
+    legacy_unmanaged = [row for row in unprotected if row["legacy_unmanaged"]]
+    managed_unresolved = [row for row in unprotected if row["status"] != "MONITORED_EXIT_ONLY" and not row["legacy_unmanaged"]]
     return {
         "filled_open": len(rows),
         "protected_open": len(rows) - len(unprotected),
         "unprotected_open": len(unprotected),
         "monitored_exit_only_open": len(monitored_only),
+        "legacy_unmanaged_open": len(legacy_unmanaged),
+        "managed_unresolved_unprotected_open": len(managed_unresolved),
+        # Kept for existing reporting clients; it excludes monitored-only
+        # routing rejects but intentionally includes legacy warnings.
         "unresolved_unprotected_open": len(unprotected) - len(monitored_only),
         "unprotected": unprotected[:25],
     }
