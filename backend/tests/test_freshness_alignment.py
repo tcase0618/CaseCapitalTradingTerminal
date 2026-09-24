@@ -200,6 +200,7 @@ def test_scanner_default_includes_delayed_sip_for_free_tier_research(monkeypatch
 
 
 def test_delayed_sip_is_never_execution_eligible(monkeypatch):
+    monkeypatch.setenv("PUBLIC_API_ENABLED", "false")
     monkeypatch.setenv("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200")
 
     async def fake_alpaca(ticker, *, feed=None):
@@ -228,6 +229,7 @@ def test_delayed_sip_is_never_execution_eligible(monkeypatch):
 
 
 def test_live_price_meta_prefers_fresh_alpaca_feed(monkeypatch):
+    monkeypatch.setenv("PUBLIC_API_ENABLED", "false")
     calls = []
 
     async def fake_alpaca(ticker, *, feed=None):
@@ -259,6 +261,7 @@ def test_live_price_meta_prefers_fresh_alpaca_feed(monkeypatch):
 
 
 def test_live_price_meta_marks_stale_alpaca_without_hiding_it(monkeypatch):
+    monkeypatch.setenv("PUBLIC_API_ENABLED", "false")
     async def fake_alpaca(ticker, *, feed=None):
         if feed == "overnight":
             return {
