@@ -295,6 +295,87 @@ async def _reconcile_closed_broker_history(
     return {"checked": len(candidates), "verified": verified, "unmatched": len(candidates) - verified}
 
 
+async def _import_unattributed_closed_broker_history(
+    client: public_api.PublicAPIClient,
+) -> dict[str, Any]:
+    """Import complete broker round-trips with no terminal ledger record.
+
+    This repairs account-level performance reconciliation while retaining the
+    fact that the strategy is unknown.  It never assigns the trade to a scan,
+    lane, or PM decision, so learning cannot mistake an external/legacy trade
+    for evidence about a terminal strategy.
+    """
+    db = get_db()
+    rows = await db.tf_trades.find({"broker_base": BROKER_BASE}, {"_id": 0, "ticker": 1}).to_list(1000)
+    ledger_tickers = {_symbol(row) for row in rows}
+    try:
+        payload = await client.history(
+            start="2020-01-01T00:00:00Z",
+            end=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            page_size=500,
+        )
+    except Exception as exc:
+        return {"imported": 0, "error": exc.__class__.__name__}
+    transactions = sorted(_history_transactions(payload), key=lambda row: _history_timestamp(row) or datetime.min.replace(tzinfo=timezone.utc))
+    open_buys: dict[str, list[dict[str, Any]]] = {}
+    imported: list[str] = []
+    for row in transactions:
+        if str(row.get("type") or "").upper() != "TRADE":
+            continue
+        ticker = _symbol(row)
+        quantity = abs(_num(row.get("quantity")))
+        amount = _num(row.get("netAmount"))
+        if not ticker or quantity <= 0 or amount == 0:
+            continue
+        side = str(row.get("side") or "").upper()
+        if side == "BUY":
+            open_buys.setdefault(ticker, []).append(row)
+            continue
+        if side != "SELL" or ticker in ledger_tickers:
+            continue
+        candidates = open_buys.get(ticker) or []
+        buy = next((candidate for candidate in candidates if abs(abs(_num(candidate.get("quantity"))) - quantity) <= max(1e-5, quantity * 0.001)), None)
+        if not buy:
+            continue
+        buy_amount = abs(_num(buy.get("netAmount")))
+        if buy_amount <= 0 or amount <= 0:
+            continue
+        client_order_id = f"public-history-{str(buy.get('id') or ticker).lower()}"
+        await db.tf_trades.insert_one(stamped({
+            "client_order_id": client_order_id,
+            "broker_base": BROKER_BASE,
+            "ticker": ticker,
+            "instrument": "EQUITY",
+            "status": "CLOSED",
+            "fill_status": "EXIT_FILLED",
+            "qty_total": quantity,
+            "qty_remaining": 0.0,
+            "filled_avg_price": round(buy_amount / quantity, 6),
+            "filled_at": str(buy.get("timestamp") or ""),
+            "submitted_at": str(buy.get("timestamp") or ""),
+            "closed_at": str(row.get("timestamp") or ""),
+            "notional": buy_amount,
+            "allocation_usd": buy_amount,
+            "broker_imported": True,
+            "management_state": "BROKER_HISTORY_UNATTRIBUTED",
+            "strategy_id": None,
+            "screener_id": None,
+            "scanner_family": None,
+            "strategy_lanes": [],
+            "realized_pnl": round(amount - buy_amount, 4),
+            "realized_pl_pct": round((amount - buy_amount) / buy_amount * 100, 4),
+            "realized_pnl_source": "public_history_unattributed_round_trip",
+            "broker_exit_verified": True,
+            "broker_entry_transaction_id": buy.get("id"),
+            "broker_exit_transaction_id": row.get("id"),
+            "broker_exit_proceeds": amount,
+            "close_reason": "public_history_import",
+        }))
+        ledger_tickers.add(ticker)
+        imported.append(ticker)
+    return {"imported": len(imported), "tickers": imported}
+
+
 def _parse_history_start(value: Any) -> datetime | None:
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
@@ -1100,6 +1181,7 @@ async def reconcile() -> dict[str, Any]:
                     logger.exception("Lottery exit reconciliation flag failed for Public order %s", trade.get("public_order_id"))
                 closed += 1
         history_reconciliation = await _reconcile_closed_broker_history(client)
+        history_import = await _import_unattributed_closed_broker_history(client)
     result = {
         "skipped": False,
         "ok": poll_errors == 0,
@@ -1109,6 +1191,7 @@ async def reconcile() -> dict[str, Any]:
         "poll_errors": poll_errors,
         "broker_position_imported": imported,
         "broker_history_reconciliation": history_reconciliation,
+        "broker_history_import": history_import,
         "broker": BROKER_BASE,
     }
     state_update = {"last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_result": result}
