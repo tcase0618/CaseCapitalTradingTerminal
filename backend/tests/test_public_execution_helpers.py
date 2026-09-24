@@ -158,6 +158,25 @@ def test_public_portfolio_mark_uses_documented_public_v2_fields():
     assert timestamp == "2026-09-16T14:00:00Z"
 
 
+def test_public_position_cost_basis_uses_broker_fields_only():
+    unit, total = public_execution._public_position_cost_basis({
+        "costBasis": {"unitCost": "12.50", "totalCost": "6.00"},
+    })
+    assert unit == 12.5
+    assert total == 6.0
+
+
+def test_public_history_sell_match_requires_exact_quantity_and_post_entry_time():
+    after = datetime(2026, 9, 3, 20, tzinfo=timezone.utc)
+    transactions = [
+        {"type": "TRADE", "side": "SELL", "symbol": "ABC", "quantity": "-0.5", "netAmount": "2.00", "timestamp": "2026-09-03T21:00:00Z"},
+        {"type": "TRADE", "side": "SELL", "symbol": "ABC", "quantity": "-1.0", "netAmount": "4.20", "timestamp": "2026-09-03T19:00:00Z"},
+        {"type": "TRADE", "side": "SELL", "symbol": "ABC", "quantity": "-1.0", "netAmount": "4.20", "timestamp": "2026-09-03T22:00:00Z"},
+    ]
+    match = public_execution._matching_broker_sell(transactions, ticker="ABC", quantity=1.0, after=after)
+    assert match is transactions[2]
+
+
 def test_quote_timestamp_far_in_the_future_is_not_fresh():
     future = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
     assert safety.quote_age_seconds(future) is None

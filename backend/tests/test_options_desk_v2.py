@@ -72,6 +72,11 @@ def test_alpaca_indicative_snapshot_is_explicitly_eligible_for_paper_policy():
     }) is True
 
 
+def test_options_auto_execution_requires_a_pm_risk_add_action():
+    assert options_desk.PM_EXECUTABLE_ACTIONS == {"ACCUMULATE", "STARTER"}
+    assert "WATCH" not in options_desk.PM_EXECUTABLE_ACTIONS
+
+
 def test_spread_cost_context_uses_mid_basis():
     context = options_desk._spread_cost_context(2.1, {"bid": 1.9, "ask": 2.1})
 
