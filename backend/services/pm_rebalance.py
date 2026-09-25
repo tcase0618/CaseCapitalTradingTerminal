@@ -109,7 +109,7 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
         if not ticker or _num(position.get("quantity")) <= 0:
             continue
         incumbent = rec_by_ticker.get(ticker)
-        pnl = portfolio_manager._pct(position.get("unrealized_pct"))
+        pnl = portfolio_manager._position_unrealized_pct(position)
         holding_edge = portfolio_manager._holding_edge(position, incumbent)
         protected_winner = bool(pnl is not None and pnl >= 8 and holding_edge >= 50)
         scorecard = portfolio_scores.get(ticker) or {}
