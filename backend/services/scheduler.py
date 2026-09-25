@@ -261,13 +261,31 @@ def _compact_position(row: dict) -> dict:
     }
 
 
+def _compact_public_position(row: dict) -> dict:
+    """Normalize the Public live-equity shape to the shared snapshot contract."""
+    return {
+        "symbol": row.get("ticker"),
+        "asset_class": "public_equity",
+        "side": "long",
+        "qty": row.get("quantity"),
+        "avg_entry_price": None,
+        "current_price": row.get("current_price"),
+        "market_value": row.get("market_value"),
+        "cost_basis": row.get("cost_basis"),
+        "unrealized_pl": row.get("unrealized_pl"),
+        "unrealized_plpc": row.get("unrealized_pct"),
+        "change_today": None,
+        "price_timestamp": row.get("price_timestamp"),
+    }
+
+
 async def persist_live_position_snapshot(triggered_by: str = "scheduler_15m", management: dict | None = None) -> dict:
     """Persist the PM's live view across both funds.
 
     This is intentionally separate from scan results. It records what Alpaca
     says is currently held, what is working, and what the monitor did.
     """
-    from . import options_desk, trade_floor
+    from . import options_desk, public_execution, trade_floor
 
     db = get_db()
     equity_positions = await trade_floor.list_positions()
@@ -281,36 +299,51 @@ async def persist_live_position_snapshot(triggered_by: str = "scheduler_15m", ma
     option_orders = options_orders_payload.get("orders") or []
     options_account = options_account_payload.get("account") if options_account_payload.get("ok") else {}
 
-    equity_unrealized = sum(_num(p.get("unrealized_pl")) for p in equity_positions)
+    public_equity = await public_execution.portfolio_state() if public_execution.enabled() else {"ok": False}
+    public_equity_positions = public_equity.get("positions") or [] if public_equity.get("ok") else []
+    public_equity_orders = public_equity.get("open_orders") or [] if public_equity.get("ok") else []
+    use_public_equities = bool(public_equity.get("ok"))
+    active_equity_positions = public_equity_positions if use_public_equities else equity_positions
+    active_equity_orders = public_equity_orders if use_public_equities else equity_orders
+    active_equity_unrealized = (
+        sum(_num(p.get("unrealized_pl")) for p in public_equity_positions)
+        if use_public_equities
+        else sum(_num(p.get("unrealized_pl")) for p in equity_positions)
+    )
+    active_equity_market_value = (
+        sum(_num(p.get("market_value")) for p in public_equity_positions)
+        if use_public_equities
+        else sum(_num(p.get("market_value")) for p in equity_positions)
+    )
     options_unrealized = sum(_num(p.get("unrealized_pl")) for p in option_positions)
-    equity_market_value = sum(_num(p.get("market_value")) for p in equity_positions)
     options_market_value = sum(_num(p.get("market_value")) for p in option_positions)
 
     snapshot = stamped({
         "snapshot_at": _now_iso(),
         "triggered_by": triggered_by,
-        "cadence_minutes": 15,
+        "cadence_minutes": 5 if "5m" in triggered_by else 15,
         "management": management or {},
         "totals": {
-            "positions": len(equity_positions) + len(option_positions),
-            "open_orders": len(equity_orders) + len(option_orders),
-            "market_value": round(equity_market_value + options_market_value, 2),
-            "unrealized_pl": round(equity_unrealized + options_unrealized, 2),
+            "positions": len(active_equity_positions) + len(option_positions),
+            "open_orders": len(active_equity_orders) + len(option_orders),
+            "market_value": round(active_equity_market_value + options_market_value, 2),
+            "unrealized_pl": round(active_equity_unrealized + options_unrealized, 2),
         },
         "equities": {
+            "broker": "public" if use_public_equities else "alpaca",
             "account": {
-                "status": (equity_account or {}).get("status"),
-                "equity": (equity_account or {}).get("equity"),
-                "cash": (equity_account or {}).get("cash"),
-                "buying_power": (equity_account or {}).get("buying_power"),
-                "trading_blocked": (equity_account or {}).get("trading_blocked"),
+                "status": "ACTIVE" if use_public_equities else (equity_account or {}).get("status"),
+                "equity": public_equity.get("equity") if use_public_equities else (equity_account or {}).get("equity"),
+                "cash": public_equity.get("cash_buying_power") if use_public_equities else (equity_account or {}).get("cash"),
+                "buying_power": public_equity.get("cash_buying_power") if use_public_equities else (equity_account or {}).get("buying_power"),
+                "trading_blocked": False if use_public_equities else (equity_account or {}).get("trading_blocked"),
             },
-            "position_count": len(equity_positions),
-            "open_order_count": len(equity_orders),
-            "market_value": round(equity_market_value, 2),
-            "unrealized_pl": round(equity_unrealized, 2),
-            "positions": [_compact_position(p) for p in equity_positions],
-            "open_orders": [
+            "position_count": len(active_equity_positions),
+            "open_order_count": len(active_equity_orders),
+            "market_value": round(active_equity_market_value, 2),
+            "unrealized_pl": round(active_equity_unrealized, 2),
+            "positions": [_compact_public_position(p) for p in public_equity_positions] if use_public_equities else [_compact_position(p) for p in equity_positions],
+            "open_orders": public_equity_orders if use_public_equities else [
                 {
                     "id": o.get("id"),
                     "symbol": o.get("symbol"),
@@ -324,6 +357,20 @@ async def persist_live_position_snapshot(triggered_by: str = "scheduler_15m", ma
                 }
                 for o in equity_orders
             ],
+        },
+        "alpaca_paper_equities": {
+            "account": {
+                "status": (equity_account or {}).get("status"),
+                "equity": (equity_account or {}).get("equity"),
+                "cash": (equity_account or {}).get("cash"),
+                "buying_power": (equity_account or {}).get("buying_power"),
+                "trading_blocked": (equity_account or {}).get("trading_blocked"),
+            },
+            "position_count": len(equity_positions),
+            "open_order_count": len(equity_orders),
+            "market_value": round(sum(_num(p.get("market_value")) for p in equity_positions), 2),
+            "unrealized_pl": round(sum(_num(p.get("unrealized_pl")) for p in equity_positions), 2),
+            "positions": [_compact_position(p) for p in equity_positions],
         },
         "options": {
             "account": options_account,
@@ -357,7 +404,7 @@ async def persist_live_position_snapshot(triggered_by: str = "scheduler_15m", ma
     return {
         "ok": True,
         "snapshot_at": snapshot["snapshot_at"],
-        "cadence_minutes": 15,
+        "cadence_minutes": snapshot["cadence_minutes"],
         "totals": snapshot["totals"],
         "equities": {
             "position_count": snapshot["equities"]["position_count"],
@@ -671,6 +718,18 @@ def start_scheduler():
                 triggered_by="scheduler_position_monitor_5m_24_5",
                 management=management,
             )
+            # The watchdog must observe the Public monitor itself, not a
+            # generic snapshot that another job can overwrite moments later.
+            await get_db().bot_state.update_one(
+                {"_id": "public_position_monitor_latest"},
+                {"$set": {
+                    "snapshot_at": snapshot["snapshot_at"],
+                    "monitor_ok": bool((management.get("legacy_position_monitor") or {}).get("ok")),
+                    "management": management,
+                    "triggered_by": "scheduler_position_monitor_5m_24_5",
+                }},
+                upsert=True,
+            )
             await log_activity(
                 f"Live position snapshot: {snapshot['totals']['positions']} positions, "
                 f"{snapshot['totals']['open_orders']} open orders, "
@@ -695,8 +754,11 @@ def start_scheduler():
     async def _position_monitor_watchdog():
         """Alert when the 5-minute monitor has not produced a fresh snapshot."""
         try:
+            from . import public_execution
+            if not public_execution.enabled():
+                return
             latest = await get_db().bot_state.find_one(
-                {"_id": "live_position_snapshot_latest"},
+                {"_id": "public_position_monitor_latest"},
                 {"_id": 0, "snapshot_at": 1, "triggered_by": 1},
             ) or {}
             raw = latest.get("snapshot_at")
