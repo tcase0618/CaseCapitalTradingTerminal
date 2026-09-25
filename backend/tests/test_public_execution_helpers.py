@@ -166,6 +166,16 @@ def test_public_position_cost_basis_uses_broker_fields_only():
     assert total == 6.0
 
 
+def test_public_position_unrealized_return_uses_cost_basis_not_provider_gain_window():
+    raw = {
+        "costBasis": {"totalCost": "6.01"},
+        "currentValue": "6.04",
+        "instrumentGain": {"gainPercentage": "65.76"},
+    }
+
+    assert public_execution._public_position_unrealized_pct(raw) == 0.4992
+
+
 def test_public_history_sell_match_requires_exact_quantity_and_post_entry_time():
     after = datetime(2026, 9, 3, 20, tzinfo=timezone.utc)
     transactions = [

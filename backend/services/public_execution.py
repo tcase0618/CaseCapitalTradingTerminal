@@ -159,11 +159,10 @@ def _routing_rejects_stop(trade: dict[str, Any]) -> bool:
 
 
 def _public_position_mark(raw: dict[str, Any]) -> tuple[float, float, Any]:
-    """Normalize Public's documented Portfolio v2 position mark exactly once.
+    """Normalize Public's documented Portfolio v2 price and provider gain field.
 
-    Public returns nested ``lastPrice.lastPrice`` and
-    ``instrumentGain.gainPercentage`` fields.  The canonical terminal value is
-    a percentage (for example ``-2.56`` means -2.56%), never a fraction.
+    ``instrumentGain.gainPercentage`` is retained as a provider observation,
+    not treated as lifetime position P&L. The PM uses cost-basis return below.
     """
     last = raw.get("lastPrice") or raw.get("last_price") or {}
     gain = raw.get("instrumentGain") or raw.get("instrument_gain") or {}
@@ -182,6 +181,16 @@ def _public_position_cost_basis(raw: dict[str, Any]) -> tuple[float, float]:
         _num(basis.get("unitCost") or basis.get("unit_cost")),
         _num(basis.get("totalCost") or basis.get("total_cost")),
     )
+
+
+def _public_position_unrealized_pct(raw: dict[str, Any], total_cost: float | None = None) -> float | None:
+    """Calculate lifetime position return from broker cost and market value."""
+    _, broker_total_cost = _public_position_cost_basis(raw)
+    cost = broker_total_cost if total_cost is None else total_cost
+    market_value = _num(raw.get("currentValue") or raw.get("current_value"), -1.0)
+    if cost <= 0 or market_value < 0:
+        return None
+    return round((market_value - cost) / cost * 100.0, 4)
 
 
 def _public_position_opened_at(raw: dict[str, Any]) -> str | None:
@@ -408,7 +417,8 @@ async def _import_unmanaged_broker_positions(
             continue
         unit_cost, total_cost = _public_position_cost_basis(raw)
         opened_at = _public_position_opened_at(raw)
-        current_price, unrealized_pct, price_timestamp = _public_position_mark(raw)
+        current_price, provider_gain_pct, price_timestamp = _public_position_mark(raw)
+        unrealized_pct = _public_position_unrealized_pct(raw, total_cost)
         await db.tf_trades.insert_one(stamped({
             "client_order_id": _import_client_order_id(ticker, opened_at),
             "broker_base": BROKER_BASE,
@@ -437,6 +447,7 @@ async def _import_unmanaged_broker_positions(
             "broker_mark_price": current_price,
             "broker_mark_timestamp": price_timestamp,
             "broker_unrealized_pct": unrealized_pct,
+            "broker_provider_gain_pct": provider_gain_pct,
             "last_synced_at": datetime.now(timezone.utc).isoformat(),
         }))
         imported.append(ticker)
@@ -541,16 +552,39 @@ async def portfolio_state() -> dict[str, Any]:
         ticker = _symbol(raw)
         if not ticker:
             continue
-        current_price, unrealized_pct, price_timestamp = _public_position_mark(raw)
+        current_price, provider_gain_pct, price_timestamp = _public_position_mark(raw)
+        _, total_cost = _public_position_cost_basis(raw)
+        unrealized_pct = _public_position_unrealized_pct(raw, total_cost)
         positions.append({
             "ticker": ticker,
             "quantity": _qty(raw),
             "market_value": _num(raw.get("currentValue") or raw.get("current_value")),
+            "cost_basis": total_cost,
+            "unrealized_pl": round(_num(raw.get("currentValue") or raw.get("current_value")) - total_cost, 4),
             "current_price": current_price,
             "unrealized_pct": unrealized_pct,
+            "provider_gain_pct": provider_gain_pct,
             "return_units": "percent",
             "price_timestamp": price_timestamp,
             "broker_base": BROKER_BASE,
+        })
+    open_orders: list[dict[str, Any]] = []
+    for order in payload.get("orders") or []:
+        if not isinstance(order, dict):
+            continue
+        status = str(order.get("status") or order.get("orderStatus") or "UNKNOWN").upper()
+        if status in {"FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
+            continue
+        open_orders.append({
+            "id": order.get("orderId") or order.get("id"),
+            "symbol": _symbol(order),
+            "side": order.get("side"),
+            "type": order.get("orderType") or order.get("type"),
+            "qty": order.get("quantity") or order.get("filledQuantity"),
+            "notional": order.get("amount") or order.get("orderValue"),
+            "limit_price": order.get("limitPrice") or order.get("limit_price"),
+            "status": status,
+            "submitted_at": order.get("createdAt") or order.get("submittedAt"),
         })
     total_value = _num(payload.get("totalAccountValue") or payload.get("total_account_value"))
     cash = _cash_buying_power(payload)
@@ -564,6 +598,8 @@ async def portfolio_state() -> dict[str, Any]:
         "cash_buying_power": round(cash, 2) if cash is not None else None,
         "positions": positions,
         "position_count": len(positions),
+        "open_orders": open_orders,
+        "open_order_count": len(open_orders),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1025,7 +1061,8 @@ async def reconcile() -> dict[str, Any]:
             status = str(order.get("status") or "").upper()
             if status in {"FILLED", "PARTIALLY_FILLED"}:
                 filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
-                update = {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat(), "last_order_status": status}
+                fill_time = trade.get("filled_at") or order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat()
+                update = {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": fill_time, "last_order_status": status}
                 stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
                 protective_id = trade.get("protective_order_id")
                 protective_qty = _num(trade.get("protective_order_qty"))
@@ -1102,6 +1139,58 @@ async def reconcile() -> dict[str, Any]:
             elif status in {"CANCELLED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "fill_status": status, "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": f"public_order_{status.lower()}", "last_order_status": status}})
                 order_updates += 1
+
+        # An emergency exit is a distinct Public order. Poll and record it
+        # before the generic portfolio-absence pass so a broker fill is never
+        # downgraded to an unattributed "position absent" closure.
+        emergency_trades = await db.tf_trades.find(
+            {"broker_base": BROKER_BASE, "status": "OPEN", "emergency_exit_order_id": {"$exists": True, "$ne": None}},
+            {"_id": 0},
+        ).to_list(500)
+        for trade in emergency_trades:
+            emergency_id = str(trade.get("emergency_exit_order_id"))
+            try:
+                emergency = await _get_order_with_portfolio_fallback(client, emergency_id, portfolio_orders)
+            except Exception:
+                poll_errors += 1
+                continue
+            emergency_status = str(emergency.get("status") or emergency.get("orderStatus") or "").upper()
+            update = {"emergency_exit_status": emergency_status, "last_order_status": emergency_status}
+            if emergency_status in {"FILLED", "PARTIALLY_FILLED"}:
+                exit_qty = _num(emergency.get("filledQuantity") or emergency.get("filled_quantity"))
+                exit_price = _num(emergency.get("averagePrice") or emergency.get("average_price"))
+                remaining = max(0.0, _qty(trade) - exit_qty)
+                update.update({
+                    "emergency_exit_filled_qty": exit_qty,
+                    "emergency_exit_fill_price": exit_price,
+                    "last_exit_synced_at": datetime.now(timezone.utc).isoformat(),
+                })
+                if remaining <= 0:
+                    update.update({
+                        "status": "CLOSED",
+                        "fill_status": "EXIT_FILLED",
+                        "qty_remaining": 0.0,
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                        "close_reason": "public_emergency_limit_exit_filled",
+                    })
+                else:
+                    update["qty_remaining"] = remaining
+                try:
+                    from . import lottery
+                    await lottery.close_filled_lottery_entry(
+                        broker="public",
+                        entry_order_id=str(trade.get("public_order_id") or ""),
+                        exit_price=exit_price,
+                        exit_quantity=exit_qty,
+                        reason="public_emergency_limit_exit_filled",
+                    )
+                except Exception:
+                    logger.exception("Lottery exit ledger failed for Public emergency order %s", emergency_id)
+            await db.tf_trades.update_one(
+                {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                {"$set": update},
+            )
+            order_updates += 1
         protective_trades = await db.tf_trades.find(
             {"broker_base": BROKER_BASE, "status": "OPEN", "protective_order_id": {"$exists": True, "$ne": None}},
             {"_id": 0},
@@ -1181,7 +1270,8 @@ async def reconcile() -> dict[str, Any]:
             if position:
                 qty = _qty(position)
                 unit_cost, total_cost = _public_position_cost_basis(position)
-                mark_price, unrealized_pct, mark_timestamp = _public_position_mark(position)
+                mark_price, provider_gain_pct, mark_timestamp = _public_position_mark(position)
+                unrealized_pct = _public_position_unrealized_pct(position, total_cost)
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                     {"$set": {
@@ -1194,6 +1284,7 @@ async def reconcile() -> dict[str, Any]:
                         "broker_mark_price": mark_price,
                         "broker_mark_timestamp": mark_timestamp,
                         "broker_unrealized_pct": unrealized_pct,
+                        "broker_provider_gain_pct": provider_gain_pct,
                         "last_synced_at": datetime.now(timezone.utc).isoformat(),
                     }},
                 )
