@@ -42,6 +42,22 @@ def test_rebalance_does_not_sell_a_protected_winner():
     assert plan["position_reviews"][0]["protected_winner"] is True
 
 
+def test_rebalance_does_not_convert_public_percent_return_twice():
+    candidate = _candidate(pm_score=99)
+    plan = pm_rebalance.build_rebalance_plan(
+        {"recommendations": [candidate]},
+        [{
+            "ticker": "SMALL_LOSS",
+            "quantity": 1,
+            "market_value": 10,
+            "unrealized_pct": -1.33,
+            "return_units": "percent",
+        }],
+    )
+
+    assert plan["position_reviews"][0]["unrealized_pct"] == -1.33
+
+
 def test_pm_constraints_preserve_original_approval_for_capital_rotation():
     rows = [_candidate(action="STARTER", pre_execution_action=None, allocation_usd=6)]
     rows[0].pop("pre_execution_action")

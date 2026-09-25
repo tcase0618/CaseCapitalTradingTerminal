@@ -724,12 +724,25 @@ def _pct(value: Any) -> float | None:
         return None
 
 
+def _position_unrealized_pct(position: dict[str, Any]) -> float | None:
+    """Read a position return without converting known percentage units twice."""
+    value = position.get("unrealized_plpc")
+    if value is None:
+        value = position.get("unrealized_pct")
+    if str(position.get("return_units") or "").lower() == "percent":
+        try:
+            return float(value) if value is not None and value != "" else None
+        except (TypeError, ValueError):
+            return None
+    return _pct(value)
+
+
 def _position_ticker(position: dict[str, Any]) -> str:
     return str(position.get("symbol") or position.get("ticker") or position.get("underlying") or "").upper()
 
 
 def _holding_edge(position: dict[str, Any], pm_row: dict[str, Any] | None) -> float:
-    unrealized_pct = _pct(position.get("unrealized_plpc") or position.get("unrealized_pct"))
+    unrealized_pct = _position_unrealized_pct(position)
     if pm_row:
         edge = _num(pm_row.get("pm_score"), 45)
     else:
@@ -758,7 +771,7 @@ def _opportunity_cost_review(recommendations: list[dict[str, Any]], positions: l
         if not ticker:
             continue
         pm_row = rec_by_ticker.get(ticker)
-        unrealized_pct = _pct(position.get("unrealized_plpc") or position.get("unrealized_pct"))
+        unrealized_pct = _position_unrealized_pct(position)
         edge = _holding_edge(position, pm_row)
         protected_winner = bool(unrealized_pct is not None and unrealized_pct >= 8 and edge >= 50)
         action = "HOLD"
