@@ -1,4 +1,20 @@
+from datetime import datetime
+
 from services import scheduler
+
+
+def _et_timestamp(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    return scheduler.ET.localize(datetime(year, month, day, hour, minute))
+
+
+def test_public_monitor_window_matches_sunday_to_friday_24_5_schedule():
+    assert not scheduler.public_monitor_window_open(_et_timestamp(2026, 9, 25, 20, 0))
+    assert not scheduler.public_monitor_window_open(_et_timestamp(2026, 9, 26, 12, 0))
+    assert not scheduler.public_monitor_window_open(_et_timestamp(2026, 9, 27, 19, 59))
+    assert scheduler.public_monitor_window_open(_et_timestamp(2026, 9, 27, 20, 0))
+    assert scheduler.public_monitor_window_open(_et_timestamp(2026, 9, 28, 12, 0))
+    assert scheduler.public_monitor_window_open(_et_timestamp(2026, 10, 1, 23, 0))
+    assert scheduler.public_monitor_window_open(_et_timestamp(2026, 10, 2, 19, 59))
 
 
 class _FakeScheduler:
