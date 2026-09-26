@@ -45,6 +45,24 @@ STOCK_SCAN_CADENCE_ET = [
 ]
 
 
+def public_monitor_window_open(now: datetime | None = None) -> bool:
+    """Return whether the configured Sunday-to-Friday Public monitor should run.
+
+    The watchdog must use the same cadence window as the actual monitor.
+    Friday after 20:00 ET through Sunday before 20:00 ET is an expected quiet
+    period, not an operational failure.
+    """
+    now_et = (now or datetime.now(ET)).astimezone(ET)
+    weekday = now_et.weekday()  # Monday=0 ... Sunday=6
+    if weekday == 6:
+        return (now_et.hour, now_et.minute) >= (20, 0)
+    if weekday <= 3:
+        return True
+    if weekday == 4:
+        return (now_et.hour, now_et.minute) < (20, 0)
+    return False
+
+
 async def _stock_scan_market_day_now() -> tuple[bool, str]:
     now_et = datetime.now(ET)
     if now_et.weekday() >= 5:
@@ -755,7 +773,7 @@ def start_scheduler():
         """Alert when the 5-minute monitor has not produced a fresh snapshot."""
         try:
             from . import public_execution
-            if not public_execution.enabled():
+            if not public_execution.enabled() or not public_monitor_window_open():
                 return
             latest = await get_db().bot_state.find_one(
                 {"_id": "public_position_monitor_latest"},
