@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import pytest
+
 from services import pm_rebalance, portfolio_manager
 
 
@@ -69,3 +73,58 @@ def test_pm_constraints_preserve_original_approval_for_capital_rotation():
     assert rows[0]["action"] == "WATCH"
     assert rows[0]["pre_execution_action"] == "STARTER"
     assert rows[0]["pre_execution_allocation_usd"] == 6
+
+
+@pytest.mark.asyncio
+async def test_rebalance_releases_capital_only_after_broker_confirmed_sell_fill(monkeypatch):
+    """A replacement buy cannot be submitted until a later confirmed-fill pass."""
+
+    intent = {
+        "intent_id": "replace-weak-with-betr",
+        "broker_base": "public",
+        "status": "SELL_SUBMITTED",
+        "sell_order_id": "sell-1",
+        "candidate": _candidate(),
+    }
+
+    class Cursor:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def to_list(self, _limit):
+            return [dict(row) for row in self.rows]
+
+    class Intents:
+        def find(self, query, *_args, **_kwargs):
+            allowed = set(query["status"]["$in"])
+            return Cursor([intent] if intent["status"] in allowed else [])
+
+        async def update_one(self, query, update, *_args, **_kwargs):
+            if query.get("intent_id") == intent["intent_id"]:
+                intent.update(update.get("$set") or {})
+
+    monkeypatch.setattr(pm_rebalance, "get_db", lambda: SimpleNamespace(pm_rebalance_intents=Intents()))
+
+    class Broker:
+        async def get_order(self, _order_id):
+            return {"status": "FILLED", "filledQuantity": "0.5", "averagePrice": "12.0"}
+
+    submitted_candidates = []
+
+    async def execute(rows, **_kwargs):
+        submitted_candidates.extend(rows)
+        return {"executed": [{"order_id": "buy-1"}], "rejected": []}
+
+    monkeypatch.setattr(pm_rebalance.public_execution, "execute_pm_equity", execute)
+
+    first_pass = await pm_rebalance._reconcile_intents(Broker())
+    assert first_pass["sell_filled"] == 1
+    assert first_pass["replacement_submitted"] == []
+    assert intent["status"] == "SELL_FILLED"
+    assert submitted_candidates == []
+
+    second_pass = await pm_rebalance._reconcile_intents(Broker())
+    assert second_pass["replacement_submitted"] == [{"order_id": "buy-1"}]
+    assert intent["status"] == "BUY_SUBMITTED"
+    assert submitted_candidates[0]["action"] == "STARTER"
+    assert submitted_candidates[0]["allocation_usd"] == 6.0
