@@ -62,6 +62,17 @@ def test_rebalance_does_not_convert_public_percent_return_twice():
     assert plan["position_reviews"][0]["unrealized_pct"] == -1.33
 
 
+def test_exit_review_can_release_cash_without_an_available_replacement():
+    plan = pm_rebalance.build_rebalance_plan(
+        {"recommendations": []},
+        [{"ticker": "LEGACY", "quantity": 1.5, "market_value": 4, "unrealized_pct": -27.0}],
+        {"LEGACY": {"recommended_state": "EXIT_REVIEW", "portfolio_score": 35}},
+    )
+
+    assert plan["actions"][0]["action"] == "EXIT_TO_CASH"
+    assert plan["actions"][0]["candidate"] is None
+
+
 def test_pm_constraints_preserve_original_approval_for_capital_rotation():
     rows = [_candidate(action="STARTER", pre_execution_action=None, allocation_usd=6)]
     rows[0].pop("pre_execution_action")

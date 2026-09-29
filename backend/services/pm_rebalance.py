@@ -125,11 +125,21 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
             "portfolio_score": scorecard.get("portfolio_score"),
             "portfolio_state": scorecard.get("recommended_state"),
         }
-        if not best:
+        if scorecard and scorecard.get("recommended_state") == "EXIT_REVIEW":
+            review.update({
+                "action": "EXIT_TO_CASH",
+                "reason": "PM exit review releases capital; no replacement is required to close a failing holding",
+                "edge_gap": None,
+                "replacement": _ticker(best) if best else None,
+            })
+            actions.append({**review, "candidate": None})
             reviews.append(review)
             continue
-        replacement_edge = _candidate_score(best)
-        gap = round(replacement_edge - holding_edge, 2)
+        elif not best:
+            reviews.append(review)
+            continue
+        replacement_edge = _candidate_score(best) if best else None
+        gap = round(replacement_edge - holding_edge, 2) if replacement_edge is not None else None
         if protected_winner:
             review.update({"reason": "protected winner retained unless independently invalidated", "replacement": _ticker(best), "edge_gap": gap})
         elif pnl is None:
@@ -146,7 +156,7 @@ def build_rebalance_plan(pm_payload: dict[str, Any], positions: list[dict[str, A
             review.update({"replacement": _ticker(best), "edge_gap": gap})
         reviews.append(review)
 
-    actions.sort(key=lambda row: (row["edge_gap"], -_num(row.get("unrealized_pct"))), reverse=True)
+    actions.sort(key=lambda row: (_num(row.get("edge_gap")), -_num(row.get("unrealized_pct"))), reverse=True)
     return {
         "ok": True,
         "read_only": True,
@@ -177,8 +187,8 @@ async def _open_protective_tickers() -> set[str]:
 
 async def _persist_action(action: dict[str, Any], cycle_key: str) -> dict[str, Any]:
     db = get_db()
-    ticker, candidate = action["ticker"], action["candidate"]
-    intent_id = f"public-rebalance:{cycle_key}:{ticker}:{_ticker(candidate)}"
+    ticker, candidate = action["ticker"], action.get("candidate")
+    intent_id = f"public-rebalance:{cycle_key}:{ticker}:{_ticker(candidate) or 'cash'}:{action['quantity']}"
     document = stamped({
         "intent_id": intent_id,
         "broker_base": BROKER_BASE,
@@ -191,7 +201,7 @@ async def _persist_action(action: dict[str, Any], cycle_key: str) -> dict[str, A
         "edge_gap": action["edge_gap"],
         "reason": action["reason"],
         "candidate": candidate,
-        "buy_ticker": _ticker(candidate),
+        "buy_ticker": _ticker(candidate) or None,
         "cycle_key": cycle_key,
         "planned_at": datetime.now(timezone.utc).isoformat(),
     })
@@ -234,7 +244,9 @@ async def _reconcile_intents(client: Any) -> dict[str, Any]:
             continue
         candidate = dict(intent.get("candidate") or {})
         if not candidate:
-            await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "BUY_TERMINAL", "terminal_reason": "candidate_missing"}})
+            await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "CASH_RELEASED", "cash_released_at": datetime.now(timezone.utc).isoformat()}})
+            result.setdefault("cash_released", 0)
+            result["cash_released"] += 1
             continue
         # Restore the original PM approval. Cash constraints are intentionally
         # re-evaluated by execute_pm_equity using the broker's current book.
@@ -254,8 +266,7 @@ async def run_rebalance_cycle() -> dict[str, Any]:
     """Run one capital-management tick from the persisted latest PM plan."""
     if not _enabled():
         return {"skipped": True, "reason": "public_pm_rebalance_disabled"}
-    if public_execution._public_session_now() != "CORE":
-        return {"skipped": True, "reason": "public_pm_rebalance_core_session_only"}
+    session = public_execution._public_session_now()
     db = get_db()
     pm_doc = await db.portfolio_manager_history.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
     if not pm_doc:
@@ -276,6 +287,9 @@ async def run_rebalance_cycle() -> dict[str, Any]:
         cycle_key = str(pm_doc.get("scan_finished_at") or pm_doc.get("generated_at") or "unknown")
         for action in plan.get("actions") or []:
             ticker = action["ticker"]
+            if session != "CORE" and action.get("action") != "EXIT_TO_CASH":
+                skipped.append({"ticker": ticker, "reason": "public_24h_rebalance_replacement_waits_for_core_session"})
+                continue
             if ticker in protected:
                 skipped.append({"ticker": ticker, "reason": "active_protective_order_preserved"})
                 continue
@@ -290,18 +304,23 @@ async def run_rebalance_cycle() -> dict[str, Any]:
             if not fresh or price <= 0:
                 skipped.append({"ticker": ticker, "reason": "rebalance_quote_stale_or_unverifiable", "age_seconds": age})
                 continue
-            client_id = execution_safety.stable_client_order_id("public_rebalance_sell", intent.get("intent_id"), ticker, action["quantity"], round(price, 4), prefix="public")
+            order_shape, shape_note = public_execution._exit_order_shape(action["quantity"])
+            if not order_shape:
+                skipped.append({"ticker": ticker, "reason": shape_note or "public_rebalance_exit_shape_unavailable"})
+                continue
+            sell_quantity = _num(order_shape.get("quantity"))
+            client_id = execution_safety.stable_client_order_id("public_rebalance_sell", intent.get("intent_id"), ticker, sell_quantity, round(price, 4), prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity_rebalance_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"intent_id": intent.get("intent_id"), "reason": action["reason"]})
             if not claim.get("ok"):
                 skipped.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_execution_intent"})
                 continue
             try:
-                result = await client.submit_equity_order(symbol=ticker, side="SELL", quantity=action["quantity"], limit_price=price, time_in_force="DAY", session="CORE", client_order_id=client_id)
+                result = await client.submit_equity_order(symbol=ticker, side="SELL", quantity=sell_quantity, limit_price=price, time_in_force="DAY", session=str(order_shape["session"]), client_order_id=client_id)
                 order = result.get("order") or {}
                 order_id = order.get("orderId") or order.get("id")
                 if not order_id:
                     raise RuntimeError("Public rebalance sell response missing order id")
-                await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "SELL_SUBMITTED", "sell_order_id": order_id, "sell_client_order_id": client_id, "sell_limit_price": price, "sell_preflight": result.get("preflight"), "sell_submitted_at": datetime.now(timezone.utc).isoformat()}})
+                await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "SELL_SUBMITTED", "sell_order_id": order_id, "sell_client_order_id": client_id, "sell_limit_price": price, "sell_quantity_submitted": sell_quantity, "sell_session": order_shape["session"], "sell_shape_note": shape_note, "sell_preflight": result.get("preflight"), "sell_submitted_at": datetime.now(timezone.utc).isoformat()}})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
                 submitted.append({"ticker": ticker, "order_id": order_id, "replacement": action["replacement"], "reason": action["reason"]})
             except Exception as exc:
