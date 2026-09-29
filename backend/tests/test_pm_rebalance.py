@@ -73,6 +73,10 @@ def test_exit_review_can_release_cash_without_an_available_replacement():
     assert plan["actions"][0]["candidate"] is None
 
 
+def test_rebalance_ticker_accepts_exit_to_cash_without_a_candidate():
+    assert pm_rebalance._ticker(None) == ""
+
+
 def test_pm_constraints_preserve_original_approval_for_capital_rotation():
     rows = [_candidate(action="STARTER", pre_execution_action=None, allocation_usd=6)]
     rows[0].pop("pre_execution_action")
