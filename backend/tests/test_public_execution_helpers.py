@@ -43,6 +43,35 @@ def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
     assert stale is False
 
 
+@pytest.mark.asyncio
+async def test_protection_coverage_counts_recent_terminal_monitored_exit(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class Cursor:
+        async def to_list(self, _limit):
+            return [{
+                "ticker": "AAPL",
+                "pm_active_stop": 90.0,
+                "pm_last_ratchet_check": now.isoformat(),
+                "pm_ratchet_plan": {"enabled": True},
+                "protection_state": "MONITORED_EXIT_ONLY",
+                "status": "OPEN",
+                "fill_status": "FILLED",
+            }]
+
+    class Trades:
+        def find(self, _query, projection):
+            assert projection["pm_active_stop"] == 1
+            assert projection["pm_last_ratchet_check"] == 1
+            assert projection["pm_ratchet_plan"] == 1
+            return Cursor()
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
+    result = await public_execution.protection_coverage()
+    assert result["verified_monitored_open"] == 1
+    assert result["unprotected_open"] == 0
+
+
 def test_public_portfolio_order_index_uses_public_uuid_order_id():
     orders = public_execution._orders_by_id({
         "orders": [
