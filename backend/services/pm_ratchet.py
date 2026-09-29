@@ -53,12 +53,38 @@ def compute_active_levels(entry: float, current: float, plan: dict[str, Any], pr
     }
 
 
-async def process_open_ratchets() -> dict[str, Any]:
-    db = get_db()
-    from .trade_floor_phases import _alpaca_trade_base, _broker_scope
+async def _public_prices(tickers: list[str]) -> dict[str, float]:
+    """Return only fresh Public marks for Public-broker ratchets."""
+    from . import public_api, public_execution, safety
 
-    broker_base = _alpaca_trade_base()
-    broker_scope = _broker_scope()
+    if not tickers:
+        return {}
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
+        rows = public_execution._quotes(await client.quotes(tickers))
+    prices: dict[str, float] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+        price = public_execution._quote_price(row)
+        fresh, _age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(row)})
+        if ticker and fresh and price > 0:
+            prices[ticker] = float(price)
+    return prices
+
+
+async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, Any]:
+    """Raise stops for filled positions with an enabled PM ratchet plan.
+
+    Public and Alpaca use distinct quote and account paths. The Public branch
+    deliberately uses only fresh broker quotes; it cannot silently ratchet
+    from an old portfolio mark.
+    """
+    db = get_db()
+    if broker_base == "public":
+        broker_scope = {"broker_base": "public"}
+    else:
+        from .trade_floor_phases import _alpaca_trade_base, _broker_scope
+        broker_base = _alpaca_trade_base()
+        broker_scope = _broker_scope()
     open_trades = await db.tf_trades.find(
         {"$and": [{
             "status": "OPEN",
@@ -69,6 +95,7 @@ async def process_open_ratchets() -> dict[str, Any]:
         {"_id": 0},
     ).to_list(500)
     actions: list[dict[str, Any]] = []
+    public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades]) if broker_base == "public" else {}
     try:
         from .trade_floor_phases import _current_price
     except Exception:
@@ -76,13 +103,19 @@ async def process_open_ratchets() -> dict[str, Any]:
     for trade in open_trades:
         ticker = (trade.get("ticker") or "").upper()
         entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
-        if not ticker or entry <= 0 or _current_price is None:
+        if not ticker or entry <= 0:
             continue
-        current = await _current_price(ticker)
+        if broker_base == "public":
+            current = public_prices.get(ticker)
+        elif _current_price is not None:
+            current = await _current_price(ticker)
+        else:
+            current = None
         if not current or current <= 0:
             continue
         previous_stop = _num(trade.get("current_stop") or trade.get("stop_price"))
-        levels = compute_active_levels(entry, float(current), trade.get("pm_ratchet_plan") or {}, previous_stop)
+        observed_peak = max(_num(trade.get("peak_price_since_entry"), entry), float(current))
+        levels = compute_active_levels(entry, observed_peak, trade.get("pm_ratchet_plan") or {}, previous_stop)
         if not levels.get("enabled"):
             continue
         current_level = int(_num(trade.get("pm_ratchet_level"), 0))
@@ -90,7 +123,8 @@ async def process_open_ratchets() -> dict[str, Any]:
             "pm_active_target": levels["active_target"],
             "pm_active_stop": levels["active_stop"],
             "pm_last_ratchet_check": _now().isoformat(),
-            "peak_price_since_entry": max(_num(trade.get("peak_price_since_entry"), entry), float(current)),
+            "peak_price_since_entry": observed_peak,
+            "pm_last_ratchet_mark": float(current),
         }
         if levels["active_stop"] > previous_stop:
             updates["current_stop"] = levels["active_stop"]
@@ -101,6 +135,7 @@ async def process_open_ratchets() -> dict[str, Any]:
                 "ticker": ticker,
                 "entry": entry,
                 "current": float(current),
+                "peak_price": observed_peak,
                 "previous_level": current_level,
                 "new_level": levels["ratchet_level"],
                 "active_stop": levels["active_stop"],
@@ -121,12 +156,15 @@ async def process_open_ratchets() -> dict[str, Any]:
             {"$and": [{"client_order_id": trade.get("client_order_id")}, broker_scope]},
             {"$set": updates},
         )
-    return {"checked": len(open_trades), "ratcheted": len(actions), "actions": actions, "ran_at": _now().isoformat()}
+    return {"broker_base": broker_base, "checked": len(open_trades), "ratcheted": len(actions), "actions": actions, "ran_at": _now().isoformat()}
 
 
-async def recent_events(limit: int = 50) -> dict[str, Any]:
+async def recent_events(limit: int = 50, *, broker_base: str | None = None) -> dict[str, Any]:
     db = get_db()
-    from .trade_floor_phases import _broker_scope
-
-    rows = await db.pm_ratchet_events.find(_broker_scope(), {"_id": 0}).sort("created_at", -1).to_list(limit)
+    if broker_base == "public":
+        scope = {"broker_base": "public"}
+    else:
+        from .trade_floor_phases import _broker_scope
+        scope = _broker_scope()
+    rows = await db.pm_ratchet_events.find(scope, {"_id": 0}).sort("created_at", -1).to_list(limit)
     return {"events": rows, "count": len(rows)}
