@@ -657,6 +657,17 @@ def start_scheduler():
                     public_reconciliation = await public_execution.reconcile()
                     if not public_reconciliation.get("skipped") and not public_reconciliation.get("ok", True):
                         failures.append({"stage": "public_reconciliation", "reason": "reconciliation_degraded"})
+                    # Exit protection is the only Public responsibility that
+                    # must run every minute. It goes before ratchets, phase
+                    # trims, scoring, and replacement work so a breached stop
+                    # cannot wait behind lower-priority account requests.
+                    try:
+                        public_protection = await public_execution.process_protective_exits()
+                        if not public_protection.get("skipped") and not public_protection.get("ok", True):
+                            failures.append({"stage": "public_protective_exits", "reason": public_protection.get("reason") or "protective_exit_degraded"})
+                    except Exception as exc:
+                        failures.append({"stage": "public_protective_exits", "reason": exc.__class__.__name__})
+                        logger.exception("Public protective exit monitor failed")
                     try:
                         from . import pm_ratchet
                         public_ratchet_status = await pm_ratchet.process_open_ratchets(broker_base="public")
@@ -674,34 +685,31 @@ def start_scheduler():
                         public_phase_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_phase_exits", "reason": exc.__class__.__name__})
                         logger.exception("Public phase exit monitor failed")
-                    try:
-                        public_protection = await public_execution.process_protective_exits()
-                        if not public_protection.get("skipped") and not public_protection.get("ok", True):
-                            failures.append({"stage": "public_protective_exits", "reason": public_protection.get("reason") or "protective_exit_degraded"})
-                    except Exception as exc:
-                        failures.append({"stage": "public_protective_exits", "reason": exc.__class__.__name__})
-                        logger.exception("Public protective exit monitor failed")
-                    # A scorecard error is observable on its own; it must not
-                    # suppress broker reconciliation or the next eligible
-                    # capital-management pass.
-                    from . import pm_portfolio, pm_rebalance
-                    try:
-                        portfolio_score_status = await pm_portfolio.run_portfolio_monitor()
-                        if not portfolio_score_status.get("ok") and not portfolio_score_status.get("skipped"):
-                            failures.append({"stage": "pm_portfolio_scores", "reason": portfolio_score_status.get("reason") or "score_persist_failed"})
-                    except Exception as exc:
-                        portfolio_score_status = {"ok": False, "reason": exc.__class__.__name__}
-                        failures.append({"stage": "pm_portfolio_scores", "reason": exc.__class__.__name__})
-                        logger.exception("PM portfolio scoring failed")
-                    try:
-                        rebalance_status = await pm_rebalance.run_rebalance_cycle()
-                        rebalance_errors = rebalance_status.get("errors") or (rebalance_status.get("reconciled") or {}).get("errors")
-                        if not rebalance_status.get("skipped") and rebalance_errors:
-                            failures.append({"stage": "pm_rebalance", "reason": "rebalance_errors"})
-                    except Exception as exc:
-                        rebalance_status = {"ok": False, "reason": exc.__class__.__name__}
-                        failures.append({"stage": "pm_rebalance", "reason": exc.__class__.__name__})
-                        logger.exception("PM rebalance failed")
+                    # Portfolio scoring and replacement are intentionally
+                    # five-minute work. Running them each minute multiplied
+                    # Public account calls and starved the exit path when the
+                    # provider rate-limited a monitor cycle.
+                    if datetime.now(ET).minute % 5 == 0:
+                        # A scorecard error is observable on its own; it must
+                        # not suppress broker reconciliation or exit work.
+                        from . import pm_portfolio, pm_rebalance
+                        try:
+                            portfolio_score_status = await pm_portfolio.run_portfolio_monitor()
+                            if not portfolio_score_status.get("ok") and not portfolio_score_status.get("skipped"):
+                                failures.append({"stage": "pm_portfolio_scores", "reason": portfolio_score_status.get("reason") or "score_persist_failed"})
+                        except Exception as exc:
+                            portfolio_score_status = {"ok": False, "reason": exc.__class__.__name__}
+                            failures.append({"stage": "pm_portfolio_scores", "reason": exc.__class__.__name__})
+                            logger.exception("PM portfolio scoring failed")
+                        try:
+                            rebalance_status = await pm_rebalance.run_rebalance_cycle()
+                            rebalance_errors = rebalance_status.get("errors") or (rebalance_status.get("reconciled") or {}).get("errors")
+                            if not rebalance_status.get("skipped") and rebalance_errors:
+                                failures.append({"stage": "pm_rebalance", "reason": "rebalance_errors"})
+                        except Exception as exc:
+                            rebalance_status = {"ok": False, "reason": exc.__class__.__name__}
+                            failures.append({"stage": "pm_rebalance", "reason": exc.__class__.__name__})
+                            logger.exception("PM rebalance failed")
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
                 logger.exception("Public execution reconciliation failed")

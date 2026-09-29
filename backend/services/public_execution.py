@@ -39,6 +39,38 @@ def monitored_exit_override_enabled() -> bool:
     return os.getenv("PUBLIC_ALLOW_MONITORED_EXIT_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _monitored_exit_max_age_seconds() -> int:
+    try:
+        return max(60, min(600, int(os.getenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180"))))
+    except (TypeError, ValueError):
+        return 180
+
+
+def _timestamp_age_seconds(value: Any, *, now: datetime | None = None) -> int | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0, int(((now or datetime.now(timezone.utc)) - parsed.astimezone(timezone.utc)).total_seconds()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _verified_monitored_exit(row: dict[str, Any], *, now: datetime | None = None) -> tuple[bool, int | None]:
+    """Return whether the terminal, rather than Public, is actively protecting a fill.
+
+    Public's current routing rejects conditional stops.  A position is only
+    considered terminal-covered when its ratchet is enabled, its active stop
+    is positive, and the one-minute monitor has checked it recently.  A local
+    stop number by itself is never sufficient.
+    """
+    stop = _num(row.get("pm_active_stop") or row.get("current_stop"))
+    plan = row.get("pm_ratchet_plan") or {}
+    age = _timestamp_age_seconds(row.get("pm_last_ratchet_check"), now=now)
+    active = bool(plan.get("enabled")) and str(row.get("protection_state") or "").upper() == "MONITORED_EXIT_ONLY"
+    return bool(active and stop > 0 and age is not None and age <= _monitored_exit_max_age_seconds()), age
+
+
 def _num(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -68,12 +100,15 @@ def _strategy_attribution(row: dict[str, Any]) -> dict[str, Any]:
     primary_scanner = lottery_view or scanner
     primary_family = str(primary_scanner.get("family") or row.get("scanner_family") or "").upper() or None
     primary_id = primary_scanner.get("screener_id") or primary_scanner.get("id") or primary_scanner.get("name")
+    fallback_id = source_scan or "CORE"
+    if not primary_family:
+        primary_family = "CORE" if fallback_id == "CORE" else None
     primary_lane = lottery_view.get("lane") if lottery_view else None
     if lottery_view and primary_lane and primary_lane not in lanes:
         lanes = [primary_lane, *lanes]
     return {
-        "strategy_id": primary_id or row.get("strategy_id") or source_scan or (view_screeners[0] if view_screeners else None),
-        "screener_id": primary_id or row.get("screener_id") or source_scan or (view_screeners[0] if view_screeners else None),
+        "strategy_id": primary_id or row.get("strategy_id") or source_scan or (view_screeners[0] if view_screeners else fallback_id),
+        "screener_id": primary_id or row.get("screener_id") or source_scan or (view_screeners[0] if view_screeners else fallback_id),
         "scanner_family": primary_family,
         "strategy_is_lottery": bool(lottery_view) or primary_family == "LOTTERY",
         "strategy_lanes": list(dict.fromkeys(str(lane) for lane in lanes)) if isinstance(lanes, (list, tuple)) else ([str(lanes)] if lanes else []),
@@ -851,7 +886,7 @@ async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:
 
 
 async def protection_coverage() -> dict[str, Any]:
-    """Report actual broker protection; a local stop value is not coverage."""
+    """Report broker and verified terminal-monitor protection separately."""
     rows = await get_db().tf_trades.find(
         {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": {"$in": ["FILLED", "PARTIALLY_FILLED"]}},
         {
@@ -865,24 +900,34 @@ async def protection_coverage() -> dict[str, Any]:
         },
     ).to_list(500)
     unprotected = []
+    broker_protected = 0
+    monitored_protected = 0
     for row in rows:
         if row.get("protective_order_id") and str(row.get("protective_order_status") or "").upper() == "SUBMITTED":
+            broker_protected += 1
+            continue
+        monitored, monitor_age = _verified_monitored_exit(row)
+        if monitored:
+            monitored_protected += 1
             continue
         is_legacy_unmanaged = bool(row.get("broker_imported")) and row.get("management_state") == "REQUIRES_STRATEGY_RECONCILIATION"
         unprotected.append({
             "ticker": _symbol(row),
             "status": "LEGACY_UNMANAGED" if is_legacy_unmanaged else (
-                "MONITORED_EXIT_ONLY" if _routing_rejects_stop(row) else str(row.get("protective_order_status") or "MISSING").upper()
+                "MONITORED_EXIT_STALE_OR_INCOMPLETE" if str(row.get("protection_state") or "").upper() == "MONITORED_EXIT_ONLY" else str(row.get("protective_order_status") or "MISSING").upper()
             ),
             "reason": str(row.get("protective_order_error") or "broker_protective_order_missing")[:220],
             "legacy_unmanaged": is_legacy_unmanaged,
+            "monitor_age_seconds": monitor_age,
         })
-    monitored_only = [row for row in unprotected if row["status"] == "MONITORED_EXIT_ONLY"]
+    monitored_only = [row for row in unprotected if row["status"] == "MONITORED_EXIT_STALE_OR_INCOMPLETE"]
     legacy_unmanaged = [row for row in unprotected if row["legacy_unmanaged"]]
     managed_unresolved = [row for row in unprotected if row["status"] != "MONITORED_EXIT_ONLY" and not row["legacy_unmanaged"]]
     return {
         "filled_open": len(rows),
-        "protected_open": len(rows) - len(unprotected),
+        "protected_open": broker_protected + monitored_protected,
+        "broker_protected_open": broker_protected,
+        "verified_monitored_open": monitored_protected,
         "unprotected_open": len(unprotected),
         "monitored_exit_only_open": len(monitored_only),
         "legacy_unmanaged_open": len(legacy_unmanaged),

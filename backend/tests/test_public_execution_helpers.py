@@ -15,6 +15,34 @@ def test_public_trade_quantity_supports_portfolio_quantity():
     assert public_execution._qty({"quantity": "2.5"}) == 2.5
 
 
+def test_public_core_rows_keep_a_durable_strategy_identity():
+    attribution = public_execution._strategy_attribution({"ticker": "AAPL"})
+    assert attribution["strategy_id"] == "CORE"
+    assert attribution["screener_id"] == "CORE"
+    assert attribution["scanner_family"] == "CORE"
+
+
+def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
+    now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180")
+    covered, age = public_execution._verified_monitored_exit({
+        "pm_active_stop": 9.5,
+        "pm_last_ratchet_check": (now - timedelta(seconds=60)).isoformat(),
+        "pm_ratchet_plan": {"enabled": True},
+        "protection_state": "MONITORED_EXIT_ONLY",
+    }, now=now)
+    assert covered is True
+    assert age == 60
+
+    stale, _ = public_execution._verified_monitored_exit({
+        "pm_active_stop": 9.5,
+        "pm_last_ratchet_check": (now - timedelta(seconds=181)).isoformat(),
+        "pm_ratchet_plan": {"enabled": True},
+        "protection_state": "MONITORED_EXIT_ONLY",
+    }, now=now)
+    assert stale is False
+
+
 def test_public_portfolio_order_index_uses_public_uuid_order_id():
     orders = public_execution._orders_by_id({
         "orders": [

@@ -6,6 +6,7 @@ rollout flags are enabled.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from dataclasses import dataclass, replace
@@ -13,6 +14,13 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import httpx
+
+
+# The Public bearer token is short lived.  The scheduler creates several
+# clients in one monitor pass, so a process-wide refreshed token prevents each
+# client from independently refreshing the same expired credential.
+_RUNTIME_ACCESS_TOKEN = ""
+_TOKEN_REFRESH_LOCK = asyncio.Lock()
 
 
 class PublicAPIError(RuntimeError):
@@ -56,7 +64,7 @@ def config() -> PublicAPIConfig:
         enabled=_bool("PUBLIC_API_ENABLED"),
         api_base=os.environ.get("PUBLIC_API_BASE_URL", "https://api.public.com").rstrip("/"),
         secret=os.environ.get("PUBLIC_API_SECRET", "").strip(),
-        access_token=os.environ.get("PUBLIC_API_ACCESS_TOKEN", "").strip(),
+        access_token=_RUNTIME_ACCESS_TOKEN or os.environ.get("PUBLIC_API_ACCESS_TOKEN", "").strip(),
         account_id=os.environ.get("PUBLIC_ACCOUNT_ID", "").strip(),
         research_only=_bool("PUBLIC_RESEARCH_ONLY", True),
         live_equity_enabled=_bool("PUBLIC_LIVE_EQUITY_ENABLED"),
@@ -169,6 +177,7 @@ class PublicAPIClient:
         *,
         use_sdk: bool | None = None,
     ):
+        self._runtime_token_cache = cfg is None
         self.cfg = cfg or config()
         self._http = http_client
         self._owned = http_client is None
@@ -448,19 +457,29 @@ class PublicAPIClient:
 
     async def _refresh_access_token(self) -> None:
         """Refresh the bearer token in memory without logging credentials."""
+        global _RUNTIME_ACCESS_TOKEN
         if not self.cfg.secret:
             raise PublicAPIError("Public access token rejected and no secret is configured for refresh")
-        if self._http is None:
-            self._http = httpx.AsyncClient(timeout=self.cfg.timeout_seconds)
-        response = await self._http.post(
-            f"{self.cfg.api_base}/userapiauthservice/personal/access-tokens",
-            json={"validityInMinutes": self.cfg.sdk_token_validity_minutes, "secret": self.cfg.secret},
-            headers={"Content-Type": "application/json"},
-        )
-        refreshed = self._decode(response).get("accessToken")
-        if not refreshed:
-            raise PublicAPIError("Public token refresh returned no access token")
-        self.cfg = replace(self.cfg, access_token=str(refreshed))
+        async with _TOKEN_REFRESH_LOCK:
+            # Another concurrent monitor task may have refreshed while this
+            # request was waiting. Reuse that token instead of hitting the
+            # token endpoint again and causing a refresh storm.
+            if self._runtime_token_cache and _RUNTIME_ACCESS_TOKEN and _RUNTIME_ACCESS_TOKEN != self.cfg.access_token:
+                self.cfg = replace(self.cfg, access_token=_RUNTIME_ACCESS_TOKEN)
+                return
+            if self._http is None:
+                self._http = httpx.AsyncClient(timeout=self.cfg.timeout_seconds)
+            response = await self._http.post(
+                f"{self.cfg.api_base}/userapiauthservice/personal/access-tokens",
+                json={"validityInMinutes": self.cfg.sdk_token_validity_minutes, "secret": self.cfg.secret},
+                headers={"Content-Type": "application/json"},
+            )
+            refreshed = self._decode(response).get("accessToken")
+            if not refreshed:
+                raise PublicAPIError("Public token refresh returned no access token")
+            if self._runtime_token_cache:
+                _RUNTIME_ACCESS_TOKEN = str(refreshed)
+            self.cfg = replace(self.cfg, access_token=str(refreshed))
 
     def _account(self, account_id: str | None = None) -> str:
         account = (account_id or self.cfg.account_id).strip()
