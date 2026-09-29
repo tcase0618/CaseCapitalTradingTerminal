@@ -54,8 +54,14 @@ def _plan_is_fresh(plan: dict[str, Any]) -> bool:
     return (datetime.now(timezone.utc) - generated.astimezone(timezone.utc)).total_seconds() <= max_age
 
 
-def _ticker(row: dict[str, Any]) -> str:
-    return public_execution._symbol(row)
+def _ticker(row: dict[str, Any] | None) -> str:
+    """Return a ticker without assuming every rebalance action has a replacement.
+
+    ``EXIT_TO_CASH`` intentionally carries ``candidate=None``. Treating that
+    valid capital-release action as a malformed candidate made the one-minute
+    monitor emit a traceback on every pass.
+    """
+    return public_execution._symbol(row or {})
 
 
 def _candidate_action(row: dict[str, Any]) -> str:
