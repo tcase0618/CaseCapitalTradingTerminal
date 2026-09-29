@@ -214,6 +214,67 @@ def test_public_routing_stop_rejection_is_suppressed_not_retried():
 
 
 @pytest.mark.asyncio
+async def test_explicit_public_exit_uses_fresh_broker_quantity_and_reconciliation_fields(monkeypatch):
+    trade = {
+        "client_order_id": "entry-flws-1",
+        "broker_base": "public",
+        "ticker": "FLWS",
+        "status": "OPEN",
+        "fill_status": "FILLED",
+        "qty_remaining": 1.0,
+    }
+    updates = []
+
+    class Trades:
+        async def find_one(self, *_args, **_kwargs):
+            return dict(trade)
+
+        async def update_one(self, _query, update):
+            updates.append(update["$set"])
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def portfolio(self):
+            return {"positions": [{"symbol": "FLWS", "quantity": 1.67597}]}
+
+        async def quotes(self, _symbols):
+            return {"quotes": [{"symbol": "FLWS", "bid": 2.67, "ask": 2.69, "quoteTime": datetime.now(timezone.utc).isoformat()}]}
+
+        async def submit_equity_order(self, **kwargs):
+            self.submitted = kwargs
+            return {"preflight": {"estimatedCost": 4.5}, "order": {"orderId": "forced-exit-1"}}
+
+    client = Client()
+
+    async def claim(**_kwargs):
+        return {"ok": True}
+
+    async def marked(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(public_execution, "enabled", lambda: True)
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: client)
+    monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", claim)
+    monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", marked)
+    monkeypatch.setattr(public_execution, "_public_session_now", lambda *_args: "CORE")
+
+    result = await public_execution.submit_exit_to_cash("FLWS", reason="operator_forced_exit")
+
+    assert result["submitted"] is True
+    assert result["order_id"] == "forced-exit-1"
+    assert client.submitted["quantity"] == 1.67597
+    assert client.submitted["session"] == "CORE"
+    assert updates[0]["emergency_exit_order_id"] == "forced-exit-1"
+    assert updates[0]["emergency_exit_reason"] == "operator_forced_exit"
+
+
+@pytest.mark.asyncio
 async def test_public_reconciliation_health_fails_closed_without_success_marker(monkeypatch):
     class FakeCollection:
         async def find_one(self, *_args, **_kwargs):
