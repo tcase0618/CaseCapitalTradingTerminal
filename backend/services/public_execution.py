@@ -1253,6 +1253,7 @@ async def reconcile() -> dict[str, Any]:
             emergency_status = str(emergency.get("status") or emergency.get("orderStatus") or "").upper()
             update = {"emergency_exit_status": emergency_status, "last_order_status": emergency_status}
             if emergency_status in {"FILLED", "PARTIALLY_FILLED"}:
+                exit_reason = str(trade.get("emergency_exit_reason") or "public_emergency_limit_exit")
                 exit_qty = _num(emergency.get("filledQuantity") or emergency.get("filled_quantity"))
                 exit_price = _num(emergency.get("averagePrice") or emergency.get("average_price"))
                 remaining = max(0.0, _qty(trade) - exit_qty)
@@ -1267,7 +1268,7 @@ async def reconcile() -> dict[str, Any]:
                         "fill_status": "EXIT_FILLED",
                         "qty_remaining": 0.0,
                         "closed_at": datetime.now(timezone.utc).isoformat(),
-                        "close_reason": "public_emergency_limit_exit_filled",
+                        "close_reason": f"{exit_reason}_filled",
                     })
                 else:
                     update["qty_remaining"] = remaining
@@ -1278,7 +1279,7 @@ async def reconcile() -> dict[str, Any]:
                         entry_order_id=str(trade.get("public_order_id") or ""),
                         exit_price=exit_price,
                         exit_quantity=exit_qty,
-                        reason="public_emergency_limit_exit_filled",
+                        reason=f"{exit_reason}_filled",
                     )
                 except Exception:
                     logger.exception("Lottery exit ledger failed for Public emergency order %s", emergency_id)
@@ -1708,6 +1709,107 @@ async def process_protective_exits() -> dict[str, Any]:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
                 errors.append({"ticker": ticker, "reason": f"emergency_exit_submit_failed:{exc.__class__.__name__}"})
     return {"skipped": False, "ok": not errors, "checked": len(rows), "submitted": submitted, "errors": errors}
+
+
+async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit") -> dict[str, Any]:
+    """Submit one fully reconciled Public limit exit from broker truth.
+
+    This is deliberately narrow: it is for an explicit PM or operator decision
+    to flatten one existing position. It never infers a sell from a stale local
+    ledger row, never uses a market order, and records the broker order in the
+    established exit fields so ``reconcile`` owns confirmation and closure.
+    """
+    symbol = str(ticker or "").upper().strip()
+    if not symbol:
+        return {"submitted": False, "reason": "public_exit_ticker_required"}
+    if not enabled():
+        return {"submitted": False, "ticker": symbol, "reason": "public_live_equity_disabled"}
+
+    db = get_db()
+    trade = await db.tf_trades.find_one(
+        {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "FILLED", "$or": [{"ticker": symbol}, {"symbol": symbol}]},
+        {"_id": 0},
+    )
+    if not trade:
+        return {"submitted": False, "ticker": symbol, "reason": "public_open_trade_ledger_missing"}
+    if trade.get("emergency_exit_order_id") or trade.get("public_phase_order_id"):
+        return {"submitted": False, "ticker": symbol, "reason": "public_exit_order_already_active"}
+
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
+        portfolio = await client.portfolio()
+        broker_position = next((row for row in _positions(portfolio) if _symbol(row) == symbol), None)
+        broker_quantity = _qty(broker_position or {})
+        if broker_quantity <= 0:
+            return {"submitted": False, "ticker": symbol, "reason": "public_broker_position_not_found"}
+
+        quote_rows = _quotes(await client.quotes([symbol]))
+        quote = next((row for row in quote_rows if _symbol(row) == symbol), quote_rows[0] if quote_rows else {})
+        price = _quote_price(quote)
+        fresh, age_seconds = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
+        if not fresh or price <= 0:
+            return {
+                "submitted": False,
+                "ticker": symbol,
+                "reason": "public_exit_quote_stale_or_unverifiable",
+                "age_seconds": age_seconds,
+            }
+        order_shape, shape_note = _exit_order_shape(broker_quantity)
+        if not order_shape:
+            return {"submitted": False, "ticker": symbol, "reason": shape_note or "public_exit_shape_unavailable"}
+        quantity = _num(order_shape.get("quantity"))
+        exit_limit = round(price * 0.995, 4 if price < 1 else 2)
+        client_id = execution_safety.stable_client_order_id(
+            "public_exit_to_cash", trade.get("client_order_id"), symbol, reason, prefix="public"
+        )
+        claim = await execution_safety.claim_execution_intent(
+            scope="public_equity_exit",
+            client_order_id=client_id,
+            symbol=symbol,
+            side="sell",
+            metadata={"reason": reason, "broker_quantity": broker_quantity, "limit_price": exit_limit},
+        )
+        if not claim.get("ok"):
+            return {"submitted": False, "ticker": symbol, "reason": claim.get("reason") or "duplicate_execution_intent"}
+        try:
+            result = await client.submit_equity_order(
+                symbol=symbol,
+                side="SELL",
+                quantity=quantity,
+                limit_price=exit_limit,
+                time_in_force="DAY",
+                session=str(order_shape["session"]),
+                client_order_id=client_id,
+            )
+            order = result.get("order") or {}
+            order_id = order.get("orderId") or order.get("id")
+            if not order_id:
+                raise RuntimeError("Public exit response missing order id")
+            await db.tf_trades.update_one(
+                {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                {"$set": {
+                    "emergency_exit_order_id": order_id,
+                    "emergency_exit_order_qty": quantity,
+                    "emergency_exit_status": "SUBMITTED",
+                    "emergency_exit_limit": exit_limit,
+                    "emergency_exit_preflight": result.get("preflight"),
+                    "emergency_exit_reason": reason,
+                    "emergency_exit_session": order_shape["session"],
+                    "emergency_exit_shape_note": shape_note,
+                }},
+            )
+            await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
+            return {
+                "submitted": True,
+                "ticker": symbol,
+                "order_id": order_id,
+                "quantity": quantity,
+                "limit_price": exit_limit,
+                "session": order_shape["session"],
+                "reason": reason,
+            }
+        except Exception as exc:
+            await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
+            return {"submitted": False, "ticker": symbol, "reason": f"public_exit_submit_failed:{exc.__class__.__name__}"}
 
 
 async def analytics(limit: int = 500) -> dict[str, Any]:
