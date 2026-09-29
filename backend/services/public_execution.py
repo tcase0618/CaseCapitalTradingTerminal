@@ -897,6 +897,11 @@ async def protection_coverage() -> dict[str, Any]:
             "protective_order_error": 1,
             "broker_imported": 1,
             "management_state": 1,
+            "current_stop": 1,
+            "pm_active_stop": 1,
+            "pm_ratchet_plan": 1,
+            "pm_last_ratchet_check": 1,
+            "protection_state": 1,
         },
     ).to_list(500)
     unprotected = []
