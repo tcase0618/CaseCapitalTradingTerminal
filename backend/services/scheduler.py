@@ -1038,7 +1038,7 @@ def start_scheduler():
     _scheduler.start()
     logger.info(
         "Scheduler: stock scans 00:00/08:00/10:00/12:00/15:00/18:30 + Lottery League 8:45/9:36/10:00/12:00/15:35 "
-        "+ Options pre-open 09:35 + 5m active lottery monitor + alerts/flow/P&L/learning"
+        "+ Options pre-open 09:35 + 1m Public position monitor + 5m active lottery monitor + alerts/flow/P&L/learning"
     )
 
 
