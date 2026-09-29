@@ -17,6 +17,10 @@ BROKER_BASE = "public"
 ALLOCATIONS = (2.0, 4.0, 6.0)
 ET = ZoneInfo("America/New_York")
 PUBLIC_MIN_FRACTIONAL_NOTIONAL_USD = 5.0
+PUBLIC_PHASE1_CLOSE_PCT = 0.40
+PUBLIC_PHASE2_CLOSE_PCT = 0.30
+PUBLIC_PHASE2_MULTIPLIER = 1.50
+PUBLIC_PHASE3_TRAIL_PCT = 0.50
 
 
 def enabled() -> bool:
@@ -515,6 +519,57 @@ def _protective_order_terms(now: datetime | None = None) -> dict[str, Any]:
     return {"time_in_force": "DAY", "expiration_time": None, "session": session}
 
 
+def _public_phase_plan(entry: float, target: float, *, no_capped_tp: bool, proxy_target: bool) -> dict[str, Any]:
+    """Persist an explicit Public-compatible partial-exit plan.
+
+    Lottery proxy targets and no-cap ratchet plans deliberately remain runner
+    positions. A phase plan is created only for a PM structural target that is
+    above the actual entry price.
+    """
+    if no_capped_tp or proxy_target or entry <= 0 or target <= entry:
+        return {"enabled": False, "reason": "no_verified_capped_target"}
+    phase2 = entry + PUBLIC_PHASE2_MULTIPLIER * (target - entry)
+    return {
+        "enabled": True,
+        "phase1_target": round(target, 4),
+        "phase2_target": round(phase2, 4),
+        "phase1_close_pct": PUBLIC_PHASE1_CLOSE_PCT,
+        "phase2_close_pct": PUBLIC_PHASE2_CLOSE_PCT,
+        "phase3_trail_pct": PUBLIC_PHASE3_TRAIL_PCT,
+        "source": "pm_structural_target",
+    }
+
+
+def _phase_plan_for_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    """Use a persisted plan, or migrate a verified PM target once.
+
+    This intentionally cannot invent a target for account-protection or
+    no-cap runner positions. Their ratchet-only exit policy remains intact.
+    """
+    existing = trade.get("public_phase_plan") or {}
+    if existing.get("enabled"):
+        return existing
+    ratchet = trade.get("pm_ratchet_plan") or {}
+    entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
+    target = _num(
+        trade.get("phase1_target")
+        or trade.get("structural_target")
+        or ratchet.get("initial_target_price")
+    )
+    return _public_phase_plan(
+        entry,
+        target,
+        no_capped_tp=bool(ratchet.get("no_capped_tp")),
+        proxy_target=str(trade.get("execution_target_mode") or "").upper() == "RATCHET_ONLY_PROXY_TARGET",
+    )
+
+
+def _phase_limit_price(mark: float) -> float:
+    """A sellable limit based on the fresh mark, respecting Public ticks."""
+    raw = mark * 0.995
+    return round(raw, 4 if raw < 1 else 2)
+
+
 def _numeric_field(payload: Any, names: set[str]) -> float | None:
     """Find a positive account value across Public's changing response shapes."""
     normalized = {name.replace("_", "").lower() for name in names}
@@ -1002,6 +1057,19 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 rejected.append({"ticker": ticker, "reason": "public_submission_missing_order_id"})
                 continue
             attribution = _strategy_attribution(row)
+            ratchet_plan = row.get("ratchet_plan") or {"enabled": False}
+            structural_target = _num(
+                row.get("target")
+                or row.get("target_blended")
+                or (row.get("targets") or {}).get("target_blended")
+                or ratchet_plan.get("initial_target_price")
+            )
+            phase_plan = _public_phase_plan(
+                price,
+                structural_target,
+                no_capped_tp=bool(ratchet_plan.get("no_capped_tp")),
+                proxy_target=proxy_target,
+            )
             await get_db().tf_trades.insert_one(stamped({
                 "client_order_id": client_id, "public_order_id": order_id, "broker_base": BROKER_BASE,
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
@@ -1010,7 +1078,13 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "execution_target_mode": "RATCHET_ONLY_PROXY_TARGET" if proxy_target else "STRUCTURAL_TARGET",
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
                 "current_stop": stop_price, "pm_active_stop": stop_price,
-                "pm_ratchet_plan": row.get("ratchet_plan") or {"enabled": False}, "submitted_at": datetime.now(timezone.utc).isoformat(),
+                "pm_ratchet_plan": ratchet_plan, "submitted_at": datetime.now(timezone.utc).isoformat(),
+                "structural_target": structural_target or None,
+                "public_phase_plan": phase_plan,
+                "phase": 1,
+                "phases_hit": {},
+                "phase1_target": phase_plan.get("phase1_target"),
+                "phase2_target": phase_plan.get("phase2_target"),
                 "public_preflight": result.get("preflight"),
                 **attribution,
                 "strategy_attribution": attribution,
@@ -1323,6 +1397,9 @@ async def reconcile() -> dict[str, Any]:
                 except Exception:
                     logger.exception("Lottery exit reconciliation flag failed for Public order %s", trade.get("public_order_id"))
                 closed += 1
+        phase_updates = await _reconcile_public_phase_exits(client, portfolio_orders)
+        order_updates += phase_updates["updates"]
+        poll_errors += phase_updates["poll_errors"]
         history_reconciliation = await _reconcile_closed_broker_history(client)
         history_import = await _import_unattributed_closed_broker_history(client)
     result = {
@@ -1335,6 +1412,7 @@ async def reconcile() -> dict[str, Any]:
         "broker_position_imported": imported,
         "broker_history_reconciliation": history_reconciliation,
         "broker_history_import": history_import,
+        "phase_exit_reconciliation": phase_updates,
         "broker": BROKER_BASE,
     }
     state_update = {"last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_result": result}
@@ -1344,12 +1422,234 @@ async def reconcile() -> dict[str, Any]:
     return result
 
 
+async def _reconcile_public_phase_exits(
+    client: public_api.PublicAPIClient,
+    portfolio_orders: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    """Resolve Public partial-exit orders against broker truth.
+
+    A phase does not advance when a sell is merely submitted. It advances only
+    after Public confirms the fill, keeping the remaining quantity and stop
+    state internally consistent with the broker.
+    """
+    db = get_db()
+    rows = await db.tf_trades.find(
+        {"broker_base": BROKER_BASE, "status": "OPEN", "public_phase_order_id": {"$exists": True, "$ne": None}},
+        {"_id": 0},
+    ).to_list(500)
+    updates = poll_errors = 0
+    for trade in rows:
+        raw_phase_order_id = trade.get("public_phase_order_id")
+        if not raw_phase_order_id:
+            continue
+        phase_order_id = str(raw_phase_order_id)
+        try:
+            order = await _get_order_with_portfolio_fallback(client, phase_order_id, portfolio_orders)
+        except Exception:
+            poll_errors += 1
+            continue
+        status = str(order.get("status") or order.get("orderStatus") or "").upper()
+        phase = int(_num(trade.get("public_phase_order_phase"), _num(trade.get("phase"), 1)))
+        update: dict[str, Any] = {"public_phase_order_status": status, "last_order_status": status}
+        if status in {"FILLED", "PARTIALLY_FILLED"}:
+            cumulative_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
+            prior_qty = _num(trade.get("public_phase_filled_qty"))
+            delta_qty = max(0.0, cumulative_qty - prior_qty)
+            fill_price = _num(order.get("averagePrice") or order.get("average_price") or order.get("limitPrice") or order.get("limit_price"))
+            if delta_qty > 0 and fill_price > 0:
+                entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
+                await db.public_phase_exits.insert_one(stamped({
+                    "parent_client_order_id": trade.get("client_order_id"),
+                    "public_order_id": phase_order_id,
+                    "ticker": _symbol(trade),
+                    "phase": phase,
+                    "qty": delta_qty,
+                    "fill_price": fill_price,
+                    "reason": f"public_phase{phase}_target_hit",
+                    "realized_pct_on_slice": round((fill_price - entry) / entry * 100, 2) if entry > 0 else None,
+                    "submitted_at": trade.get("public_phase_submitted_at"),
+                    "filled_at": datetime.now(timezone.utc).isoformat(),
+                }))
+                update.update({
+                    "public_phase_filled_qty": cumulative_qty,
+                    "public_phase_fill_price": fill_price,
+                    "last_exit_synced_at": datetime.now(timezone.utc).isoformat(),
+                })
+            if status == "FILLED":
+                entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
+                plan = trade.get("public_phase_plan") or {}
+                phases_hit = dict(trade.get("phases_hit") or {})
+                existing = dict(phases_hit.get(str(phase)) or {})
+                total_phase_qty = _num(trade.get("public_phase_filled_qty"))
+                if delta_qty > 0:
+                    total_phase_qty = cumulative_qty
+                if fill_price <= 0:
+                    fill_price = _num(trade.get("public_phase_fill_price"))
+                if phase == 1:
+                    new_stop = max(_num(trade.get("current_stop") or trade.get("pm_active_stop")), entry)
+                    next_phase = 2
+                else:
+                    p1_exit = _num((phases_hit.get("1") or {}).get("exit_price"), entry)
+                    new_stop = max(_num(trade.get("current_stop") or trade.get("pm_active_stop")), p1_exit)
+                    next_phase = 3
+                phases_hit[str(phase)] = {
+                    **existing,
+                    "hit_at": datetime.now(timezone.utc).isoformat(),
+                    "trigger_price": _num(trade.get("public_phase_trigger_price")),
+                    "exit_price": fill_price,
+                    "qty_sold": total_phase_qty,
+                    "stop_moved_to": new_stop,
+                }
+                update.update({
+                    "phase": next_phase,
+                    "phases_hit": phases_hit,
+                    "current_stop": new_stop,
+                    "pm_active_stop": new_stop,
+                    "public_phase_order_id": None,
+                    "public_phase_order_phase": None,
+                    "public_phase_order_status": "FILLED",
+                    "public_phase_filled_qty": 0.0,
+                })
+        elif status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
+            update.update({
+                "public_phase_order_id": None,
+                "public_phase_order_phase": None,
+                "public_phase_order_status": status,
+                "public_phase_filled_qty": 0.0,
+            })
+        await db.tf_trades.update_one(
+            {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+            {"$set": update},
+        )
+        updates += 1
+    return {"updates": updates, "poll_errors": poll_errors}
+
+
+async def process_public_phase_exits() -> dict[str, Any]:
+    """Submit one Public limit partial-exit per position when its PM target hits."""
+    if not enabled():
+        return {"skipped": True, "reason": "public_live_equity_disabled"}
+    db = get_db()
+    rows = await db.tf_trades.find(
+        {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "FILLED", "qty_remaining": {"$gt": 0}},
+        {"_id": 0},
+    ).to_list(500)
+    submitted: list[dict[str, Any]] = []
+    deferred: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    eligible: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for trade in rows:
+        if trade.get("public_phase_order_id") or trade.get("emergency_exit_order_id"):
+            continue
+        plan = _phase_plan_for_trade(trade)
+        if not plan.get("enabled"):
+            continue
+        if plan != (trade.get("public_phase_plan") or {}):
+            await db.tf_trades.update_one(
+                {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                {"$set": {"public_phase_plan": plan, "phase1_target": plan.get("phase1_target"), "phase2_target": plan.get("phase2_target")}},
+            )
+        eligible.append((trade, plan))
+    if not eligible:
+        return {"skipped": False, "ok": True, "checked": len(rows), "eligible": 0, "submitted": submitted, "deferred": deferred, "errors": errors}
+    async with public_api.PublicAPIClient(use_sdk=False) as client:
+        quote_rows = _quotes(await client.quotes([_symbol(trade) for trade, _plan in eligible]))
+        quotes = {_symbol(row): row for row in quote_rows}
+        for trade, plan in eligible:
+            ticker = _symbol(trade)
+            quote = quotes.get(ticker) or {}
+            current = _quote_price(quote)
+            fresh, _age = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
+            if not fresh or current <= 0:
+                deferred.append({"ticker": ticker, "reason": "public_phase_quote_stale_or_unverifiable"})
+                continue
+            phase = int(_num(trade.get("phase"), 1))
+            if phase == 3:
+                entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
+                peak = max(_num(trade.get("peak_price_since_entry"), entry), current)
+                trail_pct = _num(plan.get("phase3_trail_pct"), PUBLIC_PHASE3_TRAIL_PCT)
+                trail_stop = entry * (1 + ((peak - entry) / entry) * (1 - trail_pct)) if entry > 0 else 0.0
+                prior_stop = _num(trade.get("current_stop") or trade.get("pm_active_stop"))
+                if trail_stop > prior_stop:
+                    await db.tf_trades.update_one(
+                        {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                        {"$set": {
+                            "current_stop": round(trail_stop, 4),
+                            "pm_active_stop": round(trail_stop, 4),
+                            "phase3_trail_pct_active": trail_pct,
+                            "peak_price_since_entry": peak,
+                        }},
+                    )
+                continue
+            if phase not in {1, 2}:
+                continue
+            target = _num(plan.get(f"phase{phase}_target"))
+            if target <= 0 or current < target:
+                continue
+            total_qty = _num(trade.get("qty_total"))
+            remaining = _qty(trade)
+            close_pct = _num(plan.get(f"phase{phase}_close_pct"))
+            requested_qty = min(remaining, total_qty * close_pct)
+            shape, shape_reason = _exit_order_shape(requested_qty)
+            if not shape:
+                deferred.append({"ticker": ticker, "reason": shape_reason or "public_phase_exit_shape_invalid"})
+                continue
+            client_id = execution_safety.stable_client_order_id(
+                "public_phase", trade.get("client_order_id"), phase, target, prefix="public"
+            )
+            claim = await execution_safety.claim_execution_intent(
+                scope="public_equity_phase_exit",
+                client_order_id=client_id,
+                symbol=ticker,
+                side="sell",
+                metadata={"phase": phase, "target": target, "parent_client_order_id": trade.get("client_order_id")},
+            )
+            if not claim.get("ok"):
+                deferred.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_phase_exit"})
+                continue
+            try:
+                limit_price = _phase_limit_price(current)
+                result = await client.submit_equity_order(
+                    symbol=ticker,
+                    side="SELL",
+                    quantity=float(shape["quantity"]),
+                    limit_price=limit_price,
+                    time_in_force="DAY",
+                    session=str(shape["session"]),
+                    client_order_id=client_id,
+                )
+                order = result.get("order") or {}
+                order_id = order.get("orderId") or order.get("id")
+                if not order_id:
+                    raise RuntimeError("Public phase exit response missing order id")
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": {
+                        "public_phase_order_id": order_id,
+                        "public_phase_order_phase": phase,
+                        "public_phase_order_status": "SUBMITTED",
+                        "public_phase_order_qty": float(shape["quantity"]),
+                        "public_phase_filled_qty": 0.0,
+                        "public_phase_trigger_price": current,
+                        "public_phase_limit": limit_price,
+                        "public_phase_submitted_at": datetime.now(timezone.utc).isoformat(),
+                        "public_phase_preflight": result.get("preflight"),
+                    }},
+                )
+                await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
+                submitted.append({"ticker": ticker, "phase": phase, "order_id": order_id, "qty": float(shape["quantity"]), "limit_price": limit_price})
+            except Exception as exc:
+                await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
+                errors.append({"ticker": ticker, "reason": f"public_phase_exit_submit_failed:{exc.__class__.__name__}"})
+    return {"skipped": False, "ok": not errors, "checked": len(rows), "eligible": len(eligible), "submitted": submitted, "deferred": deferred, "errors": errors}
+
+
 async def process_protective_exits() -> dict[str, Any]:
     """Emergency fresh-quote limit exit after a monitored stop breach.
 
     Public has rejected resting stop orders for the configured routing profile.
     This is intentionally not called broker-side stop protection: it is a
-    five-minute monitored fallback used only after the PM stop has breached.
+    one-minute monitored fallback used only after the PM stop has breached.
     """
     if not enabled():
         return {"skipped": True, "reason": "public_live_equity_disabled"}
@@ -1363,6 +1663,10 @@ async def process_protective_exits() -> dict[str, Any]:
         quote_rows = _quotes(await client.quotes([_symbol(row) for row in rows]))
         by_symbol = {_symbol(row): row for row in quote_rows}
         for trade in rows:
+            if trade.get("public_phase_order_id"):
+                # A phase trim is already working at the broker. Do not race
+                # it with a full emergency close using stale local quantity.
+                continue
             ticker = _symbol(trade)
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
             quote_row = by_symbol.get(ticker) or {}
