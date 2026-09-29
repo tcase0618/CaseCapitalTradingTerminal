@@ -648,6 +648,7 @@ def start_scheduler():
         rebalance_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         portfolio_score_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         public_ratchet_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        public_phase_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
             from . import options_desk, tail_hunter
             try:
@@ -665,6 +666,14 @@ def start_scheduler():
                         public_ratchet_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_pm_ratchet", "reason": exc.__class__.__name__})
                         logger.exception("Public PM ratchet failed")
+                    try:
+                        public_phase_status = await public_execution.process_public_phase_exits()
+                        if not public_phase_status.get("skipped") and not public_phase_status.get("ok", True):
+                            failures.append({"stage": "public_phase_exits", "reason": "phase_exit_degraded"})
+                    except Exception as exc:
+                        public_phase_status = {"ok": False, "reason": exc.__class__.__name__}
+                        failures.append({"stage": "public_phase_exits", "reason": exc.__class__.__name__})
+                        logger.exception("Public phase exit monitor failed")
                     try:
                         public_protection = await public_execution.process_protective_exits()
                         if not public_protection.get("skipped") and not public_protection.get("ok", True):
@@ -714,7 +723,7 @@ def start_scheduler():
         except Exception as e:
             failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
             logger.warning("position monitor: %s", e)
-        return {"ok": not failures, "failures": failures, "pm_ratchet": public_ratchet_status, "pm_rebalance": rebalance_status, "pm_portfolio_scores": portfolio_score_status}
+        return {"ok": not failures, "failures": failures, "pm_ratchet": public_ratchet_status, "public_phase_exits": public_phase_status, "pm_rebalance": rebalance_status, "pm_portfolio_scores": portfolio_score_status}
 
     async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
         if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
@@ -734,6 +743,7 @@ def start_scheduler():
             result = await _position_monitor()
             management["legacy_position_monitor"] = result
             management["pm_ratchet"] = result.get("pm_ratchet") or {"skipped": True, "reason": "not_run"}
+            management["public_phase_exits"] = result.get("public_phase_exits") or {"skipped": True, "reason": "not_run"}
             management["pm_rebalance"] = result.get("pm_rebalance") or {"skipped": True, "reason": "not_run"}
             management["pm_portfolio_scores"] = result.get("pm_portfolio_scores") or {"skipped": True, "reason": "not_run"}
             if not result.get("ok"):
