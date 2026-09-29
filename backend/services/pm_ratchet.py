@@ -5,6 +5,7 @@ the ratchet plan decided by the Portfolio Manager. It does not open trades.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,6 +54,38 @@ def compute_active_levels(entry: float, current: float, plan: dict[str, Any], pr
     }
 
 
+def _public_account_protection_plan(entry: float, current: float) -> dict[str, Any]:
+    """Create a no-cap protection ratchet for an existing Public holding.
+
+    Holdings imported from the broker have no trustworthy original PM thesis.
+    When such a holding is already below the default initial stop, anchoring at
+    its original cost would create a retroactive stop above the live price and
+    cause an immediate, invented liquidation.  Anchor the migration at the
+    fresh mark instead; subsequent losses are protected and later gains still
+    ratchet normally.  Terminal-owned positions retain their PM-authored plan.
+    """
+    initial_stop_pct = max(1.0, min(50.0, _num(os.environ.get("PUBLIC_ACCOUNT_RATCHET_INITIAL_STOP_PCT"), 10.0)))
+    trigger_step_pct = max(0.5, min(25.0, _num(os.environ.get("PUBLIC_ACCOUNT_RATCHET_TRIGGER_STEP_PCT"), 3.0)))
+    stop_raise_pct = max(0.25, min(25.0, _num(os.environ.get("PUBLIC_ACCOUNT_RATCHET_STOP_RAISE_PCT"), 3.0)))
+    max_ratchets = max(1, min(100, int(_num(os.environ.get("PUBLIC_ACCOUNT_RATCHET_MAX_LEVELS"), 20))))
+    anchor = entry if entry > 0 else current
+    migrated_at_loss = current < anchor * (1.0 - initial_stop_pct / 100.0)
+    if migrated_at_loss:
+        anchor = current
+    return {
+        "enabled": True,
+        "profile": "ACCOUNT_PROTECTION",
+        "anchor_price": round(anchor, 6),
+        "initial_stop_pct": round(initial_stop_pct, 3),
+        "trigger_step_pct": round(trigger_step_pct, 3),
+        "stop_raise_pct": round(stop_raise_pct, 3),
+        "max_ratchets": max_ratchets,
+        "no_capped_tp": True,
+        "exit_policy": "STOP_RATCHET_ONLY",
+        "migration": "fresh_mark_anchor" if migrated_at_loss else "cost_basis_anchor",
+    }
+
+
 async def _public_prices(tickers: list[str]) -> dict[str, float]:
     """Return only fresh Public marks for Public-broker ratchets."""
     from . import public_api, public_execution, safety
@@ -85,16 +118,22 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
         from .trade_floor_phases import _alpaca_trade_base, _broker_scope
         broker_base = _alpaca_trade_base()
         broker_scope = _broker_scope()
+    filters = {
+        "status": "OPEN",
+        "fill_status": "FILLED",
+        "qty_remaining": {"$gt": 0},
+    }
+    # Every broker-reconciled Public holding must be covered. Alpaca retains
+    # its PM-only scope because its equity execution path is retired.
+    if broker_base != "public":
+        filters["pm_ratchet_plan.enabled"] = True
     open_trades = await db.tf_trades.find(
-        {"$and": [{
-            "status": "OPEN",
-            "fill_status": "FILLED",
-            "qty_remaining": {"$gt": 0},
-            "pm_ratchet_plan.enabled": True,
-        }, broker_scope]},
+        {"$and": [filters, broker_scope]},
         {"_id": 0},
     ).to_list(500)
     actions: list[dict[str, Any]] = []
+    coverage_initialized: list[str] = []
+    unpriced: list[str] = []
     public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades]) if broker_base == "public" else {}
     try:
         from .trade_floor_phases import _current_price
@@ -112,10 +151,25 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
         else:
             current = None
         if not current or current <= 0:
+            if broker_base == "public" and ticker:
+                unpriced.append(ticker)
+            continue
+        plan = trade.get("pm_ratchet_plan") or {}
+        initialized = False
+        if broker_base == "public" and not plan.get("enabled"):
+            plan = _public_account_protection_plan(entry, float(current))
+            initialized = True
+            coverage_initialized.append(ticker)
+        ratchet_entry = _num(plan.get("anchor_price")) or entry
+        if ratchet_entry <= 0:
+            unpriced.append(ticker)
             continue
         previous_stop = _num(trade.get("current_stop") or trade.get("stop_price"))
         observed_peak = max(_num(trade.get("peak_price_since_entry"), entry), float(current))
-        levels = compute_active_levels(entry, observed_peak, trade.get("pm_ratchet_plan") or {}, previous_stop)
+        # A migrated plan uses its fresh-mark anchor for both peak and gains;
+        # a PM-authored position continues using its original entry price.
+        observed_peak = max(_num(trade.get("peak_price_since_entry"), ratchet_entry), float(current))
+        levels = compute_active_levels(ratchet_entry, observed_peak, plan, previous_stop)
         if not levels.get("enabled"):
             continue
         current_level = int(_num(trade.get("pm_ratchet_level"), 0))
@@ -126,6 +180,13 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
             "peak_price_since_entry": observed_peak,
             "pm_last_ratchet_mark": float(current),
         }
+        if initialized:
+            updates.update({
+                "pm_ratchet_plan": plan,
+                "management_state": "PUBLIC_ACCOUNT_RATCHET",
+                "protection_state": "MONITORED_EXIT_ONLY",
+                "protection_note": "Account-protection ratchet initialized from a fresh Public mark; no original PM thesis was assumed.",
+            })
         if levels["active_stop"] > previous_stop:
             updates["current_stop"] = levels["active_stop"]
         if levels["ratchet_level"] > current_level:
@@ -156,7 +217,16 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
             {"$and": [{"client_order_id": trade.get("client_order_id")}, broker_scope]},
             {"$set": updates},
         )
-    return {"broker_base": broker_base, "checked": len(open_trades), "ratcheted": len(actions), "actions": actions, "ran_at": _now().isoformat()}
+    return {
+        "broker_base": broker_base,
+        "checked": len(open_trades),
+        "ratcheted": len(actions),
+        "coverage_initialized": len(coverage_initialized),
+        "coverage_initialized_tickers": coverage_initialized,
+        "unpriced": sorted(set(unpriced)),
+        "actions": actions,
+        "ran_at": _now().isoformat(),
+    }
 
 
 async def recent_events(limit: int = 50, *, broker_base: str | None = None) -> dict[str, Any]:

@@ -60,6 +60,9 @@ def test_scheduler_uses_non_overlapping_job_defaults(monkeypatch):
     assert len(_FakeScheduler.instances[0].jobs) >= 20
     job_ids = {job["id"] for job in _FakeScheduler.instances[0].jobs}
     assert "position_monitor" in job_ids
-    assert "position_monitor_watchdog_5m" in job_ids
+    assert "position_monitor_watchdog_1m" in job_ids
+    jobs = {job["id"]: job for job in _FakeScheduler.instances[0].jobs}
+    assert "minute='*'" in str(jobs["position_monitor"]["trigger"])
+    assert "0:01:00" in str(jobs["position_monitor_watchdog_1m"]["trigger"])
 
     scheduler.shutdown_scheduler()

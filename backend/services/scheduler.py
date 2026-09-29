@@ -627,7 +627,7 @@ def start_scheduler():
         id="regime_gate", replace_existing=True,
     )
 
-    # Position and broker monitor every 5 minutes during the requested 24/5
+    # Position and broker monitor every minute during the requested 24/5
     # window: Sunday 20:00 ET through Friday 19:55 ET.
     async def _day_start_equity_snapshot_job():
         try:
@@ -744,7 +744,7 @@ def start_scheduler():
             await _send_position_monitor_failure([{"stage": "monitor_wrapper", "reason": e.__class__.__name__}], "wrapper")
         try:
             snapshot = await persist_live_position_snapshot(
-                triggered_by="scheduler_position_monitor_5m_24_5",
+                triggered_by="scheduler_position_monitor_1m_24_5",
                 management=management,
             )
             # The watchdog must observe the Public monitor itself, not a
@@ -755,7 +755,7 @@ def start_scheduler():
                     "snapshot_at": snapshot["snapshot_at"],
                     "monitor_ok": bool((management.get("legacy_position_monitor") or {}).get("ok")),
                     "management": management,
-                    "triggered_by": "scheduler_position_monitor_5m_24_5",
+                    "triggered_by": "scheduler_position_monitor_1m_24_5",
                 }},
                 upsert=True,
             )
@@ -773,15 +773,15 @@ def start_scheduler():
     _scheduler.add_job(
         _position_monitor_with_snapshot,
         OrTrigger([
-            CronTrigger(day_of_week="sun", hour="20-23", minute="*/5", timezone=ET),
-            CronTrigger(day_of_week="mon-thu", hour="0-23", minute="*/5", timezone=ET),
-            CronTrigger(day_of_week="fri", hour="0-19", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="sun", hour="20-23", minute="*", timezone=ET),
+            CronTrigger(day_of_week="mon-thu", hour="0-23", minute="*", timezone=ET),
+            CronTrigger(day_of_week="fri", hour="0-19", minute="*", timezone=ET),
         ]),
         id="position_monitor", replace_existing=True,
     )
 
     async def _position_monitor_watchdog():
-        """Alert when the 5-minute monitor has not produced a fresh snapshot."""
+        """Alert when the one-minute monitor has not produced a fresh snapshot."""
         try:
             from . import public_execution
             if not public_execution.enabled() or not public_monitor_window_open():
@@ -801,7 +801,7 @@ def start_scheduler():
             if fetched and fetched.tzinfo is None:
                 fetched = fetched.replace(tzinfo=timezone.utc)
             age_seconds = (datetime.now(timezone.utc) - fetched).total_seconds() if fetched else None
-            if age_seconds is None or age_seconds > 8 * 60:
+            if age_seconds is None or age_seconds > 3 * 60:
                 await _send_position_monitor_failure(
                     [{"stage": "monitor_watchdog", "reason": "missing_or_stale_snapshot"}],
                     "watchdog",
@@ -812,8 +812,8 @@ def start_scheduler():
 
     _scheduler.add_job(
         _position_monitor_watchdog,
-        IntervalTrigger(minutes=5),
-        id="position_monitor_watchdog_5m",
+        IntervalTrigger(minutes=1),
+        id="position_monitor_watchdog_1m",
         replace_existing=True,
     )
     _scheduler.add_job(
