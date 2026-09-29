@@ -56,6 +56,20 @@ def test_public_entry_shape_obeys_session_and_notional_constraints():
     assert extended_reason == "public_24h_requires_whole_share_within_allocation"
 
 
+def test_public_exit_shape_keeps_fractional_core_exits_and_reduces_24h_positions():
+    core, core_note = public_execution._exit_order_shape(1.67597, now=datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
+    assert core == {"quantity": 1.67597, "session": "CORE"}
+    assert core_note is None
+
+    overnight, overnight_note = public_execution._exit_order_shape(1.67597, now=datetime(2026, 9, 14, 1, tzinfo=timezone.utc))
+    assert overnight == {"quantity": 1.0, "session": "TWENTY_FOUR_HOURS"}
+    assert overnight_note == "public_24h_fractional_residual_core_session_required"
+
+    unavailable, unavailable_note = public_execution._exit_order_shape(0.67597, now=datetime(2026, 9, 14, 1, tzinfo=timezone.utc))
+    assert unavailable is None
+    assert unavailable_note == "public_24h_exit_requires_whole_share"
+
+
 def test_public_protective_order_terms_follow_broker_session_contract():
     core = public_execution._protective_order_terms(datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
     assert core["time_in_force"] == "GTD"

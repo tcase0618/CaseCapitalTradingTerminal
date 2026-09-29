@@ -51,3 +51,16 @@ def test_holding_score_labels_only_genuinely_weak_replacement_candidate():
     )
     assert score["recommended_state"] == "REPLACE_REVIEW"
     assert score["portfolio_score"] < 55
+
+
+def test_deep_loss_without_a_current_thesis_is_an_exit_review():
+    score = pm_portfolio._holding_score(
+        {"ticker": "LEGACY", "market_value": 4, "unrealized_pct": -27.0, "lastPrice": 2.6},
+        None,
+        None,
+        None,
+        100,
+    )
+
+    assert score["recommended_state"] == "EXIT_REVIEW"
+    assert "no current PM thesis" in score["reasons"][-1]

@@ -139,8 +139,8 @@ def _holding_score(position: dict[str, Any], recommendation: dict[str, Any] | No
         reasons.append("stop coverage is unavailable in the portfolio record")
     elif risk_state == "UNPROTECTED":
         reasons.append("broker-side protective order is not confirmed; monitored emergency exit remains fallback only")
-    if pnl is not None and pnl <= -7.0 and pm_score <= 35.0:
-        state, reasons = "EXIT_REVIEW", reasons + ["deep loss and weak current PM thesis"]
+    if pnl is not None and pnl <= -7.0 and (pm_score <= 35.0 or not has_current_recommendation):
+        state, reasons = "EXIT_REVIEW", reasons + ["deep loss with no current PM thesis or a weak current thesis"]
     elif pnl is not None and pnl <= -3.0 and (edge_gap or 0.0) >= 18.0 and overall < 55.0:
         state, reasons = "REPLACE_REVIEW", reasons + ["weaker holding trails an executable replacement by the required edge gap"]
     elif pnl is not None and pnl <= -3.0 and overall < 55.0:

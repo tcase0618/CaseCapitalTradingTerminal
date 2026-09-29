@@ -475,6 +475,28 @@ def _entry_order_shape(amount: float, price: float, *, now: datetime | None = No
     return {"quantity": float(quantity), "session": session}, None
 
 
+def _exit_order_shape(quantity: float, *, now: datetime | None = None) -> tuple[dict[str, float | str] | None, str | None]:
+    """Build the largest broker-valid sell for the active Public session.
+
+    Core trading accepts the broker's fractional position quantity. Public's
+    24-hour session accepts whole shares only, so an overnight exit can reduce
+    a fractional holding but cannot claim to flatten its fractional residual.
+    The next core-session PM pass can close that residual using its updated
+    broker quantity.
+    """
+    session = _public_session_now(now) if now is not None else _public_session_now()
+    if quantity <= 0:
+        return None, "public_exit_quantity_invalid"
+    if session == "CORE":
+        return {"quantity": float(quantity), "session": session}, None
+    whole_shares = int(quantity)
+    if whole_shares < 1:
+        return None, "public_24h_exit_requires_whole_share"
+    residual = round(float(quantity) - whole_shares, 8)
+    reason = "public_24h_fractional_residual_core_session_required" if residual > 0 else None
+    return {"quantity": float(whole_shares), "session": session}, reason
+
+
 def _protective_order_terms(now: datetime | None = None) -> dict[str, Any]:
     """Build a broker-valid stop order for the current Public session.
 
