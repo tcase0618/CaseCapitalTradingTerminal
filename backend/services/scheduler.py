@@ -39,6 +39,10 @@ STOCK_SCAN_CADENCE_ET = [
     # is a terminal scan, not a standalone options refresh, so every family
     # reaches its PM and the single consolidated Telegram report together.
     ("ten_am_scan", 10, 0),
+    # Re-evaluate overnight/premarket candidates whose Public execution quote
+    # was stale or non-executable. This is another full terminal cycle: old
+    # PM decisions are never blindly replayed into a new market.
+    ("stale_retry_scan_1030", 10, 30),
     ("midday_scan", 12, 0),
     ("afternoon_scan", 15, 0),
     ("evening_scan", 18, 30),

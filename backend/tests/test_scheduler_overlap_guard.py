@@ -61,6 +61,7 @@ def test_scheduler_uses_non_overlapping_job_defaults(monkeypatch):
     job_ids = {job["id"] for job in _FakeScheduler.instances[0].jobs}
     assert "position_monitor" in job_ids
     assert "position_monitor_watchdog_1m" in job_ids
+    assert "stale_retry_scan_1030" in job_ids
     jobs = {job["id"]: job for job in _FakeScheduler.instances[0].jobs}
     assert "minute='*'" in str(jobs["position_monitor"]["trigger"])
     assert "0:01:00" in str(jobs["position_monitor_watchdog_1m"]["trigger"])

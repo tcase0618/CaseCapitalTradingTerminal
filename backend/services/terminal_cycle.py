@@ -15,6 +15,12 @@ from .db import get_db, log_activity
 
 _FULL_SCAN_LOCK = asyncio.Lock()
 
+_STALE_PUBLIC_ENTRY_REASONS = {
+    "public_execution_quote_stale_or_unverifiable",
+    "public_final_quote_stale_or_unverifiable",
+    "public_final_quote_unavailable",
+}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -32,6 +38,108 @@ def _reason_counts(rows: Any) -> dict[str, int]:
         reason = str((row or {}).get("reason") or "unknown") if isinstance(row, dict) else "unknown"
         counts[reason] = counts.get(reason, 0) + 1
     return counts
+
+
+def _is_stale_public_entry_rejection(reason: Any) -> bool:
+    """Whether an execution rejection merits a later fresh-market retry.
+
+    This deliberately excludes PM, stop, buying-power, halt, and duplicate
+    rejections. A retry queue must never become a second path around those
+    decisions or controls.
+    """
+    value = str(reason or "").strip().lower()
+    return value in _STALE_PUBLIC_ENTRY_REASONS or (
+        value.startswith("public_execution_quote_") and ("stale" in value or "unverifiable" in value)
+    )
+
+
+async def _persist_stale_execution_retries(
+    *,
+    pm_rows: list[dict[str, Any]],
+    equity_execution: dict[str, Any],
+    cycle_id: str,
+    observed_at: str | None,
+) -> dict[str, Any]:
+    """Persist only fresh-quote retry candidates for the 10:30 full rescan."""
+    rejected = equity_execution.get("rejected") or []
+    stale = [row for row in rejected if isinstance(row, dict) and _is_stale_public_entry_rejection(row.get("reason"))]
+    if not stale:
+        return {"queued": 0, "tickers": []}
+    approved = {
+        str(row.get("ticker") or "").upper(): row
+        for row in pm_rows
+        if str(row.get("action") or "").upper() in {"STARTER", "ACCUMULATE"}
+    }
+    today = (observed_at or _now().isoformat())[:10]
+    db = get_db()
+    queued: list[str] = []
+    for rejection in stale:
+        ticker = str(rejection.get("ticker") or "").upper()
+        pm_row = approved.get(ticker)
+        if not ticker or not pm_row:
+            continue
+        source_scan = str(pm_row.get("source_scan") or pm_row.get("screener_id") or "CORE")
+        retry_key = f"{today}:{ticker}:{source_scan}"
+        await db.stale_execution_retries.update_one(
+            {"retry_key": retry_key},
+            {"$set": {
+                "retry_key": retry_key,
+                "ticker": ticker,
+                "source_scan": source_scan,
+                "scanner_family": pm_row.get("scanner_family"),
+                "source_cycle_id": cycle_id,
+                "source_observed_at": observed_at,
+                "pm_action": pm_row.get("action"),
+                "pm_score": pm_row.get("pm_score"),
+                "allocation_usd": pm_row.get("allocation_usd"),
+                "last_rejection_reason": rejection.get("reason"),
+                "last_quote_age_seconds": rejection.get("age_seconds"),
+                "status": "PENDING_1030_FULL_RESCAN",
+                "updated_at": _now().isoformat(),
+            }, "$setOnInsert": {"created_at": _now().isoformat()}},
+            upsert=True,
+        )
+        queued.append(ticker)
+    return {"queued": len(queued), "tickers": sorted(set(queued))}
+
+
+async def _resolve_stale_execution_retries(
+    *,
+    pm_rows: list[dict[str, Any]],
+    equity_execution: dict[str, Any],
+    cycle_id: str,
+) -> dict[str, Any]:
+    """Record the outcome of the 10:30 *new* PM cycle for queued tickers."""
+    db = get_db()
+    pending = await db.stale_execution_retries.find(
+        {"status": "PENDING_1030_FULL_RESCAN"}, {"_id": 0}
+    ).to_list(500)
+    if not pending:
+        return {"reviewed": 0, "retried": 0, "executed": 0}
+    current = {str(row.get("ticker") or "").upper(): row for row in pm_rows}
+    executed = {str(row.get("ticker") or "").upper() for row in equity_execution.get("executed") or []}
+    rejected = {str(row.get("ticker") or "").upper(): row for row in equity_execution.get("rejected") or [] if isinstance(row, dict)}
+    retried = completed = 0
+    for item in pending:
+        ticker = str(item.get("ticker") or "").upper()
+        pm_row = current.get(ticker)
+        if not pm_row:
+            status = "NOT_REDISCOVERED_1030"
+        elif str(pm_row.get("action") or "").upper() not in {"STARTER", "ACCUMULATE"}:
+            status = "NOT_REAPPROVED_1030"
+        else:
+            retried += 1
+            if ticker in executed:
+                status = "EXECUTED_1030"
+                completed += 1
+            else:
+                failure = rejected.get(ticker) or {}
+                status = "STALE_AGAIN_1030" if _is_stale_public_entry_rejection(failure.get("reason")) else "REJECTED_1030"
+        await db.stale_execution_retries.update_one(
+            {"retry_key": item.get("retry_key")},
+            {"$set": {"status": status, "retry_cycle_id": cycle_id, "resolved_at": _now().isoformat()}},
+        )
+    return {"reviewed": len(pending), "retried": retried, "executed": completed}
 
 
 async def _persist_execution_funnel(
@@ -249,6 +357,26 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             options_desk.auto_execute_latest(candidate_set=options_payload),
         )
 
+    stale_retry_queue = await timed(
+        "stale_execution_retry_queue",
+        _persist_stale_execution_retries(
+            pm_rows=pm_payload.get("recommendations") or [],
+            equity_execution=equity_execution,
+            cycle_id=str(scan["cycle_id"]),
+            observed_at=scan.get("finished_at"),
+        ),
+    )
+    stale_retry_resolution = {"reviewed": 0, "retried": 0, "executed": 0}
+    if triggered_by == "stale_retry_scan_1030":
+        stale_retry_resolution = await timed(
+            "stale_execution_retry_resolution",
+            _resolve_stale_execution_retries(
+                pm_rows=pm_payload.get("recommendations") or [],
+                equity_execution=equity_execution,
+                cycle_id=str(scan["cycle_id"]),
+            ),
+        )
+
     from . import execution_funnel
     execution_funnel_payload = await timed(
         "execution_funnel",
@@ -273,6 +401,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "equity_rejected_sample": (equity_execution.get("rejected") or [])[:8],
         "equity_freshness": execution_freshness,
         "equity_submitted_rows": equity_execution.get("executed") or [],
+        "stale_execution_retry_queue": stale_retry_queue,
+        "stale_execution_retry_resolution": stale_retry_resolution,
         "options_ready": options_execution.get("ready"),
         "options_submitted": _row_count(options_execution.get("submitted")),
         "options_skipped": _row_count(options_execution.get("skipped")),
@@ -305,6 +435,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                 "execution_summary": scan.get("execution_summary"),
                 "execution_funnel": execution_funnel_payload,
                 "execution_freshness": execution_freshness,
+                "stale_execution_retry_queue": stale_retry_queue,
+                "stale_execution_retry_resolution": stale_retry_resolution,
                 "telegram_report_variant": scan.get("telegram_report_variant"),
             }},
         )
@@ -324,6 +456,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "pm_actions": (pm_payload.get("summary") or {}),
         "equity_executed": len(equity_execution.get("executed") or []),
         "equity_rejected": len(equity_execution.get("rejected") or []),
+        "stale_execution_retry_queued": stale_retry_queue.get("queued", 0),
+        "stale_execution_retry_executed": stale_retry_resolution.get("executed", 0),
         "options_submitted": _row_count(options_execution.get("submitted")),
         "execution_funnel": execution_funnel_payload.get("summary") or {},
         "options_skipped": _row_count(options_execution.get("skipped")),
@@ -354,6 +488,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "portfolio_manager": pm_payload.get("summary") or {},
         "equity_execution": equity_execution,
         "execution_freshness": execution_freshness,
+        "stale_execution_retry_queue": stale_retry_queue,
+        "stale_execution_retry_resolution": stale_retry_resolution,
         "options_execution": options_execution,
         "execution_funnel": execution_funnel_payload,
         "telegram": telegram_result,
