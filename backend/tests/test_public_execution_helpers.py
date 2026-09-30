@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from services import portfolio_manager, public_execution, safety
+from services import portfolio_manager, public_execution, safety, telegram_events
 from services import trade_floor_learning
 
 
@@ -64,6 +64,34 @@ async def test_exit_quote_refresh_retries_until_a_fresh_executable_quote(monkeyp
     assert result["attempts"] == 2
     assert result["resolved"]["AAPL"]["execution_quote"]["limit_price"] == 99.98
     assert result["unresolved"] == {}
+
+
+@pytest.mark.asyncio
+async def test_exit_quote_timeout_persists_pending_state_and_alerts(monkeypatch):
+    updates = []
+    alerts = []
+
+    class Trades:
+        async def update_one(self, _query, update):
+            updates.append(update["$set"])
+
+    async def emit(*args, **kwargs):
+        alerts.append((args, kwargs))
+        return {"sent": True}
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
+    monkeypatch.setattr(telegram_events, "emit_event", emit)
+
+    await public_execution._record_exit_quote_unavailable(
+        {"client_order_id": "public-aapl-1"},
+        ticker="AAPL",
+        reason="public_exit_quote_stale_or_unverifiable",
+        quote_refresh={"attempts": 30, "configured_attempts": 30, "unresolved": {"AAPL": {"reason": "public_exit_quote_stale_or_unverifiable"}}},
+    )
+
+    assert updates[0]["emergency_exit_status"] == "PENDING_QUOTE_UNAVAILABLE"
+    assert alerts[0][0][0] == "public_exit_quote_unavailable"
+    assert alerts[0][1]["priority"] == "critical"
 
 
 def test_public_learning_record_requires_verified_attributed_exit():
