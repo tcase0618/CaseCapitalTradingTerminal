@@ -120,6 +120,128 @@ async def _public_prices(tickers: list[str]) -> dict[str, float]:
     return prices
 
 
+async def _apply_public_ratchet_marks(
+    open_trades: list[dict[str, Any]],
+    prices: dict[str, float],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    """Apply already-validated Public marks to the authoritative ratchet ledger.
+
+    Both the one-minute REST monitor and the SDK price subscription use this
+    path.  The caller must have already rejected stale, one-sided, or
+    untradeably wide quotes; this function never treats a portfolio mark as an
+    executable price.
+    """
+    db = get_db()
+    actions: list[dict[str, Any]] = []
+    coverage_initialized: list[str] = []
+    unpriced: list[str] = []
+    broker_scope = {"broker_base": "public"}
+    for trade in open_trades:
+        ticker = (trade.get("ticker") or "").upper()
+        entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
+        if not ticker or entry <= 0:
+            continue
+        current = prices.get(ticker)
+        if not current or current <= 0:
+            unpriced.append(ticker)
+            continue
+        plan = trade.get("pm_ratchet_plan") or {}
+        initialized = False
+        if not plan.get("enabled"):
+            plan = _public_account_protection_plan(entry, float(current))
+            initialized = True
+            coverage_initialized.append(ticker)
+        ratchet_entry = _num(plan.get("anchor_price")) or entry
+        if ratchet_entry <= 0:
+            unpriced.append(ticker)
+            continue
+        previous_stop = _num(trade.get("current_stop") or trade.get("stop_price"))
+        observed_peak = max(_num(trade.get("peak_price_since_entry"), ratchet_entry), float(current))
+        levels = compute_active_levels(ratchet_entry, observed_peak, plan, previous_stop)
+        if not levels.get("enabled"):
+            continue
+        current_level = int(_num(trade.get("pm_ratchet_level"), 0))
+        updates = {
+            "pm_active_target": levels["active_target"],
+            "pm_active_stop": levels["active_stop"],
+            "pm_last_ratchet_check": _now().isoformat(),
+            "pm_last_ratchet_source": source,
+            "peak_price_since_entry": observed_peak,
+            "pm_last_ratchet_mark": float(current),
+        }
+        if initialized:
+            updates.update({
+                "pm_ratchet_plan": plan,
+                "management_state": "PUBLIC_ACCOUNT_RATCHET",
+                "protection_state": "MONITORED_EXIT_ONLY",
+                "protection_note": "Account-protection ratchet initialized from a fresh Public mark; no original PM thesis was assumed.",
+            })
+        if levels["active_stop"] > previous_stop:
+            updates["current_stop"] = levels["active_stop"]
+        if levels["ratchet_level"] > current_level:
+            updates["pm_ratchet_level"] = levels["ratchet_level"]
+            await db.pm_ratchet_events.insert_one(stamped({
+                "client_order_id": trade.get("client_order_id"),
+                "ticker": ticker,
+                "entry": entry,
+                "current": float(current),
+                "peak_price": observed_peak,
+                "previous_level": current_level,
+                "new_level": levels["ratchet_level"],
+                "active_stop": levels["active_stop"],
+                "active_target": levels["active_target"],
+                "gain_pct": levels["gain_pct"],
+                "profile": (trade.get("pm_ratchet_plan") or {}).get("profile"),
+                "broker_base": "public",
+                "source": source,
+                "created_at": _now().isoformat(),
+            }))
+            actions.append({
+                "ticker": ticker,
+                "level": levels["ratchet_level"],
+                "active_stop": levels["active_stop"],
+                "active_target": levels["active_target"],
+                "gain_pct": levels["gain_pct"],
+            })
+        await db.tf_trades.update_one(
+            {"$and": [{"client_order_id": trade.get("client_order_id")}, broker_scope]},
+            {"$set": updates},
+        )
+    return {
+        "checked": len(open_trades),
+        "ratcheted": len(actions),
+        "coverage_initialized": len(coverage_initialized),
+        "coverage_initialized_tickers": coverage_initialized,
+        "unpriced": sorted(set(unpriced)),
+        "actions": actions,
+        "ran_at": _now().isoformat(),
+    }
+
+
+async def process_public_ratchet_marks(marks: dict[str, float], *, source: str = "public_price_stream") -> dict[str, Any]:
+    """Apply callback marks from Public's SDK subscription to held positions."""
+    prices = {
+        str(ticker).upper(): float(price)
+        for ticker, price in marks.items()
+        if str(ticker).strip() and _num(price) > 0
+    }
+    if not prices:
+        return {"ok": True, "checked": 0, "ratcheted": 0, "source": source}
+    db = get_db()
+    filters = {
+        "broker_base": "public",
+        "status": "OPEN",
+        "fill_status": "FILLED",
+        "qty_remaining": {"$gt": 0},
+        "ticker": {"$in": list(prices)},
+    }
+    rows = await db.tf_trades.find(filters, {"_id": 0}).to_list(500)
+    result = await _apply_public_ratchet_marks(rows, prices, source=source)
+    return {"ok": True, "source": source, **result}
+
+
 async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, Any]:
     """Raise stops for filled positions with an enabled PM ratchet plan.
 
@@ -147,10 +269,13 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
         {"$and": [filters, broker_scope]},
         {"_id": 0},
     ).to_list(500)
+    if broker_base == "public":
+        public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades])
+        result = await _apply_public_ratchet_marks(open_trades, public_prices, source="public_rest_monitor")
+        return {"broker_base": broker_base, **result}
     actions: list[dict[str, Any]] = []
     coverage_initialized: list[str] = []
     unpriced: list[str] = []
-    public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades]) if broker_base == "public" else {}
     try:
         from .trade_floor_phases import _current_price
     except Exception:
@@ -160,9 +285,7 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
         entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
         if not ticker or entry <= 0:
             continue
-        if broker_base == "public":
-            current = public_prices.get(ticker)
-        elif _current_price is not None:
+        if _current_price is not None:
             current = await _current_price(ticker)
         else:
             current = None
@@ -172,19 +295,12 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
             continue
         plan = trade.get("pm_ratchet_plan") or {}
         initialized = False
-        if broker_base == "public" and not plan.get("enabled"):
-            plan = _public_account_protection_plan(entry, float(current))
-            initialized = True
-            coverage_initialized.append(ticker)
         ratchet_entry = _num(plan.get("anchor_price")) or entry
         if ratchet_entry <= 0:
             unpriced.append(ticker)
             continue
         previous_stop = _num(trade.get("current_stop") or trade.get("stop_price"))
         observed_peak = max(_num(trade.get("peak_price_since_entry"), entry), float(current))
-        # A migrated plan uses its fresh-mark anchor for both peak and gains;
-        # a PM-authored position continues using its original entry price.
-        observed_peak = max(_num(trade.get("peak_price_since_entry"), ratchet_entry), float(current))
         levels = compute_active_levels(ratchet_entry, observed_peak, plan, previous_stop)
         if not levels.get("enabled"):
             continue
