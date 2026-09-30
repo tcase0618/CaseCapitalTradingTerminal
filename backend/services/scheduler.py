@@ -648,13 +648,14 @@ def start_scheduler():
     )
 
     async def _position_monitor():
+        """One-minute Public protection lane.
+
+        Keep this intentionally narrow. A slow scorecard, rebalance, or
+        options analysis must never consume the next ratchet/exit interval.
+        """
         failures: list[dict[str, str]] = []
-        rebalance_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
-        portfolio_score_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         public_ratchet_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
-        public_phase_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
-            from . import options_desk, tail_hunter
             try:
                 from . import public_execution
                 if public_execution.enabled():
@@ -681,48 +682,59 @@ def start_scheduler():
                         public_ratchet_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_pm_ratchet", "reason": exc.__class__.__name__})
                         logger.exception("Public PM ratchet failed")
+            except Exception as exc:
+                failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
+                logger.exception("Public execution reconciliation failed")
+        except Exception as e:
+            failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
+            logger.warning("position monitor: %s", e)
+        return {"ok": not failures, "failures": failures, "pm_ratchet": public_ratchet_status}
+
+    async def _position_management_monitor() -> dict[str, Any]:
+        """Five-minute management lane, isolated from protective monitoring."""
+        failures: list[dict[str, str]] = []
+        rebalance_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        portfolio_score_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        public_phase_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        try:
+            from . import options_desk, tail_hunter, safety
+            try:
+                from . import public_execution
+                if public_execution.enabled():
                     try:
                         public_phase_status = await public_execution.process_public_phase_exits()
                         if not public_phase_status.get("skipped") and not public_phase_status.get("ok", True):
-                            failures.append({"stage": "public_phase_exits", "reason": "phase_exit_degraded"})
+                            failures.append({"stage": "public_phase_exits", "reason": public_phase_status.get("reason") or "phase_exit_degraded"})
                     except Exception as exc:
                         public_phase_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_phase_exits", "reason": exc.__class__.__name__})
                         logger.exception("Public phase exit monitor failed")
-                    # Portfolio scoring and replacement are intentionally
-                    # five-minute work. Running them each minute multiplied
-                    # Public account calls and starved the exit path when the
-                    # provider rate-limited a monitor cycle.
-                    if datetime.now(ET).minute % 5 == 0:
-                        # A scorecard error is observable on its own; it must
-                        # not suppress broker reconciliation or exit work.
-                        from . import pm_portfolio, pm_rebalance
-                        try:
-                            portfolio_score_status = await pm_portfolio.run_portfolio_monitor()
-                            if not portfolio_score_status.get("ok") and not portfolio_score_status.get("skipped"):
-                                failures.append({"stage": "pm_portfolio_scores", "reason": portfolio_score_status.get("reason") or "score_persist_failed"})
-                        except Exception as exc:
-                            portfolio_score_status = {"ok": False, "reason": exc.__class__.__name__}
-                            failures.append({"stage": "pm_portfolio_scores", "reason": exc.__class__.__name__})
-                            logger.exception("PM portfolio scoring failed")
-                        try:
-                            rebalance_status = await pm_rebalance.run_rebalance_cycle()
-                            rebalance_errors = rebalance_status.get("errors") or (rebalance_status.get("reconciled") or {}).get("errors")
-                            if not rebalance_status.get("skipped") and rebalance_errors:
-                                failures.append({"stage": "pm_rebalance", "reason": "rebalance_errors"})
-                        except Exception as exc:
-                            rebalance_status = {"ok": False, "reason": exc.__class__.__name__}
-                            failures.append({"stage": "pm_rebalance", "reason": exc.__class__.__name__})
-                            logger.exception("PM rebalance failed")
+                    from . import pm_portfolio, pm_rebalance
+                    try:
+                        portfolio_score_status = await pm_portfolio.run_portfolio_monitor()
+                        if not portfolio_score_status.get("ok") and not portfolio_score_status.get("skipped"):
+                            failures.append({"stage": "pm_portfolio_scores", "reason": portfolio_score_status.get("reason") or "score_persist_failed"})
+                    except Exception as exc:
+                        portfolio_score_status = {"ok": False, "reason": exc.__class__.__name__}
+                        failures.append({"stage": "pm_portfolio_scores", "reason": exc.__class__.__name__})
+                        logger.exception("PM portfolio scoring failed")
+                    try:
+                        rebalance_status = await pm_rebalance.run_rebalance_cycle()
+                        rebalance_errors = rebalance_status.get("errors") or (rebalance_status.get("reconciled") or {}).get("errors")
+                        if not rebalance_status.get("skipped") and rebalance_errors:
+                            failures.append({"stage": "pm_rebalance", "reason": "rebalance_errors"})
+                    except Exception as exc:
+                        rebalance_status = {"ok": False, "reason": exc.__class__.__name__}
+                        failures.append({"stage": "pm_rebalance", "reason": exc.__class__.__name__})
+                        logger.exception("PM rebalance failed")
             except Exception as exc:
-                failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
-                logger.exception("Public execution reconciliation failed")
+                failures.append({"stage": "public_management", "reason": exc.__class__.__name__})
+                logger.exception("Public management monitor failed")
             try:
-                from . import safety
-                await safety.check_daily_loss(source="position_monitor")
-            except Exception as breaker_exc:
-                failures.append({"stage": "daily_loss_check", "reason": breaker_exc.__class__.__name__})
-                logger.warning("daily loss breaker: %s", breaker_exc)
+                await safety.check_daily_loss(source="position_management_monitor")
+            except Exception as exc:
+                failures.append({"stage": "daily_loss_check", "reason": exc.__class__.__name__})
+                logger.warning("daily loss breaker: %s", exc)
             for stage, operation in (
                 ("options_monitor", lambda: options_desk.monitor_open_positions(enforce_hard_stop=True)),
                 ("tail_monitor", tail_hunter.monitor_tail_positions),
@@ -732,15 +744,31 @@ def start_scheduler():
                 except Exception as exc:
                     failures.append({"stage": stage, "reason": exc.__class__.__name__})
                     logger.exception("%s failed", stage)
-        except Exception as e:
-            failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
-            logger.warning("position monitor: %s", e)
-        return {"ok": not failures, "failures": failures, "pm_ratchet": public_ratchet_status, "public_phase_exits": public_phase_status, "pm_rebalance": rebalance_status, "pm_portfolio_scores": portfolio_score_status}
+        except Exception as exc:
+            failures.append({"stage": "position_management", "reason": exc.__class__.__name__})
+            logger.exception("Position management monitor failed")
+        return {
+            "ok": not failures,
+            "failures": failures,
+            "public_phase_exits": public_phase_status,
+            "pm_rebalance": rebalance_status,
+            "pm_portfolio_scores": portfolio_score_status,
+        }
 
     async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
         if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
             return
         details = ", ".join(f"{item.get('stage', 'unknown')}={item.get('reason', 'unknown')}" for item in failures[:5])
+        state_key = f"position_monitor_alert:{stage}"
+        db = get_db()
+        prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
+        if prior.get("active") and prior.get("details") == details:
+            return
+        await db.bot_state.update_one(
+            {"_id": state_key},
+            {"$set": {"active": True, "details": details, "updated_at": _now_iso()}},
+            upsert=True,
+        )
         await telegram_service.send_message(
             f"<b>CASE CAPITAL | PORTFOLIO MONITOR FAILURE</b>\n"
             f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
@@ -749,21 +777,27 @@ def start_scheduler():
             f"Action: monitor status requires review; no new risk is authorized by this alert.",
             chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         )
+
+    async def _clear_position_monitor_failure(stage: str) -> None:
+        await get_db().bot_state.update_one(
+            {"_id": f"position_monitor_alert:{stage}"},
+            {"$set": {"active": False, "recovered_at": _now_iso()}},
+            upsert=True,
+        )
     async def _position_monitor_with_snapshot():
         management: dict[str, dict] = {}
         try:
             result = await _position_monitor()
             management["legacy_position_monitor"] = result
             management["pm_ratchet"] = result.get("pm_ratchet") or {"skipped": True, "reason": "not_run"}
-            management["public_phase_exits"] = result.get("public_phase_exits") or {"skipped": True, "reason": "not_run"}
-            management["pm_rebalance"] = result.get("pm_rebalance") or {"skipped": True, "reason": "not_run"}
-            management["pm_portfolio_scores"] = result.get("pm_portfolio_scores") or {"skipped": True, "reason": "not_run"}
             if not result.get("ok"):
-                await _send_position_monitor_failure(result.get("failures") or [])
+                await _send_position_monitor_failure(result.get("failures") or [], "critical")
+            else:
+                await _clear_position_monitor_failure("critical")
         except Exception as e:
             logger.warning("position monitor wrapper: %s", e)
             management["legacy_position_monitor"] = {"ok": False, "reason": e.__class__.__name__}
-            await _send_position_monitor_failure([{"stage": "monitor_wrapper", "reason": e.__class__.__name__}], "wrapper")
+            await _send_position_monitor_failure([{"stage": "monitor_wrapper", "reason": e.__class__.__name__}], "critical")
         try:
             snapshot = await persist_live_position_snapshot(
                 triggered_by="scheduler_position_monitor_1m_24_5",
@@ -792,6 +826,22 @@ def start_scheduler():
             logger.warning("position monitor snapshot: %s", e)
             await _send_position_monitor_failure([{"stage": "snapshot_persist", "reason": e.__class__.__name__}], "snapshot")
 
+    async def _position_management_with_status():
+        try:
+            result = await _position_management_monitor()
+            await get_db().bot_state.update_one(
+                {"_id": "public_position_management_latest"},
+                {"$set": {"updated_at": _now_iso(), "management": result}},
+                upsert=True,
+            )
+            if not result.get("ok"):
+                await _send_position_monitor_failure(result.get("failures") or [], "management")
+            else:
+                await _clear_position_monitor_failure("management")
+        except Exception as exc:
+            logger.exception("Position management wrapper failed")
+            await _send_position_monitor_failure([{"stage": "management_wrapper", "reason": exc.__class__.__name__}], "management")
+
     _scheduler.add_job(
         _position_monitor_with_snapshot,
         OrTrigger([
@@ -800,6 +850,15 @@ def start_scheduler():
             CronTrigger(day_of_week="fri", hour="0-19", minute="*", timezone=ET),
         ]),
         id="position_monitor", replace_existing=True,
+    )
+    _scheduler.add_job(
+        _position_management_with_status,
+        OrTrigger([
+            CronTrigger(day_of_week="sun", hour="20-23", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="mon-thu", hour="0-23", minute="*/5", timezone=ET),
+            CronTrigger(day_of_week="fri", hour="0-19", minute="*/5", timezone=ET),
+        ]),
+        id="position_management_5m", replace_existing=True,
     )
 
     async def _position_monitor_watchdog():
@@ -828,6 +887,8 @@ def start_scheduler():
                     [{"stage": "monitor_watchdog", "reason": "missing_or_stale_snapshot"}],
                     "watchdog",
                 )
+            else:
+                await _clear_position_monitor_failure("watchdog")
         except Exception as exc:
             logger.exception("position monitor watchdog failed")
             await _send_position_monitor_failure([{"stage": "watchdog", "reason": exc.__class__.__name__}], "watchdog")
