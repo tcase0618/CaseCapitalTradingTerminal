@@ -72,7 +72,7 @@ async def test_public_phase_one_submits_a_fractional_limit_trim(monkeypatch):
 
     result = await public_execution.process_public_phase_exits()
 
-    assert result["submitted"] == [{"ticker": "RUN", "phase": 1, "order_id": "phase-order-1", "qty": 4.0, "limit_price": 11.94}]
+    assert result["submitted"] == [{"ticker": "RUN", "phase": 1, "order_id": "phase-order-1", "qty": 4.0, "limit_price": 12.0}]
     assert client.submitted["quantity"] == 4.0
     assert client.submitted["session"] == "CORE"
     assert updates[0]["public_phase_order_id"] == "phase-order-1"

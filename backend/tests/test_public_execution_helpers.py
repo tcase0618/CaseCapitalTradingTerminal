@@ -22,6 +22,22 @@ def test_public_core_rows_keep_a_durable_strategy_identity():
     assert attribution["scanner_family"] == "CORE"
 
 
+def test_execution_quote_requires_two_sided_market_and_respects_spread(monkeypatch):
+    missing, reason = public_execution._execution_quote({"ask": 10.0}, side="BUY")
+    assert missing is None
+    assert reason == "public_execution_quote_requires_valid_bid_ask"
+
+    monkeypatch.setenv("PUBLIC_MAX_EQUITY_SPREAD_BPS", "100")
+    wide, reason = public_execution._execution_quote({"bid": 9.0, "ask": 10.0}, side="BUY")
+    assert wide is None
+    assert reason == "public_execution_quote_spread_too_wide"
+
+    buy, _ = public_execution._execution_quote({"bid": 9.98, "ask": 10.02}, side="BUY")
+    emergency_sell, _ = public_execution._execution_quote({"bid": 9.98, "ask": 10.02}, side="SELL", emergency=True)
+    assert buy["limit_price"] == 10.0
+    assert emergency_sell["limit_price"] == 9.98
+
+
 def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
     now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
     monkeypatch.setenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180")
@@ -443,7 +459,8 @@ async def test_execution_freshness_refreshes_approved_rows_before_execution(monk
             assert symbols == ["AAPL"]
             return {"quotes": [{
                 "symbol": "AAPL",
-                "ask": 150.25,
+                    "bid": 150.15,
+                    "ask": 150.25,
                 "quoteTime": datetime.now(timezone.utc).isoformat(),
             }]}
 
@@ -513,7 +530,7 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
             return {"accounts": [{"accountId": "acct-1", "tradePermissions": "FULL"}]}
 
         async def quotes(self, symbols):
-            row = {"symbol": "AAPL", "ask": 150.25, "quoteTime": datetime.now(timezone.utc).isoformat()}
+            row = {"symbol": "AAPL", "bid": 150.15, "ask": 150.25, "quoteTime": datetime.now(timezone.utc).isoformat()}
             return {"quotes": [row]}
 
         async def submit_equity_order(self, **kwargs):

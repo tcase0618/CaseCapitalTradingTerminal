@@ -21,6 +21,7 @@ PUBLIC_PHASE1_CLOSE_PCT = 0.40
 PUBLIC_PHASE2_CLOSE_PCT = 0.30
 PUBLIC_PHASE2_MULTIPLIER = 1.50
 PUBLIC_PHASE3_TRAIL_PCT = 0.50
+PUBLIC_DEFAULT_MAX_EQUITY_SPREAD_BPS = 300.0
 
 
 def enabled() -> bool:
@@ -167,6 +168,51 @@ def _quote_price(row: dict[str, Any]) -> float:
     if bid > 0 and ask >= bid:
         return round((bid + ask) / 2.0, 4)
     return _num(row.get("last") or row.get("lastPrice") or ask or bid)
+
+
+def _quote_sides(row: dict[str, Any]) -> tuple[float, float]:
+    return (
+        _num(row.get("bid") or row.get("bidPrice")),
+        _num(row.get("ask") or row.get("askPrice")),
+    )
+
+
+def _max_equity_spread_bps() -> float:
+    try:
+        return max(25.0, min(2_000.0, float(os.getenv("PUBLIC_MAX_EQUITY_SPREAD_BPS", str(PUBLIC_DEFAULT_MAX_EQUITY_SPREAD_BPS)))))
+    except (TypeError, ValueError):
+        return PUBLIC_DEFAULT_MAX_EQUITY_SPREAD_BPS
+
+
+def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate a two-sided Public quote and derive a non-chasing limit.
+
+    A last trade is useful for display but cannot price a new order. Normal
+    orders rest at midpoint, preserving price improvement. An emergency stop
+    exit uses the current bid so the terminal does not promise a protective
+    sale at a price the market is not bidding.
+    """
+    bid, ask = _quote_sides(row)
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None, "public_execution_quote_requires_valid_bid_ask"
+    mid = (bid + ask) / 2.0
+    spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else None
+    if spread_bps is None or spread_bps > _max_equity_spread_bps():
+        return None, "public_execution_quote_spread_too_wide"
+    normal_side = str(side or "").upper()
+    raw_limit = bid if emergency and normal_side == "SELL" else mid
+    precision = 4 if raw_limit < 1 else 2
+    limit = round(raw_limit, precision)
+    if limit <= 0:
+        return None, "public_execution_quote_limit_invalid"
+    return {
+        "bid": bid,
+        "ask": ask,
+        "mid": round(mid, precision),
+        "spread_bps": round(spread_bps, 2),
+        "limit_price": limit,
+        "quote_time": _quote_timestamp(row),
+    }, None
 
 
 def _quote_timestamp(row: dict[str, Any]) -> Any:
@@ -777,25 +823,29 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                 by_symbol = {}
             for ticker in list(pending):
                 quote = by_symbol.get(ticker) or {}
-                price = _quote_price(quote)
+                quote_plan, quote_reason = _execution_quote(quote, side="BUY")
+                price = _num((quote_plan or {}).get("limit_price"))
                 fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
                 rows[ticker] = {
                     "ticker": ticker,
-                    "fresh": bool(fresh and price > 0),
+                    "fresh": bool(fresh and price > 0 and quote_plan),
                     "price": price or None,
+                    "bid": (quote_plan or {}).get("bid"),
+                    "ask": (quote_plan or {}).get("ask"),
+                    "spread_bps": (quote_plan or {}).get("spread_bps"),
+                    "quote_reason": quote_reason,
                     "age_seconds": age,
                     "source": "public",
                     "quote_time": _quote_timestamp(quote),
                     "attempt": attempt,
                 }
-                if fresh and price > 0:
+                if fresh and price > 0 and quote_plan:
                     pending.discard(ticker)
             if pending and attempt < attempts and retry_seconds:
                 await asyncio.sleep(retry_seconds)
 
-    # The execution path uses this same Alpaca fallback when Public is stale.
-    # Include it in the preflight evidence, but do not treat delayed feeds as
-    # execution-grade marks.
+    # Alpaca fallback prices remain diagnostic-only. A Public order must use a
+    # fresh two-sided Public quote, never another provider's reference mark.
     if pending:
         try:
             from . import pricer
@@ -807,10 +857,11 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                         continue
                     candidate = {
                         "ticker": ticker,
-                        "fresh": bool(meta.get("execution_eligible")),
+                        "fresh": False,
                         "price": meta.get("price"),
                         "age_seconds": meta.get("age_seconds"),
-                        "source": meta.get("source") or "alpaca",
+                        "source": f"{meta.get('source') or 'alpaca'}_diagnostic_only",
+                        "quote_reason": "public_execution_requires_two_sided_public_quote",
                         "quote_time": meta.get("provider_ts"),
                         "attempt": attempts,
                     }
@@ -819,7 +870,7 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                     # even when no provider is fresh enough for execution.
                     prior_age = rows[ticker].get("age_seconds")
                     candidate_age = candidate.get("age_seconds")
-                    if candidate.get("fresh") or prior_age is None or (
+                    if prior_age is None or (
                         candidate_age is not None and candidate_age < prior_age
                     ):
                         rows[ticker] = candidate
@@ -1002,7 +1053,8 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 continue
             quote_row = quote_by_symbol.get(ticker) or {}
             quote_source = "public"
-            price = _quote_price(quote_row)
+            entry_quote, entry_quote_reason = _execution_quote(quote_row, side="BUY")
+            price = _num((entry_quote or {}).get("limit_price"))
             if not ticker or price <= 0:
                 fresh, age = False, None
             else:
@@ -1010,30 +1062,13 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if ticker in active_halts:
                 rejected.append({"ticker": ticker, "reason": "public_symbol_actively_halted"})
                 continue
-            if not fresh:
-                # Public remains the execution broker, but Alpaca can provide
-                # a fresher underlying mark for a Public limit order when the
-                # Public quote is delayed or inactive. Never accept a stale
-                # fallback and record the source for auditability.
-                try:
-                    from . import pricer
-                    feeds = [os.environ.get("ALPACA_STOCK_FEED", "").strip() or None, "iex", None]
-                    seen_feeds: set[str | None] = set()
-                    for feed in feeds:
-                        if feed in seen_feeds:
-                            continue
-                        seen_feeds.add(feed)
-                        meta = await pricer._alpaca_trade_meta(ticker, feed=feed)
-                        if meta and meta.get("execution_eligible") and _num(meta.get("price")) > 0:
-                            price = _num(meta.get("price"))
-                            fresh, age = safety.quote_is_fresh({"ts": meta.get("provider_ts")})
-                            if fresh:
-                                quote_source = "alpaca_fallback"
-                                break
-                except Exception as exc:
-                    logger.debug("Alpaca fallback quote failed for %s: %s", ticker, exc)
-            if not fresh:
-                rejected.append({"ticker": ticker, "reason": "public_and_alpaca_quote_stale_or_unverifiable", "age_seconds": age, "public_price": _quote_price(quote_row)})
+            if not fresh or not entry_quote:
+                rejected.append({
+                    "ticker": ticker,
+                    "reason": entry_quote_reason or "public_execution_quote_stale_or_unverifiable",
+                    "age_seconds": age,
+                    "public_price": _quote_price(quote_row),
+                })
                 continue
             stop_price = _stop_price(row)
             if not (0 < stop_price < price):
@@ -1060,12 +1095,13 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             try:
                 final_rows = _quotes(await client.quotes([ticker]))
                 final_row = next((item for item in final_rows if _symbol(item) == ticker), final_rows[0] if final_rows else {})
-                final_price = _quote_price(final_row)
+                final_quote, final_quote_reason = _execution_quote(final_row, side="BUY")
+                final_price = _num((final_quote or {}).get("limit_price"))
                 final_fresh, final_age = safety.quote_is_fresh({"ts": _quote_timestamp(final_row)})
             except Exception:
-                final_price, final_fresh, final_age = 0.0, False, None
-            if not final_fresh or final_price <= 0:
-                rejected.append({"ticker": ticker, "reason": "public_final_quote_stale_or_unverifiable", "age_seconds": final_age})
+                final_price, final_fresh, final_age, final_quote, final_quote_reason = 0.0, False, None, None, "public_final_quote_unavailable"
+            if not final_fresh or final_price <= 0 or not final_quote:
+                rejected.append({"ticker": ticker, "reason": final_quote_reason or "public_final_quote_stale_or_unverifiable", "age_seconds": final_age})
                 continue
             if price > 0 and abs(final_price - price) / price > 0.01:
                 rejected.append({"ticker": ticker, "reason": "public_quote_changed_before_submit", "initial_price": price, "final_price": final_price})
@@ -1125,6 +1161,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
                 "quote_source": quote_source,
+                "execution_quote": final_quote,
                 "execution_target_mode": "RATCHET_ONLY_PROXY_TARGET" if proxy_target else "STRUCTURAL_TARGET",
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
                 "current_stop": stop_price, "pm_active_stop": stop_price,
@@ -1609,10 +1646,11 @@ async def process_public_phase_exits() -> dict[str, Any]:
         for trade, plan in eligible:
             ticker = _symbol(trade)
             quote = quotes.get(ticker) or {}
-            current = _quote_price(quote)
+            phase_quote, phase_quote_reason = _execution_quote(quote, side="SELL")
+            current = _num((phase_quote or {}).get("mid"))
             fresh, _age = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
-            if not fresh or current <= 0:
-                deferred.append({"ticker": ticker, "reason": "public_phase_quote_stale_or_unverifiable"})
+            if not fresh or current <= 0 or not phase_quote:
+                deferred.append({"ticker": ticker, "reason": phase_quote_reason or "public_phase_quote_stale_or_unverifiable"})
                 continue
             phase = int(_num(trade.get("phase"), 1))
             if phase == 3:
@@ -1659,7 +1697,7 @@ async def process_public_phase_exits() -> dict[str, Any]:
                 deferred.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_phase_exit"})
                 continue
             try:
-                limit_price = _phase_limit_price(current)
+                limit_price = _num(phase_quote.get("limit_price"))
                 result = await client.submit_equity_order(
                     symbol=ticker,
                     side="SELL",
@@ -1683,6 +1721,7 @@ async def process_public_phase_exits() -> dict[str, Any]:
                         "public_phase_filled_qty": 0.0,
                         "public_phase_trigger_price": current,
                         "public_phase_limit": limit_price,
+                        "public_phase_quote": phase_quote,
                         "public_phase_submitted_at": datetime.now(timezone.utc).isoformat(),
                         "public_phase_preflight": result.get("preflight"),
                     }},
@@ -1721,10 +1760,11 @@ async def process_protective_exits() -> dict[str, Any]:
             ticker = _symbol(trade)
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
             quote_row = by_symbol.get(ticker) or {}
-            current = _quote_price(quote_row)
+            exit_quote, exit_quote_reason = _execution_quote(quote_row, side="SELL", emergency=True)
+            current = _num((exit_quote or {}).get("mid"))
             fresh, _age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
             quantity = _qty(trade)
-            if stop <= 0 or current <= 0 or not fresh or quantity <= 0 or current > stop:
+            if stop <= 0 or current <= 0 or not fresh or not exit_quote or quantity <= 0 or current > stop:
                 continue
             client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, stop, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"stop": stop})
@@ -1735,7 +1775,7 @@ async def process_protective_exits() -> dict[str, Any]:
                 # routing profile. Submit a plainly labelled, fresh-quote
                 # limit close instead; it can still remain unfilled, which is
                 # why the position stays reconciled until broker confirmation.
-                exit_limit = round(current * 0.995, 4 if current < 1 else 2)
+                exit_limit = _num(exit_quote.get("limit_price"))
                 result = await client.submit_equity_order(
                     symbol=ticker,
                     side="SELL",
@@ -1751,7 +1791,7 @@ async def process_protective_exits() -> dict[str, Any]:
                     raise RuntimeError("Public protective order response missing order id")
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                    {"$set": {"emergency_exit_order_id": order_id, "emergency_exit_order_qty": quantity, "emergency_exit_status": "SUBMITTED", "emergency_exit_limit": exit_limit, "emergency_exit_preflight": result.get("preflight")}},
+                    {"$set": {"emergency_exit_order_id": order_id, "emergency_exit_order_qty": quantity, "emergency_exit_status": "SUBMITTED", "emergency_exit_limit": exit_limit, "emergency_exit_quote": exit_quote, "emergency_exit_preflight": result.get("preflight")}},
                 )
                 submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "limit_price": exit_limit, "order_type": "EMERGENCY_LIMIT_EXIT"})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id})
@@ -1794,20 +1834,21 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
 
         quote_rows = _quotes(await client.quotes([symbol]))
         quote = next((row for row in quote_rows if _symbol(row) == symbol), quote_rows[0] if quote_rows else {})
-        price = _quote_price(quote)
+        exit_quote, exit_quote_reason = _execution_quote(quote, side="SELL")
+        price = _num((exit_quote or {}).get("mid"))
         fresh, age_seconds = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
-        if not fresh or price <= 0:
+        if not fresh or price <= 0 or not exit_quote:
             return {
                 "submitted": False,
                 "ticker": symbol,
-                "reason": "public_exit_quote_stale_or_unverifiable",
+                "reason": exit_quote_reason or "public_exit_quote_stale_or_unverifiable",
                 "age_seconds": age_seconds,
             }
         order_shape, shape_note = _exit_order_shape(broker_quantity)
         if not order_shape:
             return {"submitted": False, "ticker": symbol, "reason": shape_note or "public_exit_shape_unavailable"}
         quantity = _num(order_shape.get("quantity"))
-        exit_limit = round(price * 0.995, 4 if price < 1 else 2)
+        exit_limit = _num(exit_quote.get("limit_price"))
         client_id = execution_safety.stable_client_order_id(
             "public_exit_to_cash", trade.get("client_order_id"), symbol, reason, prefix="public"
         )
@@ -1841,6 +1882,7 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
                     "emergency_exit_order_qty": quantity,
                     "emergency_exit_status": "SUBMITTED",
                     "emergency_exit_limit": exit_limit,
+                    "emergency_exit_quote": exit_quote,
                     "emergency_exit_preflight": result.get("preflight"),
                     "emergency_exit_reason": reason,
                     "emergency_exit_session": order_shape["session"],
