@@ -279,6 +279,65 @@ def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False)
     }, None
 
 
+def _exit_quote_retry_config() -> tuple[int, float]:
+    """Bound rapid refreshes for an exit that cannot safely price yet."""
+    attempts = max(1, min(30, int(_num(os.getenv("PUBLIC_EXIT_QUOTE_REFRESH_ATTEMPTS", "15"), 15))))
+    interval = max(0.0, min(5.0, _num(os.getenv("PUBLIC_EXIT_QUOTE_RETRY_SECONDS", "2"), 2.0)))
+    return attempts, interval
+
+
+async def _refresh_exit_quotes(
+    client: public_api.PublicAPIClient,
+    symbols: list[str],
+    *,
+    emergency: bool = False,
+) -> dict[str, Any]:
+    """Rapidly retry stale exit quotes without accepting stale fallback data.
+
+    A single request is made for every unresolved symbol on each attempt. This
+    keeps a burst of stop exits bounded to one provider call per retry rather
+    than one call per position. Only Public's fresh two-sided quote can release
+    an exit for submission.
+    """
+    attempts, interval = _exit_quote_retry_config()
+    pending = {str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()}
+    resolved: dict[str, dict[str, Any]] = {}
+    unresolved: dict[str, dict[str, Any]] = {}
+    used_attempts = 0
+    for attempt in range(1, attempts + 1):
+        if not pending:
+            break
+        used_attempts = attempt
+        try:
+            rows = _quotes(await client.quotes(sorted(pending)))
+            by_symbol = {_symbol(row): row for row in rows}
+        except Exception as exc:
+            for symbol in pending:
+                unresolved[symbol] = {"reason": f"public_exit_quote_refresh_failed:{exc.__class__.__name__}", "attempt": attempt}
+            by_symbol = {}
+        for symbol in list(pending):
+            row = by_symbol.get(symbol) or {}
+            quote, reason = _execution_quote(row, side="SELL", emergency=emergency)
+            fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(row)})
+            if fresh and quote:
+                resolved[symbol] = {"quote": row, "execution_quote": quote, "age_seconds": age, "attempt": attempt}
+                pending.discard(symbol)
+            else:
+                unresolved[symbol] = {
+                    "reason": reason or "public_exit_quote_stale_or_unverifiable",
+                    "age_seconds": age,
+                    "attempt": attempt,
+                }
+        if pending and attempt < attempts and interval:
+            await asyncio.sleep(interval)
+    return {
+        "attempts": used_attempts,
+        "configured_attempts": attempts,
+        "resolved": resolved,
+        "unresolved": {symbol: unresolved.get(symbol) or {"reason": "public_exit_quote_unavailable"} for symbol in pending},
+    }
+
+
 def _quote_timestamp(row: dict[str, Any]) -> Any:
     return row.get("quoteTime") or row.get("quote_time") or row.get("timestamp") or row.get("updatedAt")
 
@@ -1714,16 +1773,15 @@ async def process_public_phase_exits() -> dict[str, Any]:
     if not eligible:
         return {"skipped": False, "ok": True, "checked": len(rows), "eligible": 0, "submitted": submitted, "deferred": deferred, "errors": errors}
     async with public_api.PublicAPIClient(use_sdk=False) as client:
-        quote_rows = _quotes(await client.quotes([_symbol(trade) for trade, _plan in eligible]))
-        quotes = {_symbol(row): row for row in quote_rows}
+        refreshed = await _refresh_exit_quotes(client, [_symbol(trade) for trade, _plan in eligible])
         for trade, plan in eligible:
             ticker = _symbol(trade)
-            quote = quotes.get(ticker) or {}
-            phase_quote, phase_quote_reason = _execution_quote(quote, side="SELL")
+            refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
+            phase_quote = refreshed_quote.get("execution_quote")
             current = _num((phase_quote or {}).get("mid"))
-            fresh, _age = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
-            if not fresh or current <= 0 or not phase_quote:
-                deferred.append({"ticker": ticker, "reason": phase_quote_reason or "public_phase_quote_stale_or_unverifiable"})
+            if current <= 0 or not phase_quote:
+                unresolved = (refreshed.get("unresolved") or {}).get(ticker) or {}
+                deferred.append({"ticker": ticker, "reason": unresolved.get("reason") or "public_phase_quote_stale_or_unverifiable"})
                 continue
             phase = int(_num(trade.get("phase"), 1))
             if phase == 3:
@@ -1804,7 +1862,16 @@ async def process_public_phase_exits() -> dict[str, Any]:
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
                 errors.append({"ticker": ticker, "reason": f"public_phase_exit_submit_failed:{exc.__class__.__name__}"})
-    return {"skipped": False, "ok": not errors, "checked": len(rows), "eligible": len(eligible), "submitted": submitted, "deferred": deferred, "errors": errors}
+    return {
+        "skipped": False,
+        "ok": not errors,
+        "checked": len(rows),
+        "eligible": len(eligible),
+        "submitted": submitted,
+        "deferred": deferred,
+        "errors": errors,
+        "quote_refresh": {"attempts": refreshed.get("attempts"), "unresolved": refreshed.get("unresolved")},
+    }
 
 
 async def process_protective_exits() -> dict[str, Any]:
@@ -1823,8 +1890,7 @@ async def process_protective_exits() -> dict[str, Any]:
     submitted: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     async with public_api.PublicAPIClient(use_sdk=False) as client:
-        quote_rows = _quotes(await client.quotes([_symbol(row) for row in rows]))
-        by_symbol = {_symbol(row): row for row in quote_rows}
+        refreshed = await _refresh_exit_quotes(client, [_symbol(row) for row in rows], emergency=True)
         for trade in rows:
             if trade.get("public_phase_order_id"):
                 # A phase trim is already working at the broker. Do not race
@@ -1832,12 +1898,11 @@ async def process_protective_exits() -> dict[str, Any]:
                 continue
             ticker = _symbol(trade)
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
-            quote_row = by_symbol.get(ticker) or {}
-            exit_quote, exit_quote_reason = _execution_quote(quote_row, side="SELL", emergency=True)
+            refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
+            exit_quote = refreshed_quote.get("execution_quote")
             current = _num((exit_quote or {}).get("mid"))
-            fresh, _age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
             quantity = _qty(trade)
-            if stop <= 0 or current <= 0 or not fresh or not exit_quote or quantity <= 0 or current > stop:
+            if stop <= 0 or current <= 0 or not exit_quote or quantity <= 0 or current > stop:
                 continue
             client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, stop, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"stop": stop})
@@ -1871,7 +1936,17 @@ async def process_protective_exits() -> dict[str, Any]:
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
                 errors.append({"ticker": ticker, "reason": f"emergency_exit_submit_failed:{exc.__class__.__name__}"})
-    return {"skipped": False, "ok": not errors, "checked": len(rows), "submitted": submitted, "errors": errors}
+    return {
+        "skipped": False,
+        "ok": not errors,
+        "checked": len(rows),
+        "submitted": submitted,
+        "errors": errors,
+        "quote_refresh": {
+            "attempts": refreshed.get("attempts"),
+            "unresolved": refreshed.get("unresolved"),
+        },
+    }
 
 
 async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit") -> dict[str, Any]:
@@ -1905,17 +1980,18 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
         if broker_quantity <= 0:
             return {"submitted": False, "ticker": symbol, "reason": "public_broker_position_not_found"}
 
-        quote_rows = _quotes(await client.quotes([symbol]))
-        quote = next((row for row in quote_rows if _symbol(row) == symbol), quote_rows[0] if quote_rows else {})
-        exit_quote, exit_quote_reason = _execution_quote(quote, side="SELL")
+        refreshed = await _refresh_exit_quotes(client, [symbol])
+        refreshed_quote = (refreshed.get("resolved") or {}).get(symbol) or {}
+        exit_quote = refreshed_quote.get("execution_quote")
         price = _num((exit_quote or {}).get("mid"))
-        fresh, age_seconds = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
-        if not fresh or price <= 0 or not exit_quote:
+        if price <= 0 or not exit_quote:
+            unresolved = (refreshed.get("unresolved") or {}).get(symbol) or {}
             return {
                 "submitted": False,
                 "ticker": symbol,
-                "reason": exit_quote_reason or "public_exit_quote_stale_or_unverifiable",
-                "age_seconds": age_seconds,
+                "reason": unresolved.get("reason") or "public_exit_quote_stale_or_unverifiable",
+                "age_seconds": unresolved.get("age_seconds"),
+                "quote_refresh_attempts": refreshed.get("attempts"),
             }
         order_shape, shape_note = _exit_order_shape(broker_quantity)
         if not order_shape:
