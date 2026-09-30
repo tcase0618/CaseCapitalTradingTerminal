@@ -281,7 +281,7 @@ def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False)
 
 def _exit_quote_retry_config() -> tuple[int, float]:
     """Bound rapid refreshes for an exit that cannot safely price yet."""
-    attempts = max(1, min(30, int(_num(os.getenv("PUBLIC_EXIT_QUOTE_REFRESH_ATTEMPTS", "15"), 15))))
+    attempts = max(1, min(30, int(_num(os.getenv("PUBLIC_EXIT_QUOTE_REFRESH_ATTEMPTS", "30"), 30))))
     interval = max(0.0, min(5.0, _num(os.getenv("PUBLIC_EXIT_QUOTE_RETRY_SECONDS", "2"), 2.0)))
     return attempts, interval
 
@@ -291,6 +291,7 @@ async def _refresh_exit_quotes(
     symbols: list[str],
     *,
     emergency: bool = False,
+    max_attempts: int | None = None,
 ) -> dict[str, Any]:
     """Rapidly retry stale exit quotes without accepting stale fallback data.
 
@@ -300,6 +301,8 @@ async def _refresh_exit_quotes(
     an exit for submission.
     """
     attempts, interval = _exit_quote_retry_config()
+    if max_attempts is not None:
+        attempts = max(1, min(attempts, int(max_attempts)))
     pending = {str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()}
     resolved: dict[str, dict[str, Any]] = {}
     unresolved: dict[str, dict[str, Any]] = {}
@@ -336,6 +339,45 @@ async def _refresh_exit_quotes(
         "resolved": resolved,
         "unresolved": {symbol: unresolved.get(symbol) or {"reason": "public_exit_quote_unavailable"} for symbol in pending},
     }
+
+
+async def _record_exit_quote_unavailable(
+    trade: dict[str, Any],
+    *,
+    ticker: str,
+    reason: str,
+    quote_refresh: dict[str, Any],
+) -> None:
+    """Persist and alert a failed exit price discovery without selling blind."""
+    details = {
+        "reason": reason,
+        "attempts": quote_refresh.get("attempts"),
+        "configured_attempts": quote_refresh.get("configured_attempts"),
+        "unresolved": (quote_refresh.get("unresolved") or {}).get(ticker),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await get_db().tf_trades.update_one(
+        {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+        {"$set": {"emergency_exit_status": "PENDING_QUOTE_UNAVAILABLE", "emergency_exit_quote_refresh": details}},
+    )
+    try:
+        from . import telegram_events
+
+        await telegram_events.emit_event(
+            "public_exit_quote_unavailable",
+            severity="watch",
+            scope="execution",
+            ticker=ticker,
+            title="Public exit quote unavailable",
+            summary=(
+                f"Exit pricing for {ticker} remained unavailable after "
+                f"{details['attempts']} rapid Public quote checks; no blind sell was submitted."
+            ),
+            details=details,
+            priority="critical",
+        )
+    except Exception:
+        logger.exception("Failed to emit Public exit quote alert for %s", ticker)
 
 
 def _quote_timestamp(row: dict[str, Any]) -> Any:
@@ -1773,7 +1815,9 @@ async def process_public_phase_exits() -> dict[str, Any]:
     if not eligible:
         return {"skipped": False, "ok": True, "checked": len(rows), "eligible": 0, "submitted": submitted, "deferred": deferred, "errors": errors}
     async with public_api.PublicAPIClient(use_sdk=False) as client:
-        refreshed = await _refresh_exit_quotes(client, [_symbol(trade) for trade, _plan in eligible])
+        # This is a monitor, not yet a requested sale. One batch quote avoids
+        # spending the full retry window on every held position each minute.
+        refreshed = await _refresh_exit_quotes(client, [_symbol(trade) for trade, _plan in eligible], max_attempts=1)
         for trade, plan in eligible:
             ticker = _symbol(trade)
             refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
@@ -1890,7 +1934,10 @@ async def process_protective_exits() -> dict[str, Any]:
     submitted: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     async with public_api.PublicAPIClient(use_sdk=False) as client:
-        refreshed = await _refresh_exit_quotes(client, [_symbol(row) for row in rows], emergency=True)
+        # A breached stop can only be established from a current quote. Keep
+        # routine monitoring to one batch request; an explicit exit request
+        # below receives the rapid one-minute retry window.
+        refreshed = await _refresh_exit_quotes(client, [_symbol(row) for row in rows], emergency=True, max_attempts=1)
         for trade in rows:
             if trade.get("public_phase_order_id"):
                 # A phase trim is already working at the broker. Do not race
@@ -1986,6 +2033,12 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
         price = _num((exit_quote or {}).get("mid"))
         if price <= 0 or not exit_quote:
             unresolved = (refreshed.get("unresolved") or {}).get(symbol) or {}
+            await _record_exit_quote_unavailable(
+                trade,
+                ticker=symbol,
+                reason=unresolved.get("reason") or "public_exit_quote_stale_or_unverifiable",
+                quote_refresh=refreshed,
+            )
             return {
                 "submitted": False,
                 "ticker": symbol,
