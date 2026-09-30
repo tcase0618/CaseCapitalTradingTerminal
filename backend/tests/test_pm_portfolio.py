@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from services import pm_portfolio, pm_rebalance
 
 
@@ -64,3 +66,20 @@ def test_deep_loss_without_a_current_thesis_is_an_exit_review():
 
     assert score["recommended_state"] == "EXIT_REVIEW"
     assert "no current PM thesis" in score["reasons"][-1]
+
+
+def test_holding_score_distinguishes_verified_terminal_monitor_from_broker_stop():
+    score = pm_portfolio._holding_score(
+        {"ticker": "MON", "market_value": 10, "unrealized_pct": 1.0, "lastPrice": 10},
+        {"ticker": "MON", "pm_score": 60, "case_score": 60},
+        {
+            "pm_active_stop": 9.0,
+            "pm_last_ratchet_check": datetime.now(timezone.utc).isoformat(),
+            "pm_ratchet_plan": {"enabled": True},
+            "protection_state": "MONITORED_EXIT_ONLY",
+        },
+        None,
+        100,
+    )
+    assert score["risk_state"] == "TERMINAL_MONITORED"
+    assert score["components"]["risk_quality"] > 15

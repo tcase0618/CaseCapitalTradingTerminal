@@ -38,6 +38,27 @@ def test_execution_quote_requires_two_sided_market_and_respects_spread(monkeypat
     assert emergency_sell["limit_price"] == 9.98
 
 
+def test_public_learning_record_requires_verified_attributed_exit():
+    base = {
+        "client_order_id": "order-1",
+        "ticker": "AAPL",
+        "status": "CLOSED",
+        "broker_exit_verified": True,
+        "realized_pl_pct": 4.25,
+        "filled_avg_price": 100.0,
+        "strategy_id": "CORE",
+        "screener_id": "CORE",
+        "scanner_family": "CORE",
+    }
+    record = public_execution._public_learning_record(base)
+    assert record["learning_eligible"] is True
+    assert record["realized_pct"] == 4.25
+
+    missing = public_execution._public_learning_record({**base, "broker_exit_verified": False})
+    assert missing["learning_eligible"] is False
+    assert missing["learning_exclusion_reason"] == "broker_exit_not_verified"
+
+
 def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
     now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
     monkeypatch.setenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180")
