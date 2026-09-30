@@ -2388,6 +2388,12 @@ async def on_startup():
         scheduler.start_scheduler()
     else:
         logger.warning("Scheduler disabled by ENABLE_SCHEDULER")
+    try:
+        from services import public_price_stream
+        stream_status = await public_price_stream.start()
+        logger.info("Public price stream startup: %s", stream_status.get("reason") or stream_status.get("status"))
+    except Exception as e:
+        logger.warning("Public price stream startup skipped: %s", e)
     base = os.environ.get("PUBLIC_BASE_URL")
     webhook_enabled = os.environ.get("TELEGRAM_WEBHOOK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     is_https = bool(base and urlparse(base).scheme.lower() == "https")
@@ -2965,8 +2971,20 @@ async def portfolio_manager_ratchet_events(limit: int = 50):
     return await pm_ratchet.recent_events(limit=limit)
 
 
+@api.get("/public/price-stream")
+async def public_price_stream_status():
+    """Expose stream health without exposing quote payloads or credentials."""
+    from services import public_price_stream
+    return await public_price_stream.status()
+
+
 @app.on_event("shutdown")
 async def on_shutdown():
+    try:
+        from services import public_price_stream
+        await public_price_stream.stop()
+    except Exception:
+        pass
     try:
         from services import postgres_store
         await postgres_store.close_pool()

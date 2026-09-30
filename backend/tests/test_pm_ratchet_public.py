@@ -128,3 +128,53 @@ async def test_public_ratchet_initializes_account_protection_for_unplanned_posit
     assert updates[0]["current_stop"] == 7.2
     assert updates[0]["protection_state"] == "MONITORED_EXIT_ONLY"
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_sdk_stream_mark_uses_the_same_public_ratchet_ledger(monkeypatch):
+    trade = {
+        "client_order_id": "public-stream-1",
+        "broker_base": "public",
+        "status": "OPEN",
+        "fill_status": "FILLED",
+        "qty_remaining": 1,
+        "ticker": "STREAM",
+        "filled_avg_price": 10.0,
+        "current_stop": 9.0,
+        "pm_ratchet_level": 0,
+        "pm_ratchet_plan": {
+            "enabled": True,
+            "trigger_step_pct": 10.0,
+            "max_ratchets": 4,
+            "initial_stop_pct": 10.0,
+            "stop_raise_pct": 7.5,
+            "no_capped_tp": True,
+        },
+    }
+    updates = []
+
+    class Cursor:
+        async def to_list(self, _limit):
+            return [dict(trade)]
+
+    class Trades:
+        def find(self, query, *_args, **_kwargs):
+            assert query["broker_base"] == "public"
+            assert query["ticker"] == {"$in": ["STREAM"]}
+            return Cursor()
+
+        async def update_one(self, _query, update):
+            updates.append(update["$set"])
+
+    class Events:
+        async def insert_one(self, _event):
+            return None
+
+    monkeypatch.setattr(pm_ratchet, "get_db", lambda: SimpleNamespace(tf_trades=Trades(), pm_ratchet_events=Events()))
+
+    result = await pm_ratchet.process_public_ratchet_marks({"STREAM": 22.0})
+
+    assert result["source"] == "public_price_stream"
+    assert result["ratcheted"] == 1
+    assert updates[0]["pm_last_ratchet_source"] == "public_price_stream"
+    assert updates[0]["current_stop"] == 12.0
