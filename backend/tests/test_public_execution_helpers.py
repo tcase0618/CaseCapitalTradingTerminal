@@ -38,6 +38,34 @@ def test_execution_quote_requires_two_sided_market_and_respects_spread(monkeypat
     assert emergency_sell["limit_price"] == 9.98
 
 
+@pytest.mark.asyncio
+async def test_exit_quote_refresh_retries_until_a_fresh_executable_quote(monkeypatch):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def quotes(self, symbols):
+            assert symbols == ["AAPL"]
+            self.calls += 1
+            timestamp = (
+                datetime.now(timezone.utc) - timedelta(seconds=300)
+                if self.calls == 1
+                else datetime.now(timezone.utc)
+            )
+            return {"quotes": [{"symbol": "AAPL", "bid": 99.98, "ask": 100.02, "quoteTime": timestamp.isoformat()}]}
+
+    monkeypatch.setenv("PUBLIC_EXIT_QUOTE_REFRESH_ATTEMPTS", "3")
+    monkeypatch.setenv("PUBLIC_EXIT_QUOTE_RETRY_SECONDS", "0")
+    client = Client()
+
+    result = await public_execution._refresh_exit_quotes(client, ["AAPL"], emergency=True)
+
+    assert client.calls == 2
+    assert result["attempts"] == 2
+    assert result["resolved"]["AAPL"]["execution_quote"]["limit_price"] == 99.98
+    assert result["unresolved"] == {}
+
+
 def test_public_learning_record_requires_verified_attributed_exit():
     base = {
         "client_order_id": "order-1",
