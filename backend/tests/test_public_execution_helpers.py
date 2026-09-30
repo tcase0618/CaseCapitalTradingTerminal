@@ -488,7 +488,37 @@ async def test_public_reconciliation_health_keeps_unknown_protection_fail_closed
 
     result = await public_execution.reconciliation_health()
     assert result["ok"] is False
+    assert result["entry_ok"] is False
     assert result["reason"] == "public_protection_coverage_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_public_reconciliation_health_does_not_globally_lock_entries_for_stale_known_monitoring(monkeypatch):
+    class FakeCollection:
+        async def find_one(self, *_args, **_kwargs):
+            return {"last_success_at": datetime.now(timezone.utc).isoformat()}
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(bot_state=FakeCollection()))
+
+    async def stale_monitored_coverage():
+        return {
+            "filled_open": 1,
+            "protected_open": 0,
+            "unprotected_open": 1,
+            "monitored_exit_only_open": 1,
+            "legacy_unmanaged_open": 0,
+            "managed_unresolved_unprotected_open": 1,
+            "unresolved_unprotected_open": 0,
+            "unprotected": [{"ticker": "AAPL", "status": "MONITORED_EXIT_STALE_OR_INCOMPLETE"}],
+        }
+
+    monkeypatch.setattr(public_execution, "protection_coverage", stale_monitored_coverage)
+
+    result = await public_execution.reconciliation_health()
+
+    assert result["ok"] is False
+    assert result["entry_ok"] is True
+    assert result["entry_warning"] == "public_existing_positions_monitor_stale"
 
 
 @pytest.mark.asyncio

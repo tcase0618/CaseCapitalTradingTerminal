@@ -1091,14 +1091,23 @@ async def reconciliation_health(max_age_seconds: int = 900) -> dict[str, Any]:
                 "last_success_at": checked_at,
                 **coverage,
             }
+        # A stale price on an already-known monitored-exit position must stay
+        # visible as a portfolio-protection problem, but it is not evidence
+        # that a *new* candidate has a stale price. New entries always take
+        # their own fresh Public quote, stop, halt, buying-power and preflight
+        # checks below. Do not freeze the entire book because premarket has
+        # not printed a current two-sided quote for an older holding.
+        entry_ok = coverage["unresolved_unprotected_open"] == 0
         return {
             "ok": False,
             "reason": "public_protection_coverage_incomplete",
+            "entry_ok": entry_ok,
+            "entry_warning": "public_existing_positions_monitor_stale" if entry_ok else None,
             "age_seconds": age,
             "last_success_at": checked_at,
             **coverage,
         }
-    return {"ok": True, "age_seconds": age, "last_success_at": checked_at, **coverage}
+    return {"ok": True, "entry_ok": True, "age_seconds": age, "last_success_at": checked_at, **coverage}
 
 
 async def protection_coverage() -> dict[str, Any]:
@@ -1171,7 +1180,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
         return {"skipped": False, "reason": "no_pm_equity_approvals", "executed": [], "rejected": []}
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         health = await reconciliation_health()
-        if not health.get("ok"):
+        if not health.get("entry_ok", health.get("ok")):
             # Bootstrap the health record once after deployment. This performs
             # reconciliation only; it does not submit a buy order.
             try:
@@ -1180,7 +1189,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 logger.exception("Public reconciliation bootstrap failed")
                 return {"skipped": False, "reason": "public_reconciliation_failed", "executed": [], "rejected": [{"ticker": "", "reason": "public_reconciliation_failed", "detail": str(exc)[:220]}]}
             health = await reconciliation_health()
-            if not health.get("ok"):
+            if not health.get("entry_ok", health.get("ok")):
                 return {"skipped": False, "reason": health.get("reason") or "public_reconciliation_unhealthy", "executed": [], "rejected": [{"ticker": "", "reason": health.get("reason") or "public_reconciliation_unhealthy"}]}
         risk_allowed, safety_status = await execution_safety.add_risk_allowed("public_equity")
         if not risk_allowed:
