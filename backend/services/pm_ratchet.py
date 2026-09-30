@@ -86,9 +86,26 @@ def _public_account_protection_plan(entry: float, current: float) -> dict[str, A
     }
 
 
+def _fresh_public_execution_mark(row: dict[str, Any]) -> float | None:
+    """Return a ratchet mark only when it is safe to price a Public order.
+
+    A quote that is old or so wide that an order would be rejected must not
+    advance an active stop. Using its midpoint would make the monitor look
+    protected while anchoring the ratchet to an untradeable price.
+    """
+    from . import public_execution, safety
+
+    quote, _reason = public_execution._execution_quote(row, side="SELL")
+    fresh, _age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(row)})
+    if not fresh or not quote:
+        return None
+    mark = _num(quote.get("mid"))
+    return mark if mark > 0 else None
+
+
 async def _public_prices(tickers: list[str]) -> dict[str, float]:
-    """Return only fresh Public marks for Public-broker ratchets."""
-    from . import public_api, public_execution, safety
+    """Return only fresh, executable Public marks for Public-broker ratchets."""
+    from . import public_api, public_execution
 
     if not tickers:
         return {}
@@ -97,10 +114,9 @@ async def _public_prices(tickers: list[str]) -> dict[str, float]:
     prices: dict[str, float] = {}
     for row in rows:
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
-        price = public_execution._quote_price(row)
-        fresh, _age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(row)})
-        if ticker and fresh and price > 0:
-            prices[ticker] = float(price)
+        price = _fresh_public_execution_mark(row)
+        if ticker and price:
+            prices[ticker] = price
     return prices
 
 

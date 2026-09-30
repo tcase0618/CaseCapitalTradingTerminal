@@ -1,8 +1,21 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from services import pm_ratchet
+
+
+def test_public_ratchet_mark_requires_a_fresh_executable_quote(monkeypatch):
+    monkeypatch.setenv("PUBLIC_MAX_EQUITY_SPREAD_BPS", "300")
+    now = datetime.now(timezone.utc).isoformat()
+    valid = pm_ratchet._fresh_public_execution_mark({"bid": 10.00, "ask": 10.04, "quoteTime": now})
+    wide = pm_ratchet._fresh_public_execution_mark({"bid": 10.00, "ask": 11.00, "quoteTime": now})
+    stale = pm_ratchet._fresh_public_execution_mark({"bid": 10.00, "ask": 10.04, "quoteTime": "2020-01-01T00:00:00Z"})
+
+    assert valid == 10.02
+    assert wide is None
+    assert stale is None
 
 
 @pytest.mark.asyncio
