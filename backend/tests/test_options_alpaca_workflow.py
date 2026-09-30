@@ -15,6 +15,7 @@ def test_alpaca_order_preview_never_targets_another_broker():
         "contracts": 2,
         "instrument": {
             "symbol": "SPY260918C00650000",
+            "bid": 3.20,
             "ask": 3.25,
         },
     }
@@ -30,7 +31,23 @@ def test_alpaca_order_preview_never_targets_another_broker():
     assert preview["payload"]["side"] == "buy"
     assert preview["payload"]["type"] == "limit"
     assert preview["payload"]["time_in_force"] == "day"
-    assert preview["payload"]["limit_price"] == 3.25
+    assert preview["payload"]["limit_price"] == 3.20
+    assert preview["requires_fresh_two_sided_quote"] is True
+
+
+def test_option_execution_limits_are_two_sided_and_side_aware():
+    quote = {"bid": 1.00, "ask": 1.04}
+
+    buy, buy_reason = options_desk._execution_limit_from_quote(quote, side="buy")
+    sell, sell_reason = options_desk._execution_limit_from_quote(quote, side="sell")
+    emergency, emergency_reason = options_desk._execution_limit_from_quote(quote, side="sell", emergency=True)
+
+    assert buy_reason is None and buy["limit_price"] == 1.02
+    assert sell_reason is None and sell["limit_price"] == 1.02
+    assert emergency_reason is None and emergency["limit_price"] == 1.00
+    missing, reason = options_desk._execution_limit_from_quote({"ask": 1.04}, side="buy")
+    assert missing is None
+    assert reason == "option_execution_quote_requires_valid_bid_ask"
 
 
 def test_options_headers_use_options_credentials_only(monkeypatch):

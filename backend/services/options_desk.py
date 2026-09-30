@@ -475,7 +475,7 @@ def _parse_occ_symbol(symbol: str) -> dict[str, Any] | None:
 def _alpaca_order_preview_from_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
     instrument = ticket.get("instrument") or {}
     symbol = str(instrument.get("symbol") or instrument.get("contractSymbol") or "").upper()
-    ask = _safe_float(instrument.get("ask") or instrument.get("premium") or instrument.get("net_debit"))
+    pricing, _ = _execution_limit_from_quote(instrument, side="buy")
     qty = _safe_int(ticket.get("contracts"))
     return {
         "broker": "ALPACA_OPTIONS",
@@ -487,9 +487,13 @@ def _alpaca_order_preview_from_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
             "side": "buy",
             "type": "limit",
             "time_in_force": "day",
-            "limit_price": round(ask, 2) if ask > 0 else None,
+            # This preview is not executable until a new snapshot supplies a
+            # fresh two-sided quote. Never present a stored ask as a limit.
+            "limit_price": pricing.get("limit_price") if pricing else None,
             "client_order_id": _candidate_order_id(str(ticket.get("candidate_id") or "")),
         },
+        "pricing": pricing,
+        "requires_fresh_two_sided_quote": True,
         "not_submitted": True,
         "execution_authority": "alpaca_options_only",
     }
@@ -600,6 +604,61 @@ def _snapshot_mid(snap: dict[str, Any] | None) -> float:
     if bid > 0 and ask > 0:
         return (bid + ask) / 2.0
     return _safe_float(snap.get("mid"))
+
+
+def _option_tick(price: float) -> float:
+    """Return the standard single-leg option minimum price increment."""
+    return 0.01 if price < 3.0 else 0.05
+
+
+def _round_option_limit(price: float, *, side: str) -> float:
+    """Round a limit in the non-aggressive direction for its side."""
+    import math
+
+    tick = _option_tick(price)
+    units = price / tick
+    rounded = math.floor(units + 1e-9) if side.lower() == "buy" else math.ceil(units - 1e-9)
+    return round(max(tick, rounded * tick), 2)
+
+
+def _execution_limit_from_quote(
+    quote: dict[str, Any] | None,
+    *,
+    side: str,
+    emergency: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Build an executable option limit from a current two-sided quote only.
+
+    Normal orders use the midpoint, never a stored ask or last trade. Protective
+    sells use the displayed bid so an already-triggered exit is not converted
+    into an unbounded market order.
+    """
+    quote = quote or {}
+    bid = _safe_float(quote.get("bid"))
+    ask = _safe_float(quote.get("ask"))
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None, "option_execution_quote_requires_valid_bid_ask"
+    side = str(side or "").lower()
+    if side not in {"buy", "sell"}:
+        return None, "option_execution_quote_side_invalid"
+    midpoint = (bid + ask) / 2.0
+    raw_limit = bid if side == "sell" and emergency else midpoint
+    limit_price = _round_option_limit(raw_limit, side=side)
+    # A buy must never be more aggressive than the midpoint. A normal sell
+    # must never concede below it. Emergency exits deliberately use the bid.
+    if side == "buy" and limit_price > midpoint + 1e-9:
+        limit_price = _round_option_limit(max(bid, midpoint - _option_tick(midpoint)), side="buy")
+    if side == "sell" and not emergency and limit_price < midpoint - 1e-9:
+        limit_price = _round_option_limit(midpoint + _option_tick(midpoint), side="sell")
+    return {
+        "bid": round(bid, 4),
+        "ask": round(ask, 4),
+        "mid": round(midpoint, 4),
+        "spread": round(ask - bid, 4),
+        "spread_bps": round(((ask - bid) / midpoint) * 10_000, 2) if midpoint > 0 else None,
+        "limit_price": limit_price,
+        "limit_basis": "bid_protective_exit" if side == "sell" and emergency else "midpoint",
+    }, None
 
 
 def _spread_cost_context(fill_price: float, snap: dict[str, Any] | None) -> dict[str, Any]:
@@ -1633,9 +1692,15 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     if not preflight.get("ok"):
         return {"ok": False, **preflight, "candidate": ticket}
     instrument = preflight["instrument"]
-    ask = float(instrument.get("ask") or instrument.get("premium") or 0)
+    pricing, pricing_reason = _execution_limit_from_quote(instrument, side="buy")
+    if not pricing:
+        return {"ok": False, "reason": pricing_reason, "candidate": ticket, "preflight": preflight}
     order_qty = int(qty or ticket.get("contracts") or 0)
-    order_limit = float(limit_price or ask)
+    midpoint_limit = float(pricing["limit_price"])
+    requested_limit = _safe_float(limit_price)
+    # A caller may be less aggressive than the midpoint, but never pay a
+    # premium above it because a stale ticket or manual value said to do so.
+    order_limit = min(requested_limit, midpoint_limit) if requested_limit > 0 else midpoint_limit
     if order_qty <= 0 or order_limit <= 0:
         return {"ok": False, "reason": "invalid_qty_or_limit", "candidate": ticket}
     order_premium = order_qty * order_limit * 100
@@ -1711,6 +1776,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
         "account_route": route,
         "exit_policy": exit_policy,
         "fresh_preflight": preflight,
+        "execution_quote": pricing,
         "pricing_truth": pricing_truth,
     })
     await db.options_desk_orders.insert_one(record)
@@ -1912,54 +1978,52 @@ async def refresh_and_auto_execute_latest(limit: int | None = None) -> dict[str,
     return result
 
 
-async def close(symbol: str, qty: int | None = None) -> dict[str, Any]:
+async def close(symbol: str, qty: int | None = None, *, emergency: bool = False) -> dict[str, Any]:
+    """Submit a fresh-quote limit close; never send an unbounded market order."""
     route = options_account_route_guard()
     if not route.get("ok"):
         return {"ok": False, "reason": route.get("reason") or "options_account_route_blocked", "route": route}
     market_status = await _options_market_status()
     if not market_status.get("is_open"):
         return {"ok": False, "reason": "options_market_closed", "market_status": market_status}
-    payload: dict[str, Any] = {"symbol": symbol, "side": "sell", "type": "market", "time_in_force": "day"}
+    snap = await _option_snapshot(symbol)
+    if not snap.get("ok"):
+        return {"ok": False, "reason": "fresh_option_snapshot_failed_for_close", "snapshot": snap}
+    quote_age = _quote_age_seconds(snap)
+    if quote_age is None:
+        return {"ok": False, "reason": "fresh_quote_timestamp_missing_for_close", "snapshot": snap}
+    if quote_age > OPTIONS_MAX_QUOTE_AGE_SECONDS:
+        return {"ok": False, "reason": "fresh_quote_stale_for_close", "quote_age_seconds": quote_age, "snapshot": snap}
+    pricing, pricing_reason = _execution_limit_from_quote(snap, side="sell", emergency=emergency)
+    if not pricing:
+        return {"ok": False, "reason": pricing_reason, "snapshot": snap}
+    payload: dict[str, Any] = {
+        "symbol": symbol,
+        "side": "sell",
+        "type": "limit",
+        "time_in_force": "day",
+        "limit_price": pricing["limit_price"],
+    }
     if qty:
         payload["qty"] = str(int(qty))
     async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
         r = await client.post(f"{_options_trade_base()}/v2/orders", json=payload)
     if r.status_code not in (200, 201):
-        detail = r.text[:220]
-        if "no available quote" not in detail.lower():
-            return {"ok": False, "reason": f"alpaca_rejected_{r.status_code}", "detail": detail}
-        snap = await _option_snapshot(symbol)
-        bid = _safe_float(snap.get("bid")) if snap.get("ok") else 0.0
-        limit_price = round(max(0.01, bid), 2)
-        limit_payload: dict[str, Any] = {
-            "symbol": symbol,
-            "side": "sell",
-            "type": "limit",
-            "time_in_force": "day",
-            "limit_price": limit_price,
-        }
-        if qty:
-            limit_payload["qty"] = str(int(qty))
-        async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
-            retry = await client.post(f"{_options_trade_base()}/v2/orders", json=limit_payload)
-        if retry.status_code not in (200, 201):
-            return {
-                "ok": False,
-                "reason": f"alpaca_rejected_{retry.status_code}",
-                "detail": retry.text[:220],
-                "market_reject_detail": detail,
-                "limit_payload": limit_payload,
-                "snapshot": snap,
-            }
         return {
-            "ok": True,
-            "order": retry.json(),
-            "account_route": route,
-            "fallback": "limit_sell_after_no_quote_market_reject",
-            "market_reject_detail": detail,
+            "ok": False,
+            "reason": f"alpaca_rejected_{r.status_code}",
+            "detail": r.text[:220],
+            "payload": payload,
             "snapshot": snap,
+            "execution_quote": pricing,
         }
-    return {"ok": True, "order": r.json(), "account_route": route}
+    return {
+        "ok": True,
+        "order": r.json(),
+        "account_route": route,
+        "snapshot": snap,
+        "execution_quote": pricing,
+    }
 
 
 def _order_fill_price(order: dict[str, Any]) -> float:
@@ -2800,7 +2864,10 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
                 )
                 checks.append(check)
                 continue
-            result = await close(symbol=symbol, qty=qty)
+            # A triggered stop/ratchet is an emergency exit: retain a bounded
+            # limit order at the displayed bid instead of an unbounded market
+            # sell or a midpoint that may no longer be executable.
+            result = await close(symbol=symbol, qty=qty, emergency=True)
             check["close_result"] = result
             if result.get("ok"):
                 close_reason = {
