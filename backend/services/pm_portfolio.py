@@ -117,13 +117,19 @@ def _holding_score(position: dict[str, Any], recommendation: dict[str, Any] | No
         (trade or {}).get("protective_order_id")
         and str((trade or {}).get("protective_order_status") or "").upper() == "SUBMITTED"
     )
+    terminal_monitored, monitor_age = public_execution._verified_monitored_exit(trade or {})
     if stop <= 0 or price <= 0:
         risk_state, risk_quality = "UNVERIFIED", 25.0
-    elif not broker_protected:
-        risk_state, risk_quality = "UNPROTECTED", 15.0
-    else:
+    elif broker_protected:
         stop_distance = ((price - stop) / price) * 100.0
-        risk_state, risk_quality = ("PROTECTED", _clamp(60.0 + stop_distance * 4.0))
+        risk_state, risk_quality = ("BROKER_PROTECTED", _clamp(60.0 + stop_distance * 4.0))
+    elif terminal_monitored:
+        stop_distance = ((price - stop) / price) * 100.0
+        # The monitor is validated but cannot protect an unobserved intraminute
+        # gap. Give it meaningful credit without scoring it as a resting stop.
+        risk_state, risk_quality = ("TERMINAL_MONITORED", _clamp(48.0 + stop_distance * 3.0, 0.0, 82.0))
+    else:
+        risk_state, risk_quality = "UNPROTECTED", 15.0
     concentration = (market_value / total_equity * 100.0) if total_equity > 0 else None
     fit_quality = _clamp(100.0 - max(0.0, (concentration or 0.0) - 15.0) * 4.0) if concentration is not None else 50.0
     own_edge = candidate_edge(recommendation or {"pm_score": pm_score})
@@ -137,6 +143,8 @@ def _holding_score(position: dict[str, Any], recommendation: dict[str, Any] | No
         reasons.append("holding has no fresh PM recommendation; default score is informational only")
     if risk_state == "UNVERIFIED":
         reasons.append("stop coverage is unavailable in the portfolio record")
+    elif risk_state == "TERMINAL_MONITORED":
+        reasons.append(f"terminal ratchet monitor verified {monitor_age}s ago; broker-native conditional order is unavailable")
     elif risk_state == "UNPROTECTED":
         reasons.append("broker-side protective order is not confirmed; monitored emergency exit remains fallback only")
     if pnl is not None and pnl <= -7.0 and (pm_score <= 35.0 or not has_current_recommendation):
@@ -161,6 +169,7 @@ def _holding_score(position: dict[str, Any], recommendation: dict[str, Any] | No
             "opportunity_cost": opportunity_quality,
         },
         "risk_state": risk_state,
+        "monitor_age_seconds": monitor_age,
         "unrealized_pct": round(pnl, 2) if pnl is not None else None,
         "market_value": market_value,
         "concentration_pct": round(concentration, 2) if concentration is not None else None,

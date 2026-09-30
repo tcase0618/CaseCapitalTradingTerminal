@@ -116,6 +116,70 @@ def _strategy_attribution(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _public_learning_record(trade: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one Public trade into an outcome-ledger row.
+
+    Only a broker-history-verified closed trade is eligible for PM learning.
+    Open positions and closes without a matched broker fill remain observable,
+    but cannot be silently treated as evidence for a strategy.
+    """
+    attribution = trade.get("strategy_attribution") or _strategy_attribution(trade)
+    realized_pct = trade.get("realized_pl_pct")
+    try:
+        realized_pct = float(realized_pct) if realized_pct is not None else None
+    except (TypeError, ValueError):
+        realized_pct = None
+    closed = str(trade.get("status") or "").upper() == "CLOSED"
+    verified = bool(trade.get("broker_exit_verified")) and realized_pct is not None
+    strategy_id = attribution.get("strategy_id") or trade.get("strategy_id") or "UNATTRIBUTED"
+    return {
+        "learning_id": f"public-learning:{trade.get('client_order_id')}",
+        "client_order_id": trade.get("client_order_id"),
+        "broker_base": BROKER_BASE,
+        "ticker": _symbol(trade),
+        "strategy_id": strategy_id,
+        "screener_id": attribution.get("screener_id") or trade.get("screener_id") or strategy_id,
+        "scanner_family": attribution.get("scanner_family") or trade.get("scanner_family"),
+        "strategy_lanes": attribution.get("strategy_lanes") or trade.get("strategy_lanes") or [],
+        "pm_score": _num(trade.get("pm_score")) or None,
+        "case_score": _num(trade.get("case_score")) or None,
+        "strategy_confidence": _num(trade.get("strategy_confidence")) or None,
+        "entry_price": _num(trade.get("filled_avg_price") or trade.get("limit_price")) or None,
+        "entry_at": trade.get("filled_at") or trade.get("submitted_at"),
+        "close_at": trade.get("closed_at"),
+        "status": str(trade.get("status") or "UNKNOWN").upper(),
+        "realized_pnl": _num(trade.get("realized_pnl")) if verified else None,
+        "realized_pct": realized_pct if verified else None,
+        "outcome_verified": verified,
+        "learning_eligible": bool(verified and strategy_id != "UNATTRIBUTED"),
+        "learning_exclusion_reason": None if verified and strategy_id != "UNATTRIBUTED" else (
+            "broker_exit_not_verified" if closed else "position_open"
+        ) if strategy_id != "UNATTRIBUTED" else "strategy_unattributed",
+        "source": "public_broker_history_reconciliation",
+    }
+
+
+async def sync_public_learning_ledger() -> dict[str, int]:
+    """Persist Public execution outcomes without altering strategy weights."""
+    db = get_db()
+    rows = await db.tf_trades.find({"broker_base": BROKER_BASE}, {"_id": 0}).to_list(5_000)
+    written = eligible = verified = 0
+    for trade in rows:
+        client_order_id = str(trade.get("client_order_id") or "")
+        if not client_order_id:
+            continue
+        record = _public_learning_record(trade)
+        await db.public_trade_learning.update_one(
+            {"learning_id": record["learning_id"]},
+            {"$set": stamped({**record, "updated_at": datetime.now(timezone.utc).isoformat()})},
+            upsert=True,
+        )
+        written += 1
+        verified += 1 if record["outcome_verified"] else 0
+        eligible += 1 if record["learning_eligible"] else 0
+    return {"written": written, "verified_outcomes": verified, "learning_eligible": eligible}
+
+
 def _positions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = payload.get("positions") or payload.get("holdings") or []
     return rows if isinstance(rows, list) else []
@@ -1160,6 +1224,8 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "client_order_id": client_id, "public_order_id": order_id, "broker_base": BROKER_BASE,
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
+                "case_score": row.get("case_score"), "strategy_confidence": row.get("strategy_confidence"),
+                "signals": list(row.get("signals") or []), "horizon_days": row.get("horizon_days") or row.get("hold_window_days"),
                 "quote_source": quote_source,
                 "execution_quote": final_quote,
                 "execution_target_mode": "RATCHET_ONLY_PROXY_TARGET" if proxy_target else "STRUCTURAL_TARGET",
@@ -1490,6 +1556,12 @@ async def reconcile() -> dict[str, Any]:
         poll_errors += phase_updates["poll_errors"]
         history_reconciliation = await _reconcile_closed_broker_history(client)
         history_import = await _import_unattributed_closed_broker_history(client)
+        try:
+            learning_sync = await sync_public_learning_ledger()
+        except Exception as exc:
+            # Analytics must never suppress broker reconciliation or exits.
+            logger.exception("Public learning-ledger sync failed")
+            learning_sync = {"written": 0, "verified_outcomes": 0, "learning_eligible": 0, "error": exc.__class__.__name__}
     result = {
         "skipped": False,
         "ok": poll_errors == 0,
@@ -1500,6 +1572,7 @@ async def reconcile() -> dict[str, Any]:
         "broker_position_imported": imported,
         "broker_history_reconciliation": history_reconciliation,
         "broker_history_import": history_import,
+        "learning_sync": learning_sync,
         "phase_exit_reconciliation": phase_updates,
         "broker": BROKER_BASE,
     }
