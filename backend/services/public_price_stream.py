@@ -204,9 +204,14 @@ async def stop() -> None:
 
 async def status() -> dict[str, Any]:
     persisted = await get_db().bot_state.find_one({"_id": "public_price_stream"}, {"_id": 0}) or {}
+    runtime_running = bool(_task and not _task.done())
+    # A CLI health check imports a new module instance with the default local
+    # state. Prefer the persisted service state in that process; the running
+    # API process still exposes its newer in-memory callback counters.
+    state = _state if runtime_running else persisted
     return {
         **persisted,
-        **_state,
+        **state,
         "enabled": enabled(),
-        "task_running": bool(_task and not _task.done()),
+        "task_running": runtime_running,
     }
