@@ -305,10 +305,11 @@ async def run_rebalance_cycle() -> dict[str, Any]:
                 continue
             quote_rows = public_execution._quotes(await client.quotes([ticker]))
             quote = next((row for row in quote_rows if _ticker(row) == ticker), quote_rows[0] if quote_rows else {})
-            price = public_execution._quote_price(quote)
+            sell_quote, quote_reason = public_execution._execution_quote(quote, side="SELL")
+            price = _num((sell_quote or {}).get("limit_price"))
             fresh, age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(quote)})
-            if not fresh or price <= 0:
-                skipped.append({"ticker": ticker, "reason": "rebalance_quote_stale_or_unverifiable", "age_seconds": age})
+            if not fresh or price <= 0 or not sell_quote:
+                skipped.append({"ticker": ticker, "reason": quote_reason or "rebalance_quote_stale_or_unverifiable", "age_seconds": age})
                 continue
             order_shape, shape_note = public_execution._exit_order_shape(action["quantity"])
             if not order_shape:
@@ -326,7 +327,7 @@ async def run_rebalance_cycle() -> dict[str, Any]:
                 order_id = order.get("orderId") or order.get("id")
                 if not order_id:
                     raise RuntimeError("Public rebalance sell response missing order id")
-                await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "SELL_SUBMITTED", "sell_order_id": order_id, "sell_client_order_id": client_id, "sell_limit_price": price, "sell_quantity_submitted": sell_quantity, "sell_session": order_shape["session"], "sell_shape_note": shape_note, "sell_preflight": result.get("preflight"), "sell_submitted_at": datetime.now(timezone.utc).isoformat()}})
+                await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "SELL_SUBMITTED", "sell_order_id": order_id, "sell_client_order_id": client_id, "sell_limit_price": price, "sell_execution_quote": sell_quote, "sell_quantity_submitted": sell_quantity, "sell_session": order_shape["session"], "sell_shape_note": shape_note, "sell_preflight": result.get("preflight"), "sell_submitted_at": datetime.now(timezone.utc).isoformat()}})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
                 submitted.append({"ticker": ticker, "order_id": order_id, "replacement": action["replacement"], "reason": action["reason"]})
             except Exception as exc:
