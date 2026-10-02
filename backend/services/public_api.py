@@ -26,6 +26,20 @@ _REQUEST_BACKOFF_LOCK = asyncio.Lock()
 _NEXT_REQUEST_AT = 0.0
 
 
+def _request_interval_seconds() -> float:
+    """Keep REST traffic below Public's account-wide request budget.
+
+    Public documents a shared per-account limit. Use a conservative default
+    below that ceiling because the monitor, scans, and reconciliation share
+    the same credential. SDK streaming is a separate persistent connection;
+    this applies to REST request bursts only.
+    """
+    try:
+        return max(0.05, min(1.0, float(os.getenv("PUBLIC_API_MIN_REQUEST_INTERVAL_SECONDS", "0.12"))))
+    except (TypeError, ValueError):
+        return 0.12
+
+
 class PublicAPIError(RuntimeError):
     """Transport, authentication, or schema error from Public."""
 
@@ -35,9 +49,13 @@ class PublicTradingBlocked(PermissionError):
 
 
 async def _wait_for_request_slot() -> None:
-    """Serialize only API cooldowns, not normal concurrent quote work."""
+    """Reserve a shared REST slot and honor any broker-imposed cooldown."""
+    global _NEXT_REQUEST_AT
     async with _REQUEST_BACKOFF_LOCK:
-        delay = _NEXT_REQUEST_AT - time.monotonic()
+        now = time.monotonic()
+        scheduled = max(now, _NEXT_REQUEST_AT)
+        _NEXT_REQUEST_AT = scheduled + _request_interval_seconds()
+        delay = scheduled - now
     if delay > 0:
         await asyncio.sleep(delay)
 
