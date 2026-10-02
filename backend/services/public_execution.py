@@ -1212,7 +1212,11 @@ async def protection_coverage() -> dict[str, Any]:
         })
     monitored_only = [row for row in unprotected if row["status"] == "MONITORED_EXIT_STALE_OR_INCOMPLETE"]
     legacy_unmanaged = [row for row in unprotected if row["legacy_unmanaged"]]
-    managed_unresolved = [row for row in unprotected if row["status"] != "MONITORED_EXIT_ONLY" and not row["legacy_unmanaged"]]
+    # A stale terminal-monitored exit is visible as degraded coverage, but it
+    # is not an unknown protection state. Keep it separate from genuinely
+    # unresolved rows so reconciliation/reporting does not misclassify it.
+    monitored_statuses = {"MONITORED_EXIT_ONLY", "MONITORED_EXIT_STALE_OR_INCOMPLETE"}
+    managed_unresolved = [row for row in unprotected if row["status"] not in monitored_statuses and not row["legacy_unmanaged"]]
     return {
         "filled_open": len(rows),
         "protected_open": broker_protected + monitored_protected,
