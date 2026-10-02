@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 
 import httpx
 import pytest
@@ -151,6 +152,30 @@ def test_public_rejects_invalid_gtd_24_hour_combination():
         )
 
 
+def test_public_bracket_payload_requires_documented_core_whole_share_shape():
+    payload = public_api.PublicAPIClient._equity_order_payload(
+        symbol="AAPL",
+        side="BUY",
+        quantity=2,
+        limit_price=150.25,
+        session="CORE",
+        order_class="OTO",
+        stop_loss=140.00,
+        stop_loss_limit=139.50,
+    )
+    assert payload["orderClass"] == "OTO"
+    assert payload["quantity"] == "2"
+    assert payload["stopLoss"] == {"stopPrice": "140.00", "limitPrice": "139.50"}
+    with pytest.raises(public_api.PublicAPIError, match="whole-share quantity"):
+        public_api.PublicAPIClient._equity_order_payload(
+            symbol="AAPL", side="BUY", amount=6, limit_price=150, order_class="OTO", stop_loss=140,
+        )
+    with pytest.raises(public_api.PublicAPIError, match="CORE"):
+        public_api.PublicAPIClient._equity_order_payload(
+            symbol="AAPL", side="BUY", quantity=1, limit_price=150, session="TWENTY_FOUR_HOURS", order_class="OTO", stop_loss=140,
+        )
+
+
 def test_public_accepts_successful_empty_broker_response():
     assert public_api.PublicAPIClient._decode(httpx.Response(204)) == {}
 
@@ -211,16 +236,62 @@ async def test_public_equity_submit_accepts_documented_preflight_shape():
 
 
 @pytest.mark.asyncio
-async def test_public_order_status_uses_account_scoped_endpoint():
+async def test_public_order_status_prefers_v2_account_scoped_endpoint():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        assert request.url.path == "/userapigateway/trading/acct-1/order/order-1"
+        assert request.url.path == "/userapigateway/trading/acct-1/order/v2/order-1"
         return httpx.Response(200, json={"orderId": "order-1", "status": "FILLED"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         async with public_api.PublicAPIClient(_cfg(), http) as client:
             result = await client.get_order("order-1")
     assert result["status"] == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_public_order_status_uses_legacy_read_fallback_only_after_v2_404():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if "/v2/" in request.url.path:
+            return httpx.Response(404, json={"message": "not found"})
+        return httpx.Response(200, json={"orderId": "order-1", "status": "FILLED"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            result = await client.get_order("order-1")
+    assert result["status"] == "FILLED"
+    assert seen == [
+        "/userapigateway/trading/acct-1/order/v2/order-1",
+        "/userapigateway/trading/acct-1/order/order-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_public_search_orders_and_intraday_bars_are_read_only_contract_calls():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params), json.loads(request.content) if request.content else {}))
+        if request.url.path.endswith("/order/search"):
+            return httpx.Response(200, json={"orders": [{"orderId": "o-1", "status": "FILLED"}]})
+        return httpx.Response(200, json={"regularMarket": {"bars": []}, "preMarketOvernight": {"bars": []}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http, use_sdk=False) as client:
+            orders = await client.search_orders(created_after="2026-10-01T00:00:00Z", symbols=["aapl"])
+            bars = await client.intraday_bars("aapl")
+    assert orders["orders"][0]["orderId"] == "o-1"
+    assert bars["dataProvider"] == "PUBLIC_BARS_V2"
+    assert seen[0] == (
+        "POST", "/userapigateway/trading/acct-1/order/search", {},
+        {"createdAfter": "2026-10-01T00:00:00Z", "instruments": [{"symbol": "AAPL", "type": "EQUITY"}]},
+    )
+    assert seen[1] == (
+        "GET", "/userapigateway/historicdata/EQUITY/AAPL/DAY/ONE_MINUTE",
+        {"tradingSessionToggle": "ALL_SESSIONS"}, {},
+    )
 
 
 @pytest.mark.asyncio
