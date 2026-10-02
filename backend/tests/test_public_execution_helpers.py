@@ -175,6 +175,32 @@ async def test_protection_coverage_counts_recent_terminal_monitored_exit(monkeyp
     assert result["unprotected_open"] == 0
 
 
+@pytest.mark.asyncio
+async def test_protection_coverage_keeps_stale_known_monitoring_out_of_unresolved_bucket(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class Cursor:
+        async def to_list(self, _limit):
+            return [{
+                "ticker": "AAPL",
+                "pm_active_stop": 90.0,
+                "pm_last_ratchet_check": (now - timedelta(seconds=181)).isoformat(),
+                "pm_ratchet_plan": {"enabled": True},
+                "protection_state": "MONITORED_EXIT_ONLY",
+                "status": "OPEN",
+                "fill_status": "FILLED",
+            }]
+
+    class Trades:
+        def find(self, *_args, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
+    result = await public_execution.protection_coverage()
+    assert result["monitored_exit_only_open"] == 1
+    assert result["managed_unresolved_unprotected_open"] == 0
+
+
 def test_public_portfolio_order_index_uses_public_uuid_order_id():
     orders = public_execution._orders_by_id({
         "orders": [

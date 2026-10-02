@@ -690,7 +690,7 @@ def start_scheduler():
                     if protection_coverage.get("monitored_exit_only_open", 0):
                         failures.append({
                             "stage": "public_protection_coverage",
-                            "reason": f"{protection_coverage['monitored_exit_only_open']}_monitored_positions_stale",
+                            "reason": f"{protection_coverage['monitored_exit_only_open']}_positions_with_stale_or_incomplete_monitor_coverage",
                         })
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
@@ -784,12 +784,19 @@ def start_scheduler():
             {"$set": {"active": True, "details": details, "updated_at": _now_iso()}},
             upsert=True,
         )
+        coverage_only = all(item.get("stage") == "public_protection_coverage" for item in failures)
+        title = "CASE CAPITAL | PORTFOLIO PROTECTION DEGRADED" if coverage_only else "CASE CAPITAL | PORTFOLIO MONITOR FAILURE"
+        action = (
+            "Action: broker stops are unavailable and fresh two-sided Public quotes have not recently verified terminal exit coverage."
+            if coverage_only
+            else "Action: monitor status requires review; no new risk is authorized by this alert."
+        )
         await telegram_service.send_message(
-            f"<b>CASE CAPITAL | PORTFOLIO MONITOR FAILURE</b>\n"
+            f"<b>{title}</b>\n"
             f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
             f"Stage: <b>{stage}</b>\n"
             f"Failures: <code>{details}</code>\n"
-            f"Action: monitor status requires review; no new risk is authorized by this alert.",
+            f"{action}",
             chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         )
 

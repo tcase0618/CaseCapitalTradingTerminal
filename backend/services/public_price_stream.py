@@ -200,9 +200,7 @@ async def _run_subscription(symbols: list[str]) -> None:
             subscription_id=str(subscription_id),
             poll_seconds=_poll_seconds(),
             last_error=None,
-            invalid_reason_counts={},
-            last_invalid_reason=None,
-            last_invalid_symbol=None,
+            subscription_started_at=datetime.now(timezone.utc).isoformat(),
         )
         try:
             await asyncio.sleep(_refresh_seconds())
