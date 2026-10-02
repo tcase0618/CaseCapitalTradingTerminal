@@ -655,6 +655,7 @@ def start_scheduler():
         """
         failures: list[dict[str, str]] = []
         public_ratchet_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        protection_coverage: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
             try:
                 from . import public_execution
@@ -682,13 +683,22 @@ def start_scheduler():
                         public_ratchet_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_pm_ratchet", "reason": exc.__class__.__name__})
                         logger.exception("Public PM ratchet failed")
+                    # Coverage is a read-only truth check. Keep it out of the
+                    # failure list: a broker routing limitation must be visible
+                    # without stopping monitoring or new-entry evaluation.
+                    protection_coverage = await public_execution.protection_coverage()
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
                 logger.exception("Public execution reconciliation failed")
         except Exception as e:
             failures.append({"stage": "position_monitor", "reason": e.__class__.__name__})
             logger.warning("position monitor: %s", e)
-        return {"ok": not failures, "failures": failures, "pm_ratchet": public_ratchet_status}
+        return {
+            "ok": not failures,
+            "failures": failures,
+            "pm_ratchet": public_ratchet_status,
+            "protection_coverage": protection_coverage,
+        }
 
     async def _position_management_monitor() -> dict[str, Any]:
         """Five-minute management lane, isolated from protective monitoring."""

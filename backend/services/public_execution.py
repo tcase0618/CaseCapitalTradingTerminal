@@ -132,6 +132,7 @@ def _public_learning_record(trade: dict[str, Any]) -> dict[str, Any]:
     closed = str(trade.get("status") or "").upper() == "CLOSED"
     verified = bool(trade.get("broker_exit_verified")) and realized_pct is not None
     strategy_id = attribution.get("strategy_id") or trade.get("strategy_id") or "UNATTRIBUTED"
+    legacy_or_unattributed = strategy_id in {"UNATTRIBUTED", "LEGACY_UNATTRIBUTED"}
     return {
         "learning_id": f"public-learning:{trade.get('client_order_id')}",
         "client_order_id": trade.get("client_order_id"),
@@ -151,10 +152,10 @@ def _public_learning_record(trade: dict[str, Any]) -> dict[str, Any]:
         "realized_pnl": _num(trade.get("realized_pnl")) if verified else None,
         "realized_pct": realized_pct if verified else None,
         "outcome_verified": verified,
-        "learning_eligible": bool(verified and strategy_id != "UNATTRIBUTED"),
-        "learning_exclusion_reason": None if verified and strategy_id != "UNATTRIBUTED" else (
+        "learning_eligible": bool(verified and not legacy_or_unattributed),
+        "learning_exclusion_reason": None if verified and not legacy_or_unattributed else (
             "broker_exit_not_verified" if closed else "position_open"
-        ) if strategy_id != "UNATTRIBUTED" else "strategy_unattributed",
+        ) if not legacy_or_unattributed else "strategy_unattributed_or_legacy",
         "source": "public_broker_history_reconciliation",
     }
 
@@ -178,6 +179,39 @@ async def sync_public_learning_ledger() -> dict[str, int]:
         verified += 1 if record["outcome_verified"] else 0
         eligible += 1 if record["learning_eligible"] else 0
     return {"written": written, "verified_outcomes": verified, "learning_eligible": eligible}
+
+
+async def label_legacy_unattributed_positions() -> int:
+    """Quarantine pre-attribution Public holdings from strategy learning.
+
+    This preserves the broker position and its P&L while making clear that it
+    cannot be evidence for Core, Lottery, or any other strategy.
+    """
+    db = get_db()
+    result = await db.tf_trades.update_many(
+        {
+            "broker_base": BROKER_BASE,
+            "$or": [
+                {"strategy_id": None},
+                {"strategy_id": {"$exists": False}},
+                {"strategy_id": ""},
+            ],
+        },
+        {"$set": {
+            "strategy_id": "LEGACY_UNATTRIBUTED",
+            "screener_id": "LEGACY_UNATTRIBUTED",
+            "strategy_attribution": {
+                "strategy_id": "LEGACY_UNATTRIBUTED",
+                "screener_id": "LEGACY_UNATTRIBUTED",
+                "scanner_family": "LEGACY",
+                "strategy_lanes": [],
+                "strategy_is_lottery": False,
+            },
+            "learning_exclusion_reason": "strategy_unattributed_or_legacy",
+            "legacy_attribution_labeled_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    return int(getattr(result, "modified_count", 0) or 0)
 
 
 def _positions(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1666,7 +1700,9 @@ async def reconcile() -> dict[str, Any]:
         poll_errors += phase_updates["poll_errors"]
         history_reconciliation = await _reconcile_closed_broker_history(client)
         history_import = await _import_unattributed_closed_broker_history(client)
+        legacy_labeled = 0
         try:
+            legacy_labeled = await label_legacy_unattributed_positions()
             learning_sync = await sync_public_learning_ledger()
         except Exception as exc:
             # Analytics must never suppress broker reconciliation or exits.
@@ -1683,6 +1719,7 @@ async def reconcile() -> dict[str, Any]:
         "broker_history_reconciliation": history_reconciliation,
         "broker_history_import": history_import,
         "learning_sync": learning_sync,
+        "legacy_attribution_labeled": legacy_labeled,
         "phase_exit_reconciliation": phase_updates,
         "broker": BROKER_BASE,
     }

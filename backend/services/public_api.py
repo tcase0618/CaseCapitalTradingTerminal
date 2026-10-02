@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ import httpx
 # client from independently refreshing the same expired credential.
 _RUNTIME_ACCESS_TOKEN = ""
 _TOKEN_REFRESH_LOCK = asyncio.Lock()
+_REQUEST_BACKOFF_LOCK = asyncio.Lock()
+_NEXT_REQUEST_AT = 0.0
 
 
 class PublicAPIError(RuntimeError):
@@ -29,6 +32,27 @@ class PublicAPIError(RuntimeError):
 
 class PublicTradingBlocked(PermissionError):
     """Raised before a Public order mutation can be sent."""
+
+
+async def _wait_for_request_slot() -> None:
+    """Serialize only API cooldowns, not normal concurrent quote work."""
+    async with _REQUEST_BACKOFF_LOCK:
+        delay = _NEXT_REQUEST_AT - time.monotonic()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+async def _apply_rate_limit_backoff(response: httpx.Response, attempt: int) -> None:
+    """Honor Public's retry hint and share the resulting cooldown process-wide."""
+    global _NEXT_REQUEST_AT
+    try:
+        retry_after = float(response.headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        retry_after = 0.0
+    delay = max(0.5, min(15.0, retry_after or (0.75 * (2 ** attempt))))
+    async with _REQUEST_BACKOFF_LOCK:
+        _NEXT_REQUEST_AT = max(_NEXT_REQUEST_AT, time.monotonic() + delay)
+    await asyncio.sleep(delay)
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -260,25 +284,29 @@ class PublicAPIClient:
         refresh only on preflight caused reconciliation and stop maintenance
         to fail after the first token expiry.
         """
-        client = self._mutation_client() if mutation else self._client()
-        request = getattr(client, method.lower())
-        kwargs: dict[str, Any] = {"headers": _auth_headers(self.cfg)}
-        if payload is not None:
-            kwargs["json"] = payload
-        if params:
-            kwargs["params"] = params
-        response = await request(f"{self.cfg.api_base}{path}", **kwargs)
-        try:
-            return self._decode(response)
-        except PublicAPIError as exc:
-            if "HTTP 401" not in str(exc):
-                raise
-            await self._refresh_access_token()
+        # All REST consumers share this small retry budget.  The one-minute
+        # monitor opens several short-lived clients, so per-client retries
+        # create a thundering herd after a Public 429.
+        refreshed = False
+        for attempt in range(3):
+            await _wait_for_request_slot()
             client = self._mutation_client() if mutation else self._client()
             request = getattr(client, method.lower())
-            kwargs["headers"] = _auth_headers(self.cfg)
+            kwargs: dict[str, Any] = {"headers": _auth_headers(self.cfg)}
+            if payload is not None:
+                kwargs["json"] = payload
+            if params:
+                kwargs["params"] = params
             response = await request(f"{self.cfg.api_base}{path}", **kwargs)
+            if response.status_code == 401 and not refreshed:
+                refreshed = True
+                await self._refresh_access_token()
+                continue
+            if response.status_code == 429 and attempt < 2:
+                await _apply_rate_limit_backoff(response, attempt)
+                continue
             return self._decode(response)
+        raise PublicAPIError("Public API retry budget exhausted")
 
     @staticmethod
     def _decode(response: httpx.Response) -> dict[str, Any]:

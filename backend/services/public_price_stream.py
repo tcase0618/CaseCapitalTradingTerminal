@@ -88,6 +88,48 @@ async def _unsubscribe(stream: Any, subscription_id: Any) -> None:
         await result
 
 
+def _stream_quote_payload(change: Any) -> tuple[str, dict[str, Any]]:
+    """Normalize the SDK callback without assuming a REST response shape."""
+    from . import public_api
+
+    instrument = getattr(change, "instrument", None)
+    symbol = str(getattr(instrument, "symbol", "") or "").upper().strip()
+    quote = getattr(change, "new_quote", None)
+    if quote is None:
+        return symbol, {}
+    row = public_api._sdk_quote_payload(quote)
+    symbol = symbol or str(row.get("symbol") or row.get("ticker") or "").upper().strip()
+    # SDK callback quotes are typed objects. Preserve a direct timestamp
+    # fallback so a version-specific serialization alias cannot make every
+    # callback look stale.
+    if not row.get("quoteTime"):
+        for name in ("ask_timestamp", "bid_timestamp", "last_timestamp"):
+            value = getattr(quote, name, None)
+            if value:
+                row["quoteTime"] = value.isoformat() if hasattr(value, "isoformat") else str(value)
+                break
+    row.update({"ticker": symbol, "symbol": symbol})
+    return symbol, row
+
+
+def _record_invalid(symbol: str, row: dict[str, Any]) -> None:
+    from . import public_execution, safety
+
+    _state["invalid_updates"] = int(_state.get("invalid_updates") or 0) + 1
+    reason = "missing_symbol_or_quote"
+    if symbol and row:
+        quote, quote_reason = public_execution._execution_quote(row, side="SELL")
+        fresh, age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(row)})
+        reason = quote_reason or ("stale_quote" if not fresh else "unusable_quote")
+        _state["last_invalid_age_seconds"] = age
+        _state["last_invalid_has_execution_quote"] = bool(quote)
+    counts = dict(_state.get("invalid_reason_counts") or {})
+    counts[reason] = int(counts.get(reason) or 0) + 1
+    _state["invalid_reason_counts"] = counts
+    _state["last_invalid_symbol"] = symbol or None
+    _state["last_invalid_reason"] = reason
+
+
 async def _run_subscription(symbols: list[str]) -> None:
     from public_api_sdk import (
         ApiKeyAuthConfig,
@@ -105,15 +147,13 @@ async def _run_subscription(symbols: list[str]) -> None:
 
     async def on_price_change(change: Any) -> None:
         try:
-            symbol = str(getattr(getattr(change, "instrument", None), "symbol", "")).upper().strip()
+            symbol, row = _stream_quote_payload(change)
             if not symbol:
+                _record_invalid(symbol, row)
                 return
-            row = public_api._sdk_quote_payload(getattr(change, "new_quote"), None)
-            row["ticker"] = symbol
-            row["symbol"] = symbol
             mark = pm_ratchet._fresh_public_execution_mark(row)
             if not mark:
-                _state["invalid_updates"] = int(_state.get("invalid_updates") or 0) + 1
+                _record_invalid(symbol, row)
                 return
             result = await pm_ratchet.process_public_ratchet_marks({symbol: mark}, source="public_sdk_price_stream")
             _state["updates"] = int(_state.get("updates") or 0) + 1
@@ -145,6 +185,9 @@ async def _run_subscription(symbols: list[str]) -> None:
             subscription_id=str(subscription_id),
             poll_seconds=_poll_seconds(),
             last_error=None,
+            invalid_reason_counts={},
+            last_invalid_reason=None,
+            last_invalid_symbol=None,
         )
         try:
             await asyncio.sleep(_refresh_seconds())

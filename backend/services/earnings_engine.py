@@ -723,23 +723,21 @@ async def _alpha_vantage_earnings_for_week(start: date, end: date) -> list[dict[
 
 async def _earnings_calendar_for_week(start: date, end: date) -> list[dict[str, Any]]:
     """Returns reporting tickers for a Monday-Friday window."""
-    source_counts = {"Yahoo earnings calendar": 0, "Nasdaq earnings calendar": 0, "Alpha Vantage earnings calendar": 0}
+    # Yahoo is intentionally not a calendar authority. Its intermittent
+    # failures created noisy scans after the legacy provider was removed.
+    source_counts = {"Nasdaq earnings calendar": 0, "Alpha Vantage earnings calendar": 0}
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     try:
-        yahoo_rows, nasdaq_rows, alpha_rows = await asyncio.gather(
-            asyncio.wait_for(scrapers.fetch_yahoo_upcoming_earnings(days_ahead=14), timeout=float(os.getenv("EARNINGS_YAHOO_TIMEOUT_SEC", "4"))),
+        nasdaq_rows, alpha_rows = await asyncio.gather(
             asyncio.wait_for(_nasdaq_earnings_for_week(start, end), timeout=float(os.getenv("EARNINGS_NASDAQ_TIMEOUT_SEC", "18"))),
             asyncio.wait_for(_alpha_vantage_earnings_for_week(start, end), timeout=float(os.getenv("EARNINGS_ALPHA_TIMEOUT_SEC", "6"))),
             return_exceptions=True,
         )
     except Exception as e:
         logger.warning("earnings calendar source fanout failed: %s", e)
-        yahoo_rows, nasdaq_rows, alpha_rows = [], [], []
+        nasdaq_rows, alpha_rows = [], []
 
-    if isinstance(yahoo_rows, Exception):
-        logger.warning("Yahoo earnings calendar failed: %s", yahoo_rows)
-        yahoo_rows = []
     if isinstance(nasdaq_rows, Exception):
         logger.warning("Nasdaq earnings calendar timed out/failed: %s", nasdaq_rows)
         nasdaq_rows = []
@@ -747,23 +745,6 @@ async def _earnings_calendar_for_week(start: date, end: date) -> list[dict[str, 
         logger.warning("Alpha Vantage earnings calendar timed out/failed: %s", alpha_rows)
         alpha_rows = []
 
-    raw = yahoo_rows or []
-    for r in raw or []:
-        try:
-            d = datetime.fromisoformat(r["earnings_date"]).date()
-        except Exception:
-            continue
-        if d < start or d > end:
-            continue
-        key = (r["ticker"], r["earnings_date"])
-        seen.add(key)
-        source_counts["Yahoo earnings calendar"] += 1
-        out.append({
-            "ticker": r["ticker"],
-            "earnings_date": r["earnings_date"],
-            "source": "Yahoo earnings calendar",
-            "sources": ["Yahoo earnings calendar"],
-        })
     for source_rows in (nasdaq_rows or [], alpha_rows or []):
         for r in source_rows:
             source = r.get("source") or "Unknown earnings calendar"
