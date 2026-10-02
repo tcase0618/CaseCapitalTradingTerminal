@@ -96,7 +96,7 @@ def _fresh_public_execution_mark(row: dict[str, Any]) -> float | None:
     from . import public_execution, safety
 
     quote, _reason = public_execution._execution_quote(row, side="SELL")
-    fresh, _age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(row)})
+    fresh, _age = safety.quote_is_fresh({"ts": public_execution._execution_quote_timestamp(row)})
     if not fresh or not quote:
         return None
     mark = _num(quote.get("mid"))

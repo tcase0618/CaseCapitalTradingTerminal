@@ -121,7 +121,7 @@ def _record_invalid(symbol: str, row: dict[str, Any]) -> None:
     reason = "missing_symbol_or_quote"
     if symbol and row:
         quote, quote_reason = public_execution._execution_quote(row, side="SELL")
-        fresh, age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(row)})
+        fresh, age = safety.quote_is_fresh({"ts": public_execution._execution_quote_timestamp(row)})
         reason = quote_reason or ("stale_quote" if not fresh else "unusable_quote")
         _state["last_invalid_age_seconds"] = age
         _state["last_invalid_has_execution_quote"] = bool(quote)

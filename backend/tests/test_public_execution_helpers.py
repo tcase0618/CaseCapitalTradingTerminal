@@ -367,6 +367,21 @@ def test_quote_timestamp_far_in_the_future_is_not_fresh():
     assert safety.quote_is_fresh({"ts": future}) == (False, None)
 
 
+def test_public_execution_uses_oldest_bid_ask_timestamp_not_fresh_last_trade():
+    now = datetime.now(timezone.utc)
+    stale = (now - timedelta(minutes=10)).isoformat()
+    row = {
+        "bid": 10.00,
+        "ask": 10.04,
+        "lastTimestamp": now.isoformat(),
+        "bidTimestamp": stale,
+        "askTimestamp": stale,
+        "quoteTime": now.isoformat(),
+    }
+    assert public_execution._execution_quote_timestamp(row) == stale
+    assert safety.quote_is_fresh({"ts": public_execution._execution_quote_timestamp(row)})[0] is False
+
+
 def test_public_routing_stop_rejection_is_suppressed_not_retried():
     assert public_execution._routing_rejects_stop({
         "protective_order_error": "Public API HTTP 400: Order type Stop and Stop limit are not allowed on lit exchanges."
