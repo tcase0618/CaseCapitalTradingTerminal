@@ -684,9 +684,14 @@ def start_scheduler():
                         failures.append({"stage": "public_pm_ratchet", "reason": exc.__class__.__name__})
                         logger.exception("Public PM ratchet failed")
                     # Coverage is a read-only truth check. Keep it out of the
-                    # failure list: a broker routing limitation must be visible
+                    # entry gate: a broker routing limitation must be visible
                     # without stopping monitoring or new-entry evaluation.
                     protection_coverage = await public_execution.protection_coverage()
+                    if protection_coverage.get("monitored_exit_only_open", 0):
+                        failures.append({
+                            "stage": "public_protection_coverage",
+                            "reason": f"{protection_coverage['monitored_exit_only_open']}_monitored_positions_stale",
+                        })
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
                 logger.exception("Public execution reconciliation failed")
