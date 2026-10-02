@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 _task: asyncio.Task | None = None
 _task_lock = asyncio.Lock()
 _state: dict[str, Any] = {"status": "not_started", "symbols": [], "updates": 0}
+_last_telemetry_persist_at = 0.0
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -130,6 +132,16 @@ def _record_invalid(symbol: str, row: dict[str, Any]) -> None:
     _state["last_invalid_reason"] = reason
 
 
+async def _persist_callback_telemetry() -> None:
+    """Persist stream diagnostics at most twice a minute, not per tick."""
+    global _last_telemetry_persist_at
+    now = time.monotonic()
+    if now - _last_telemetry_persist_at < 30.0:
+        return
+    _last_telemetry_persist_at = now
+    await _persist_state()
+
+
 async def _run_subscription(symbols: list[str]) -> None:
     from public_api_sdk import (
         ApiKeyAuthConfig,
@@ -150,16 +162,19 @@ async def _run_subscription(symbols: list[str]) -> None:
             symbol, row = _stream_quote_payload(change)
             if not symbol:
                 _record_invalid(symbol, row)
+                await _persist_callback_telemetry()
                 return
             mark = pm_ratchet._fresh_public_execution_mark(row)
             if not mark:
                 _record_invalid(symbol, row)
+                await _persist_callback_telemetry()
                 return
             result = await pm_ratchet.process_public_ratchet_marks({symbol: mark}, source="public_sdk_price_stream")
             _state["updates"] = int(_state.get("updates") or 0) + 1
             _state["last_quote_at"] = datetime.now(timezone.utc).isoformat()
             _state["last_symbol"] = symbol
             _state["last_ratchet_result"] = {"ratcheted": result.get("ratcheted", 0), "checked": result.get("checked", 0)}
+            await _persist_callback_telemetry()
         except Exception as exc:
             _state["callback_errors"] = int(_state.get("callback_errors") or 0) + 1
             _state["last_error"] = f"callback:{exc.__class__.__name__}"
