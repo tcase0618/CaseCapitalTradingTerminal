@@ -115,6 +115,16 @@ def test_public_learning_record_requires_verified_attributed_exit():
     assert missing["learning_exclusion_reason"] == "broker_exit_not_verified"
 
 
+def test_public_learning_record_excludes_legacy_attribution():
+    record = public_execution._public_learning_record({
+        "client_order_id": "legacy-1", "ticker": "AAPL", "status": "CLOSED",
+        "broker_exit_verified": True, "realized_pl_pct": 2.5,
+        "strategy_id": "LEGACY_UNATTRIBUTED",
+    })
+    assert record["learning_eligible"] is False
+    assert record["learning_exclusion_reason"] == "strategy_unattributed_or_legacy"
+
+
 def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
     now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
     monkeypatch.setenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180")

@@ -288,3 +288,23 @@ async def test_public_read_path_refreshes_expired_bearer_token_once():
     assert calls[0][2] == "Bearer token"
     assert calls[1][1].endswith("/access-tokens")
     assert calls[2][2] == "Bearer refreshed-token"
+
+
+@pytest.mark.asyncio
+async def test_public_read_path_retries_rate_limit_once(monkeypatch):
+    calls = 0
+
+    async def no_wait(_response, _attempt):
+        return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429) if calls == 1 else httpx.Response(200, json={"positions": []})
+
+    monkeypatch.setattr(public_api, "_apply_rate_limit_backoff", no_wait)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            result = await client.portfolio()
+    assert result == {"positions": []}
+    assert calls == 2
