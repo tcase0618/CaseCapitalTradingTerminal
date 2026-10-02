@@ -307,7 +307,7 @@ async def run_rebalance_cycle() -> dict[str, Any]:
             quote = next((row for row in quote_rows if _ticker(row) == ticker), quote_rows[0] if quote_rows else {})
             sell_quote, quote_reason = public_execution._execution_quote(quote, side="SELL")
             price = _num((sell_quote or {}).get("limit_price"))
-            fresh, age = safety.quote_is_fresh({"ts": public_execution._quote_timestamp(quote)})
+            fresh, age = safety.quote_is_fresh({"ts": public_execution._execution_quote_timestamp(quote)})
             if not fresh or price <= 0 or not sell_quote:
                 skipped.append({"ticker": ticker, "reason": quote_reason or "rebalance_quote_stale_or_unverifiable", "age_seconds": age})
                 continue

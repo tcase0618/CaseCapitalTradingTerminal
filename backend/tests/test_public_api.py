@@ -64,6 +64,7 @@ async def test_public_rest_quotes_normalize_timestamp_for_execution_freshness():
             quote = (await client.quotes(["AAPL"]))["quotes"][0]
     assert quote["symbol"] == "AAPL"
     assert quote["quoteTime"] == "2026-09-14T12:00:02Z"
+    assert quote["executableQuoteTime"] == "2026-09-14T12:00:01Z"
 
 
 def test_public_sdk_quote_uses_newest_market_timestamp():
@@ -79,7 +80,21 @@ def test_public_sdk_quote_uses_newest_market_timestamp():
                 "askTimestamp": "2026-09-09T12:00:30Z",
             }
 
-    assert public_api._sdk_quote_payload(Quote())["quoteTime"] == "2026-09-09T12:01:00Z"
+    payload = public_api._sdk_quote_payload(Quote())
+    assert payload["quoteTime"] == "2026-09-09T12:01:00Z"
+    assert payload["executableQuoteTime"] == "2026-09-09T12:00:30Z"
+
+
+@pytest.mark.asyncio
+async def test_public_option_reads_fail_explicitly_without_sdk_not_against_retired_rest_routes():
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(500))) as http:
+        async with public_api.PublicAPIClient(_cfg(sdk_enabled=False), http, use_sdk=False) as client:
+            with pytest.raises(public_api.PublicAPIError, match="require the enabled Public SDK"):
+                await client.option_expirations("NVDA")
+            with pytest.raises(public_api.PublicAPIError, match="require the enabled Public SDK"):
+                await client.option_chain("NVDA", expiration="2026-10-02")
+            with pytest.raises(public_api.PublicAPIError, match="require the enabled Public SDK"):
+                await client.option_greeks("NVDA261002C00050000")
 
 
 def test_public_defaults_fail_closed_and_mutations_are_blocked(monkeypatch):

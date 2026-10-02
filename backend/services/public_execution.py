@@ -309,7 +309,7 @@ def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False)
         "mid": round(mid, precision),
         "spread_bps": round(spread_bps, 2),
         "limit_price": limit,
-        "quote_time": _quote_timestamp(row),
+        "quote_time": _execution_quote_timestamp(row),
     }, None
 
 
@@ -355,7 +355,7 @@ async def _refresh_exit_quotes(
         for symbol in list(pending):
             row = by_symbol.get(symbol) or {}
             quote, reason = _execution_quote(row, side="SELL", emergency=emergency)
-            fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(row)})
+            fresh, age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(row)})
             if fresh and quote:
                 resolved[symbol] = {"quote": row, "execution_quote": quote, "age_seconds": age, "attempt": attempt}
                 pending.discard(symbol)
@@ -416,6 +416,32 @@ async def _record_exit_quote_unavailable(
 
 def _quote_timestamp(row: dict[str, Any]) -> Any:
     return row.get("quoteTime") or row.get("quote_time") or row.get("timestamp") or row.get("updatedAt")
+
+
+def _execution_quote_timestamp(row: dict[str, Any]) -> Any:
+    """Return the timestamp that actually supports a two-sided limit quote.
+
+    ``quoteTime`` can be a fresh last trade while bid/ask are stale. Where
+    Public supplies bid/ask timestamps, execution must use the older side.
+    Legacy providers without side timestamps retain the generic fallback.
+    """
+    direct = row.get("executableQuoteTime") or row.get("executable_quote_time")
+    if direct:
+        return direct
+    bid_time = row.get("bidTimestamp") or row.get("bid_timestamp")
+    ask_time = row.get("askTimestamp") or row.get("ask_timestamp")
+    if bid_time or ask_time:
+        if not (bid_time and ask_time):
+            return None
+        try:
+            bid_dt = datetime.fromisoformat(str(bid_time).replace("Z", "+00:00"))
+            ask_dt = datetime.fromisoformat(str(ask_time).replace("Z", "+00:00"))
+            bid_dt = bid_dt if bid_dt.tzinfo else bid_dt.replace(tzinfo=timezone.utc)
+            ask_dt = ask_dt if ask_dt.tzinfo else ask_dt.replace(tzinfo=timezone.utc)
+            return bid_time if bid_dt <= ask_dt else ask_time
+        except (TypeError, ValueError):
+            return None
+    return _quote_timestamp(row)
 
 
 def _stop_price(row: dict[str, Any]) -> float:
@@ -1024,7 +1050,7 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                 quote = by_symbol.get(ticker) or {}
                 quote_plan, quote_reason = _execution_quote(quote, side="BUY")
                 price = _num((quote_plan or {}).get("limit_price"))
-                fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote)})
+                fresh, age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(quote)})
                 rows[ticker] = {
                     "ticker": ticker,
                     "fresh": bool(fresh and price > 0 and quote_plan),
@@ -1035,7 +1061,7 @@ async def refresh_execution_freshness(pm_rows: list[dict[str, Any]]) -> dict[str
                     "quote_reason": quote_reason,
                     "age_seconds": age,
                     "source": "public",
-                    "quote_time": _quote_timestamp(quote),
+                    "quote_time": _execution_quote_timestamp(quote),
                     "attempt": attempt,
                 }
                 if fresh and price > 0 and quote_plan:
@@ -1266,7 +1292,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if not ticker or price <= 0:
                 fresh, age = False, None
             else:
-                fresh, age = safety.quote_is_fresh({"ts": _quote_timestamp(quote_row)})
+                fresh, age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(quote_row)})
             if ticker in active_halts:
                 rejected.append({"ticker": ticker, "reason": "public_symbol_actively_halted"})
                 continue
@@ -1305,7 +1331,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 final_row = next((item for item in final_rows if _symbol(item) == ticker), final_rows[0] if final_rows else {})
                 final_quote, final_quote_reason = _execution_quote(final_row, side="BUY")
                 final_price = _num((final_quote or {}).get("limit_price"))
-                final_fresh, final_age = safety.quote_is_fresh({"ts": _quote_timestamp(final_row)})
+                final_fresh, final_age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(final_row)})
             except Exception:
                 final_price, final_fresh, final_age, final_quote, final_quote_reason = 0.0, False, None, None, "public_final_quote_unavailable"
             if not final_fresh or final_price <= 0 or not final_quote:

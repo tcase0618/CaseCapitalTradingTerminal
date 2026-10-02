@@ -156,6 +156,19 @@ def _sdk_quote_payload(quote: Any, option_type: str | None = None) -> dict[str, 
         except (TypeError, ValueError):
             continue
     newest_timestamp = max(parsed_timestamps, key=lambda item: item[0])[1] if parsed_timestamps else (timestamp_values[0] if timestamp_values else None)
+
+    # A last trade may be newer than the NBBO. Keep that useful display mark,
+    # but price orders from the older side of a two-sided bid/ask quote. The
+    # quote is only as current as its oldest executable side.
+    bid_ask_values = [row.get(key) for key in ("bidTimestamp", "askTimestamp") if row.get(key)]
+    parsed_bid_ask = []
+    for value in bid_ask_values:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            parsed_bid_ask.append((parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc), value))
+        except (TypeError, ValueError):
+            continue
+    executable_quote_time = min(parsed_bid_ask, key=lambda item: item[0])[1] if len(parsed_bid_ask) == 2 else None
     flat = {
         **row,
         "symbol": symbol,
@@ -177,6 +190,7 @@ def _sdk_quote_payload(quote: Any, option_type: str | None = None) -> dict[str, 
         "theta": greeks.get("theta"),
         "vega": greeks.get("vega"),
         "quoteTime": newest_timestamp,
+        "executableQuoteTime": executable_quote_time,
     }
     if option_type:
         flat["type"] = option_type
@@ -392,7 +406,7 @@ class PublicAPIClient:
                 account_id=self.cfg.account_id,
             )
             return result.model_dump(by_alias=True, mode="json")
-        return await self._post("/userapigateway/marketdata/options/expirations", {"symbol": symbol.upper()})
+        raise PublicAPIError("Public option expirations require the enabled Public SDK; the REST fallback is unavailable")
 
     async def option_chain(self, symbol: str, expiration: str | None = None, option_type: str | None = None) -> dict[str, Any]:
         if self._sdk:
@@ -419,15 +433,13 @@ class PublicAPIClient:
                 elif wanted in {"PUT", "P"}:
                     payload["calls"] = []
             return payload
-        payload: dict[str, Any] = {"symbol": symbol.upper()}
-        if expiration:
-            payload["expirationDate"] = expiration
-        if option_type:
-            payload["type"] = option_type.upper()
-        return await self._post("/userapigateway/marketdata/options/chain", payload)
+        raise PublicAPIError("Public option chains require the enabled Public SDK; the REST fallback is unavailable")
 
     async def option_greeks(self, option_symbol: str) -> dict[str, Any]:
-        return await self._get(f"/userapigateway/marketdata/options/{option_symbol.upper()}/greeks")
+        if self._sdk:
+            result = await self._sdk.get_option_greek(option_symbol.upper(), account_id=self.cfg.account_id)
+            return result.model_dump(by_alias=True, mode="json")
+        raise PublicAPIError("Public option greeks require the enabled Public SDK; the REST fallback is unavailable")
 
     async def bars(self, symbol: str, days: int = 120) -> dict[str, Any]:
         """Return Public daily regular-session bars in terminal format."""
