@@ -214,6 +214,51 @@ def test_public_portfolio_order_index_uses_public_uuid_order_id():
 
 
 @pytest.mark.asyncio
+async def test_public_order_search_overrides_incomplete_portfolio_order_feed():
+    class Client:
+        async def search_orders(self, **_kwargs):
+            return {"orders": [{"orderId": "uuid-order", "status": "FILLED", "filledQuantity": "1"}]}
+
+    orders, detail = await public_execution._broker_orders_with_search(
+        Client(),
+        {"orders": [{"orderId": "uuid-order", "status": "NEW"}]},
+    )
+    assert orders["uuid-order"]["status"] == "FILLED"
+    assert detail["search_ok"] is True
+    assert detail["source"] == "public_order_search+portfolio"
+
+
+@pytest.mark.asyncio
+async def test_public_order_search_failure_keeps_read_only_portfolio_fallback():
+    class Client:
+        async def search_orders(self, **_kwargs):
+            raise RuntimeError("temporary broker outage")
+
+    orders, detail = await public_execution._broker_orders_with_search(
+        Client(),
+        {"orders": [{"orderId": "uuid-order", "status": "NEW"}]},
+    )
+    assert orders["uuid-order"]["status"] == "NEW"
+    assert detail["search_ok"] is False
+    assert detail["reason"] == "public_order_search_failed:RuntimeError"
+
+
+def test_public_broker_protection_capability_never_calls_fractional_or_24h_monitoring_broker_protected(monkeypatch):
+    monkeypatch.delenv("PUBLIC_BRACKET_PROTECTION_ENABLED", raising=False)
+    fractional = public_execution._broker_protection_capability({"amount": 6, "session": "CORE"}, 9.5)
+    overnight = public_execution._broker_protection_capability({"quantity": 1, "session": "TWENTY_FOUR_HOURS"}, 9.5)
+    core_whole = public_execution._broker_protection_capability({"quantity": 1, "session": "CORE"}, 9.5)
+    assert fractional["mode"] == "MONITORED_EXIT_ONLY"
+    assert overnight["mode"] == "MONITORED_EXIT_ONLY"
+    assert core_whole["eligible"] is True
+    assert core_whole["enabled"] is False
+    monkeypatch.setenv("PUBLIC_BRACKET_PROTECTION_ENABLED", "true")
+    enabled = public_execution._broker_protection_capability({"quantity": 1, "session": "CORE"}, 9.5)
+    assert enabled["mode"] == "BROKER_OTO_STOP"
+    assert enabled["enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_public_order_lookup_falls_back_to_portfolio_order_feed():
     class Client:
         async def get_order(self, _order_id):
@@ -277,6 +322,21 @@ def test_public_cash_buying_power_does_not_use_margin_buying_power():
     }) is None
 
 
+def test_public_preflight_economics_keeps_missing_fees_unknown_and_sums_known_components():
+    economics = public_execution._preflight_economics({
+        "orderValue": "6.00",
+        "buyingPowerRequirement": "6.00",
+        "estimatedCommission": "0.01",
+        "estimatedExecutionFee": "0.02",
+        "regulatoryFees": {"sec": "0.003", "taf": "0.001"},
+        "priceIncrement": "0.01",
+    })
+    assert economics["order_value"] == 6.0
+    assert economics["estimated_total_fees"] == 0.034
+    assert economics["price_increment"] == 0.01
+    assert public_execution._preflight_economics({})["estimated_total_fees"] is None
+
+
 def test_public_account_permission_blocks_close_only_accounts():
     assert public_execution._account_allows_buys(
         {"accounts": [{"accountId": "acct-1", "tradePermissions": "CLOSE_ONLY"}]},
@@ -333,6 +393,8 @@ async def test_public_execution_analytics_reports_slippage_protection_and_strate
                 "broker_base": "public", "fill_status": "FILLED", "limit_price": 10,
                 "filled_avg_price": 10.05, "qty_remaining": 1,
                 "protective_order_id": "stop-1", "protective_order_status": "SUBMITTED", "strategy_id": "lottery_gap",
+                "execution_quote": {"mid": 10.02},
+                "public_preflight_economics": {"estimated_total_fees": 0.03},
             }]
 
     class FakeCollection:
@@ -345,6 +407,8 @@ async def test_public_execution_analytics_reports_slippage_protection_and_strate
     assert result["protected_filled_records"] == 1
     assert result["protection_coverage_pct"] == 100.0
     assert result["slippage_bps"]["avg"] == 50.0
+    assert result["arrival_mid_slippage_bps"]["avg"] == 29.94
+    assert result["preflight_estimated_fees_usd"] == {"n": 1, "total": 0.03, "avg": 0.03}
     assert result["by_strategy"] == {"lottery_gap": 1}
 
 

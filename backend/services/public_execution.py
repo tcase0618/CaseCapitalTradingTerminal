@@ -40,6 +40,17 @@ def monitored_exit_override_enabled() -> bool:
     return os.getenv("PUBLIC_ALLOW_MONITORED_EXIT_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def broker_bracket_protection_enabled() -> bool:
+    """Whether the separately validated Public bracket path may transmit.
+
+    Public brackets are not interchangeable with the terminal's 24/5
+    fractional workflow: the broker requires a whole-share CORE-session order.
+    Keep this opt-in until a read-only preflight confirms the account's exact
+    routing capability.
+    """
+    return os.getenv("PUBLIC_BRACKET_PROTECTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _monitored_exit_max_age_seconds() -> int:
     try:
         return max(60, min(600, int(os.getenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180"))))
@@ -240,6 +251,44 @@ def _orders_by_id(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return indexed
 
 
+async def _broker_orders_with_search(
+    client: public_api.PublicAPIClient,
+    portfolio_snapshot: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Merge Public order-search truth over the portfolio convenience feed.
+
+    Portfolio orders are useful but may be incomplete. Public's documented
+    order-search response includes terminal status, fills, rejects, and legs;
+    when available it takes precedence. The legacy client fallback keeps old
+    tests and staged deployments observable without inventing broker state.
+    """
+    combined = _orders_by_id(portfolio_snapshot)
+    search = getattr(client, "search_orders", None)
+    if not callable(search):
+        return combined, {"source": "portfolio_only", "search_ok": False, "reason": "client_search_orders_unavailable"}
+    now = datetime.now(timezone.utc)
+    try:
+        payload = await search(
+            created_after=(now - timedelta(days=30)).isoformat().replace("+00:00", "Z"),
+            created_before=now.isoformat().replace("+00:00", "Z"),
+        )
+        searched = _orders_by_id(payload)
+        combined.update(searched)
+        return combined, {
+            "source": "public_order_search+portfolio",
+            "search_ok": True,
+            "search_order_count": len(searched),
+            "portfolio_order_count": len(_orders_by_id(portfolio_snapshot)),
+        }
+    except Exception as exc:
+        logger.warning("Public order search unavailable; falling back to portfolio/order-V2: %s", exc.__class__.__name__)
+        return combined, {
+            "source": "portfolio_only",
+            "search_ok": False,
+            "reason": f"public_order_search_failed:{exc.__class__.__name__}",
+        }
+
+
 async def _get_order_with_portfolio_fallback(
     client: public_api.PublicAPIClient,
     order_id: str,
@@ -273,6 +322,44 @@ def _quote_sides(row: dict[str, Any]) -> tuple[float, float]:
         _num(row.get("bid") or row.get("bidPrice")),
         _num(row.get("ask") or row.get("askPrice")),
     )
+
+
+def _preflight_economics(payload: dict[str, Any] | None) -> dict[str, float | None]:
+    """Normalize Public's non-mutating order economics for audit and research.
+
+    Values are evidence from the broker preflight, not a forecast of a fill.
+    Unknown fields stay ``None`` so downstream research cannot mistake missing
+    cost data for a zero-cost trade.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    regulatory = data.get("regulatoryFees") or data.get("regulatory_fees") or {}
+    regulatory_total = None
+    if isinstance(regulatory, dict):
+        values = [_num(value, -1.0) for value in regulatory.values()]
+        known = [value for value in values if value >= 0]
+        regulatory_total = round(sum(known), 6) if known else None
+    def known(*keys: str) -> float | None:
+        for key in keys:
+            value = _num(data.get(key), -1.0)
+            if value >= 0:
+                return value
+        return None
+    commission = known("estimatedCommission", "estimated_commission")
+    execution_fee = known("estimatedExecutionFee", "estimated_execution_fee")
+    explicit_total = known("estimatedFees", "estimated_fees")
+    components = [value for value in (commission, execution_fee, regulatory_total) if value is not None]
+    estimated_total = explicit_total if explicit_total is not None else (round(sum(components), 6) if components else None)
+    return {
+        "order_value": known("orderValue", "order_value"),
+        "estimated_cost": known("estimatedCost", "estimated_cost"),
+        "buying_power_requirement": known("buyingPowerRequirement", "buying_power_requirement"),
+        "estimated_quantity": known("estimatedQuantity", "estimated_quantity"),
+        "estimated_commission": commission,
+        "estimated_execution_fee": execution_fee,
+        "estimated_regulatory_fees": regulatory_total,
+        "estimated_total_fees": estimated_total,
+        "price_increment": known("priceIncrement", "price_increment"),
+    }
 
 
 def _max_equity_spread_bps() -> float:
@@ -466,6 +553,33 @@ def _routing_rejects_stop(trade: dict[str, Any]) -> bool:
     """Recognize Public's documented routing rejection without retry storms."""
     error = str(trade.get("protective_order_error") or "").lower()
     return "not allowed on lit exchanges" in error or '"code":145' in error.replace(" ", "")
+
+
+def _broker_protection_capability(order_shape: dict[str, Any], stop_price: float) -> dict[str, Any]:
+    """Describe the protection Public can *actually* attach to an entry.
+
+    A broker bracket/OTO stop is eligible only for a whole-share, CORE-session
+    entry. Fractional and 24/5 positions must remain explicitly classified as
+    terminal-monitored; they must never be displayed as broker-protected.
+    """
+    session = str(order_shape.get("session") or "").upper()
+    quantity = _num(order_shape.get("quantity"))
+    whole_share = quantity >= 1 and abs(quantity - round(quantity)) < 1e-8
+    eligible = bool(session == "CORE" and whole_share and stop_price > 0)
+    if not eligible:
+        reason = "public_bracket_requires_core_whole_share_stop"
+    elif not broker_bracket_protection_enabled():
+        reason = "public_bracket_feature_not_enabled"
+    else:
+        reason = None
+    return {
+        "eligible": eligible,
+        "enabled": bool(eligible and broker_bracket_protection_enabled()),
+        "mode": "BROKER_OTO_STOP" if eligible and broker_bracket_protection_enabled() else "MONITORED_EXIT_ONLY",
+        "reason": reason,
+        "session": session,
+        "whole_share_quantity": quantity if whole_share else None,
+    }
 
 
 def _public_position_mark(raw: dict[str, Any]) -> tuple[float, float, Any]:
@@ -1355,6 +1469,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             if not order_shape:
                 rejected.append({"ticker": ticker, "reason": shape_reason, "allocation_usd": amount, "limit_price": price})
                 continue
+            protection_capability = _broker_protection_capability(order_shape, stop_price)
             client_id = execution_safety.stable_client_order_id("public_pm", cycle_id or "", ticker, amount, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity", client_order_id=client_id, symbol=ticker, side="buy", metadata={"amount": amount, "price": price, "cycle_id": cycle_id})
             if not claim.get("ok"):
@@ -1405,6 +1520,13 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "execution_target_mode": "RATCHET_ONLY_PROXY_TARGET" if proxy_target else "STRUCTURAL_TARGET",
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
                 "current_stop": stop_price, "pm_active_stop": stop_price,
+                "broker_protection_capability": protection_capability,
+                "protection_state": protection_capability["mode"],
+                "protection_note": (
+                    "Broker-linked bracket protection is eligible but disabled pending an account-specific preflight contract check."
+                    if protection_capability["eligible"] and not protection_capability["enabled"]
+                    else "This position requires the terminal's fresh-quote monitored exit path."
+                ),
                 "pm_ratchet_plan": ratchet_plan, "submitted_at": datetime.now(timezone.utc).isoformat(),
                 "structural_target": structural_target or None,
                 "public_phase_plan": phase_plan,
@@ -1413,6 +1535,7 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 "phase1_target": phase_plan.get("phase1_target"),
                 "phase2_target": phase_plan.get("phase2_target"),
                 "public_preflight": result.get("preflight"),
+                "public_preflight_economics": _preflight_economics(result.get("preflight")),
                 **attribution,
                 "strategy_attribution": attribution,
             }))
@@ -1430,7 +1553,7 @@ async def reconcile() -> dict[str, Any]:
     db = get_db()
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         portfolio_snapshot = await client.portfolio()
-        portfolio_orders = _orders_by_id(portfolio_snapshot)
+        broker_orders, broker_order_reconciliation = await _broker_orders_with_search(client, portfolio_snapshot)
         # Keep polling filled entries as well as pending entries.  DAY
         # protective stops can expire outside core hours and must be re-armed
         # from the broker-confirmed fill rather than left unprotected.
@@ -1457,7 +1580,7 @@ async def reconcile() -> dict[str, Any]:
                         current = await _get_order_with_portfolio_fallback(
                             client,
                             str(trade.get("public_order_id")),
-                            portfolio_orders,
+                            broker_orders,
                         )
                         confirmed = str((current or {}).get("status") or (current or {}).get("orderStatus") or "").upper()
                         if confirmed not in {"CANCELLED", "CANCELED", "EXPIRED"}:
@@ -1476,7 +1599,7 @@ async def reconcile() -> dict[str, Any]:
                 order = await _get_order_with_portfolio_fallback(
                     client,
                     str(trade.get("public_order_id")),
-                    portfolio_orders,
+                    broker_orders,
                 )
             except Exception:
                 poll_errors += 1
@@ -1573,7 +1696,7 @@ async def reconcile() -> dict[str, Any]:
         for trade in emergency_trades:
             emergency_id = str(trade.get("emergency_exit_order_id"))
             try:
-                emergency = await _get_order_with_portfolio_fallback(client, emergency_id, portfolio_orders)
+                emergency = await _get_order_with_portfolio_fallback(client, emergency_id, broker_orders)
             except Exception:
                 poll_errors += 1
                 continue
@@ -1625,7 +1748,7 @@ async def reconcile() -> dict[str, Any]:
                 protective = await _get_order_with_portfolio_fallback(
                     client,
                     str(protective_id),
-                    portfolio_orders,
+                    broker_orders,
                 )
             except Exception:
                 poll_errors += 1
@@ -1725,7 +1848,7 @@ async def reconcile() -> dict[str, Any]:
                 except Exception:
                     logger.exception("Lottery exit reconciliation flag failed for Public order %s", trade.get("public_order_id"))
                 closed += 1
-        phase_updates = await _reconcile_public_phase_exits(client, portfolio_orders)
+        phase_updates = await _reconcile_public_phase_exits(client, broker_orders)
         order_updates += phase_updates["updates"]
         poll_errors += phase_updates["poll_errors"]
         history_reconciliation = await _reconcile_closed_broker_history(client)
@@ -1751,6 +1874,7 @@ async def reconcile() -> dict[str, Any]:
         "learning_sync": learning_sync,
         "legacy_attribution_labeled": legacy_labeled,
         "phase_exit_reconciliation": phase_updates,
+        "broker_order_reconciliation": broker_order_reconciliation,
         "broker": BROKER_BASE,
     }
     state_update = {"last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_result": result}
@@ -2188,6 +2312,8 @@ async def analytics(limit: int = 500) -> dict[str, Any]:
     rows = await db.tf_trades.find({"broker_base": BROKER_BASE}, {"_id": 0}).sort("submitted_at", -1).to_list(max(1, min(limit, 5000)))
     status_counts = Counter(str(row.get("fill_status") or row.get("status") or "UNKNOWN").upper() for row in rows)
     slippage_bps: list[float] = []
+    arrival_mid_slippage_bps: list[float] = []
+    estimated_fee_usd: list[float] = []
     by_strategy: Counter[str] = Counter()
     filled = 0
     protected = 0
@@ -2198,6 +2324,12 @@ async def analytics(limit: int = 500) -> dict[str, Any]:
         limit_price = _num(row.get("limit_price"))
         if fill_price > 0 and limit_price > 0:
             slippage_bps.append(round(((fill_price - limit_price) / limit_price) * 10000, 2))
+        arrival_mid = _num((row.get("execution_quote") or {}).get("mid"))
+        if fill_price > 0 and arrival_mid > 0:
+            arrival_mid_slippage_bps.append(round(((fill_price - arrival_mid) / arrival_mid) * 10000, 2))
+        preflight_fees = _num((row.get("public_preflight_economics") or {}).get("estimated_total_fees"), -1.0)
+        if preflight_fees >= 0:
+            estimated_fee_usd.append(preflight_fees)
         if str(row.get("fill_status") or "").upper() in {"FILLED", "PARTIALLY_FILLED"} or _qty(row) > 0:
             filled += 1
             if row.get("protective_order_id") and row.get("protective_order_status") == "SUBMITTED":
@@ -2212,5 +2344,7 @@ async def analytics(limit: int = 500) -> dict[str, Any]:
         "protected_filled_records": protected,
         "protection_coverage_pct": round(protected / filled * 100, 2) if filled else None,
         "slippage_bps": {"n": len(slippage_bps), "avg": round(sum(slippage_bps) / len(slippage_bps), 2) if slippage_bps else None, "worst": max(slippage_bps) if slippage_bps else None},
+        "arrival_mid_slippage_bps": {"n": len(arrival_mid_slippage_bps), "avg": round(sum(arrival_mid_slippage_bps) / len(arrival_mid_slippage_bps), 2) if arrival_mid_slippage_bps else None, "worst": max(arrival_mid_slippage_bps) if arrival_mid_slippage_bps else None},
+        "preflight_estimated_fees_usd": {"n": len(estimated_fee_usd), "total": round(sum(estimated_fee_usd), 4) if estimated_fee_usd else None, "avg": round(sum(estimated_fee_usd) / len(estimated_fee_usd), 4) if estimated_fee_usd else None},
         "by_strategy": dict(by_strategy),
     }

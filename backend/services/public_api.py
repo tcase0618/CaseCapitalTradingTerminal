@@ -461,6 +461,42 @@ class PublicAPIClient:
             "dataFeed": "public",
         }
 
+    async def intraday_bars(
+        self,
+        symbol: str,
+        *,
+        period: str = "DAY",
+        aggregation: str = "ONE_MINUTE",
+        trading_session: str = "ALL_SESSIONS",
+    ) -> dict[str, Any]:
+        """Fetch documented Public intraday bars without collapsing sessions.
+
+        This is intentionally separate from :meth:`bars`, whose historical
+        callers expect daily regular-session bars.  The scan and execution
+        research paths can opt into this explicit 24/5 payload and retain the
+        source's pre-market, regular, after-market, and overnight segments.
+        """
+        allowed_periods = {"DAY", "WEEK", "MONTH", "QUARTER", "HALF_YEAR", "YEAR", "FIVE_YEARS", "TEN_YEARS", "ALL", "YTD"}
+        allowed_aggregations = {"ONE_MINUTE", "FIVE_MINUTES", "TEN_MINUTES", "FIFTEEN_MINUTES", "THIRTY_MINUTES", "ONE_HOUR", "ONE_DAY", "ONE_WEEK", "ONE_MONTH", "THREE_MONTHS", "SIX_MONTHS", "ONE_YEAR"}
+        allowed_sessions = {"REGULAR_HOURS", "REGULAR_AND_EXTENDED_HOURS", "ALL_SESSIONS"}
+        wanted_period = str(period).upper()
+        wanted_aggregation = str(aggregation).upper()
+        wanted_session = str(trading_session).upper()
+        if wanted_period not in allowed_periods:
+            raise PublicAPIError(f"Unsupported Public bar period: {period}")
+        if wanted_aggregation not in allowed_aggregations:
+            raise PublicAPIError(f"Unsupported Public bar aggregation: {aggregation}")
+        if wanted_session not in allowed_sessions:
+            raise PublicAPIError(f"Unsupported Public trading session toggle: {trading_session}")
+        payload = await self._get(
+            f"/userapigateway/historicdata/EQUITY/{symbol.upper().strip()}/{wanted_period}/{wanted_aggregation}",
+            tradingSessionToggle=wanted_session,
+        )
+        payload["dataProvider"] = "PUBLIC_BARS_V2"
+        payload["dataFeed"] = "public"
+        payload["tradingSessionToggle"] = wanted_session
+        return payload
+
     async def strategy_quote(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
         """Return a combined quote for a multi-leg option strategy.
 
@@ -550,6 +586,10 @@ class PublicAPIClient:
         expiration_time: datetime | str | None = None,
         session: str = "CORE",
         order_id: str | None = None,
+        order_class: str = "SIMPLE",
+        take_profit: float | None = None,
+        stop_loss: float | None = None,
+        stop_loss_limit: float | None = None,
     ) -> dict[str, Any]:
         if (amount is None) == (quantity is None):
             raise PublicAPIError("Public equity order requires exactly one of amount or quantity")
@@ -578,6 +618,21 @@ class PublicAPIClient:
             precision = 4 if value < 1 else 2
             return f"{value:.{precision}f}"
 
+        normalized_order_class = str(order_class or "SIMPLE").upper()
+        if normalized_order_class not in {"SIMPLE", "BRACKET", "OCO", "OTO"}:
+            raise PublicAPIError(f"Unsupported Public order class: {order_class}")
+        if normalized_order_class != "SIMPLE":
+            if amount is not None or quantity is None:
+                raise PublicAPIError("Public bracket orders require whole-share quantity, not amount")
+            if market_session != "CORE":
+                raise PublicAPIError("Public bracket orders require the CORE market session")
+            if stop_price is not None:
+                raise PublicAPIError("Public bracket entry must use stop_loss, not a parent stop_price")
+            if limit_price is None and normalized_order_class == "OCO":
+                raise PublicAPIError("Public OCO bracket entry requires a limit price")
+            if take_profit is None and stop_loss is None:
+                raise PublicAPIError("Public bracket order requires take_profit and/or stop_loss")
+
         payload: dict[str, Any] = {
             "orderId": PublicAPIClient._order_id(order_id),
             "instrument": {"symbol": symbol.upper().strip(), "type": "EQUITY"},
@@ -586,6 +641,7 @@ class PublicAPIClient:
             "expiration": expiration,
             "equityMarketSession": market_session,
             "openCloseIndicator": "OPEN" if side.upper() == "BUY" else "CLOSE",
+            "orderClass": normalized_order_class,
         }
         if amount is not None:
             payload["amount"] = f"{float(amount):.2f}"
@@ -596,6 +652,13 @@ class PublicAPIClient:
             payload["limitPrice"] = _format_price(float(limit_price))
         if stop_price is not None:
             payload["stopPrice"] = _format_price(float(stop_price))
+        if take_profit is not None:
+            payload["takeProfit"] = {"limitPrice": _format_price(float(take_profit))}
+        if stop_loss is not None:
+            loss: dict[str, str] = {"stopPrice": _format_price(float(stop_loss))}
+            if stop_loss_limit is not None:
+                loss["limitPrice"] = _format_price(float(stop_loss_limit))
+            payload["stopLoss"] = loss
         return payload
 
     async def preflight_single_leg(self, payload: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
@@ -628,6 +691,10 @@ class PublicAPIClient:
         session: str = "CORE",
         client_order_id: str | None = None,
         account_id: str | None = None,
+        order_class: str = "SIMPLE",
+        take_profit: float | None = None,
+        stop_loss: float | None = None,
+        stop_loss_limit: float | None = None,
     ) -> dict[str, Any]:
         """Preflight, then submit one Public equity order.
 
@@ -646,6 +713,10 @@ class PublicAPIClient:
             expiration_time=expiration_time,
             session=session,
             order_id=client_order_id,
+            order_class=order_class,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            stop_loss_limit=stop_loss_limit,
         )
         preflight = await self.preflight_single_leg(payload, account_id=account_id)
         # Public communicates validation failures through HTTP errors. A
@@ -666,7 +737,44 @@ class PublicAPIClient:
 
     async def get_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
         account = self._account(account_id)
+        # Public's current contract documents the V2 route. Keep a read-only
+        # legacy fallback for broker accounts still serving the older route;
+        # no mutation is attempted by either lookup.
+        try:
+            return await self._request("GET", f"/userapigateway/trading/{account}/order/v2/{order_id}", mutation=True)
+        except PublicAPIError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
         return await self._request("GET", f"/userapigateway/trading/{account}/order/{order_id}", mutation=True)
+
+    async def search_orders(
+        self,
+        *,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        status: str | None = None,
+        symbols: Iterable[str] | None = None,
+        side: str | None = None,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return Public's broker-authoritative recent order history.
+
+        This is a read-only POST endpoint.  It is used as a reconciliation
+        source alongside individual order lookups, never as an order action.
+        """
+        payload: dict[str, Any] = {}
+        if created_after:
+            payload["createdAfter"] = created_after
+        if created_before:
+            payload["createdBefore"] = created_before
+        if status:
+            payload["status"] = str(status).upper()
+        if side:
+            payload["side"] = str(side).upper()
+        wanted = _symbols(symbols or [])
+        if wanted:
+            payload["instruments"] = [{"symbol": symbol, "type": "EQUITY"} for symbol in wanted]
+        return await self._post(f"/userapigateway/trading/{self._account(account_id)}/order/search", payload)
 
     async def cancel_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:
         cfg = self.cfg
