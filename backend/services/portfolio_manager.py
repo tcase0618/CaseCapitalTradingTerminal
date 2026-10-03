@@ -554,6 +554,14 @@ def evaluate_rows(
             "scanner_family": row.get("scanner_family") or (row.get("strategy_scanner") or {}).get("family"),
             "strategy_profile": strategy_profile,
             "source_scan": row.get("source_scan"),
+            # Preserve the discovery contract through PM routing. Execution
+            # and learning must distinguish independent evidence from a source
+            # label or a generic score.
+            "signal_groups": list(row.get("signal_groups") or []),
+            "independent_signal_count": row.get("independent_signal_count"),
+            "strategy_fits": list(row.get("strategy_fits") or []),
+            "provenance": row.get("provenance") or {},
+            "triggers": list(row.get("triggers") or []),
             "target_source": row.get("target_source"),
             "target_is_proxy": bool(row.get("target_is_proxy")),
             "signals": signals,

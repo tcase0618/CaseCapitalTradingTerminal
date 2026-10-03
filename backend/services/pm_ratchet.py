@@ -239,7 +239,12 @@ async def process_public_ratchet_marks(marks: dict[str, float], *, source: str =
     }
     rows = await db.tf_trades.find(filters, {"_id": 0}).to_list(500)
     result = await _apply_public_ratchet_marks(rows, prices, source=source)
-    return {"ok": True, "source": source, **result}
+    return {
+        "ok": not result.get("unpriced"),
+        "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
+        "source": source,
+        **result,
+    }
 
 
 async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, Any]:
@@ -272,7 +277,12 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
     if broker_base == "public":
         public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades])
         result = await _apply_public_ratchet_marks(open_trades, public_prices, source="public_rest_monitor")
-        return {"broker_base": broker_base, **result}
+        return {
+            "ok": not result.get("unpriced"),
+            "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
+            "broker_base": broker_base,
+            **result,
+        }
     actions: list[dict[str, Any]] = []
     coverage_initialized: list[str] = []
     unpriced: list[str] = []

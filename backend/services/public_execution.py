@@ -23,6 +23,14 @@ PUBLIC_PHASE2_MULTIPLIER = 1.50
 PUBLIC_PHASE3_TRAIL_PCT = 0.50
 PUBLIC_DEFAULT_MAX_EQUITY_SPREAD_BPS = 300.0
 
+OUTCOME_THESIS_WIN = "THESIS_WIN"
+OUTCOME_THESIS_LOSS = "THESIS_LOSS"
+OUTCOME_STOP_LOSS = "STOP_LOSS"
+OUTCOME_RATCHET_EXIT = "RATCHET_EXIT"
+OUTCOME_EXECUTION_ANOMALY = "EXECUTION_ANOMALY"
+OUTCOME_BROKER_RECONCILIATION_EXIT = "BROKER_RECONCILIATION_EXIT"
+OUTCOME_OPERATOR_EXIT = "OPERATOR_EXIT"
+
 
 def enabled() -> bool:
     cfg = public_api.config()
@@ -127,6 +135,174 @@ def _strategy_attribution(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _utc_datetime(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _minimum_thesis_hold_seconds() -> int:
+    """Minimum observed lifecycle before an exit can teach entry selection."""
+    try:
+        return max(60, min(3_600, int(os.getenv("PUBLIC_MIN_THESIS_HOLD_SECONDS", "300"))))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _observed_hold_seconds(trade: dict[str, Any]) -> int | None:
+    entry = _utc_datetime(trade.get("filled_at") or trade.get("submitted_at"))
+    close = _utc_datetime(trade.get("closed_at"))
+    if not entry or not close:
+        return None
+    return max(0, int((close - entry).total_seconds()))
+
+
+def _classify_trade_outcome(trade: dict[str, Any]) -> tuple[str | None, str | None, bool, bool]:
+    """Classify a close before any strategy-learning eligibility is assigned.
+
+    A broker-history match alone is not sufficient evidence for an entry model:
+    an immediate disappearance, an unmatched broker reconciliation, or a
+    manual/operator exit says something about operations, not the thesis.
+    """
+    if str(trade.get("status") or "").upper() != "CLOSED":
+        return None, "position_open", False, False
+    reason = str(trade.get("close_reason") or "").lower()
+    verified = bool(trade.get("broker_exit_verified"))
+    realized = trade.get("realized_pl_pct")
+    try:
+        realized_pct = float(realized) if realized is not None else None
+    except (TypeError, ValueError):
+        realized_pct = None
+    hold_seconds = _observed_hold_seconds(trade)
+    unconfirmed = bool(trade.get("broker_exit_unconfirmed")) or "position_absent" in reason or "unconfirmed" in reason
+    if unconfirmed or (hold_seconds is not None and hold_seconds < _minimum_thesis_hold_seconds()):
+        return OUTCOME_EXECUTION_ANOMALY, "unconfirmed_or_too_short_to_measure_thesis", False, False
+    if hold_seconds is None:
+        return OUTCOME_BROKER_RECONCILIATION_EXIT, "entry_or_close_time_unavailable", False, False
+    if not verified or realized_pct is None:
+        return OUTCOME_BROKER_RECONCILIATION_EXIT, "broker_exit_not_verified", False, False
+    if "operator" in reason or "manual" in reason or "to_cash" in reason:
+        return OUTCOME_OPERATOR_EXIT, "operator_directed_exit", False, True
+    if "ratchet" in reason or "phase" in reason or "trail" in reason:
+        return OUTCOME_RATCHET_EXIT, "ratchet_or_phase_exit", False, True
+    if "protective" in reason or "stop" in reason or "emergency" in reason:
+        return OUTCOME_STOP_LOSS, "protective_exit", False, True
+    return (
+        OUTCOME_THESIS_WIN if realized_pct > 0 else OUTCOME_THESIS_LOSS,
+        None,
+        True,
+        True,
+    )
+
+
+def _day2_entry_gate(row: dict[str, Any]) -> tuple[bool, str | None]:
+    """Keep Day-2 visible while it earns an independently verified sample."""
+    attribution = _strategy_attribution(row)
+    lanes = {str(value).upper() for value in attribution.get("strategy_lanes") or []}
+    is_day2 = "DAY2_CONTINUATION" in lanes or str(attribution.get("strategy_id") or "").lower() == "lottery_day2_continuation"
+    if not is_day2:
+        return True, None
+    if os.getenv("LOTTERY_DAY2_LIVE_AUTOMATION_ENABLED", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False, "lottery_day2_shadow_until_edge_proven"
+    groups = {str(value).upper() for value in row.get("signal_groups") or []}
+    required = {"MOMENTUM", "VOLUME"}
+    confirmations = {"ROTATION", "CATALYST", "SHORT", "ATTENTION", "STRUCTURE"}
+    if not required.issubset(groups) or not groups.intersection(confirmations):
+        return False, "lottery_day2_requires_distinct_confirmation"
+    try:
+        min_score = max(55.0, min(95.0, float(os.getenv("LOTTERY_DAY2_MIN_PM_SCORE", "60"))))
+    except (TypeError, ValueError):
+        min_score = 60.0
+    if _num(row.get("pm_score")) < min_score:
+        return False, "lottery_day2_pm_score_below_minimum"
+    return True, None
+
+
+def _day2_observation(row: dict[str, Any], attribution: dict[str, Any]) -> dict[str, Any] | None:
+    """Persist Day-2 structure without filling missing microstructure with guesses."""
+    lanes = {str(value).upper() for value in attribution.get("strategy_lanes") or []}
+    if "DAY2_CONTINUATION" not in lanes:
+        return None
+    source = row.get("day2_features") or row.get("intraday_structure") or {}
+    if not isinstance(source, dict):
+        source = {}
+    values = {
+        "premarket_change_pct": source.get("premarket_change_pct", row.get("premarket_change_pct")),
+        "gap_retention_pct": source.get("gap_retention_pct", row.get("gap_retention_pct")),
+        "float_turnover": source.get("float_turnover", row.get("float_turnover")),
+        "vwap": source.get("vwap", row.get("vwap")),
+        "first_hour_structure": source.get("first_hour_structure", row.get("first_hour_structure")),
+    }
+    missing = [key for key, value in values.items() if value is None]
+    return {
+        **values,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "quality": "COMPLETE" if not missing else "PARTIAL" if len(missing) < len(values) else "UNAVAILABLE",
+        "missing_fields": missing,
+    }
+
+
+def _entry_decision_packet(
+    row: dict[str, Any],
+    *,
+    attribution: dict[str, Any],
+    quote: dict[str, Any],
+    limit_price: float,
+    stop_price: float,
+    structural_target: float,
+    ratchet_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Freeze the evidence and PM contract available at order submission."""
+    return {
+        "schema_version": "public-equity-entry-v2",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "strategy": {
+            "strategy_id": attribution.get("strategy_id"),
+            "screener_id": attribution.get("screener_id"),
+            "scanner_family": attribution.get("scanner_family"),
+            "lanes": list(attribution.get("strategy_lanes") or []),
+            "source_scan": row.get("source_scan"),
+        },
+        "evidence": {
+            "signals": list(row.get("signals") or []),
+            "signal_groups": list(row.get("signal_groups") or []),
+            "independent_signal_count": row.get("independent_signal_count"),
+            "strategy_fits": list(row.get("strategy_fits") or []),
+            "triggers": list(row.get("triggers") or []),
+            "provenance": dict(row.get("provenance") or {}),
+        },
+        "pm": {
+            "action": str(row.get("action") or "").upper(),
+            "score": row.get("pm_score"),
+            "score_breakdown": dict(row.get("score_breakdown") or {}),
+            "case_score": row.get("case_score"),
+            "strategy_confidence": row.get("strategy_confidence"),
+            "allocation_usd": row.get("allocation_usd"),
+            "reasons": list(row.get("reasons") or []),
+            "cautions": list(row.get("cautions") or []),
+        },
+        "market": {
+            "regime": row.get("regime"),
+            "regime_playbook": row.get("regime_playbook"),
+            "sector": row.get("sector"),
+            "entry_quote": dict(quote or {}),
+            "entry_limit_price": limit_price,
+        },
+        "lifecycle": {
+            "target": structural_target or None,
+            "target_source": row.get("target_source"),
+            "target_is_proxy": bool(row.get("target_is_proxy")),
+            "stop": stop_price,
+            "ratchet_plan": dict(ratchet_plan or {}),
+            "plan": dict(row.get("lifecycle_plan") or {}),
+            "holding_window_days": row.get("horizon_days") or row.get("hold_window_days"),
+        },
+        "day2_observation": _day2_observation(row, attribution),
+    }
+
+
 def _public_learning_record(trade: dict[str, Any]) -> dict[str, Any]:
     """Normalize one Public trade into an outcome-ledger row.
 
@@ -144,6 +320,8 @@ def _public_learning_record(trade: dict[str, Any]) -> dict[str, Any]:
     verified = bool(trade.get("broker_exit_verified")) and realized_pct is not None
     strategy_id = attribution.get("strategy_id") or trade.get("strategy_id") or "UNATTRIBUTED"
     legacy_or_unattributed = strategy_id in {"UNATTRIBUTED", "LEGACY_UNATTRIBUTED"}
+    outcome_class, outcome_reason, entry_learning_eligible, exit_learning_eligible = _classify_trade_outcome(trade)
+    eligible = bool(verified and not legacy_or_unattributed and entry_learning_eligible)
     return {
         "learning_id": f"public-learning:{trade.get('client_order_id')}",
         "client_order_id": trade.get("client_order_id"),
@@ -159,14 +337,20 @@ def _public_learning_record(trade: dict[str, Any]) -> dict[str, Any]:
         "entry_price": _num(trade.get("filled_avg_price") or trade.get("limit_price")) or None,
         "entry_at": trade.get("filled_at") or trade.get("submitted_at"),
         "close_at": trade.get("closed_at"),
+        "hold_seconds": _observed_hold_seconds(trade),
         "status": str(trade.get("status") or "UNKNOWN").upper(),
         "realized_pnl": _num(trade.get("realized_pnl")) if verified else None,
         "realized_pct": realized_pct if verified else None,
         "outcome_verified": verified,
-        "learning_eligible": bool(verified and not legacy_or_unattributed),
-        "learning_exclusion_reason": None if verified and not legacy_or_unattributed else (
-            "broker_exit_not_verified" if closed else "position_open"
-        ) if not legacy_or_unattributed else "strategy_unattributed_or_legacy",
+        "outcome_class": outcome_class,
+        "outcome_reason": outcome_reason,
+        "entry_learning_eligible": eligible,
+        "exit_learning_eligible": bool(verified and not legacy_or_unattributed and exit_learning_eligible),
+        "learning_eligible": eligible,
+        "learning_exclusion_reason": None if eligible else (
+            "strategy_unattributed_or_legacy" if legacy_or_unattributed else outcome_reason or ("broker_exit_not_verified" if closed else "position_open")
+        ),
+        "entry_decision": dict(trade.get("entry_decision") or {}),
         "source": "public_broker_history_reconciliation",
     }
 
@@ -1398,6 +1582,10 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
         for row in approved:
             ticker = _symbol(row)
             amount = _allocation(row)
+            day2_allowed, day2_reason = _day2_entry_gate(row)
+            if not day2_allowed:
+                rejected.append({"ticker": ticker, "reason": day2_reason})
+                continue
             intended_route = str(row.get("route") or "").upper()
             preferred_route = str(row.get("preferred_route") or "").upper()
             if intended_route == "OPTION" or preferred_route == "OPTION":
@@ -1509,14 +1697,29 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 no_capped_tp=bool(ratchet_plan.get("no_capped_tp")),
                 proxy_target=proxy_target,
             )
+            entry_decision = _entry_decision_packet(
+                row,
+                attribution=attribution,
+                quote=final_quote,
+                limit_price=price,
+                stop_price=stop_price,
+                structural_target=structural_target,
+                ratchet_plan=ratchet_plan,
+            )
             await get_db().tf_trades.insert_one(stamped({
                 "client_order_id": client_id, "public_order_id": order_id, "broker_base": BROKER_BASE,
                 "ticker": ticker, "instrument": "EQUITY", "notional": amount, "allocation_usd": amount,
                 "limit_price": price, "pm_action": str(row.get("action") or "").upper(), "pm_score": row.get("pm_score"),
                 "case_score": row.get("case_score"), "strategy_confidence": row.get("strategy_confidence"),
                 "signals": list(row.get("signals") or []), "horizon_days": row.get("horizon_days") or row.get("hold_window_days"),
+                "signal_groups": list(row.get("signal_groups") or []),
+                "independent_signal_count": row.get("independent_signal_count"),
+                "score_breakdown": dict(row.get("score_breakdown") or {}),
+                "regime": row.get("regime"), "regime_playbook": row.get("regime_playbook"),
+                "lifecycle_plan": dict(row.get("lifecycle_plan") or {}),
                 "quote_source": quote_source,
                 "execution_quote": final_quote,
+                "entry_decision": entry_decision,
                 "execution_target_mode": "RATCHET_ONLY_PROXY_TARGET" if proxy_target else "STRUCTURAL_TARGET",
                 "cycle_id": cycle_id, "status": "OPEN", "fill_status": "PENDING", "qty_remaining": 0.0,
                 "current_stop": stop_price, "pm_active_stop": stop_price,
@@ -1713,12 +1916,20 @@ async def reconcile() -> dict[str, Any]:
                     "last_exit_synced_at": datetime.now(timezone.utc).isoformat(),
                 })
                 if remaining <= 0:
+                    entry_price = _num(trade.get("filled_avg_price") or trade.get("limit_price"))
+                    realized_pnl = round((exit_price - entry_price) * exit_qty, 4) if entry_price > 0 else None
                     update.update({
                         "status": "CLOSED",
                         "fill_status": "EXIT_FILLED",
                         "qty_remaining": 0.0,
                         "closed_at": datetime.now(timezone.utc).isoformat(),
                         "close_reason": f"{exit_reason}_filled",
+                        "broker_exit_verified": bool(entry_price > 0 and exit_price > 0),
+                        "broker_exit_price": exit_price or None,
+                        "broker_exit_filled_at": datetime.now(timezone.utc).isoformat(),
+                        "broker_exit_source": "public_direct_emergency_order_fill",
+                        "realized_pnl": realized_pnl,
+                        "realized_pl_pct": round((exit_price - entry_price) / entry_price * 100, 4) if entry_price > 0 else None,
                     })
                 else:
                     update["qty_remaining"] = remaining
@@ -1775,7 +1986,21 @@ async def reconcile() -> dict[str, Any]:
                     "last_exit_synced_at": datetime.now(timezone.utc).isoformat(),
                 }
                 if remaining <= 0:
-                    update.update({"status": "CLOSED", "fill_status": "EXIT_FILLED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_protective_stop_filled"})
+                    entry_price = _num(trade.get("filled_avg_price") or trade.get("limit_price"))
+                    realized_pnl = round((exit_price - entry_price) * exit_qty, 4) if entry_price > 0 else None
+                    update.update({
+                        "status": "CLOSED",
+                        "fill_status": "EXIT_FILLED",
+                        "qty_remaining": 0.0,
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                        "close_reason": "public_protective_stop_filled",
+                        "broker_exit_verified": bool(entry_price > 0 and exit_price > 0),
+                        "broker_exit_price": exit_price or None,
+                        "broker_exit_filled_at": datetime.now(timezone.utc).isoformat(),
+                        "broker_exit_source": "public_direct_protective_order_fill",
+                        "realized_pnl": realized_pnl,
+                        "realized_pl_pct": round((exit_price - entry_price) / entry_price * 100, 4) if entry_price > 0 else None,
+                    })
                 else:
                     update["qty_remaining"] = remaining
                 await db.tf_trades.update_one(
@@ -1837,7 +2062,17 @@ async def reconcile() -> dict[str, Any]:
                 )
                 updated += 1
             elif trade.get("fill_status") == "FILLED":
-                await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_position_absent"}})
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": {
+                        "status": "CLOSED",
+                        "qty_remaining": 0.0,
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                        "close_reason": "public_position_absent",
+                        "broker_exit_unconfirmed": True,
+                        "broker_exit_unconfirmed_at": datetime.now(timezone.utc).isoformat(),
+                    }},
+                )
                 try:
                     from . import lottery
                     await lottery.mark_broker_exit_unconfirmed(
