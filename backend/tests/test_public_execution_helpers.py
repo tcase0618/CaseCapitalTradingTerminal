@@ -95,6 +95,7 @@ async def test_exit_quote_timeout_persists_pending_state_and_alerts(monkeypatch)
 
 
 def test_public_learning_record_requires_verified_attributed_exit():
+    now = datetime.now(timezone.utc)
     base = {
         "client_order_id": "order-1",
         "ticker": "AAPL",
@@ -102,6 +103,8 @@ def test_public_learning_record_requires_verified_attributed_exit():
         "broker_exit_verified": True,
         "realized_pl_pct": 4.25,
         "filled_avg_price": 100.0,
+        "filled_at": now.isoformat(),
+        "closed_at": (now + timedelta(minutes=20)).isoformat(),
         "strategy_id": "CORE",
         "screener_id": "CORE",
         "scanner_family": "CORE",
@@ -780,6 +783,8 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     monkeypatch.setattr(public_execution, "log_activity", _marked)
     monkeypatch.setattr(public_execution, "_public_session_now", lambda: "CORE")
     monkeypatch.setattr("services.trading_halts.fetch_halts", lambda: _clear_halts())
+    monkeypatch.setenv("LOTTERY_DAY2_LIVE_AUTOMATION_ENABLED", "true")
+    monkeypatch.setenv("LOTTERY_DAY2_MIN_PM_SCORE", "60")
 
     pm_row = portfolio_manager.evaluate_rows([{
         "ticker": "AAPL",
@@ -789,11 +794,14 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
         "source_scan": "lottery_gap",
         "scanner_family": "LOTTERY",
         "signals": ["GAP/SURGE", "RVOL"],
+        "signal_groups": ["MOMENTUM", "VOLUME", "CATALYST"],
+        "independent_signal_count": 3,
         "strategy_views": [{"screener_id": "lottery_gap", "family": "LOTTERY", "lane": "DAY2_CONTINUATION"}],
     }], equity=1000, mode="BALANCED")[0]
     pm_row.update({
         "action": "STARTER",
         "allocation_usd": 6,
+        "pm_score": 80,
         "target_is_proxy": True,
         "target_source": "thesis_lane_proxy_pending_validation",
         "ratchet_plan": {"enabled": True, "exit_policy": "STOP_RATCHET_ONLY"},
@@ -814,6 +822,87 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
     assert fake_trades.docs[0]["current_stop"] == 140.0
     assert fake_trades.docs[0]["pm_active_stop"] == 140.0
     assert fake_trades.docs[0]["execution_target_mode"] == "RATCHET_ONLY_PROXY_TARGET"
+    assert fake_trades.docs[0]["entry_decision"]["evidence"]["signal_groups"] == ["MOMENTUM", "VOLUME", "CATALYST"]
+    assert fake_trades.docs[0]["entry_decision"]["pm"]["score"] == 80
+    assert fake_trades.docs[0]["entry_decision"]["day2_observation"]["quality"] == "UNAVAILABLE"
+
+
+def test_day2_entry_gate_defaults_to_shadow_and_requires_distinct_confirmation(monkeypatch):
+    row = {
+        "source_scan": "lottery_day2_continuation",
+        "scanner_family": "LOTTERY",
+        "strategy_views": [{"screener_id": "lottery_day2_continuation", "family": "LOTTERY", "lane": "DAY2_CONTINUATION"}],
+        "signal_groups": ["MOMENTUM", "VOLUME"],
+        "pm_score": 80,
+    }
+    allowed, reason = public_execution._day2_entry_gate(row)
+    assert allowed is False
+    assert reason == "lottery_day2_shadow_until_edge_proven"
+
+    monkeypatch.setenv("LOTTERY_DAY2_LIVE_AUTOMATION_ENABLED", "true")
+    allowed, reason = public_execution._day2_entry_gate(row)
+    assert allowed is False
+    assert reason == "lottery_day2_requires_distinct_confirmation"
+
+    row["signal_groups"].append("CATALYST")
+    row["pm_score"] = 59
+    allowed, reason = public_execution._day2_entry_gate(row)
+    assert allowed is False
+    assert reason == "lottery_day2_pm_score_below_minimum"
+
+    row["pm_score"] = 60
+    allowed, reason = public_execution._day2_entry_gate(row)
+    assert allowed is True
+    assert reason is None
+
+
+def test_public_learning_excludes_immediate_or_unconfirmed_exit_from_strategy_tuning():
+    now = datetime.now(timezone.utc)
+    immediate = {
+        "client_order_id": "public-immediate",
+        "broker_base": "public",
+        "ticker": "ABC",
+        "status": "CLOSED",
+        "strategy_id": "lottery_day2_continuation",
+        "screener_id": "lottery_day2_continuation",
+        "scanner_family": "LOTTERY",
+        "strategy_lanes": ["DAY2_CONTINUATION"],
+        "submitted_at": now.isoformat(),
+        "filled_at": now.isoformat(),
+        "closed_at": (now + timedelta(seconds=1)).isoformat(),
+        "close_reason": "public_position_absent",
+        "broker_exit_unconfirmed": True,
+        "broker_exit_verified": True,
+        "realized_pl_pct": -15.5,
+    }
+    record = public_execution._public_learning_record(immediate)
+    assert record["outcome_class"] == public_execution.OUTCOME_EXECUTION_ANOMALY
+    assert record["learning_eligible"] is False
+    assert record["exit_learning_eligible"] is False
+
+
+def test_public_learning_accepts_only_verified_measured_thesis_outcome():
+    now = datetime.now(timezone.utc)
+    measured = {
+        "client_order_id": "public-thesis",
+        "broker_base": "public",
+        "ticker": "ABC",
+        "status": "CLOSED",
+        "strategy_id": "core_momentum",
+        "screener_id": "core_momentum",
+        "scanner_family": "CORE",
+        "submitted_at": now.isoformat(),
+        "filled_at": now.isoformat(),
+        "closed_at": (now + timedelta(minutes=20)).isoformat(),
+        "close_reason": "pm_thesis_review_exit",
+        "broker_exit_verified": True,
+        "realized_pl_pct": 6.25,
+        "realized_pnl": 0.38,
+    }
+    record = public_execution._public_learning_record(measured)
+    assert record["outcome_class"] == public_execution.OUTCOME_THESIS_WIN
+    assert record["learning_eligible"] is True
+    assert record["entry_learning_eligible"] is True
 
 
 @pytest.mark.asyncio
