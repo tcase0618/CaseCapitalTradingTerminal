@@ -49,6 +49,20 @@ STOCK_SCAN_CADENCE_ET = [
 ]
 
 
+def _noncritical_start_delay_seconds() -> float:
+    """Reserve the start of shared scheduler minutes for protective work."""
+    try:
+        return max(0.0, min(30.0, float(os.environ.get("NONCRITICAL_JOB_START_DELAY_SECONDS", "12"))))
+    except ValueError:
+        return 12.0
+
+
+async def _yield_to_protection_lane() -> None:
+    delay = _noncritical_start_delay_seconds()
+    if delay:
+        await asyncio.sleep(delay)
+
+
 def public_monitor_window_open(now: datetime | None = None) -> bool:
     """Return whether the configured Sunday-to-Friday Public monitor should run.
 
@@ -150,6 +164,7 @@ async def _flow_refresh_job():
     """Every 15min during US market hours - refresh unusual flow on tickers
     from today's scan. Stores into flow_snapshots collection for the dashboard."""
     try:
+        await _yield_to_protection_lane()
         now_et = datetime.now(ET)
         # Skip weekends
         if now_et.weekday() >= 5:
@@ -182,6 +197,7 @@ async def _flow_refresh_job():
 async def _pharma_catalyst_shock_job():
     """Refresh same-day pharma catalyst news during regular market hours."""
     try:
+        await _yield_to_protection_lane()
         now_et = datetime.now(ET)
         if now_et.weekday() >= 5:
             return
@@ -479,6 +495,7 @@ def start_scheduler():
     )
     async def _kronos_forecast_snapshot_job():
         try:
+            await _yield_to_protection_lane()
             from . import kronos
             payload = await kronos.refresh_snapshot()
             status = payload.get("status") or {}
@@ -712,6 +729,7 @@ def start_scheduler():
         portfolio_score_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         public_phase_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
+            await _yield_to_protection_lane()
             from . import options_desk, tail_hunter, safety
             try:
                 from . import public_execution
@@ -962,6 +980,7 @@ def start_scheduler():
 
     async def _execution_authority_refresh_job():
         try:
+            await _yield_to_protection_lane()
             from . import options_desk
 
             snapshot = await persist_live_position_snapshot(triggered_by="scheduler_execution_authority_5m")

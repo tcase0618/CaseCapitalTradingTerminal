@@ -160,3 +160,16 @@ async def company_snapshot(ticker: str, filing_limit: int = 8) -> dict[str, Any]
         snapshot["cache"] = "miss"
 
     return snapshot
+
+
+async def health_probe() -> dict[str, Any]:
+    """Check EdgarTools against an operating company, not an ETF."""
+    ticker = os.environ.get("SEC_HEALTH_PROBE_TICKER", "AAPL").upper().strip() or "AAPL"
+    snapshot = await company_snapshot(ticker, filing_limit=1)
+    return {
+        "ok": bool(snapshot.get("ok")),
+        "provider": "edgartools",
+        "ticker": ticker,
+        "reason": snapshot.get("reason"),
+        "cache": snapshot.get("cache"),
+    }

@@ -203,7 +203,21 @@ async def _run_subscription(symbols: list[str]) -> None:
             subscription_started_at=datetime.now(timezone.utc).isoformat(),
         )
         try:
-            await asyncio.sleep(_refresh_seconds())
+            # Keep the SDK subscription alive while the broker-reconciled
+            # holdings are unchanged. Recreating it on a fixed one-minute
+            # timer produced needless token/session churn and bursts of SDK
+            # diagnostics. Reconnect only when the actual symbol universe
+            # changes or the SDK raises an error to the outer retry loop.
+            while True:
+                await asyncio.sleep(_refresh_seconds())
+                refreshed_symbols = await _held_symbols()
+                if refreshed_symbols != symbols:
+                    await _persist_state(
+                        status="refreshing_symbols",
+                        symbols=symbols,
+                        next_symbols=refreshed_symbols,
+                    )
+                    return
         finally:
             await _unsubscribe(client.price_stream, subscription_id)
 
