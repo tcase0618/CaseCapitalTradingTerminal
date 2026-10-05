@@ -172,7 +172,7 @@ async def _flow_refresh_job():
         # Market hours 9:30-16:00 ET (CronTrigger handles day/hour but we
         # double-guard the minute-level boundary)
         h, m = now_et.hour, now_et.minute
-        if h < 9 or h > 16 or (h == 9 and m < 30):
+        if h < 9 or h > 16 or (h == 9 and m < 30) or (h == 16 and m > 0):
             return
         latest = await scanner.latest_scan()
         if not latest:
@@ -181,14 +181,27 @@ async def _flow_refresh_job():
         if not tickers:
             return
         db = get_db()
-        for tk in tickers:
-            try:
-                flow = await options_engine.detect_unusual_flow(tk)
-                await db.flow_snapshots.insert_one(stamped({
-                    "ticker": tk, "ts": now_et.isoformat(), **flow,
-                }))
-            except Exception:
-                continue
+        from . import public_api
+        public_client_cm = public_api.PublicAPIClient() if public_api.configured() else None
+        if public_client_cm is None:
+            for tk in tickers:
+                try:
+                    flow = await options_engine.detect_unusual_flow(tk)
+                    await db.flow_snapshots.insert_one(stamped({
+                        "ticker": tk, "ts": now_et.isoformat(), **flow,
+                    }))
+                except Exception:
+                    continue
+        else:
+            async with public_client_cm as public_client:
+                for tk in tickers:
+                    try:
+                        flow = await options_engine.detect_unusual_flow(tk, public_client=public_client)
+                        await db.flow_snapshots.insert_one(stamped({
+                            "ticker": tk, "ts": now_et.isoformat(), **flow,
+                        }))
+                    except Exception:
+                        continue
         await log_activity(f"Flow refresh complete for {len(tickers)} tickers", "info")
     except Exception as e:
         logger.exception("flow refresh job failed: %s", e)
