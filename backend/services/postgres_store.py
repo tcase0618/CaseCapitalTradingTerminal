@@ -26,6 +26,26 @@ _last_error: str | None = None
 _schema_ready = False
 _MISSING = object()
 
+# These collections are current-state telemetry. Their snapshots remain
+# durable, but retaining a full immutable event for every heartbeat/quote
+# update has no decision or reconstruction value and was the primary source
+# of PostgreSQL growth on the VPS.
+SNAPSHOT_ONLY_UPDATE_COLLECTIONS = frozenset({
+    "bot_state",
+    "price_cache",
+    "public_trade_learning",
+})
+
+# Trade lifecycle events stay in the journal. These fields only express that
+# a poll occurred, not that a position, order, or protective level changed.
+TF_TRADE_EVENT_NOISE_FIELDS = frozenset({
+    "pm_last_ratchet_check",
+    "last_checked_at",
+    "last_quote_at",
+    "last_reconciled_at",
+    "updated_at",
+})
+
 
 class PostgresResult:
     def __init__(self, **values: Any):
@@ -419,8 +439,10 @@ class PostgresCollection:
     async def _persist_updated(self, existing: dict[str, Any], update: dict[str, Any], *, inserted: bool) -> PostgresResult:
         original = copy.deepcopy(existing)
         self._apply_update(existing, update, inserted=inserted)
+        if existing == original:
+            return PostgresResult(matched_count=0 if inserted else 1, modified_count=0, upserted_id=doc_key(self.name, existing) if inserted else None)
         key = doc_key(self.name, existing)
-        if not await upsert_snapshot(self.name, key, existing):
+        if not await upsert_snapshot(self.name, key, existing, record_event=_record_update_event(self.name, original, existing)):
             raise RuntimeError(_last_error or "Postgres update failed")
         return PostgresResult(matched_count=0 if inserted else 1, modified_count=1 if existing != original else 0, upserted_id=key if inserted else None)
 
@@ -573,6 +595,20 @@ def _sanitize_json(value: Any) -> Any:
 def normalize_json(value: Any) -> Any:
     serialized = json.dumps(value, default=_json_default, ensure_ascii=False)
     return _sanitize_json(json.loads(serialized))
+
+
+def _record_update_event(collection: str, original: dict[str, Any], updated: dict[str, Any]) -> bool:
+    """Keep immutable history for business changes, not timer heartbeats."""
+    if collection in SNAPSHOT_ONLY_UPDATE_COLLECTIONS:
+        return False
+    if collection != "tf_trades":
+        return True
+    before = copy.deepcopy(original)
+    after = copy.deepcopy(updated)
+    for field in TF_TRADE_EVENT_NOISE_FIELDS:
+        before.pop(field, None)
+        after.pop(field, None)
+    return before != after
 
 
 def doc_key(collection: str, doc: dict[str, Any]) -> str:
@@ -777,6 +813,7 @@ async def upsert_snapshot(
     *,
     source: str = "case-capital",
     event_type: str = "upsert",
+    record_event: bool = True,
 ) -> bool:
     global _last_error
     if not await init_schema():
@@ -797,7 +834,8 @@ async def upsert_snapshot(
                 key,
                 raw,
             )
-        await write_event(collection, clean, natural_key=key, event_type=event_type, source=source)
+        if record_event:
+            await write_event(collection, clean, natural_key=key, event_type=event_type, source=source)
         _last_error = None
         return True
     except Exception as exc:

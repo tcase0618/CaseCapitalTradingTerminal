@@ -258,9 +258,9 @@ async def dashboard(limit_scans: int = 160) -> dict[str, Any]:
         lse_health = {"ok": False, "reason": str(exc)[:180]}
     try:
         from . import edgartools_bridge
-        edgar_ok = (await edgartools_bridge.company_snapshot("SPY")).get("ok")
-    except Exception:
-        edgar_ok = False
+        edgar_health = await edgartools_bridge.health_probe()
+    except Exception as exc:
+        edgar_health = {"ok": False, "reason": exc.__class__.__name__}
     try:
         from . import kronos
         disagreements = await kronos.disagreement_performance(limit=200)
@@ -292,7 +292,7 @@ async def dashboard(limit_scans: int = 160) -> dict[str, Any]:
             "scan_results": len(scans),
             "latest_scan_at": latest_scan.get("finished_at") or latest_scan.get("created_at"),
             "lse": lse_health,
-            "edgartools": {"ok": bool(edgar_ok)},
+            "edgartools": edgar_health,
             "kronos_disagreements": len(disagreements.get("rows") or []),
         },
         "stats": {

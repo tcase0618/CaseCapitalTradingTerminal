@@ -72,6 +72,14 @@ def test_postgres_json_normalization_nulls_nonfinite_numbers():
     assert payload == {"bad": None, "nested": [None, None, 1.5]}
 
 
+def test_postgres_update_events_skip_snapshot_telemetry_and_trade_poll_noise():
+    assert not postgres_store._record_update_event("bot_state", {"status": "old"}, {"status": "new"})
+    before = {"status": "OPEN", "pm_last_ratchet_check": "2026-10-05T10:00:00Z"}
+    after = {"status": "OPEN", "pm_last_ratchet_check": "2026-10-05T10:01:00Z"}
+    assert not postgres_store._record_update_event("tf_trades", before, after)
+    assert postgres_store._record_update_event("tf_trades", before, {**after, "current_stop": 9.5})
+
+
 def test_postgres_cursor_allow_disk_use_is_chainable():
     collection = postgres_store.PostgresCollection("scan_results")
     cursor = collection.find({}, {"_id": 0}).sort("finished_at", -1).allow_disk_use(True).limit(10)
