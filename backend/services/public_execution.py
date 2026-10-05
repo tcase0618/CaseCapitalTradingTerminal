@@ -2032,7 +2032,10 @@ async def reconcile() -> dict[str, Any]:
                     }},
                 )
                 order_updates += 1
-        positions = {_symbol(row): row for row in _positions(await client.portfolio())}
+        # ``portfolio_snapshot`` is the broker-truth snapshot for this entire
+        # reconciliation pass. Re-fetching it here doubled account traffic and
+        # made one monitor pass vulnerable to a second transient outage.
+        positions = {_symbol(row): row for row in _positions(portfolio_snapshot)}
         imported = await _import_unmanaged_broker_positions(positions)
         rows = await db.tf_trades.find({"broker_base": BROKER_BASE, "status": "OPEN"}, {"_id": 0}).to_list(500)
         updated = closed = 0

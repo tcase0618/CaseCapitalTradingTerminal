@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -68,6 +69,32 @@ async def _apply_rate_limit_backoff(response: httpx.Response, attempt: int) -> N
     except (TypeError, ValueError):
         retry_after = 0.0
     delay = max(0.5, min(15.0, retry_after or (0.75 * (2 ** attempt))))
+    async with _REQUEST_BACKOFF_LOCK:
+        _NEXT_REQUEST_AT = max(_NEXT_REQUEST_AT, time.monotonic() + delay)
+    await asyncio.sleep(delay)
+
+
+def _retryable_read_response(response: httpx.Response) -> bool:
+    """Return whether a failed broker *read* can safely be retried.
+
+    Public occasionally wraps an upstream 408/504 in a 400 response.  Those
+    are transport failures, not malformed requests.  Mutations deliberately
+    never use this helper: an ambiguous order response must be reconciled,
+    never re-submitted.
+    """
+    if response.status_code in {408, 425, 429, 500, 502, 503, 504}:
+        return True
+    if response.status_code != 400:
+        return False
+    body = response.text.lower()
+    return "upstream response" in body and any(code in body for code in ("408", "502", "503", "504", "gateway time-out", "gateway timeout"))
+
+
+async def _apply_transient_read_backoff(attempt: int) -> None:
+    """Back off a bounded amount and share the cooldown across read clients."""
+    global _NEXT_REQUEST_AT
+    base = min(4.0, 0.35 * (2 ** attempt))
+    delay = base + random.uniform(0.0, min(0.25, base / 3))
     async with _REQUEST_BACKOFF_LOCK:
         _NEXT_REQUEST_AT = max(_NEXT_REQUEST_AT, time.monotonic() + delay)
     await asyncio.sleep(delay)
@@ -329,13 +356,22 @@ class PublicAPIClient:
                 kwargs["json"] = payload
             if params:
                 kwargs["params"] = params
-            response = await request(f"{self.cfg.api_base}{path}", **kwargs)
+            try:
+                response = await request(f"{self.cfg.api_base}{path}", **kwargs)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                if not mutation and attempt < 2:
+                    await _apply_transient_read_backoff(attempt)
+                    continue
+                raise PublicAPIError(f"Public API transport failure: {exc.__class__.__name__}") from exc
             if response.status_code == 401 and not refreshed:
                 refreshed = True
                 await self._refresh_access_token()
                 continue
             if response.status_code == 429 and attempt < 2:
                 await _apply_rate_limit_backoff(response, attempt)
+                continue
+            if not mutation and _retryable_read_response(response) and attempt < 2:
+                await _apply_transient_read_backoff(attempt)
                 continue
             return self._decode(response)
         raise PublicAPIError("Public API retry budget exhausted")

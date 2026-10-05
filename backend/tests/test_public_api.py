@@ -394,3 +394,42 @@ async def test_public_read_path_retries_rate_limit_once(monkeypatch):
             result = await client.portfolio()
     assert result == {"positions": []}
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_public_read_path_retries_wrapped_upstream_gateway_timeout(monkeypatch):
+    calls = 0
+
+    async def no_wait(_attempt):
+        return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(400, json={"message": "Invalid upstream response: 504 Gateway Time-out"})
+        return httpx.Response(200, json={"positions": []})
+
+    monkeypatch.setattr(public_api, "_apply_transient_read_backoff", no_wait)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(_cfg(), http) as client:
+            result = await client.portfolio()
+    assert result == {"positions": []}
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_public_mutation_does_not_retry_transient_gateway_response():
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(504, json={"message": "gateway timeout"})
+
+    cfg = _cfg(research_only=False, live_equity_enabled=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with public_api.PublicAPIClient(cfg, http) as client:
+            with pytest.raises(public_api.PublicAPIError, match="HTTP 504"):
+                await client.place_order({"orderId": "no-retry"})
+    assert calls == 1
