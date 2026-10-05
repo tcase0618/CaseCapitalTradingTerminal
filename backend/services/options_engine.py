@@ -277,6 +277,7 @@ async def _fetch_public_options_data(
     catalyst_date: str | None = None,
     spot_hint: float | None = None,
     horizon: str = "tactical",
+    public_client: Any | None = None,
 ) -> dict[str, Any] | None:
     """Fetch and normalize Public's chain for research and PM analysis.
 
@@ -289,25 +290,37 @@ async def _fetch_public_options_data(
 
         if not public_api.configured():
             return None
-        async with public_api.PublicAPIClient() as client:
-            expirations_payload = await client.option_expirations(ticker.upper())
-            expirations = expirations_payload.get("expirations") or expirations_payload.get("results") or expirations_payload.get("data") or []
-            if isinstance(expirations, dict):
-                expirations = expirations.get("dates") or expirations.get("expirations") or []
-            expirations = [str(x.get("date") if isinstance(x, dict) else x)[:10] for x in expirations if x]
-            if not expirations:
-                return None
-            target_lo, target_hi = _option_expiration_target(catalyst_date, horizon=horizon)
-            parsed_expirations = []
-            for exp in expirations:
-                try:
-                    parsed_expirations.append((exp, datetime.fromisoformat(exp).date()))
-                except Exception:
-                    continue
-            if not parsed_expirations:
-                return None
-            best_exp, _ = min(parsed_expirations, key=lambda pair: abs((pair[1] - (target_lo + (target_hi - target_lo) / 2)).days))
-            chain_payload = await client.option_chain(ticker.upper(), expiration=best_exp)
+        # Flow refreshes evaluate a batch of tickers. Reuse their SDK client
+        # so one refresh does not create and tear down a subscription manager
+        # for every underlying.
+        if public_client is None:
+            async with public_api.PublicAPIClient() as owned_client:
+                return await _fetch_public_options_data(
+                    ticker,
+                    catalyst_date,
+                    spot_hint,
+                    horizon,
+                    public_client=owned_client,
+                )
+        client = public_client
+        expirations_payload = await client.option_expirations(ticker.upper())
+        expirations = expirations_payload.get("expirations") or expirations_payload.get("results") or expirations_payload.get("data") or []
+        if isinstance(expirations, dict):
+            expirations = expirations.get("dates") or expirations.get("expirations") or []
+        expirations = [str(x.get("date") if isinstance(x, dict) else x)[:10] for x in expirations if x]
+        if not expirations:
+            return None
+        target_lo, target_hi = _option_expiration_target(catalyst_date, horizon=horizon)
+        parsed_expirations = []
+        for exp in expirations:
+            try:
+                parsed_expirations.append((exp, datetime.fromisoformat(exp).date()))
+            except Exception:
+                continue
+        if not parsed_expirations:
+            return None
+        best_exp, _ = min(parsed_expirations, key=lambda pair: abs((pair[1] - (target_lo + (target_hi - target_lo) / 2)).days))
+        chain_payload = await client.option_chain(ticker.upper(), expiration=best_exp)
         raw_rows = chain_payload.get("options") or chain_payload.get("contracts") or chain_payload.get("chain") or chain_payload.get("results") or chain_payload.get("data") or []
         if isinstance(raw_rows, dict):
             raw_rows = raw_rows.get("options") or raw_rows.get("contracts") or list(raw_rows.values())
@@ -351,8 +364,7 @@ async def _fetch_public_options_data(
             return None
         spot = _safe_float(spot_hint)
         if not spot:
-            async with public_api.PublicAPIClient() as client:
-                quote_payload = await client.quotes([ticker.upper()])
+            quote_payload = await client.quotes([ticker.upper()])
             quote_rows = quote_payload.get("quotes") or quote_payload.get("results") or quote_payload.get("data") or []
             quote = quote_rows.get(ticker.upper(), {}) if isinstance(quote_rows, dict) else (quote_rows[0] if quote_rows else {})
             spot = _safe_float((quote or {}).get("lastPrice") or (quote or {}).get("price"))
@@ -379,6 +391,7 @@ async def get_options_data(
     horizon: str = "tactical",
     *,
     execution_preferred: bool = False,
+    public_client: Any | None = None,
 ) -> dict[str, Any] | None:
     """Return a normalized chain, using Public for research by default.
 
@@ -394,7 +407,13 @@ async def get_options_data(
         )
         if alpaca_chain:
             return alpaca_chain
-    public_chain = await _fetch_public_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
+    public_chain = await _fetch_public_options_data(
+        ticker,
+        catalyst_date,
+        spot_hint=spot_hint,
+        horizon=horizon,
+        public_client=public_client,
+    )
     if public_chain:
         return public_chain
     alpaca_chain = await _fetch_alpaca_options_data(ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon)
@@ -827,9 +846,9 @@ def _detect_unusual_flow_from_chain(ticker: str, chain: dict | None) -> dict[str
                 "call_put_ratio": 0.0, "flow_bias": "NEUTRAL"}
 
 
-async def detect_unusual_flow(ticker: str) -> dict[str, Any]:
+async def detect_unusual_flow(ticker: str, *, public_client: Any | None = None) -> dict[str, Any]:
     """Detect unusual options activity vs open interest baseline."""
-    return _detect_unusual_flow_from_chain(ticker, await get_options_data(ticker))
+    return _detect_unusual_flow_from_chain(ticker, await get_options_data(ticker, public_client=public_client))
 
 
 # ---------------- crush risk (Part 8) ----------------
