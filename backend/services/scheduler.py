@@ -770,18 +770,34 @@ def start_scheduler():
             "pm_portfolio_scores": portfolio_score_status,
         }
 
+    def _monitor_incident_key(failures: list[dict[str, str]]) -> str:
+        """Classify failures so an upstream outage is one incident, not spam."""
+        categories: set[str] = set()
+        for item in failures:
+            reason = str(item.get("reason") or "").lower()
+            if any(token in reason for token in ("timeout", "connect", "gateway", "upstream", "publicapierror")):
+                categories.add("PUBLIC_UPSTREAM_UNAVAILABLE")
+            elif "quote" in reason or "ratchet" in str(item.get("stage") or "").lower():
+                categories.add("PUBLIC_QUOTE_COVERAGE_DEGRADED")
+            elif "reconciliation" in reason or "reconciliation" in str(item.get("stage") or "").lower():
+                categories.add("PUBLIC_RECONCILIATION_DEGRADED")
+            else:
+                categories.add(f"{item.get('stage', 'unknown')}:{item.get('reason', 'unknown')}")
+        return "|".join(sorted(categories)) or "UNKNOWN"
+
     async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
         if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
             return
         details = ", ".join(f"{item.get('stage', 'unknown')}={item.get('reason', 'unknown')}" for item in failures[:5])
+        incident = _monitor_incident_key(failures)
         state_key = f"position_monitor_alert:{stage}"
         db = get_db()
         prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
-        if prior.get("active") and prior.get("details") == details:
+        if prior.get("active") and prior.get("incident") == incident:
             return
         await db.bot_state.update_one(
             {"_id": state_key},
-            {"$set": {"active": True, "details": details, "updated_at": _now_iso()}},
+            {"$set": {"active": True, "incident": incident, "details": details, "updated_at": _now_iso()}},
             upsert=True,
         )
         coverage_only = all(item.get("stage") == "public_protection_coverage" for item in failures)
@@ -795,17 +811,29 @@ def start_scheduler():
             f"<b>{title}</b>\n"
             f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
             f"Stage: <b>{stage}</b>\n"
+            f"Incident: <code>{incident}</code>\n"
             f"Failures: <code>{details}</code>\n"
             f"{action}",
             chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         )
 
     async def _clear_position_monitor_failure(stage: str) -> None:
-        await get_db().bot_state.update_one(
-            {"_id": f"position_monitor_alert:{stage}"},
+        state_key = f"position_monitor_alert:{stage}"
+        db = get_db()
+        prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
+        await db.bot_state.update_one(
+            {"_id": state_key},
             {"$set": {"active": False, "recovered_at": _now_iso()}},
             upsert=True,
         )
+        if prior.get("active") and os.environ.get("TELEGRAM_CHAT_ID"):
+            await telegram_service.send_message(
+                f"<b>CASE CAPITAL | PORTFOLIO MONITOR RECOVERED</b>\n"
+                f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
+                f"Stage: <b>{stage}</b>\n"
+                f"Recovered incident: <code>{prior.get('incident') or 'UNKNOWN'}</code>",
+                chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+            )
     async def _position_monitor_with_snapshot():
         management: dict[str, dict] = {}
         try:
