@@ -1059,6 +1059,10 @@ def start_scheduler():
                     )
                 except Exception:
                     pass
+        except asyncio.CancelledError:
+            # Service shutdown cancels in-flight repair work. Treat that as a
+            # normal lifecycle transition rather than a monitor failure.
+            return
         except Exception as e:
             logger.warning("schedule watchdog: %s", e)
     _scheduler.add_job(
