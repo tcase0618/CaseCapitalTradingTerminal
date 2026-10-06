@@ -106,6 +106,9 @@ def build_observation(row: dict[str, Any], *, cycle_id: str, observed_at: str, p
         "strategy_lanes": lanes,
         "source_scans": _unique_strings(row.get("scanner_sources") or row.get("source_scan")),
         "cautions": cautions,
+        # External Accountant evidence is preserved as labelled research only.
+        # PM scoring/execution does not read this namespace.
+        "accountant_research": row.get("accountant_research") if isinstance(row.get("accountant_research"), dict) else None,
         "execution_blocker": blocker,
         "target_is_proxy": bool(row.get("target_is_proxy")),
         "change_reasons": reasons,
@@ -199,6 +202,7 @@ async def record_pm_cycle(pm_payload: dict[str, Any], *, cycle_id: str, observed
                     "latest_signals": observation["signals"],
                     "latest_thesis": observation["thesis"],
                     "latest_cautions": observation["cautions"],
+                    "latest_accountant_research": observation["accountant_research"],
                     "latest_execution_blocker": observation["execution_blocker"],
                 },
             },
@@ -235,6 +239,16 @@ async def company_dossier(ticker: str, *, limit: int = 20) -> dict[str, Any]:
             "decision_authority": "NONE",
             "reason": "fundamental_research_unavailable",
         }
+    try:
+        from . import accountant_research
+        accountant_packet = await accountant_research.ticker_research(symbol)
+    except Exception:
+        accountant_packet = {
+            "ok": False,
+            "research_only": True,
+            "decision_authority": "NONE",
+            "reason": "accountant_research_unavailable",
+        }
     return {
         "ok": bool(profile or decisions),
         "ticker": symbol,
@@ -243,5 +257,6 @@ async def company_dossier(ticker: str, *, limit: int = 20) -> dict[str, Any]:
         "observations": observations,
         "prediction_markets": prediction_evidence,
         "fundamental_research": fundamental_research,
+        "accountant_research": accountant_packet,
         "data_role": "pm_memory_and_decision_audit",
     }

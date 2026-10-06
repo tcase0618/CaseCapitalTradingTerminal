@@ -176,7 +176,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             stage_times[label] = round((_now() - t0).total_seconds(), 2)
 
     await log_activity(f"Full terminal scan started ({triggered_by})", "info")
-    from . import candidate_ledger, lottery, options_desk, pharma, pm_brain, portfolio_manager, scanner, strategy_contracts, strategy_screeners
+    from . import accountant_research, candidate_ledger, lottery, options_desk, pharma, pm_brain, portfolio_manager, scanner, strategy_contracts, strategy_screeners
 
     core_task = asyncio.create_task(
         timed(
@@ -205,6 +205,19 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "strategy_screeners",
         strategy_screeners.run_all(scan=scan, persist=True, lottery_result=lottery_result),
     )
+    # THE ACCOUNTANT is a separately hosted SEC/XBRL research system.  Attach
+    # only its compact, read-only evidence snapshot to this frozen scan packet.
+    # A timeout or unavailable report must never stop discovery, PM routing, or
+    # execution because the adapter has no decision authority.
+    try:
+        accountant_payload = await timed(
+            "accountant_research",
+            accountant_research.enrich_scan_candidates(strategy_payload.get("candidates") or []),
+        )
+    except Exception as exc:
+        accountant_payload = {"ok": False, "reason": f"accountant_enrichment_failed:{exc.__class__.__name__}", "enriched": 0}
+        await log_activity("Accountant research enrichment failed", "warning", accountant_payload)
+    scan["accountant_research"] = accountant_payload
     try:
         from . import pnl_tracker
         await pnl_tracker.record_scan_picks(

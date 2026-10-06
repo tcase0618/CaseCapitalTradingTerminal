@@ -884,6 +884,20 @@ async def finance_toolkit_research(ticker: str, sections: str | None = None):
     return await finance_toolkit_source.research_bundle(ticker, sections=sections)
 
 
+@api.get("/research/accountant/status")
+async def accountant_research_status():
+    """Read-only connection state for the separately hosted Accountant."""
+    from services import accountant_research
+    return accountant_research.status()
+
+
+@api.get("/research/accountant/{ticker}")
+async def accountant_research_ticker(ticker: str, force_refresh: bool = False):
+    """Return compact Accountant SEC/XBRL research; never creates trade authority."""
+    from services import accountant_research
+    return await accountant_research.ticker_research(ticker, force_refresh=force_refresh)
+
+
 @api.post("/scan/run")
 async def run_scan_now():
     scan = await scanner.run_scan(triggered_by="admin_dashboard")
