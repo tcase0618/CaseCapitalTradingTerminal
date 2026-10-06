@@ -131,6 +131,43 @@ async def test_public_ratchet_initializes_account_protection_for_unplanned_posit
 
 
 @pytest.mark.asyncio
+async def test_public_ratchet_quote_gap_is_degraded_not_a_monitor_failure(monkeypatch):
+    trade = {
+        "client_order_id": "public-unpriced-1",
+        "broker_base": "public",
+        "status": "OPEN",
+        "fill_status": "FILLED",
+        "qty_remaining": 1,
+        "ticker": "NOQUOTE",
+        "filled_avg_price": 10.0,
+        "current_stop": 9.0,
+        "pm_ratchet_plan": {"enabled": True},
+    }
+
+    class Cursor:
+        async def to_list(self, _limit):
+            return [dict(trade)]
+
+    class Trades:
+        def find(self, _query, *_args, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(pm_ratchet, "get_db", lambda: SimpleNamespace(tf_trades=Trades(), pm_ratchet_events=SimpleNamespace()))
+
+    async def no_marks(_tickers):
+        return {}
+
+    monkeypatch.setattr(pm_ratchet, "_public_prices", no_marks)
+
+    result = await pm_ratchet.process_open_ratchets(broker_base="public")
+
+    assert result["ok"] is True
+    assert result["degraded"] is True
+    assert result["reason"] == "public_ratchet_quotes_unavailable"
+    assert result["quote_coverage_status"] == "unavailable"
+
+
+@pytest.mark.asyncio
 async def test_sdk_stream_mark_uses_the_same_public_ratchet_ledger(monkeypatch):
     trade = {
         "client_order_id": "public-stream-1",

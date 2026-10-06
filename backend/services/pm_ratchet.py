@@ -240,8 +240,12 @@ async def process_public_ratchet_marks(marks: dict[str, float], *, source: str =
     rows = await db.tf_trades.find(filters, {"_id": 0}).to_list(500)
     result = await _apply_public_ratchet_marks(rows, prices, source=source)
     return {
-        "ok": not result.get("unpriced"),
+        # Missing fresh quotes is a coverage condition, not a ratchet service
+        # failure.  The next stream/REST mark can resume ratcheting normally.
+        "ok": True,
+        "degraded": bool(result.get("unpriced")),
         "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
+        "quote_coverage_status": "partial" if result.get("unpriced") else "complete",
         "source": source,
         **result,
     }
@@ -277,9 +281,19 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
     if broker_base == "public":
         public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades])
         result = await _apply_public_ratchet_marks(open_trades, public_prices, source="public_rest_monitor")
+        checked = int(result.get("checked") or 0)
+        unpriced = len(result.get("unpriced") or [])
+        coverage_status = "complete"
+        if unpriced:
+            coverage_status = "unavailable" if checked and unpriced >= checked else "partial"
         return {
-            "ok": not result.get("unpriced"),
+            # Quote gaps are reported to the monitor as degraded coverage.
+            # They are not service failures: treating them as one created
+            # critical Telegram incidents every overnight session.
+            "ok": True,
+            "degraded": bool(unpriced),
             "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
+            "quote_coverage_status": coverage_status,
             "broker_base": broker_base,
             **result,
         }
