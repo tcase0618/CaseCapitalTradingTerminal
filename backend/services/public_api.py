@@ -7,6 +7,7 @@ rollout flags are enabled.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import time
@@ -16,6 +17,12 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import httpx
+
+
+# The SDK emits an INFO line for its internal subscription cleanup on each
+# monitor pass. Keep warnings/errors, but do not let normal cleanup drown out
+# operational errors in the terminal journal.
+logging.getLogger("public_api_sdk.async_order_subscription_manager").setLevel(logging.WARNING)
 
 
 # The Public bearer token is short lived.  The scheduler creates several

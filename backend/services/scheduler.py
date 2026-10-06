@@ -684,6 +684,7 @@ def start_scheduler():
         options analysis must never consume the next ratchet/exit interval.
         """
         failures: list[dict[str, str]] = []
+        coverage_degraded: dict[str, Any] = {}
         public_ratchet_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         protection_coverage: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         try:
@@ -709,6 +710,12 @@ def start_scheduler():
                         public_ratchet_status = await pm_ratchet.process_open_ratchets(broker_base="public")
                         if not public_ratchet_status.get("ok", True):
                             failures.append({"stage": "public_pm_ratchet", "reason": public_ratchet_status.get("reason") or "ratchet_degraded"})
+                        elif public_ratchet_status.get("degraded"):
+                            coverage_degraded["public_ratchet"] = {
+                                "reason": public_ratchet_status.get("reason") or "quote_coverage_degraded",
+                                "status": public_ratchet_status.get("quote_coverage_status") or "partial",
+                                "unpriced": public_ratchet_status.get("unpriced") or [],
+                            }
                     except Exception as exc:
                         public_ratchet_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_pm_ratchet", "reason": exc.__class__.__name__})
@@ -717,11 +724,17 @@ def start_scheduler():
                     # entry gate: a broker routing limitation must be visible
                     # without stopping monitoring or new-entry evaluation.
                     protection_coverage = await public_execution.protection_coverage()
-                    if protection_coverage.get("monitored_exit_only_open", 0):
+                    unresolved = int(protection_coverage.get("managed_unresolved_unprotected_open") or 0)
+                    if unresolved:
                         failures.append({
                             "stage": "public_protection_coverage",
-                            "reason": f"{protection_coverage['monitored_exit_only_open']}_positions_with_stale_or_incomplete_monitor_coverage",
+                            "reason": f"{unresolved}_positions_without_managed_exit_coverage",
                         })
+                    elif protection_coverage.get("monitored_exit_only_open", 0):
+                        coverage_degraded["public_protection"] = {
+                            "reason": "terminal_exit_coverage_waiting_for_fresh_quote",
+                            "monitored_exit_only_open": protection_coverage["monitored_exit_only_open"],
+                        }
             except Exception as exc:
                 failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
                 logger.exception("Public execution reconciliation failed")
@@ -733,6 +746,7 @@ def start_scheduler():
             "failures": failures,
             "pm_ratchet": public_ratchet_status,
             "protection_coverage": protection_coverage,
+            "coverage_degraded": coverage_degraded,
         }
 
     async def _position_management_monitor() -> dict[str, Any]:
