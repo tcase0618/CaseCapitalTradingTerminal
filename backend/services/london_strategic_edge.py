@@ -95,8 +95,9 @@ async def candles(
     limit: int = 5000,
     order: str = "asc",
     dataset: str | None = None,
+    request_timeout: float = 60,
 ) -> dict[str, Any]:
-    client = _client()
+    client = _client(timeout=request_timeout)
     t = symbol.upper()
     safe_limit = min(max(int(limit), 1), 5000)
     key = f"candles:{t}:{timeframe}:{start}:{end}:{safe_limit}:{order}:{dataset}"

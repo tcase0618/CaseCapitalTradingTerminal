@@ -614,6 +614,10 @@ def _record_update_event(collection: str, original: dict[str, Any], updated: dic
 def doc_key(collection: str, doc: dict[str, Any]) -> str:
     """Stable best-effort natural key for collection-style documents."""
     collection_keys = {
+        "kronos_forecast_snapshots": ("snapshot_key",),
+        "kronos_candle_predictions": ("prediction_id",),
+        "kronos_candle_outcomes": ("prediction_id",),
+        "kronos_pm_disagreements": ("audit_id",),
         "pm_company_observations": ("observation_id",),
         "pm_decision_ledger": ("decision_id",),
         "pm_decision_outcomes": ("outcome_id",),

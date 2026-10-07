@@ -1776,13 +1776,20 @@ async def scan_tabs():
 @api.get("/kronos/forecast")
 async def kronos_forecast(persist: bool = True):
     from services import kronos
-    return await kronos.forecast(persist=persist)
+    return await kronos.latest_forecast()
 
 
 @api.get("/kronos/status")
 async def kronos_status():
     from services import kronos
     return await kronos.status()
+
+
+@api.get("/kronos/positions")
+async def kronos_positions():
+    from services import kronos
+    latest = await kronos.latest_forecast()
+    return {"ok": latest.get("ok", False), "positions": [p for p in latest.get("forecasts", []) if p.get("instrument") == "EQUITY"], "broker": "public", "asof": latest.get("generated_at")}
 
 
 @api.post("/kronos/refresh")
@@ -1800,7 +1807,7 @@ async def kronos_market_forecast():
 @api.get("/kronos/candle_forecast/{symbol}")
 async def kronos_candle_forecast(symbol: str, persist: bool = False):
     from services import kronos
-    return await kronos.candle_forecast_suite(symbol=symbol, persist=persist)
+    return await kronos.candle_forecast_suite(symbol=symbol, persist=False)
 
 
 @api.get("/kronos/disagreements")
@@ -1818,7 +1825,7 @@ async def kronos_disagreements_reconcile(limit: int = 750):
 @api.get("/kronos/accuracy")
 async def kronos_accuracy(limit: int = 800, persist: bool = False):
     from services import kronos
-    return await kronos.candle_accuracy(limit=limit, persist=persist)
+    return await kronos.accuracy_snapshot()
 
 
 @api.get("/kronos/learning")
