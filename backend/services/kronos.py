@@ -801,7 +801,7 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
         aligned = bool(valid and _aligned(pm_action, bias["label"]))
         probs = prediction.get("probabilities") or {}
         tripwires = _tripwires(pos, score, pm_action)
-        kscore = prediction.get("score", 0) if valid else 0
+        kscore = confidence if valid else 0
         mv = pos.get("market_value") or 0.0
         if valid and pos["instrument"] == "EQUITY":
             cumulative_low += mv * (bias["bear"] / 100)
@@ -824,6 +824,7 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
             "anchor_price": (prediction.get("features") or {}).get("last_close"),
             "confidence": confidence,
             "kronos_score": kscore,
+            "direction_score": prediction.get("score") if valid else None,
             "aligned_with_pm": aligned,
             "attribution": _attribution(score, pm_action, signal, pos["instrument"], pos.get("risk") or {}),
             "horizons": prediction.get("horizons", []),
@@ -1345,14 +1346,16 @@ async def status() -> dict[str, Any]:
     latest = await latest_forecast()
     latest_key = (latest or {}).get("snapshot_key") or _snapshot_key((latest or {}).get("generated_at") or _now().isoformat())
     latest_disagreements = await db.kronos_pm_disagreements.count_documents({
+        "model_version": kronos_contract.MODEL_VERSION,
         "status": {"$in": ["OPEN_AUDIT", "OUT_FOR_AUDIT"]},
         "audit_id": {"$regex": f"^{re.escape(str(latest_key))}"},
     })
     total_open_disagreements = await db.kronos_pm_disagreements.count_documents({
+        "model_version": kronos_contract.MODEL_VERSION,
         "status": {"$in": ["OPEN_AUDIT", "OUT_FOR_AUDIT", None]},
     })
-    resolved_disagreements = await db.kronos_pm_disagreements.count_documents({"status": "RESOLVED"})
-    archived_disagreements = await db.kronos_pm_disagreements.count_documents({"status": "ARCHIVED_UNMAPPED"})
+    resolved_disagreements = await db.kronos_pm_disagreements.count_documents({"status": "RESOLVED", "model_version": kronos_contract.MODEL_VERSION})
+    archived_disagreements = await db.kronos_pm_disagreements.count_documents({"status": "ARCHIVED_UNMAPPED", "model_version": kronos_contract.MODEL_VERSION})
     age = _age_minutes((latest or {}).get("generated_at"))
     summary = (latest or {}).get("summary") or {}
     now = _now()
@@ -1369,6 +1372,8 @@ async def status() -> dict[str, Any]:
         _, current_contract = kronos_contract.input_contract([{"timestamp": (market.get("features") or {}).get("latest_timestamp")}], market.get("timeframe", "5m"), now)
         if not current_contract.get("ok"):
             health = "STALE_INPUT"
+        elif health == "LIVE" and not any(op <= now < cl for _, op, cl in kronos_contract.sessions(now)):
+            health = "MARKET_CLOSED"
     pm_coverage = "FULL" if not summary.get("unmapped_pm", 0) else "PARTIAL"
     try:
         accuracy = await accuracy_snapshot()
@@ -1434,8 +1439,10 @@ async def calendar_month(year: int, month: int) -> dict[str, Any]:
     end = (start + timedelta(days=32)).replace(day=1)
     query = {"generated_at": {"$gte": start.astimezone(timezone.utc).isoformat(), "$lt": end.astimezone(timezone.utc).isoformat()}, "model_version": kronos_contract.MODEL_VERSION}
     db = get_db()
-    preds = await db.kronos_candle_predictions.find(query, {"_id": 0}).sort("generated_at", 1).to_list(20000)
-    outcomes = await db.kronos_candle_outcomes.find({"prediction_id": {"$in": [p["prediction_id"] for p in preds]}}, {"_id": 0}).to_list(20000) if preds else []
+    fields = {key: 1 for key in ("prediction_id", "generated_at", "symbol", "timeframe", "forecast_pct", "cone_low_pct", "cone_high_pct", "target_at", "confidence")}
+    fields["_id"] = 0
+    preds = await db.kronos_candle_predictions.find(query, fields).sort("generated_at", 1).to_list(None)
+    outcomes = await db.kronos_candle_outcomes.find({"prediction_id": {"$in": [p["prediction_id"] for p in preds]}}, {"_id": 0}).to_list(None) if preds else []
     by_id = {r["prediction_id"]: r for r in outcomes}
     out = []
     total = _empty_accuracy_bucket("MONTH")
@@ -1463,6 +1470,7 @@ async def calendar_month(year: int, month: int) -> dict[str, Any]:
                     "confidence": latest_spy.get("confidence"), "fund_actual_pct": None, "fund_prediction_usd": None})
     summary = _finalize_accuracy_bucket(total)
     summary.update({"direction_losses": summary["direction_losses"], "cone_win_rate_pct": summary.get("cone_coverage_pct"),
+                    "predictions": len(preds), "resolved_predictions": len(outcomes), "pending_predictions": len(preds) - len(outcomes),
                     "predicted_days": sum(d["has_prediction"] for d in out), "scored_days": sum(d["resolved_predictions"] > 0 for d in out)})
     return {"ok": True, "year": int(year), "month": month, "month_label": start.strftime("%B %Y"), "days": out,
             "summary": summary, "available_years": await _calendar_years(db),

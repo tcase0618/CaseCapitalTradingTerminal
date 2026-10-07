@@ -406,6 +406,8 @@ function KronosStatusPanel({ status, lseHealth, pm, lastSync }) {
     <>
       <div style={bootRow}><span>MODEL HEALTH</span><strong style={{ color: healthColor(status?.health) }}>{status?.health || "CHECKING"}</strong></div>
       <div style={bootRow}><span>SNAPSHOT AGE</span><strong>{ageText(status?.snapshot_age_minutes)}</strong></div>
+      <div style={bootRow}><span>INPUT AS-OF</span><strong>{fmtTime(status?.input_asof)}</strong></div>
+      <div style={bootRow}><span>MODEL</span><strong>OHLCV BASELINE / RESEARCH</strong></div>
       <div style={bootRow}><span>PM CONTEXT</span><strong style={{ color: (status?.unmapped_pm || 0) ? "#fbbf24" : "#4ade80" }}>{status?.pm_context_health || "CHECKING"} / {status?.mapped_pm ?? 0}/{status?.positions ?? 0}</strong></div>
       <div style={bootRow}><span>OPEN AUDITS</span><strong style={{ color: status?.open_disagreement_audits ? "#fbbf24" : "#4ade80" }}>{status?.open_disagreement_audits ?? 0}</strong></div>
       <div style={bootRow}><span>LSE DATA</span><strong style={{ color: lseHealth?.ok ? "#4ade80" : "#fbbf24" }}>{lseHealth?.ok ? "ONLINE" : "DEGRADED"}</strong></div>
