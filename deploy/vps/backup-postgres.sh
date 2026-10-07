@@ -29,9 +29,36 @@ install -d -m 700 "${BACKUP_DIR}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 tmp="${BACKUP_DIR}/.case-capital-${stamp}.dump.tmp"
 final="${BACKUP_DIR}/case-capital-${stamp}.dump"
+pgpass="${BACKUP_DIR}/.case-capital-${stamp}.pgpass"
 
-trap 'rm -f "${tmp}"' EXIT
-pg_dump --format=custom --no-owner --file="${tmp}" "${POSTGRES_DSN}"
+trap 'rm -f "${tmp}" "${pgpass}"' EXIT
+
+# Do not pass a DSN containing a password as a process argument. Root can read
+# command lines, so use a short-lived 0600 PGPASSFILE instead.
+eval "$(python3 - "${POSTGRES_DSN}" "${pgpass}" <<'PY'
+from pathlib import Path
+from shlex import quote
+from urllib.parse import unquote, urlparse
+import sys
+
+parsed = urlparse(sys.argv[1])
+if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or not parsed.username:
+    raise SystemExit("POSTGRES_DSN must be a PostgreSQL URL with host and username")
+database = parsed.path.lstrip("/")
+if not database:
+    raise SystemExit("POSTGRES_DSN is missing database name")
+host = parsed.hostname
+port = parsed.port or 5432
+user = unquote(parsed.username)
+password = unquote(parsed.password or "")
+Path(sys.argv[2]).write_text(f"{host}:{port}:{database}:{user}:{password}\\n", encoding="utf-8")
+Path(sys.argv[2]).chmod(0o600)
+print(f"export PGHOST={quote(host)} PGPORT={quote(str(port))} PGUSER={quote(user)} PGDATABASE={quote(database)}")
+PY
+)"
+export PGPASSFILE="${pgpass}"
+export PGSSLMODE="${CASE_CAPITAL_POSTGRES_SSLMODE:-disable}"
+pg_dump --format=custom --no-owner --file="${tmp}"
 pg_restore --list "${tmp}" >/dev/null
 sha256sum "${tmp}" > "${tmp}.sha256"
 mv "${tmp}" "${final}"

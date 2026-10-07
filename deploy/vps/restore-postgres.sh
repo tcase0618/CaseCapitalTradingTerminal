@@ -21,6 +21,9 @@ source "${ENV_FILE}"
 set +a
 [[ -n "${POSTGRES_DSN:-}" ]] || { echo "POSTGRES_DSN is empty" >&2; exit 2; }
 
+# pg_restore accepts the deployment DSN here because this recovery command is
+# invoked manually, not left running in a process list. Operators should use a
+# protected shell and rotate credentials after any incident response.
 pg_restore --list "${BACKUP_FILE}" >/dev/null
 pg_restore --clean --if-exists --no-owner --dbname="${POSTGRES_DSN}" "${BACKUP_FILE}"
 echo "Restore completed from ${BACKUP_FILE}"
