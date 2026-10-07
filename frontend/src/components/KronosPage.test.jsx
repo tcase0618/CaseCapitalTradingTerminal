@@ -32,6 +32,9 @@ test("Kronos renders a populated backend position with the fixed-horizon contrac
     expect(html).toContain("LDOS");
     expect(html).toContain("NEXT FULL RTH BAR");
     expect(html).toContain("UNCALIBRATED SCENARIO WEIGHTS");
+    expect(html).toContain("Oct 8");
+    expect(html).toContain("SPY TARGET");
+    expect(html).toContain("context, not the forecast model");
   } finally {
     spy.mockRestore();
   }
