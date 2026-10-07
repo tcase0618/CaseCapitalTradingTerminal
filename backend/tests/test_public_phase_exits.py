@@ -72,16 +72,16 @@ async def test_public_phase_one_submits_a_fractional_limit_trim(monkeypatch):
 
     result = await public_execution.process_public_phase_exits()
 
-    assert result["submitted"] == [{"ticker": "RUN", "phase": 1, "order_id": "phase-order-1", "qty": 4.0, "limit_price": 12.0}]
-    assert client.submitted["quantity"] == 4.0
-    assert client.submitted["session"] == "CORE"
-    assert updates[0]["public_phase_order_id"] == "phase-order-1"
+    assert result["submitted"] == []
+    assert result["reason"] == "full_position_floor_exit_policy"
+    assert not hasattr(client, "submitted")
+    assert updates == []
 
 
 def test_no_cap_lottery_plan_never_creates_a_partial_profit_target():
     plan = public_execution._public_phase_plan(10.0, 16.0, no_capped_tp=True, proxy_target=False)
 
-    assert plan == {"enabled": False, "reason": "no_verified_capped_target"}
+    assert plan == {"enabled": False, "reason": "full_position_floor_exit_policy"}
 
 
 @pytest.mark.asyncio

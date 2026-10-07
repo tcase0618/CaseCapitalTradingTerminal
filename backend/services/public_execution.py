@@ -1124,48 +1124,13 @@ def _protective_order_terms(now: datetime | None = None) -> dict[str, Any]:
 
 
 def _public_phase_plan(entry: float, target: float, *, no_capped_tp: bool, proxy_target: bool) -> dict[str, Any]:
-    """Persist an explicit Public-compatible partial-exit plan.
-
-    Lottery proxy targets and no-cap ratchet plans deliberately remain runner
-    positions. A phase plan is created only for a PM structural target that is
-    above the actual entry price.
-    """
-    if no_capped_tp or proxy_target or entry <= 0 or target <= entry:
-        return {"enabled": False, "reason": "no_verified_capped_target"}
-    phase2 = entry + PUBLIC_PHASE2_MULTIPLIER * (target - entry)
-    return {
-        "enabled": True,
-        "phase1_target": round(target, 4),
-        "phase2_target": round(phase2, 4),
-        "phase1_close_pct": PUBLIC_PHASE1_CLOSE_PCT,
-        "phase2_close_pct": PUBLIC_PHASE2_CLOSE_PCT,
-        "phase3_trail_pct": PUBLIC_PHASE3_TRAIL_PCT,
-        "source": "pm_structural_target",
-    }
+    """Public equities use full-position floor exits, never partial profits."""
+    return {"enabled": False, "reason": "full_position_floor_exit_policy"}
 
 
 def _phase_plan_for_trade(trade: dict[str, Any]) -> dict[str, Any]:
-    """Use a persisted plan, or migrate a verified PM target once.
-
-    This intentionally cannot invent a target for account-protection or
-    no-cap runner positions. Their ratchet-only exit policy remains intact.
-    """
-    existing = trade.get("public_phase_plan") or {}
-    if existing.get("enabled"):
-        return existing
-    ratchet = trade.get("pm_ratchet_plan") or {}
-    entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
-    target = _num(
-        trade.get("phase1_target")
-        or trade.get("structural_target")
-        or ratchet.get("initial_target_price")
-    )
-    return _public_phase_plan(
-        entry,
-        target,
-        no_capped_tp=bool(ratchet.get("no_capped_tp")),
-        proxy_target=str(trade.get("execution_target_mode") or "").upper() == "RATCHET_ONLY_PROXY_TARGET",
-    )
+    """Disable legacy targets without discarding pending-order reconciliation."""
+    return _public_phase_plan(0.0, 0.0, no_capped_tp=True, proxy_target=False)
 
 
 def _phase_limit_price(mark: float) -> float:
@@ -2230,133 +2195,14 @@ async def _reconcile_public_phase_exits(
 
 
 async def process_public_phase_exits() -> dict[str, Any]:
-    """Submit one Public limit partial-exit per position when its PM target hits."""
-    if not enabled():
-        return {"skipped": True, "reason": "public_live_equity_disabled"}
-    db = get_db()
-    rows = await db.tf_trades.find(
-        {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": "FILLED", "qty_remaining": {"$gt": 0}},
-        {"_id": 0},
-    ).to_list(500)
-    submitted: list[dict[str, Any]] = []
-    deferred: list[dict[str, str]] = []
-    errors: list[dict[str, str]] = []
-    eligible: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for trade in rows:
-        if trade.get("public_phase_order_id") or trade.get("emergency_exit_order_id"):
-            continue
-        plan = _phase_plan_for_trade(trade)
-        if not plan.get("enabled"):
-            continue
-        if plan != (trade.get("public_phase_plan") or {}):
-            await db.tf_trades.update_one(
-                {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                {"$set": {"public_phase_plan": plan, "phase1_target": plan.get("phase1_target"), "phase2_target": plan.get("phase2_target")}},
-            )
-        eligible.append((trade, plan))
-    if not eligible:
-        return {"skipped": False, "ok": True, "checked": len(rows), "eligible": 0, "submitted": submitted, "deferred": deferred, "errors": errors}
-    async with public_api.PublicAPIClient(use_sdk=False) as client:
-        # This is a monitor, not yet a requested sale. One batch quote avoids
-        # spending the full retry window on every held position each minute.
-        refreshed = await _refresh_exit_quotes(client, [_symbol(trade) for trade, _plan in eligible], max_attempts=1)
-        for trade, plan in eligible:
-            ticker = _symbol(trade)
-            refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
-            phase_quote = refreshed_quote.get("execution_quote")
-            current = _num((phase_quote or {}).get("mid"))
-            if current <= 0 or not phase_quote:
-                unresolved = (refreshed.get("unresolved") or {}).get(ticker) or {}
-                deferred.append({"ticker": ticker, "reason": unresolved.get("reason") or "public_phase_quote_stale_or_unverifiable"})
-                continue
-            phase = int(_num(trade.get("phase"), 1))
-            if phase == 3:
-                entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
-                peak = max(_num(trade.get("peak_price_since_entry"), entry), current)
-                trail_pct = _num(plan.get("phase3_trail_pct"), PUBLIC_PHASE3_TRAIL_PCT)
-                trail_stop = entry * (1 + ((peak - entry) / entry) * (1 - trail_pct)) if entry > 0 else 0.0
-                prior_stop = _num(trade.get("current_stop") or trade.get("pm_active_stop"))
-                if trail_stop > prior_stop:
-                    await db.tf_trades.update_one(
-                        {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                        {"$set": {
-                            "current_stop": round(trail_stop, 4),
-                            "pm_active_stop": round(trail_stop, 4),
-                            "phase3_trail_pct_active": trail_pct,
-                            "peak_price_since_entry": peak,
-                        }},
-                    )
-                continue
-            if phase not in {1, 2}:
-                continue
-            target = _num(plan.get(f"phase{phase}_target"))
-            if target <= 0 or current < target:
-                continue
-            total_qty = _num(trade.get("qty_total"))
-            remaining = _qty(trade)
-            close_pct = _num(plan.get(f"phase{phase}_close_pct"))
-            requested_qty = min(remaining, total_qty * close_pct)
-            shape, shape_reason = _exit_order_shape(requested_qty)
-            if not shape:
-                deferred.append({"ticker": ticker, "reason": shape_reason or "public_phase_exit_shape_invalid"})
-                continue
-            client_id = execution_safety.stable_client_order_id(
-                "public_phase", trade.get("client_order_id"), phase, target, prefix="public"
-            )
-            claim = await execution_safety.claim_execution_intent(
-                scope="public_equity_phase_exit",
-                client_order_id=client_id,
-                symbol=ticker,
-                side="sell",
-                metadata={"phase": phase, "target": target, "parent_client_order_id": trade.get("client_order_id")},
-            )
-            if not claim.get("ok"):
-                deferred.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_phase_exit"})
-                continue
-            try:
-                limit_price = _num(phase_quote.get("limit_price"))
-                result = await client.submit_equity_order(
-                    symbol=ticker,
-                    side="SELL",
-                    quantity=float(shape["quantity"]),
-                    limit_price=limit_price,
-                    time_in_force="DAY",
-                    session=str(shape["session"]),
-                    client_order_id=client_id,
-                )
-                order = result.get("order") or {}
-                order_id = order.get("orderId") or order.get("id")
-                if not order_id:
-                    raise RuntimeError("Public phase exit response missing order id")
-                await db.tf_trades.update_one(
-                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                    {"$set": {
-                        "public_phase_order_id": order_id,
-                        "public_phase_order_phase": phase,
-                        "public_phase_order_status": "SUBMITTED",
-                        "public_phase_order_qty": float(shape["quantity"]),
-                        "public_phase_filled_qty": 0.0,
-                        "public_phase_trigger_price": current,
-                        "public_phase_limit": limit_price,
-                        "public_phase_quote": phase_quote,
-                        "public_phase_submitted_at": datetime.now(timezone.utc).isoformat(),
-                        "public_phase_preflight": result.get("preflight"),
-                    }},
-                )
-                await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
-                submitted.append({"ticker": ticker, "phase": phase, "order_id": order_id, "qty": float(shape["quantity"]), "limit_price": limit_price})
-            except Exception as exc:
-                await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
-                errors.append({"ticker": ticker, "reason": f"public_phase_exit_submit_failed:{exc.__class__.__name__}"})
+    """Partial-profit submissions are retired; pending fills still reconcile."""
     return {
-        "skipped": False,
-        "ok": not errors,
-        "checked": len(rows),
-        "eligible": len(eligible),
-        "submitted": submitted,
-        "deferred": deferred,
-        "errors": errors,
-        "quote_refresh": {"attempts": refreshed.get("attempts"), "unresolved": refreshed.get("unresolved")},
+        "skipped": True,
+        "ok": True,
+        "reason": "full_position_floor_exit_policy",
+        "submitted": [],
+        "deferred": [],
+        "errors": [],
     }
 
 
