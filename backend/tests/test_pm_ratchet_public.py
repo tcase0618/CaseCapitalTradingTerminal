@@ -6,10 +6,29 @@ import pytest
 from services import pm_ratchet
 
 
+@pytest.mark.parametrize("gain,floor", [
+    (0, None), (5, None), (5.01, 5), (10, 5), (10.01, 10),
+    (20, 10), (20.01, 20), (30, 20), (30.01, 25),
+    (40.01, 35), (50.01, 45), (60.01, 55), (80.01, 75),
+    (100.01, 95), (200.01, 195), (1000.01, 995),
+])
+def test_uncapped_public_floor_milestones(gain, floor):
+    result = pm_ratchet.public_stop_policy(100.0, 100.0 + gain)
+    assert result["profit_floor_pct"] == floor
+    assert result["active_stop"] == (90.0 if floor is None else 100.0 + floor)
+
+
+def test_uncapped_public_floor_preserves_tighter_stop():
+    result = pm_ratchet.public_stop_policy(100.0, 140.01, 139.0)
+    assert result["active_stop"] == 139.0
+    assert result["profit_floor_pct"] == 35.0
+
+
 @pytest.mark.parametrize(
     "peak,previous,expected,armed",
     [(10.0, 8.0, 9.0, False), (10.49, 9.0, 9.0, False),
-     (10.5, 9.0, 10.5, True), (12.0, 11.0, 11.0, True),
+     (10.5, 9.0, 9.0, False), (10.5001, 9.0, 10.5, True),
+     (12.0, 11.0, 11.0, True),
      (10.0, 9.2, 9.2, False)],
 )
 def test_public_stop_policy_locks_five_percent_without_loosening(peak, previous, expected, armed):
@@ -38,9 +57,11 @@ async def test_public_profit_floor_persists_across_reversal_and_restart(monkeypa
             assert event["broker_base"] == "public"
 
     monkeypatch.setattr(pm_ratchet, "get_db", lambda: SimpleNamespace(tf_trades=Trades(), pm_ratchet_events=Events()))
-    await pm_ratchet._apply_public_ratchet_marks([dict(trade)], {"WIN": 10.5}, source="test")
+    await pm_ratchet._apply_public_ratchet_marks([dict(trade)], {"WIN": 10.5001}, source="test")
     assert trade["current_stop"] == 10.5
     assert trade["public_stop_policy"]["profit_floor_armed"] is True
+    assert trade["public_phase_plan"]["enabled"] is False
+    assert trade["pm_active_target"] is None
     await pm_ratchet._apply_public_ratchet_marks([dict(trade)], {"WIN": 10.3}, source="test_restart")
     assert trade["current_stop"] == 10.5
     assert trade["pm_active_stop"] == 10.5
@@ -113,9 +134,9 @@ async def test_public_ratchet_uses_fresh_public_mark_and_persists_raised_stop(mo
     assert result["broker_base"] == "public"
     assert result["checked"] == 1
     assert result["ratcheted"] == 1
-    assert updates[0]["pm_ratchet_level"] == 4
+    assert updates[0]["pm_ratchet_level"] == 110
     assert updates[0]["peak_price_since_entry"] == 22.0
-    assert updates[0]["current_stop"] == 12.0
+    assert updates[0]["current_stop"] == 20.5
     assert events[0]["broker_base"] == "public"
 
 
@@ -255,4 +276,4 @@ async def test_sdk_stream_mark_uses_the_same_public_ratchet_ledger(monkeypatch):
     assert result["source"] == "public_price_stream"
     assert result["ratcheted"] == 1
     assert updates[0]["pm_last_ratchet_source"] == "public_price_stream"
-    assert updates[0]["current_stop"] == 12.0
+    assert updates[0]["current_stop"] == 20.5

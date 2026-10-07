@@ -6,6 +6,7 @@ the ratchet plan decided by the Portfolio Manager. It does not open trades.
 from __future__ import annotations
 
 import os
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,17 +28,29 @@ def _num(v: Any, default: float = 0.0) -> float:
 
 def public_stop_policy(entry: float, observed_peak: float, previous_stop: float = 0.0) -> dict[str, Any]:
     """Price-based protection, not a guaranteed fee-adjusted realized return."""
-    if entry <= 0 or observed_peak <= 0:
+    if not all(math.isfinite(value) for value in (entry, observed_peak, previous_stop)) or entry <= 0 or observed_peak <= 0:
         return {"enabled": False}
-    trigger = entry * 1.05
-    armed = observed_peak >= trigger
-    stop = max(previous_stop, entry * 0.90, trigger if armed else 0.0)
+    gain_pct = round((observed_peak / entry - 1) * 100, 10)
+    floor_pct = None
+    milestone = None
+    if gain_pct > 20:
+        milestone = max(20, (math.ceil(gain_pct / 10) - 1) * 10)
+        floor_pct = 20.0 if milestone == 20 else float(milestone - 5)
+    elif gain_pct > 10:
+        milestone, floor_pct = 10, 10.0
+    elif gain_pct > 5:
+        milestone, floor_pct = 5, 5.0
+    armed = floor_pct is not None
+    floor_price = entry * (1 + floor_pct / 100) if armed else None
+    stop = max(previous_stop, entry * 0.90, floor_price or 0.0)
     return {
         "enabled": True,
         "initial_max_loss_pct": 10.0,
-        "profit_floor_pct": 5.0,
+        "version": "uncapped_floors_v2",
+        "profit_floor_pct": floor_pct,
+        "crossed_milestone_pct": milestone,
         "profit_floor_armed": armed,
-        "profit_floor_price": round(trigger, 6),
+        "profit_floor_price": round(floor_price, 6) if armed else None,
         "active_stop": round(stop, 6),
         "basis": "broker_fill_price_before_fees",
     }
@@ -177,13 +190,14 @@ async def _apply_public_ratchet_marks(
             unpriced.append(ticker)
             continue
         previous_stop = max(_num(trade.get(key)) for key in ("current_stop", "pm_active_stop", "stop_price"))
-        observed_peak = max(_num(trade.get("peak_price_since_entry"), ratchet_entry), float(current))
-        levels = compute_active_levels(ratchet_entry, observed_peak, plan, previous_stop)
-        if not levels.get("enabled"):
-            continue
+        observed_peak = max(_num(trade.get("peak_price_since_entry"), entry), entry, float(current))
         policy = public_stop_policy(entry, observed_peak, previous_stop)
-        levels["active_stop"] = max(levels["active_stop"], policy["active_stop"])
-        levels["stop_gain_pct"] = round((levels["active_stop"] / entry - 1) * 100.0, 2)
+        levels = {
+            "active_stop": policy["active_stop"],
+            "active_target": None,
+            "ratchet_level": policy["crossed_milestone_pct"] or 0,
+            "gain_pct": round((observed_peak / entry - 1) * 100, 2),
+        }
         current_level = int(_num(trade.get("pm_ratchet_level"), 0))
         updates = {
             "pm_active_target": levels["active_target"],
@@ -193,6 +207,9 @@ async def _apply_public_ratchet_marks(
             "peak_price_since_entry": observed_peak,
             "pm_last_ratchet_mark": float(current),
             "public_stop_policy": policy,
+            "public_phase_plan": {"enabled": False, "reason": "full_position_floor_exit_policy"},
+            "phase1_target": None,
+            "phase2_target": None,
         }
         if initialized:
             updates.update({
