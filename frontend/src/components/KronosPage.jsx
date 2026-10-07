@@ -275,7 +275,7 @@ export default function KronosPage() {
         <Stat label="MODEL HEALTH" value={kronosStatus?.health || "CHECKING"} sub={`snapshot ${ageText(kronosStatus?.snapshot_age_minutes)}`} color={healthColor(kronosStatus?.health)} accentBar />
         <Stat label="LEARNING" value={kronosStatus?.learning_health || kronosLearning?.health || "CHECKING"} sub={`${kronosLearning?.overall?.sample ?? kronosAccuracy?.overall?.sample ?? 0} mature samples`} color={learningColor(kronosStatus?.learning_health || kronosLearning?.health)} />
         <Stat label="OPEN UNDERLYINGS" value={stats.underlyings} sub={`${activeForecasts.length} instruments`} color={accent} />
-        <Stat label="SPY TODAY" value={`${market.direction || "UNKNOWN"} ${signed(market.forecast_pct)}%`} sub={`cone ${signed(market.cone_low_pct)} to ${signed(market.cone_high_pct)}%`} color={marketColor(market.direction)} />
+        <Stat label="SPY TARGET" value={`${market.direction || "UNKNOWN"} ${signed(market.forecast_pct)}%`} sub={`cone ${signed(market.cone_low_pct)} to ${signed(market.cone_high_pct)}%`} color={marketColor(market.direction)} />
         <Stat label="P/L DAY CONE" value={fmtMoney(cone.base_usd)} sub={`${fmtMoney(cone.low_usd)} to ${fmtMoney(cone.high_usd)}`} color={Number(cone.base_usd || 0) >= 0 ? "#4ade80" : "#f87171"} />
         <Stat label="NET FORECAST" value={stats.netBias} sub={`${stats.bullish} bull / ${stats.bearish} bear`} color={biasColors[stats.netBias] || accent} />
         <Stat label="PM ALIGNED" value={`${stats.alignedPct}%`} sub={`${stats.aligned}/${activeForecasts.length || 0} positions`} color={stats.alignedPct >= 70 ? "#4ade80" : "#fbbf24"} />
@@ -707,7 +707,7 @@ function KronosCalendarView({ data, loading, month, year, selected, setSelected,
         <div style={calendarHeroStats}>
           <div style={calendarHeroTile("#4ade80")}><span>Good Days</span><strong>{summary.good}</strong><small>prediction wins</small></div>
           <div style={calendarHeroTile("#f87171")}><span>Bad Days</span><strong>{summary.bad}</strong><small>misses</small></div>
-          <div style={calendarHeroTile("#fbbf24")}><span>Hit Rate</span><strong>{summary.hitRate}%</strong><small>{summary.watch} watch/pending</small></div>
+          <div style={calendarHeroTile("#fbbf24")}><span>Hit Rate</span><strong>{summary.hitRate == null ? "-" : `${summary.hitRate}%`}</strong><small>{summary.watch} watch/pending</small></div>
           <div style={calendarHeroTile(accent2)}><span>Directional</span><strong>{apiSummary.direction_win_rate_pct == null ? "-" : `${apiSummary.direction_win_rate_pct}%`}</strong><small>UP/DOWN win</small></div>
           <div style={calendarHeroTile("#a78bfa")}><span>Cone</span><strong>{apiSummary.cone_win_rate_pct == null ? "-" : `${apiSummary.cone_win_rate_pct}%`}</strong><small>coverage</small></div>
         </div>
@@ -803,7 +803,7 @@ function ScenarioFan({ selected, rows }) {
       <div style={miniGrid}>
         <Mini label="BASE CASE" value={`${selected.baseMove >= 0 ? "+" : ""}${selected.baseMove.toFixed(1)}%`} color={selected.color} />
         <Mini label="BEAR FLOOR" value={`${selected.bearMove.toFixed(1)}%`} color="#f87171" />
-        <Mini label="BULL CEILING" value={`+${selected.bullMove.toFixed(1)}%`} color="#4ade80" />
+        <Mini label="UPPER CONE" value={`${signed(selected.bullMove)}%`} color="#4ade80" />
         <Mini label="EDGE SCORE" value={selected.edgeScore} color={accent2} />
       </div>
       <div style={chartBox(330)}>
@@ -872,7 +872,7 @@ function MarketForecastBand({ market, cone }) {
   return (
       <div style={marketBand}>
       <div style={marketCell}>
-        <span>SPY TODAY</span>
+        <span>SPY TARGET</span>
         <strong style={{ color: marketColor(market.direction) }}>{market.direction || "UNKNOWN"} {signed(market.forecast_pct)}%</strong>
       </div>
       <div style={marketCell}>
@@ -1123,7 +1123,7 @@ function normalizeBackendForecasts(kronos) {
       color,
       confidence: numberish(r.confidence),
       aligned: Boolean(r.aligned_with_pm),
-      horizon: r.target_at ? `RTH target ${fmtTime(r.target_at)}` : "UNAVAILABLE",
+      horizon: r.target_at ? `RTH target ${new Date(r.target_at).toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric" })} ${fmtTime(r.target_at)}` : "UNAVAILABLE",
       catalysts: r.catalysts || [],
       tripwires: r.tripwires || [],
       marketValue: numberish(r.market_value),
@@ -1132,7 +1132,7 @@ function normalizeBackendForecasts(kronos) {
       bearMove,
       bullMove,
       edgeScore: numberish(r.kronos_score) ?? 0,
-      note: `Backend Kronos forecast from ${r.pm_action || "unmapped PM"} route, current exposure, scan evidence, and risk state.`,
+      note: `Research OHLCV baseline using completed session candles. PM route ${r.pm_action || "unmapped"} is context, not the forecast model.`,
     };
   }).filter(r => r.ticker).sort((a, b) => (b.edgeScore || 0) - (a.edgeScore || 0));
 }
@@ -1256,7 +1256,7 @@ function calendarSummary(days) {
     good,
     bad,
     watch,
-    hitRate: good + bad ? Math.round((good / (good + bad)) * 100) : 0,
+    hitRate: good + bad ? Math.round((good / (good + bad)) * 100) : null,
   };
 }
 
