@@ -7,6 +7,73 @@ from services import portfolio_manager, public_execution, safety, telegram_event
 from services import trade_floor_learning
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session,broker_quantity,pending,expected", [
+    ("CORE", 1.67597, False, 1.67597),
+    ("TWENTY_FOUR_HOURS", 1.67597, False, 1.0),
+    ("TWENTY_FOUR_HOURS", 0.67597, False, None),
+    ("CORE", 1.67597, True, None),
+])
+async def test_automatic_public_stop_exit_uses_broker_quantity_and_session(monkeypatch, session, broker_quantity, pending, expected):
+    trade = {"ticker": "TEST", "client_order_id": "entry-test", "qty_remaining": 3.0,
+             "current_stop": 3.0, "emergency_exit_order_id": "pending-sell" if pending else None}
+    updates = []
+    submissions = []
+
+    class Cursor:
+        async def to_list(self, _limit):
+            return [trade]
+
+    class Trades:
+        def find(self, *_args):
+            return Cursor()
+
+        async def update_one(self, _query, update):
+            updates.append(update["$set"])
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def portfolio(self):
+            return {"positions": [{"symbol": "TEST", "quantity": broker_quantity}]}
+
+        async def quotes(self, _symbols):
+            return {"quotes": [{"symbol": "TEST", "bid": 2.67, "ask": 2.69,
+                                "quoteTime": datetime.now(timezone.utc).isoformat()}]}
+
+        async def submit_equity_order(self, **kwargs):
+            submissions.append(kwargs)
+            return {"order": {"orderId": "stop-exit"}}
+
+    async def claim(**_kwargs):
+        return {"ok": True}
+
+    async def marked(*_args):
+        pass
+
+    monkeypatch.setattr(public_execution, "enabled", lambda: True)
+    monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
+    monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(public_execution, "_public_session_now", lambda *_args: session)
+    monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", claim)
+    monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", marked)
+
+    result = await public_execution.process_protective_exits()
+
+    assert result["ok"] is True
+    if expected is None:
+        assert submissions == []
+    else:
+        assert submissions[0]["quantity"] == expected
+        assert submissions[0]["session"] == session
+        assert submissions[0]["limit_price"] == 2.67
+        assert updates[0]["emergency_exit_order_qty"] == expected
+
+
 def test_public_trade_quantity_prefers_reconciled_remaining_quantity():
     assert public_execution._qty({"qty_remaining": 1.25, "quantity": 0.0}) == 1.25
 

@@ -2371,13 +2371,15 @@ async def process_protective_exits() -> dict[str, Any]:
         return {"skipped": False, "ok": True, "checked": 0, "submitted": [], "errors": []}
     submitted: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         # A breached stop can only be established from a current quote. Keep
         # routine monitoring to one batch request; an explicit exit request
         # below receives the rapid one-minute retry window.
         refreshed = await _refresh_exit_quotes(client, [_symbol(row) for row in rows], emergency=True, max_attempts=1)
+        broker_positions = None
         for trade in rows:
-            if trade.get("public_phase_order_id"):
+            if trade.get("public_phase_order_id") or trade.get("emergency_exit_order_id"):
                 # A phase trim is already working at the broker. Do not race
                 # it with a full emergency close using stale local quantity.
                 continue
@@ -2389,6 +2391,17 @@ async def process_protective_exits() -> dict[str, Any]:
             quantity = _qty(trade)
             if stop <= 0 or current <= 0 or not exit_quote or quantity <= 0 or current > stop:
                 continue
+            if broker_positions is None:
+                broker_positions = {
+                    _symbol(position): position
+                    for position in _positions(await client.portfolio())
+                }
+            broker_quantity = _qty(broker_positions.get(ticker) or {})
+            order_shape, shape_note = _exit_order_shape(broker_quantity)
+            if not order_shape:
+                deferred.append({"ticker": ticker, "reason": shape_note})
+                continue
+            quantity = _num(order_shape.get("quantity"))
             client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, stop, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"stop": stop})
             if not claim.get("ok"):
@@ -2405,7 +2418,7 @@ async def process_protective_exits() -> dict[str, Any]:
                     quantity=quantity,
                     limit_price=exit_limit,
                     time_in_force="DAY",
-                    session=_public_session_now(),
+                    session=str(order_shape["session"]),
                     client_order_id=client_id,
                 )
                 order = result.get("order") or {}
@@ -2414,7 +2427,7 @@ async def process_protective_exits() -> dict[str, Any]:
                     raise RuntimeError("Public protective order response missing order id")
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                    {"$set": {"emergency_exit_order_id": order_id, "emergency_exit_order_qty": quantity, "emergency_exit_status": "SUBMITTED", "emergency_exit_limit": exit_limit, "emergency_exit_quote": exit_quote, "emergency_exit_preflight": result.get("preflight")}},
+                    {"$set": {"emergency_exit_order_id": order_id, "emergency_exit_order_qty": quantity, "emergency_exit_status": "SUBMITTED", "emergency_exit_limit": exit_limit, "emergency_exit_quote": exit_quote, "emergency_exit_preflight": result.get("preflight"), "emergency_exit_session": order_shape["session"], "emergency_exit_shape_note": shape_note}},
                 )
                 submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "limit_price": exit_limit, "order_type": "EMERGENCY_LIMIT_EXIT"})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id})
@@ -2427,6 +2440,7 @@ async def process_protective_exits() -> dict[str, Any]:
         "checked": len(rows),
         "submitted": submitted,
         "errors": errors,
+        "deferred": deferred,
         "quote_refresh": {
             "attempts": refreshed.get("attempts"),
             "unresolved": refreshed.get("unresolved"),
