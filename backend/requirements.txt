@@ -134,4 +134,5 @@ watchfiles==1.1.1
 websockets==16.0
 yarl==1.23.0
 publicdotcom-py==0.1.22
+exchange-calendars==4.13.2
 zipp==3.23.0

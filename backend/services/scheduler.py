@@ -520,7 +520,7 @@ def start_scheduler():
                 f"Kronos 5m forecast refresh: {summary.get('positions', 0)} positions, "
                 f"health={status.get('health')}, pm_map={summary.get('mapped_pm', 0)}/{summary.get('positions', 0)}, "
                 f"resolved={reconciliation.get('resolved', 0)}, proof={((accuracy.get('overall') or {}).get('sample') or 0)}",
-                "warn" if status.get("health") in {"STALE", "MISSING"} else "info",
+                "warn" if status.get("health") in {"STALE", "MISSING", "STALE_INPUT", "DEGRADED"} else "info",
                 {
                     "health": status.get("health"),
                     "latest_snapshot_at": status.get("latest_snapshot_at"),

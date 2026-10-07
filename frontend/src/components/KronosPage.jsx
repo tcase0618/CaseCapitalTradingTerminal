@@ -73,14 +73,14 @@ export default function KronosPage() {
       const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, accuracyRes, learningRes, disagreementRes] = await Promise.all([
         get("/scan/latest", { results: [] }),
         get("/portfolio_manager/latest", { decisions: [] }, 12000),
-        get("/trade_floor/positions", { db_positions: [], live_alpaca: [] }),
+        get("/kronos/positions", { positions: [] }),
         get("/options_desk/positions", { positions: [] }),
         get("/options_desk/risk", { checks: [] }),
         get("/options_desk/trades?sync_live=false", { trades: [] }),
         get("/signals/tracker?limit=250", { rows: [] }),
         get("/data/lse/health", { ok: false }),
         get("/data/lse/macro?limit=80", { economic_calendar: [], bond_yields: [] }),
-        get("/kronos/forecast?persist=true", { forecasts: [] }, 12000),
+        get("/kronos/forecast", { forecasts: [] }, 12000),
         get("/kronos/status", { ok: false, health: "DEGRADED" }, 12000),
         get("/kronos/accuracy?limit=900", { ok: false, overall: {} }, 16000),
         get("/kronos/learning?limit=900", { ok: false, health: "UNKNOWN", recommendations: [] }, 16000),
@@ -100,7 +100,7 @@ export default function KronosPage() {
       setKronosAccuracy(accuracyRes.data);
       setKronosLearning(learningRes.data);
       setDisagreements(disagreementRes.data);
-      setLastSync(new Date().toISOString());
+      if (!kronosRes.data?.error && kronosRes.data?.generated_at) setLastSync(kronosRes.data.generated_at);
     } finally {
       refreshInFlight.current = false;
       setLoading(false);
@@ -117,33 +117,23 @@ export default function KronosPage() {
     if (actionLoading) return;
     setActionLoading(true);
     try {
-      const r = await axios.post(`${API}/kronos/refresh`, {}, { timeout: 16000 });
+      const r = await axios.post(`${API}/kronos/refresh`, {}, { timeout: 90000 });
       setKronos(r.data?.forecast || r.data);
       setKronosStatus(r.data?.status || null);
       const d = await axios.get(`${API}/kronos/disagreements?limit=250`, { timeout: 10000 }).catch(() => null);
       if (d?.data) setDisagreements(d.data);
-      const a = await axios.get(`${API}/kronos/accuracy?limit=900&persist=true`, { timeout: 16000 }).catch(() => null);
+      const a = await axios.get(`${API}/kronos/accuracy?limit=900`, { timeout: 16000 }).catch(() => null);
       if (a?.data) setKronosAccuracy(a.data);
-      const l = await axios.get(`${API}/kronos/learning?limit=900&persist=true`, { timeout: 16000 }).catch(() => null);
+      const l = await axios.get(`${API}/kronos/learning?limit=900`, { timeout: 16000 }).catch(() => null);
       if (l?.data) setKronosLearning(l.data);
-      setLastSync(new Date().toISOString());
+      if (r.data?.forecast?.generated_at) setLastSync(r.data.forecast.generated_at);
     } finally {
       setActionLoading(false);
     }
   }, [actionLoading]);
 
-  const forecasts = useMemo(() => buildForecasts({
-    scan,
-    pm,
-    equityPositions,
-    optionPositions,
-    optionRisk,
-    optionTrades,
-    tracker,
-    macro,
-  }), [scan, pm, equityPositions, optionPositions, optionRisk, optionTrades, tracker, macro]);
   const backendForecasts = useMemo(() => normalizeBackendForecasts(kronos), [kronos]);
-  const activeForecasts = backendForecasts.length ? backendForecasts : forecasts;
+  const activeForecasts = backendForecasts;
 
   useEffect(() => {
     if (!selectedKey && activeForecasts.length) setSelectedKey(activeForecasts[0].key);
@@ -153,7 +143,7 @@ export default function KronosPage() {
   const selectedBackend = useMemo(() => {
     if (!selected) return null;
     return (kronos?.forecasts || []).find(r =>
-      String(r.contract || "") === String(selected.contract || "")
+      (Boolean(r.contract) && String(r.contract) === String(selected.contract || ""))
       || (String(r.ticker || "").toUpperCase() === selected.ticker && String(r.instrument || "").toUpperCase() === selected.instrument)
     );
   }, [kronos, selected]);
@@ -178,13 +168,13 @@ export default function KronosPage() {
     setSelectedContext({ loading: true, ticker });
     Promise.all([
       axios.get(`${API}/data/lse/ticker/${ticker}`, { timeout: 10000 }).catch(e => ({ data: { error: e.message, degraded: true } })),
-      axios.get(`${API}/data/lse/candles/${ticker}?timeframe=1d&limit=80`, { timeout: 10000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
+      axios.get(`${API}/data/lse/candles/${ticker}?timeframe=1d&limit=80&order=desc`, { timeout: 10000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
       axios.get(`${API}/data/lse/options_flow?underlying=${ticker}&limit=40&max_dte=90`, { timeout: 10000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
     ]).then(([profile, candles, flow]) => {
       if (!cancelled) setSelectedContext({ loading: false, ticker, profile: profile.data, candles: candles.data, flow: flow.data });
     });
     return () => { cancelled = true; };
-  }, [selected?.ticker]);
+  }, [selected?.ticker, lastSync]);
 
   const stats = useMemo(() => summarizeForecasts(activeForecasts, lseHealth, selectedContext), [activeForecasts, lseHealth, selectedContext]);
   const scenario = selectedFull ? buildScenario(selectedFull) : [];
@@ -199,10 +189,10 @@ export default function KronosPage() {
     setCandleSuite(null);
     const path = ticker === "SPY"
       ? `${API}/price/history/SPY?days=140`
-      : `${API}/data/lse/candles/${ticker}?timeframe=1d&limit=140&order=asc`;
+      : `${API}/data/lse/candles/${ticker}?timeframe=1d&limit=140&order=desc`;
     Promise.all([
       axios.get(path, { timeout: 12000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
-      axios.get(`${API}/kronos/candle_forecast/${ticker}?persist=true`, { timeout: 16000 }).catch(e => ({ data: { ok: false, error: e.message, timeframes: [] } })),
+      axios.get(`${API}/kronos/candle_forecast/${ticker}`, { timeout: 20000 }).catch(e => ({ data: { ok: false, error: e.message, timeframes: [] } })),
     ])
       .then(([priceRes, candleRes]) => {
         if (!cancelled) {
@@ -214,7 +204,7 @@ export default function KronosPage() {
         if (!cancelled) setChartLoading(false);
       });
     return () => { cancelled = true; };
-  }, [chartChoice?.ticker]);
+  }, [chartChoice?.ticker, lastSync]);
 
   const runSandbox = useCallback(async (symbol) => {
     const ticker = normalizeTicker(symbol || sandboxDraft || "SPY") || "SPY";
@@ -224,7 +214,7 @@ export default function KronosPage() {
       axios.get(`${API}${path}`, { timeout }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
     const [profile, candles, flow, macroRes] = await Promise.all([
       get(`/data/lse/ticker/${ticker}`, { error: "missing profile" }),
-      get(`/data/lse/candles/${ticker}?timeframe=1d&limit=120&order=asc`, { rows: [] }),
+      get(`/data/lse/candles/${ticker}?timeframe=1d&limit=120&order=desc`, { rows: [] }),
       get(`/data/lse/options_flow?underlying=${ticker}&limit=80&max_dte=120`, { rows: [] }),
       get("/data/lse/macro?limit=80", { economic_calendar: [], bond_yields: [] }),
     ]);
@@ -472,7 +462,7 @@ function KronosAccuracyPanel({ accuracy, compact = false }) {
         </div>
       ) : null}
       <div style={explainText}>
-        Proof scores compare each saved Kronos candle forecast to the next raw OHLCV candle. Pending forecasts are not counted as wins or losses.
+        Proof uses exact completed target bars. Pending predictions are excluded. Confidence scores and scenario weights are uncalibrated.
       </div>
     </div>
   );
@@ -509,8 +499,8 @@ function SelectionMatrix({ rows, selectedKey, onSelect }) {
           </div>
           <div style={pill(row.color)}>{row.bias}</div>
           <div style={{ textAlign: "right" }}>
-            <div style={{ color: labelLight, fontWeight: 900 }}>{row.confidence}%</div>
-            <div style={{ color: dim, fontSize: 9, letterSpacing: "0.1em" }}>CONF</div>
+            <div style={{ color: labelLight, fontWeight: 900 }}>{row.confidence ?? "-"}</div>
+            <div style={{ color: dim, fontSize: 9, letterSpacing: "0.1em" }}>HEURISTIC SCORE</div>
           </div>
         </button>
       ))}
@@ -622,7 +612,7 @@ function KronosTerminalChart({ choice, choices, candles, candleSuite, forecast, 
 }
 
 function SandboxView({ draft, setDraft, run, loading, data }) {
-  const candles = normalizeRows(data?.candles).map(normalizeCandle).filter(Boolean);
+  const candles = normalizeRows(data?.candles).map(normalizeCandle).filter(Boolean).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const flow = normalizeRows(data?.flow);
   const stats = sandboxStats(candles, flow);
   const macroTone = inferMacroTone(data?.macro);
@@ -1118,9 +1108,9 @@ function normalizeBackendForecasts(kronos) {
     const instrument = String(r.instrument || "EQUITY").toUpperCase();
     const bias = String(r.forecast_bias || r.bias || "CHOP").toUpperCase();
     const color = biasColors[bias] || accent;
-    const baseMove = numberish(r.forecast_pct) ?? 0;
-    const bearMove = numberish(r.bear_pct) ?? baseMove - 3;
-    const bullMove = numberish(r.bull_pct) ?? baseMove + 5;
+    const baseMove = numberish(r.forecast_pct);
+    const bearMove = numberish(r.bear_pct);
+    const bullMove = numberish(r.bull_pct);
     const key = `${instrument}:${r.contract || ticker}`;
     return {
       ...r,
@@ -1132,13 +1122,13 @@ function normalizeBackendForecasts(kronos) {
       pmAction: String(r.pm_action || "UNMAPPED").toUpperCase(),
       bias,
       color,
-      confidence: numberish(r.confidence) ?? 0,
+      confidence: numberish(r.confidence),
       aligned: Boolean(r.aligned_with_pm),
-      horizon: instrument === "OPTION" ? "1-10 trading days" : "5-20 trading days",
+      horizon: r.target_at ? `RTH target ${fmtTime(r.target_at)}` : "UNAVAILABLE",
       catalysts: r.catalysts || [],
       tripwires: r.tripwires || [],
       marketValue: numberish(r.market_value),
-      unrealizedPct: normalizePct(r.unrealized_pct),
+      unrealizedPct: numberish(r.unrealized_pct),
       baseMove,
       bearMove,
       bullMove,
@@ -1149,96 +1139,6 @@ function normalizeBackendForecasts(kronos) {
   }).filter(r => r.ticker).sort((a, b) => (b.edgeScore || 0) - (a.edgeScore || 0));
 }
 
-function buildForecasts({ scan, pm, equityPositions, optionPositions, optionRisk, optionTrades, tracker, macro }) {
-  const scanRows = scan?.results || [];
-  const scanByTicker = new Map(scanRows.map(r => [normalizeTicker(r.ticker || r.symbol), r]));
-  const pmRows = normalizePmRows(pm);
-  const pmByTicker = new Map(pmRows.map(r => [normalizeTicker(r.ticker || r.symbol), r]));
-  const perfByTicker = new Map((tracker?.rows || []).map(r => [normalizeTicker(r.ticker || r.symbol), r]));
-  const riskBySymbol = new Map((optionRisk?.checks || []).map(r => [String(r.symbol || "").toUpperCase(), r]));
-  const tradeBySymbol = new Map((optionTrades?.trades || []).map(r => [String(r.symbol || "").toUpperCase(), r]));
-
-  const equity = normalizeEquityPositions(equityPositions).map(p => ({
-    ticker: normalizeTicker(p.ticker || p.symbol),
-    instrument: "EQUITY",
-    quantity: p.qty || p.quantity || p.shares || "-",
-    marketValue: numberish(p.market_value || p.marketValue || p.notional),
-    unrealizedPct: normalizePct(p.unrealized_plpc ?? p.unrealized_pct ?? p.unrealizedPnlPct),
-    raw: p,
-  }));
-
-  const options = (optionPositions?.positions || []).map(p => {
-    const symbol = String(p.symbol || "").toUpperCase();
-    const risk = riskBySymbol.get(symbol) || {};
-    const trade = tradeBySymbol.get(symbol) || {};
-    return {
-      ticker: normalizeTicker(p.underlying_symbol || p.underlying || trade.ticker || inferUnderlying(symbol)),
-      instrument: "OPTION",
-      contract: symbol,
-      quantity: p.qty || p.quantity || "-",
-      marketValue: numberish(p.market_value || p.marketValue || p.cost_basis),
-      unrealizedPct: normalizePct(risk.pnl_pct ?? p.unrealized_plpc ?? p.unrealized_pct ?? p.unrealizedPnlPct),
-      risk,
-      trade,
-      raw: p,
-    };
-  });
-
-  return [...equity, ...options].filter(p => p.ticker).map((p) => {
-    const signal = scanByTicker.get(p.ticker) || {};
-    const decision = pmByTicker.get(p.ticker) || {};
-    const perf = perfByTicker.get(p.ticker) || {};
-    const rawScore = numberish(signal.trade_score ?? signal.signal_score ?? signal.case_score ?? signal.score ?? decision.pm_score ?? decision.score);
-    const score = rawScore != null && rawScore > 10 ? rawScore / 10 : rawScore;
-    const pmAction = String(decision.action || decision.route || decision.decision || signal.pm_action || signal.pm_route || "").toUpperCase() || "UNMAPPED";
-    const catalysts = catalystTags(signal, perf, macro);
-    const bias = forecastBias(score, pmAction, p.unrealizedPct, p.instrument, p.risk);
-    const conf = confidence(score, decision, signal, p, perf);
-    const tripwires = tripwireList(p, score, pmAction);
-    const edgeScore = Math.round((score || 5) * 7 + conf * 0.3 - tripwires.length * 8);
-    return {
-      ...p,
-      key: `${p.instrument}:${p.contract || p.ticker}`,
-      score,
-      pmAction,
-      bias: bias.label,
-      color: bias.color,
-      confidence: conf,
-      aligned: pmAlignment(pmAction, bias.label),
-      horizon: p.instrument === "OPTION" ? "1-10 trading days" : "5-20 trading days",
-      catalysts,
-      tripwires,
-      baseMove: bias.baseMove,
-      bearMove: bias.bearMove,
-      bullMove: bias.bullMove,
-      edgeScore: Math.max(0, Math.min(100, edgeScore)),
-      note: forecastNote(p, bias.label, score, pmAction, catalysts),
-      path: buildPath(bias.baseMove),
-    };
-  }).sort((a, b) => (b.edgeScore || 0) - (a.edgeScore || 0));
-}
-
-function summarizeForecasts(forecasts, lseHealth) {
-  const bullish = forecasts.filter(f => f.bias === "BULLISH").length;
-  const bearish = forecasts.filter(f => f.bias === "BEARISH").length;
-  const chop = forecasts.filter(f => f.bias === "CHOP").length;
-  const aligned = forecasts.filter(f => f.aligned).length;
-  const atRisk = forecasts.filter(f => f.tripwires.length).length;
-  const thetaWatch = forecasts.filter(f => f.tripwires.some(t => t.includes("THETA"))).length;
-  const netBias = bullish > bearish && bullish >= chop ? "BULLISH" : bearish > bullish ? "BEARISH" : "CHOP";
-  return {
-    underlyings: new Set(forecasts.map(f => f.ticker)).size,
-    bullish,
-    bearish,
-    chop,
-    netBias,
-    aligned,
-    alignedPct: forecasts.length ? Math.round(aligned / forecasts.length * 100) : 0,
-    atRisk,
-    thetaWatch,
-    lseOnline: Boolean(lseHealth?.ok),
-  };
-}
 
 function buildChartChoices(forecasts) {
   const seen = new Set(["SPY"]);
@@ -1260,51 +1160,38 @@ function buildChartChoices(forecasts) {
 
 function buildChartForecast(choice, forecasts, market) {
   if (!choice || choice.key === "SPY") {
-    const base = numberish(market?.forecast_pct) ?? 0;
-    const low = numberish(market?.cone_low_pct) ?? base - 0.8;
-    const high = numberish(market?.cone_high_pct) ?? base + 0.8;
-    return { basePct: base, lowPct: low, highPct: high, horizon: "TODAY", color: marketColor(market?.direction) || accent2 };
+    const base = numberish(market?.forecast_pct);
+    const low = numberish(market?.cone_low_pct);
+    const high = numberish(market?.cone_high_pct);
+    return { basePct: base, lowPct: low, highPct: high, anchorPrice: market?.last_price, horizon: market?.target_at || "UNAVAILABLE", color: marketColor(market?.direction) || accent2 };
   }
   const tickerRows = forecasts.filter(f => f.ticker === choice.ticker);
   const best = tickerRows.sort((a, b) => (b.edgeScore || 0) - (a.edgeScore || 0))[0] || {};
   return {
-    basePct: numberish(best.baseMove) ?? 0,
-    lowPct: numberish(best.bearMove) ?? -3,
-    highPct: numberish(best.bullMove) ?? 5,
+    basePct: numberish(best.baseMove),
+    lowPct: numberish(best.bearMove),
+    highPct: numberish(best.bullMove),
+    anchorPrice: best.anchor_price,
     horizon: best.horizon || "POSITION WINDOW",
     color: best.color || choice.color || accent,
   };
 }
 
 function buildTerminalChartRows(payload, forecast) {
-  const historical = normalizeRows(payload).map(normalizeCandle).filter(Boolean).slice(-95);
+  const historical = normalizeRows(payload).map(normalizeCandle).filter(Boolean).sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-95);
   if (!historical.length) return [];
-  const last = historical[historical.length - 1];
-  const basePct = numberish(forecast?.basePct) ?? 0;
-  const lowPct = numberish(forecast?.lowPct) ?? basePct - 3;
-  const highPct = numberish(forecast?.highPct) ?? basePct + 5;
-  const anchor = { label: "NOW", actual: last.close, base: last.close, low: last.close, high: last.close, coneRange: [last.close, last.close] };
-  const future = Array.from({ length: 10 }).map((_, i) => {
-    const t = (i + 1) / 10;
-    const wobble = Math.sin((i + 1) * 0.85) * 0.003;
-    const base = last.close * (1 + (basePct / 100) * t + wobble);
-    const low = last.close * (1 + (lowPct / 100) * t);
-    const high = last.close * (1 + (highPct / 100) * t);
-    return {
-      label: `K+${i + 1}`,
-      actual: null,
-      base: Number(base.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      coneRange: [Number(low.toFixed(2)), Number(high.toFixed(2))],
-    };
-  });
-  return [
-    ...historical.map(r => ({ label: r.label, actual: r.close, base: null, low: null, high: null, coneRange: null })),
-    anchor,
-    ...future,
-  ];
+  const rows = historical.map(r => ({ label: r.label, actual: r.close, base: null, low: null, high: null, coneRange: null }));
+  const anchorPrice = numberish(forecast?.anchorPrice);
+  const base = numberish(forecast?.basePct);
+  const low = numberish(forecast?.lowPct);
+  const high = numberish(forecast?.highPct);
+  if (anchorPrice == null || base == null || low == null || high == null) return rows;
+  const lo = anchorPrice * (1 + low / 100);
+  const hi = anchorPrice * (1 + high / 100);
+  return [...rows, { label: "INPUT", actual: anchorPrice, base: anchorPrice, low: anchorPrice, high: anchorPrice, coneRange: [anchorPrice, anchorPrice] },
+    { label: "TARGET", actual: null, base: anchorPrice * (1 + base / 100), low: lo, high: hi, coneRange: [lo, hi] }];
 }
+
 
 function normalizeCandle(row, i = 0) {
   if (!row) return null;
@@ -1312,6 +1199,7 @@ function normalizeCandle(row, i = 0) {
   if (close == null) return null;
   return {
     label: shortDate(row.date || row.timestamp || row.time || row.datetime || row.t || i),
+    timestamp: String(row.date || row.timestamp || row.time || row.datetime || row.t || ""),
     close,
     volume: numberish(row.volume ?? row.v),
   };
@@ -1398,16 +1286,10 @@ function calendarTitle(day) {
 }
 
 function buildCalendarDetailChart(day) {
-  const low = numberish(day.spy_cone_low_pct) ?? 0;
-  const base = numberish(day.spy_prediction_pct) ?? 0;
-  const high = numberish(day.spy_cone_high_pct) ?? 0;
-  const actual = numberish(day.spy_actual_pct);
-  return [
-    { label: "OPEN", low: 0, base: 0, high: 0, actual: 0 },
-    { label: "MID", low: Number((low * 0.5).toFixed(2)), base: Number((base * 0.5).toFixed(2)), high: Number((high * 0.5).toFixed(2)), actual: actual == null ? null : Number((actual * 0.5).toFixed(2)) },
-    { label: "CLOSE", low, base, high, actual },
-  ];
+  return [{ label: "TARGET", low: numberish(day.spy_cone_low_pct), base: numberish(day.spy_prediction_pct),
+    high: numberish(day.spy_cone_high_pct), actual: numberish(day.spy_actual_pct) }];
 }
+
 
 function monthName(month) {
   return new Date(2026, Number(month) - 1, 1).toLocaleString("en-US", { month: "long" });
@@ -1433,17 +1315,11 @@ function shortDate(v) {
 }
 
 function buildScenario(item) {
-  return Array.from({ length: 16 }).map((_, i) => {
-    const t = i / 15;
-    const wobble = Math.sin(i * 1.15) * 0.7;
-    return {
-      step: `T+${i}`,
-      bear: Number((item.bearMove * t + wobble * 0.45).toFixed(2)),
-      base: Number((item.baseMove * t + wobble).toFixed(2)),
-      bull: Number((item.bullMove * t + wobble * 0.7).toFixed(2)),
-    };
-  });
+  if (item.baseMove == null) return [];
+  return [{ step: "INPUT", bear: 0, base: 0, bull: 0 },
+    { step: "TARGET", bear: item.bearMove, base: item.baseMove, bull: item.bullMove }];
 }
+
 
 function buildRadar(rows) {
   return rows.slice(0, 10).map(r => ({
@@ -1541,9 +1417,7 @@ function normalizeRows(payload) {
 }
 
 function normalizeEquityPositions(data) {
-  const live = data?.live_alpaca || [];
-  if (live.length) return live;
-  return data?.db_positions || [];
+  return data?.positions || [];
 }
 
 function normalizePmRows(data) {

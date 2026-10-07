@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import hashlib
+import json
 import logging
 import math
 import re
@@ -16,8 +18,10 @@ from zoneinfo import ZoneInfo
 from typing import Any
 
 from .db import get_db, stamped
+from . import kronos_contract
 
 logger = logging.getLogger(__name__)
+_refresh_lock = asyncio.Lock()
 
 
 def _now() -> datetime:
@@ -40,11 +44,6 @@ def _num(v: Any, default: float | None = None) -> float | None:
     return default
 
 
-def _pct(v: Any) -> float | None:
-    n = _num(v)
-    if n is None:
-        return None
-    return n * 100 if abs(n) <= 2 else n
 
 
 def _rows(payload: Any) -> list[dict[str, Any]]:
@@ -60,12 +59,13 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
 
 
 async def _latest_context() -> dict[str, Any]:
-    from . import options_desk, portfolio_manager, scanner, trade_floor
+    from . import options_desk, portfolio_manager, scanner
 
     scan_task = _bounded("scan", scanner.latest_scan(), timeout=4.0)
-    pm_task = _bounded("pm", portfolio_manager.latest_portfolio_plan(), timeout=5.0)
-    eq_task = _bounded("equity_db", trade_floor.open_positions_view(), timeout=3.0)
-    live_eq_task = _bounded("equity_live", trade_floor.list_positions(), timeout=5.0)
+    from . import public_execution
+    pm_task = _bounded("pm", portfolio_manager.latest_persisted_portfolio_plan(), timeout=5.0)
+    eq_task = _bounded("equity_db", _public_ledger(), timeout=3.0)
+    live_eq_task = _bounded("equity_live", public_execution.portfolio_state(), timeout=10.0)
     opt_task = _bounded("options", options_desk.positions(), timeout=5.0)
     risk_task = _bounded("option_risk", options_desk.latest_risk_check(), timeout=3.0)
     trades_task = _bounded("option_trades", options_desk.trades(limit=100, sync_live=False), timeout=3.0)
@@ -77,7 +77,14 @@ async def _latest_context() -> dict[str, Any]:
     ctx = {}
     for key, value in zip(keys, results):
         ctx[key] = {"error": str(value)} if isinstance(value, Exception) else value
+    live = ctx.get("equity_live") or {}
+    ctx["equity_live"] = live.get("positions", []) if isinstance(live, dict) and live.get("ok") else []
+    ctx["public_portfolio_health"] = {"ok": bool(live.get("ok")), "reason": live.get("reason") or live.get("error")} if isinstance(live, dict) else {"ok": False}
     return ctx
+
+
+async def _public_ledger():
+    return await get_db().tf_trades.find({"broker_base": "public", "qty_remaining": {"$gt": 0}}, {"_id": 0}).to_list(1000)
 
 
 async def _bounded(label: str, awaitable, timeout: float = 4.0) -> Any:
@@ -93,43 +100,23 @@ async def _scan_pm_context() -> dict[str, Any]:
     from . import portfolio_manager, scanner
 
     scan = await _bounded("scan", scanner.latest_scan(), timeout=3.0)
-    rows = _rows(scan)
-    try:
-        decisions = portfolio_manager.evaluate_rows(
-            rows,
-            equity=portfolio_manager.DEFAULT_EQUITY,
-            mode="BALANCED",
-        )
-        pm = {"decisions": decisions, "source": "deterministic_scan_replay"}
-    except Exception as exc:
-        pm = {"error": str(exc)}
+    pm = await _bounded("pm", portfolio_manager.latest_persisted_portfolio_plan(), timeout=3.0)
     return {"scan": scan, "pm": pm}
 
 
-async def _spy_history() -> list[float]:
-    try:
-        from . import pricer
-        data = await pricer.get_history("SPY", days=90)
-        vals = [float(v) for _, v in sorted(data.items()) if v]
-        if len(vals) >= 15:
-            return vals[-90:]
-    except Exception as exc:
-        logger.debug("kronos pricer SPY history failed: %s", exc)
-
-    return []
 
 
 def _norm_candle(row: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(row, dict):
         return None
     close = _num(row.get("close") or row.get("c") or row.get("last") or row.get("price"))
-    open_ = _num(row.get("open") or row.get("o") or close)
-    high = _num(row.get("high") or row.get("h") or close)
-    low = _num(row.get("low") or row.get("l") or close)
+    open_ = _num(row.get("open", row.get("o")))
+    high = _num(row.get("high", row.get("h")))
+    low = _num(row.get("low", row.get("l")))
     if close is None or open_ is None or high is None or low is None:
         return None
-    high = max(high, open_, close)
-    low = min(low, open_, close)
+    if min(close, open_, high, low) <= 0 or high < max(open_, close) or low > min(open_, close) or low > high:
+        return None
     ts = row.get("timestamp") or row.get("datetime") or row.get("date") or row.get("time") or row.get("t")
     return {
         "timestamp": str(ts or ""),
@@ -349,7 +336,7 @@ async def _candle_learning_adjustment(symbol: str, timeframe: str, regime: str) 
     """Return conservative calibration from the latest persisted accuracy proof."""
     try:
         db = get_db()
-        snap = await db.kronos_accuracy_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
+        snap = await db.kronos_accuracy_snapshots.find_one({"model_version": kronos_contract.MODEL_VERSION, "promotion_status": "VALIDATED_ADVISORY"}, {"_id": 0}, sort=[("generated_at", -1)])
     except Exception as exc:
         logger.debug("kronos learning snapshot unavailable: %s", exc)
         snap = None
@@ -492,7 +479,7 @@ async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int
     tf = str(timeframe or "5m").lower()
     try:
         from . import london_strategic_edge as lse
-        payload = await lse.candles(ticker, timeframe=tf, limit=max(60, min(int(limit or 220), 500)), order="asc")
+        payload = await asyncio.wait_for(lse.candles(ticker, timeframe=tf, limit=max(60, min(int(limit or 220), 500)), order="desc", request_timeout=8), timeout=15)
         candles = [_norm_candle(r) for r in _rows(payload)]
         candles = [c for c in candles if c]
         provider = payload.get("provider") or "london_strategic_edge"
@@ -502,22 +489,18 @@ async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int
         candles = []
         provider = "london_strategic_edge"
         degraded = True
-    if len(candles) < 35:
-        vals = await _spy_history() if ticker == "SPY" else []
-        if len(vals) >= 35:
-            candles = [{"timestamp": "", "open": v, "high": v, "low": v, "close": v, "volume": 0.0} for v in vals[-120:]]
-            provider = "pricer_close_fallback"
-            degraded = True
-    if len(candles) < 20:
+    candles, contract = kronos_contract.input_contract(candles, tf, _now())
+    if len(candles) < 20 or not contract.get("ok") or degraded:
         return {
             "ok": False,
             "symbol": ticker,
             "timeframe": tf,
             "direction": "UNKNOWN",
-            "reason": "insufficient_ohlcv",
+            "reason": contract.get("reason") or "insufficient_ohlcv",
             "provider": provider,
             "degraded": True,
             "candles": len(candles),
+            "input_contract": contract,
         }
     features = _candle_features(candles)
     scored = _score_candle_features(features)
@@ -578,15 +561,29 @@ async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int
         "degraded": degraded,
         "source": "raw_ohlcv_candle_engine",
         "generated_at": _now().isoformat(),
+        "input_contract": contract,
+        "input_asof": contract["input_asof"],
+        "target_at": contract["target_at"],
+        "model_version": kronos_contract.MODEL_VERSION,
+        "research_only": True,
+        "calibrated": False,
+        "confidence_kind": "heuristic_score_not_probability",
     }
     adjustment = await _candle_learning_adjustment(ticker, tf, _regime_from_features(features))
     result = _apply_candle_learning(result, adjustment)
+    result["horizons"] = [{"horizon": "NEXT FULL RTH BAR", "target_at": contract["target_at"], "forecast_pct": result["forecast_pct"], "cone_low_pct": result["cone_low_pct"], "cone_high_pct": result["cone_high_pct"]}]
+    identity = json.dumps({"symbol": ticker, "timeframe": tf, "model": result["model_version"], "input": candles, "target": result["target_at"]}, sort_keys=True)
+    result["prediction_id"] = hashlib.sha256(identity.encode()).hexdigest()
     if persist:
         try:
             db = get_db()
-            await db.kronos_candle_predictions.insert_one(stamped(result))
+            await db.kronos_candle_predictions.update_one({"prediction_id": result["prediction_id"]}, {"$setOnInsert": stamped(result)}, upsert=True)
+            saved = await db.kronos_candle_predictions.find_one({"prediction_id": result["prediction_id"]}, {"_id": 0})
+            if saved:
+                result = saved
         except Exception as exc:
-            logger.debug("kronos candle prediction persistence skipped: %s", exc)
+            logger.exception("kronos candle prediction persistence failed")
+            result["persistence_error"] = str(exc)
     return result
 
 
@@ -612,88 +609,23 @@ async def candle_forecast_suite(symbol: str = "SPY", persist: bool = False) -> d
     }
 
 
-def _ret(vals: list[float], days: int) -> float:
-    if len(vals) <= days or vals[-days - 1] == 0:
-        return 0.0
-    return (vals[-1] - vals[-days - 1]) / vals[-days - 1] * 100
 
 
-def _vol(vals: list[float], days: int = 20) -> float:
-    if len(vals) < days + 1:
-        return 1.0
-    returns = []
-    for i in range(-days, 0):
-        prev = vals[i - 1]
-        if prev:
-            returns.append((vals[i] - prev) / prev * 100)
-    if not returns:
-        return 1.0
-    mean = sum(returns) / len(returns)
-    var = sum((x - mean) ** 2 for x in returns) / max(1, len(returns) - 1)
-    return max(0.35, math.sqrt(var))
 
 
-async def market_forecast() -> dict[str, Any]:
-    candle = await candle_forecast_suite("SPY", persist=False)
-    primary = candle.get("primary") if isinstance(candle, dict) else None
-    if isinstance(primary, dict) and primary.get("ok"):
-        return {
-            "symbol": "SPY",
-            "direction": primary.get("direction") or "UNKNOWN",
-            "forecast_pct": round(_num(primary.get("forecast_pct"), 0.0) or 0.0, 2),
-            "cone_low_pct": round(_num(primary.get("cone_low_pct"), -1.0) or -1.0, 2),
-            "cone_high_pct": round(_num(primary.get("cone_high_pct"), 1.0) or 1.0, 2),
-            "confidence": primary.get("confidence") or 20,
-            "last_price": (primary.get("features") or {}).get("last_close"),
-            "realized_vol_20d": (primary.get("features") or {}).get("atr_pct"),
-            "source": "kronos_candle_engine/raw_ohlcv",
-            "reason": "candle-aware OHLCV model with adaptive noise band",
-            "candle_engine": candle,
-        }
-    vals = await _spy_history()
-    if len(vals) < 5:
-        return {
-            "symbol": "SPY",
-            "direction": "UNKNOWN",
-            "forecast_pct": 0.0,
-            "cone_low_pct": -1.0,
-            "cone_high_pct": 1.0,
-            "confidence": 20,
-            "source": "degraded",
-            "reason": "insufficient SPY history",
-        }
-    r1, r5, r20 = _ret(vals, 1), _ret(vals, 5), _ret(vals, 20)
-    vol = _vol(vals, 20)
-    base = (r1 * 0.42) + (r5 / 5 * 0.35) + (r20 / 20 * 0.23)
-    base = max(-2.8, min(2.8, base))
-    direction = "UP" if base > 0.06 else "DOWN" if base < -0.06 else "FLAT"
-    confidence = int(max(25, min(82, 50 + abs(base) * 12 + min(12, abs(r5)))))
-    return {
-        "symbol": "SPY",
-        "direction": direction,
-        "forecast_pct": round(base, 2),
-        "cone_low_pct": round(base - vol * 1.15, 2),
-        "cone_high_pct": round(base + vol * 1.15, 2),
-        "confidence": confidence,
-        "last_price": round(vals[-1], 2),
-        "r1_pct": round(r1, 2),
-        "r5_pct": round(r5, 2),
-        "r20_pct": round(r20, 2),
-        "realized_vol_20d": round(vol, 2),
-        "source": "primary_price_provider",
-        "reason": "momentum plus realized-vol cone",
-    }
+async def market_forecast(persist: bool = False) -> dict[str, Any]:
+    suite = await candle_forecast_suite("SPY", persist=persist)
+    primary = suite.get("primary") or {}
+    if not primary.get("ok"):
+        return {"ok": False, "symbol": "SPY", "direction": "UNKNOWN", "forecast_pct": None,
+                "confidence": None, "source": "unavailable", "reason": "no_fresh_completed_ohlcv", "candle_engine": suite}
+    return {**primary, "last_price": (primary.get("features") or {}).get("last_close"),
+            "source": "ohlcv_baseline_v2", "reason": "Uncalibrated research baseline, not the Kronos foundation model",
+            "candle_engine": suite}
 
 
 def _score(row: dict[str, Any], pm_row: dict[str, Any]) -> float | None:
-    score = _num(
-        row.get("trade_score")
-        or row.get("signal_score")
-        or row.get("case_score")
-        or row.get("learning_score")
-        or pm_row.get("pm_score")
-        or pm_row.get("score")
-    )
+    score = next((_num(source.get(key)) for source, key in ((pm_row, "pm_score"), (pm_row, "score"), (row, "trade_score"), (row, "signal_score"), (row, "case_score"), (row, "learning_score")) if _num(source.get(key)) is not None), None)
     if score is not None and score > 10:
         return round(score / 10.0, 2)
     return score
@@ -708,7 +640,7 @@ def _pm_rows(pm: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _snapshot_key(ts: str) -> str:
-    day = str(ts or _now().isoformat())[:10]
+    day = (_parse_dt(ts) or _now()).astimezone(ZoneInfo("America/New_York")).date().isoformat()
     return f"kronos-latest-{day}"
 
 
@@ -753,38 +685,8 @@ def _parse_dt(ts: Any) -> datetime | None:
     return None
 
 
-def _action_allows_position(action: str, instrument: str) -> bool:
-    action = str(action or "").upper()
-    if action == "BOTH":
-        return True
-    if action == "EQUITY" and instrument == "EQUITY":
-        return True
-    if action == "OPTION" and instrument == "OPTION":
-        return True
-    if action in {"ACCUMULATE", "STARTER", "WATCH"}:
-        return instrument == "EQUITY"
-    return False
 
 
-def _bias(score: float | None, pm_action: str, instrument: str, pnl_pct: float | None, risk: dict[str, Any]) -> dict[str, Any]:
-    theta_watch = str(risk.get("theta_status") or "").upper() == "WATCH"
-    if pm_action == "PASS":
-        return {"label": "BEARISH", "base": -2.2, "bear": -6.5, "bull": 2.8}
-    if theta_watch and instrument == "OPTION":
-        return {"label": "HEDGE", "base": 0.8, "bear": -8.0, "bull": 8.5}
-    if pm_action == "ACCUMULATE":
-        return {"label": "BULLISH", "base": 5.5, "bear": -4.5, "bull": 12.0}
-    if pm_action == "STARTER":
-        return {"label": "BULLISH", "base": 3.8, "bear": -3.5, "bull": 8.5}
-    if pm_action == "WATCH":
-        return {"label": "CHOP", "base": 1.2, "bear": -3.8, "bull": 4.5}
-    if pm_action == "BOTH" or (score or 0) >= 8.2:
-        return {"label": "BULLISH", "base": 24.0 if instrument == "OPTION" else 5.5, "bear": -20.0 if instrument == "OPTION" else -4.5, "bull": 85.0 if instrument == "OPTION" else 12.0}
-    if pm_action == "OPTION" or (score or 0) >= 7:
-        return {"label": "BULLISH", "base": 16.0 if instrument == "OPTION" else 3.8, "bear": -20.0 if instrument == "OPTION" else -3.5, "bull": 55.0 if instrument == "OPTION" else 8.5}
-    if (score is not None and score <= 4.5) or (pnl_pct is not None and pnl_pct <= -8):
-        return {"label": "BEARISH", "base": -3.2, "bear": -20.0 if instrument == "OPTION" else -7.5, "bull": 3.2}
-    return {"label": "CHOP", "base": 5.0 if instrument == "OPTION" else 1.2, "bear": -16.0 if instrument == "OPTION" else -3.8, "bull": 22.0 if instrument == "OPTION" else 4.5}
 
 
 def _aligned(pm_action: str, bias: str) -> bool:
@@ -809,61 +711,12 @@ def _attribution(score: float | None, pm_action: str, signal: dict[str, Any], in
     return pieces
 
 
-def _horizons(base: float, instrument: str) -> dict[str, dict[str, float]]:
-    mult = {"1D": 0.35, "5D": 1.0, "10D": 1.45, "30D": 2.2, "EARNINGS": 1.8}
-    if instrument == "OPTION":
-        mult = {"1D": 0.45, "5D": 1.0, "10D": 1.65, "30D": 2.8, "EARNINGS": 2.4}
-    return {k: {"base_pct": round(base * m, 2), "low_pct": round(base * m - abs(base) * 0.7 - 1.2, 2), "high_pct": round(base * m + abs(base) * 0.9 + 1.2, 2)} for k, m in mult.items()}
 
 
-def _probabilities(base: float, instrument: str) -> dict[str, int]:
-    power = max(-1.0, min(1.0, base / (24 if instrument == "OPTION" else 6)))
-    return {
-        "plus_5": int(max(8, min(88, 45 + power * 28))),
-        "plus_10": int(max(4, min(78, 30 + power * 26))),
-        "minus_5": int(max(6, min(82, 38 - power * 22))),
-        "minus_10": int(max(3, min(68, 22 - power * 18))),
-        "stop_hit": int(max(5, min(72, 25 - power * 14))),
-        "ratchet_hit": int(max(8, min(84, 35 + power * 30))),
-    }
 
 
-def _exit_forecast(base: float, instrument: str) -> dict[str, Any]:
-    if instrument == "OPTION":
-        tiers = [
-            {"trigger_pct": 25, "locked_floor_pct": 5, "probability": min(86, max(10, int(35 + base * 0.9)))},
-            {"trigger_pct": 50, "locked_floor_pct": 25, "probability": min(76, max(6, int(26 + base * 0.65)))},
-            {"trigger_pct": 75, "locked_floor_pct": 50, "probability": min(66, max(4, int(18 + base * 0.45)))},
-            {"trigger_pct": 100, "locked_floor_pct": 75, "probability": min(56, max(3, int(12 + base * 0.35)))},
-            {"trigger_pct": 150, "locked_floor_pct": 120, "probability": min(42, max(2, int(8 + base * 0.22)))},
-            {"trigger_pct": 200, "locked_floor_pct": 150, "probability": min(34, max(1, int(5 + base * 0.16)))},
-        ]
-        return {"style": "NO_TP_RATCHET", "hard_stop_pct": -20, "tiers": tiers}
-    return {"style": "PM_EQUITY_STOP_RATCHET", "hard_stop_pct": None, "tiers": []}
 
 
-def _kronos_score(
-    confidence: int,
-    score: float | None,
-    aligned: bool,
-    probs: dict[str, int],
-    risk_flags: int = 0,
-    forecast_abs: float = 0.0,
-) -> int:
-    """Composite Kronos confidence.
-
-    Tuned to avoid rewarding big-but-sloppy forecasts. PM alignment and Case
-    Score carry more weight; raw forecast size helps only modestly; risk flags
-    pull the score down.
-    """
-    case_component = ((score or 5.0) / 10.0) * 36.0
-    confidence_component = confidence * 0.22
-    ratchet_component = probs.get("ratchet_hit", 0) * 0.16
-    alignment_component = 14.0 if aligned else -12.0
-    magnitude_component = min(8.0, abs(forecast_abs) * 0.35)
-    risk_penalty = min(24.0, risk_flags * 7.0)
-    raw = case_component + confidence_component + ratchet_component + alignment_component + magnitude_component - risk_penalty
-    return int(max(0, min(100, round(raw))))
 
 
 def _instrument_rows(ctx: dict[str, Any]) -> list[dict[str, Any]]:
@@ -878,9 +731,11 @@ def _instrument_rows(ctx: dict[str, Any]) -> list[dict[str, Any]]:
         rows.append({
             "ticker": t,
             "instrument": "EQUITY",
-            "quantity": p.get("qty") or p.get("quantity") or p.get("shares"),
+            "quantity": p.get("qty_remaining", p.get("qty", p.get("quantity", p.get("shares")))),
             "market_value": _num(p.get("market_value") or p.get("marketValue") or p.get("notional"), 0.0),
-            "unrealized_pct": _pct(p.get("unrealized_plpc") or p.get("unrealized_pct")),
+            "unrealized_pct": _num(p.get("unrealized_pct")) if p.get("unrealized_pct") is not None else (_num(p.get("unrealized_plpc"), 0.0) * 100),
+            "broker": "public",
+            "position_verified": bool(live_eq),
             "contract": None,
             "risk": {},
         })
@@ -900,7 +755,7 @@ def _instrument_rows(ctx: dict[str, Any]) -> list[dict[str, Any]]:
             "instrument": "OPTION",
             "quantity": p.get("qty") or p.get("quantity"),
             "market_value": _num(p.get("market_value") or p.get("cost_basis"), 0.0),
-            "unrealized_pct": _pct(risk.get("pnl_pct") or p.get("unrealized_plpc") or p.get("unrealized_pct")),
+            "unrealized_pct": _num(risk.get("pnl_pct")) if risk.get("pnl_pct") is not None else (_num(p.get("unrealized_pct")) if p.get("unrealized_pct") is not None else _num(p.get("unrealized_plpc"), 0.0) * 100),
             "contract": sym,
             "risk": risk,
             "trade": trade,
@@ -916,7 +771,7 @@ def _option_root(symbol: str) -> str:
 
 async def forecast(persist: bool = True) -> dict[str, Any]:
     ctx = await _latest_context()
-    market = await market_forecast()
+    market = await market_forecast(persist=persist)
     scan_rows = _rows(ctx.get("scan"))
     scan_by_ticker = {_ticker(r.get("ticker") or r.get("symbol")): r for r in scan_rows}
     pm_rows = _pm_rows(ctx.get("pm") if isinstance(ctx.get("pm"), dict) else {})
@@ -925,38 +780,55 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
     cumulative_low = 0.0
     cumulative_base = 0.0
     cumulative_high = 0.0
-    for pos in _instrument_rows(ctx):
+    positions = _instrument_rows(ctx)
+    tickers = sorted({p["ticker"] for p in positions})
+    predictions = await asyncio.gather(*(candle_forecast(t, "1d", persist=persist) for t in tickers), return_exceptions=True)
+    by_ticker = {t: (p if isinstance(p, dict) else {"ok": False, "reason": str(p)}) for t, p in zip(tickers, predictions)}
+    for pos in positions:
         signal = scan_by_ticker.get(pos["ticker"], {})
         pm_row = pm_by_ticker.get(pos["ticker"], {})
         pm_action = str(pm_row.get("action") or pm_row.get("route") or pm_row.get("decision") or signal.get("pm_action") or signal.get("pm_route") or "UNMAPPED").upper()
         if not pm_row and not signal and (pos.get("market_value") or pos.get("quantity")):
             pm_action = "HELD_NOT_IN_LATEST_PM"
         score = _score(signal, pm_row)
-        bias = _bias(score, pm_action, pos["instrument"], pos.get("unrealized_pct"), pos.get("risk") or {})
-        confidence = int(max(18, min(92, 38 + ((score or 5) * 3) + (12 if pm_row else 0) + (10 if signal else 0) - (5 if pos["instrument"] == "OPTION" else 0))))
-        aligned = _aligned(pm_action, bias["label"]) or _action_allows_position(pm_action, pos["instrument"])
-        probs = _probabilities(bias["base"], pos["instrument"])
+        prediction = by_ticker[pos["ticker"]]
+        valid = bool(prediction.get("ok"))
+        bias = {"label": {"UP": "BULLISH", "DOWN": "BEARISH", "FLAT": "CHOP"}.get(prediction.get("direction"), "UNAVAILABLE"),
+                "base": prediction.get("forecast_pct") if valid else None,
+                "bear": prediction.get("cone_low_pct") if valid else None,
+                "bull": prediction.get("cone_high_pct") if valid else None}
+        confidence = prediction.get("confidence") if valid else None
+        aligned = bool(valid and _aligned(pm_action, bias["label"]))
+        probs = prediction.get("probabilities") or {}
         tripwires = _tripwires(pos, score, pm_action)
-        kscore = _kronos_score(confidence, score, aligned, probs, len(tripwires), bias["base"])
+        kscore = prediction.get("score", 0) if valid else 0
         mv = pos.get("market_value") or 0.0
-        cumulative_low += mv * (bias["bear"] / 100)
-        cumulative_base += mv * (bias["base"] / 100)
-        cumulative_high += mv * (bias["bull"] / 100)
+        if valid and pos["instrument"] == "EQUITY":
+            cumulative_low += mv * (bias["bear"] / 100)
+            cumulative_base += mv * (bias["base"] / 100)
+            cumulative_high += mv * (bias["bull"] / 100)
         row = {
             **pos,
             "pm_action": pm_action,
             "case_score": score,
             "forecast_bias": bias["label"],
-            "forecast_pct": round(bias["base"], 2),
-            "bear_pct": round(bias["bear"], 2),
-            "bull_pct": round(bias["bull"], 2),
+            "forecast_pct": round(bias["base"], 2) if valid else None,
+            "bear_pct": round(bias["bear"], 2) if valid else None,
+            "bull_pct": round(bias["bull"], 2) if valid else None,
+            "input_asof": prediction.get("input_asof"),
+            "target_at": prediction.get("target_at"),
+            "prediction_id": prediction.get("prediction_id"),
+            "forecast_status": "AVAILABLE" if valid else "UNAVAILABLE",
+            "reason": prediction.get("reason"),
+            "forecast_basis": "UNDERLYING_RETURN" if pos["instrument"] == "OPTION" else "EQUITY_RETURN",
+            "anchor_price": (prediction.get("features") or {}).get("last_close"),
             "confidence": confidence,
             "kronos_score": kscore,
             "aligned_with_pm": aligned,
             "attribution": _attribution(score, pm_action, signal, pos["instrument"], pos.get("risk") or {}),
-            "horizons": _horizons(bias["base"], pos["instrument"]),
+            "horizons": prediction.get("horizons", []),
             "probabilities": probs,
-            "exit_forecast": _exit_forecast(bias["base"], pos["instrument"]),
+            "exit_forecast": {"research_only": True, "reason": "Exits remain owned by the portfolio ratchet, not this forecast"},
             "tripwires": tripwires,
             "catalysts": _catalysts(signal),
         }
@@ -965,16 +837,21 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
     forecasts.sort(key=lambda r: r.get("kronos_score") or 0, reverse=True)
     disagreements = [
         r for r in forecasts
-        if not r.get("aligned_with_pm") and r.get("pm_action") not in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}
+        if r.get("forecast_status") == "AVAILABLE" and not r.get("aligned_with_pm") and r.get("pm_action") not in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}
     ]
     payload = {
-        "ok": True,
+        "ok": bool(market.get("ok") and (ctx.get("public_portfolio_health") or {}).get("ok")),
         "generated_at": _now().isoformat(),
         "snapshot_key": None,
-        "model_mode": "proxy_live_advisory",
+        "model_mode": "ohlcv_baseline_v2_research_only",
+        "model_version": kronos_contract.MODEL_VERSION,
+        "calibrated": False,
+        "public_portfolio_health": ctx.get("public_portfolio_health"),
         "read_only": True,
         "market_forecast": market,
         "portfolio_day_cone": {
+            "basis": "Equity-only, next full RTH session; excludes option premium returns",
+            "covered_positions": sum(r.get("forecast_status") == "AVAILABLE" and r["instrument"] == "EQUITY" for r in forecasts),
             "low_usd": round(cumulative_low, 2),
             "base_usd": round(cumulative_base, 2),
             "high_usd": round(cumulative_high, 2),
@@ -991,7 +868,8 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
             "avg_kronos_score": round(sum(r["kronos_score"] for r in forecasts) / len(forecasts), 1) if forecasts else 0,
             "mapped_pm": sum(1 for r in forecasts if r.get("pm_action") not in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}),
             "unmapped_pm": sum(1 for r in forecasts if r.get("pm_action") in {"UNMAPPED", "HELD_NOT_IN_LATEST_PM"}),
-            "stale_position_context": sum(1 for r in forecasts if r.get("pm_action") == "HELD_NOT_IN_LATEST_PM"),
+            "stale_position_context": sum(1 for r in forecasts if r.get("instrument") == "EQUITY" and not r.get("position_verified")),
+            "pm_context_asof": (ctx.get("pm") or {}).get("generated_at"),
             "risk_flags": sum(len(r.get("tripwires") or []) for r in forecasts),
         },
     }
@@ -1018,6 +896,7 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
                     {"audit_id": audit_id},
                     {"$setOnInsert": stamped({
                     "audit_id": audit_id,
+                    "model_version": kronos_contract.MODEL_VERSION,
                     "ticker": r["ticker"],
                     "instrument": r["instrument"],
                     "contract": r.get("contract"),
@@ -1025,13 +904,16 @@ async def forecast(persist: bool = True) -> dict[str, Any]:
                     "forecast_bias": r["forecast_bias"],
                     "kronos_score": r["kronos_score"],
                     "forecast_pct": r["forecast_pct"],
+                    "prediction_id": r.get("prediction_id"),
+                    "target_at": r.get("target_at"),
                     "generated_at": payload["generated_at"],
                     "status": "OPEN_AUDIT",
                     })},
                     upsert=True,
                 )
         except Exception as exc:
-            logger.debug("kronos persistence skipped: %s", exc)
+            logger.exception("kronos persistence failed")
+            payload["persistence_error"] = str(exc)
     return payload
 
 
@@ -1122,36 +1004,6 @@ def _winner_for_disagreement(row: dict[str, Any], actual_pct: float | None) -> s
     return "BOTH_WRONG"
 
 
-async def _return_since_generated(ticker: str, generated_at: Any, days: int = 45) -> dict[str, Any]:
-    generated = _parse_dt(generated_at)
-    if not ticker or generated is None:
-        return {"ok": False, "reason": "missing_ticker_or_timestamp"}
-    try:
-        from . import pricer
-        history = await pricer.get_history(ticker, days=days)
-    except Exception as exc:
-        logger.debug("kronos disagreement history failed %s: %s", ticker, exc)
-        history = {}
-    if not history:
-        return {"ok": False, "reason": "missing_price_history"}
-    dates = sorted(history.keys())
-    start_day = generated.date().isoformat()
-    base_date = next((d for d in dates if d >= start_day), None) or next((d for d in reversed(dates) if d <= start_day), None)
-    latest_date = dates[-1] if dates else None
-    if not base_date or not latest_date or latest_date <= base_date:
-        return {"ok": False, "reason": "not_enough_mature_history", "base_date": base_date, "latest_date": latest_date}
-    base = _num(history.get(base_date))
-    latest = _num(history.get(latest_date))
-    if not base or latest is None:
-        return {"ok": False, "reason": "invalid_history_prices", "base_date": base_date, "latest_date": latest_date}
-    return {
-        "ok": True,
-        "base_date": base_date,
-        "latest_date": latest_date,
-        "base_price": round(base, 4),
-        "latest_price": round(latest, 4),
-        "actual_return_pct": round((latest - base) / base * 100.0, 3),
-    }
 
 
 async def reconcile_disagreements(limit: int = 500, min_age_hours: float = 6.0) -> dict[str, Any]:
@@ -1185,7 +1037,12 @@ async def reconcile_disagreements(limit: int = 500, min_age_hours: float = 6.0) 
             else:
                 pending += 1
             continue
-        outcome = await _return_since_generated(_ticker(row.get("ticker")), row.get("generated_at"))
+        if not row.get("prediction_id"):
+            await db.kronos_pm_disagreements.update_one(update_filter, {"$set": {"status": "ARCHIVED_UNVERIFIABLE", "reason": "legacy_prediction_has_no_fixed_horizon"}})
+            archived += 1
+            continue
+        resolved_prediction = await db.kronos_candle_outcomes.find_one({"prediction_id": row["prediction_id"]}, {"_id": 0})
+        outcome = {"ok": bool(resolved_prediction), "actual_return_pct": (resolved_prediction or {}).get("actual_pct"), "target_at": row.get("target_at"), "reason": "pending_target_bar"}
         if not outcome.get("ok"):
             pending += 1
             if outcome.get("reason") not in {"not_enough_mature_history"}:
@@ -1201,7 +1058,7 @@ async def reconcile_disagreements(limit: int = 500, min_age_hours: float = 6.0) 
             "actual_side": _side_from_return(_num(outcome.get("actual_return_pct"))),
             "outcome": outcome,
             "actual_return_pct": outcome.get("actual_return_pct"),
-            "reconciliation_source": "daily_close_history",
+            "reconciliation_source": "exact_prediction_target_bar",
         }
         result = await db.kronos_pm_disagreements.update_one(update_filter, {"$set": update})
         if result.modified_count:
@@ -1220,7 +1077,7 @@ async def reconcile_disagreements(limit: int = 500, min_age_hours: float = 6.0) 
 
 
 async def learning_state(limit: int = 1200, persist: bool = False) -> dict[str, Any]:
-    accuracy = await candle_accuracy(limit=limit, persist=persist)
+    accuracy = await accuracy_snapshot()
     overall = accuracy.get("overall") if accuracy.get("ok") else {}
     recommendations = []
     for row in (accuracy.get("by_timeframe") or []):
@@ -1240,7 +1097,7 @@ async def learning_state(limit: int = 1200, persist: bool = False) -> dict[str, 
         "health": health,
         "overall": overall,
         "recommendations": recommendations[:18],
-        "calibration_note": "Kronos now feeds mature forecast accuracy back into live candle forecasts by dampening weak regimes and widening under-covered cones.",
+        "calibration_note": "Research baseline only. Heuristic confidence and probability weights are not calibrated probabilities or demonstrated alpha.",
         "accuracy": accuracy,
         "generated_at": _now().isoformat(),
     }
@@ -1260,10 +1117,10 @@ def _learning_health_from_overall(overall: dict[str, Any] | None) -> str:
     return "LEARNING"
 
 
-async def disagreement_performance(limit: int = 200, auto_reconcile: bool = True) -> dict[str, Any]:
+async def disagreement_performance(limit: int = 200, auto_reconcile: bool = False) -> dict[str, Any]:
     db = get_db()
     reconciliation = await reconcile_disagreements(limit=max(limit, 250)) if auto_reconcile else None
-    rows = await db.kronos_pm_disagreements.find({}, {"_id": 0}).sort("generated_at", -1).to_list(limit)
+    rows = await db.kronos_pm_disagreements.find({"model_version": kronos_contract.MODEL_VERSION}, {"_id": 0}).sort("generated_at", -1).to_list(limit)
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         key = f"{row.get('forecast_bias')} vs {row.get('pm_action')}"
@@ -1320,6 +1177,11 @@ def _finalize_accuracy_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     bucket["rmse_pct"] = round(math.sqrt(sum(sq_errors) / len(sq_errors)), 3) if sq_errors else None
     bucket["avg_error_pct"] = round(sum(errors) / len(errors), 3) if errors else None
     bucket["sample"] = sample
+    null_errors = bucket.pop("_null_errors", [])
+    widths = bucket.pop("_cone_widths", [])
+    bucket["no_change_mae_pct"] = round(sum(null_errors) / len(null_errors), 3) if null_errors else None
+    bucket["mean_cone_width_pct"] = round(sum(widths) / len(widths), 3) if widths else None
+    bucket["mae_skill_vs_no_change"] = round(1 - sum(abs_errors) / sum(null_errors), 4) if null_errors and sum(null_errors) else None
     return bucket
 
 
@@ -1349,6 +1211,9 @@ def _add_accuracy_sample(bucket: dict[str, Any], row: dict[str, Any]) -> None:
     bucket.setdefault("_errors", []).append(err)
     bucket.setdefault("_abs_errors", []).append(abs(err))
     bucket.setdefault("_sq_errors", []).append(err * err)
+    bucket.setdefault("_null_errors", []).append(abs(actual))
+    if cone_low is not None and cone_high is not None:
+        bucket.setdefault("_cone_widths", []).append(abs(cone_high - cone_low))
 
 
 async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, Any]:
@@ -1359,15 +1224,19 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
     """
     db = get_db()
     rows = await db.kronos_candle_predictions.find(
-        {"ok": True},
+        {"ok": True, "model_version": kronos_contract.MODEL_VERSION},
         {"_id": 0},
     ).sort("generated_at", -1).to_list(max(50, min(int(limit or 800), 2500)))
+    existing = await db.kronos_candle_outcomes.find({"prediction_id": {"$in": [r["prediction_id"] for r in rows if r.get("prediction_id")]}}, {"_id": 0}).to_list(2500)
+    resolved_ids = {r["prediction_id"] for r in existing}
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
+        if row.get("prediction_id") in resolved_ids:
+            continue
         key = (_ticker(row.get("symbol")) or "SPY", str(row.get("timeframe") or "5m").lower())
         grouped.setdefault(key, []).append(row)
 
-    scored: list[dict[str, Any]] = []
+    scored: list[dict[str, Any]] = list(existing)
     pending = 0
     try:
         from . import london_strategic_edge as lse
@@ -1376,7 +1245,11 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
 
     for (symbol, timeframe), preds in grouped.items():
         try:
-            payload = await lse.candles(symbol, timeframe=timeframe, limit=500, order="asc")
+            targets = [_parse_dt(p.get("target_at")) for p in preds]
+            targets = [t for t in targets if t]
+            start = (min(targets) - timedelta(days=1)).date().isoformat() if targets else None
+            end = (min(max(targets), _now()) + timedelta(days=1)).date().isoformat() if targets else None
+            payload = await asyncio.wait_for(lse.candles(symbol, timeframe=timeframe, start=start, end=end, limit=5000, order="desc", request_timeout=8), timeout=15)
             candles = [_norm_candle(r) for r in _rows(payload)]
             candles = [c for c in candles if c and _parse_dt(c.get("timestamp"))]
         except Exception as exc:
@@ -1388,12 +1261,17 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
         candle_pairs = [(_parse_dt(c.get("timestamp")), c) for c in candles]
         candle_pairs = [(dt, c) for dt, c in candle_pairs if dt]
         for pred in preds:
+            resolved = await db.kronos_candle_outcomes.find_one({"prediction_id": pred.get("prediction_id")}, {"_id": 0})
+            if resolved:
+                scored.append(resolved)
+                continue
             generated = _parse_dt(pred.get("generated_at") or pred.get("created_at"))
             base = _num((pred.get("features") or {}).get("last_close") or (pred.get("predicted_next_candle") or {}).get("open"))
             if generated is None or base is None or base <= 0:
                 pending += 1
                 continue
-            actual_candle = next((c for dt, c in candle_pairs if dt > generated), None)
+            target = _parse_dt(pred.get("target_at"))
+            actual_candle = next((c for dt, c in candle_pairs if target and target <= _now() and kronos_contract.bar_close(c.get("timestamp"), timeframe, _now()) == target), None)
             if not actual_candle:
                 pending += 1
                 continue
@@ -1409,6 +1287,9 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
                 else "CHOP"
             )
             scored.append({
+                "prediction_id": pred.get("prediction_id"),
+                "model_version": kronos_contract.MODEL_VERSION,
+                "target_at": pred.get("target_at"),
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "regime": regime,
@@ -1424,6 +1305,8 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
                 "confidence": pred.get("confidence"),
                 "provider": pred.get("provider"),
             })
+            if persist:
+                await db.kronos_candle_outcomes.update_one({"prediction_id": pred["prediction_id"]}, {"$setOnInsert": scored[-1]}, upsert=True)
 
     overall = _empty_accuracy_bucket("ALL")
     by_timeframe: dict[str, dict[str, Any]] = {}
@@ -1445,7 +1328,8 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
         "pending": pending,
         "stored_predictions": len(rows),
         "scored_predictions": len(scored),
-        "source": "kronos_candle_predictions + next raw OHLCV candle",
+        "source": "immutable predictions + exact completed target bar",
+        "model_version": kronos_contract.MODEL_VERSION,
         "generated_at": _now().isoformat(),
     }
     if persist:
@@ -1458,7 +1342,7 @@ async def candle_accuracy(limit: int = 800, persist: bool = False) -> dict[str, 
 
 async def status() -> dict[str, Any]:
     db = get_db()
-    latest = await db.kronos_forecast_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
+    latest = await latest_forecast()
     latest_key = (latest or {}).get("snapshot_key") or _snapshot_key((latest or {}).get("generated_at") or _now().isoformat())
     latest_disagreements = await db.kronos_pm_disagreements.count_documents({
         "status": {"$in": ["OPEN_AUDIT", "OUT_FOR_AUDIT"]},
@@ -1475,15 +1359,19 @@ async def status() -> dict[str, Any]:
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     end_day = calendar.monthrange(now.year, now.month)[1]
     end = datetime(now.year, now.month, end_day, 23, 59, 59, tzinfo=timezone.utc)
-    scored_days = await db.kronos_forecast_snapshots.count_documents(
-        {"generated_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}}
-    )
+    month_days = await calendar_month(now.astimezone(ZoneInfo("America/New_York")).year, now.astimezone(ZoneInfo("America/New_York")).month)
+    scored_days = (month_days.get("summary") or {}).get("scored_days", 0)
     health = _freshness_status(age)
+    if not latest.get("ok") or not (latest.get("market_forecast") or {}).get("input_asof"):
+        health = "DEGRADED"
+    market = latest.get("market_forecast") or {}
+    if market.get("ok"):
+        _, current_contract = kronos_contract.input_contract([{"timestamp": (market.get("features") or {}).get("latest_timestamp")}], market.get("timeframe", "5m"), now)
+        if not current_contract.get("ok"):
+            health = "STALE_INPUT"
     pm_coverage = "FULL" if not summary.get("unmapped_pm", 0) else "PARTIAL"
     try:
-        accuracy = await db.kronos_accuracy_snapshots.find_one({}, {"_id": 0}, sort=[("generated_at", -1)])
-        if not accuracy:
-            accuracy = await candle_accuracy(limit=300, persist=False)
+        accuracy = await accuracy_snapshot()
         proof = accuracy.get("overall") if accuracy.get("ok") else {}
         learning_health = _learning_health_from_overall(proof)
     except Exception as exc:
@@ -1512,139 +1400,77 @@ async def status() -> dict[str, Any]:
             "scored_days": scored_days,
         },
         "proof": proof,
+        "input_asof": market.get("input_asof"),
+        "model_version": kronos_contract.MODEL_VERSION,
+        "research_only": True,
     }
+
+
+async def latest_forecast() -> dict[str, Any]:
+    latest = await get_db().kronos_forecast_snapshots.find_one({"model_version": kronos_contract.MODEL_VERSION}, {"_id": 0}, sort=[("generated_at", -1)])
+    return latest or {"ok": False, "forecasts": [], "reason": "awaiting_scheduled_refresh", "research_only": True}
+
+
+async def accuracy_snapshot() -> dict[str, Any]:
+    latest = await get_db().kronos_accuracy_snapshots.find_one({"model_version": kronos_contract.MODEL_VERSION}, {"_id": 0}, sort=[("generated_at", -1)])
+    return latest or {"ok": True, "overall": {"sample": 0}, "pending": 0, "reason": "awaiting_resolved_predictions"}
 
 
 async def refresh_snapshot() -> dict[str, Any]:
-    payload = await forecast(persist=True)
-    accuracy = await candle_accuracy(limit=1200, persist=True)
-    reconciliation = await reconcile_disagreements(limit=750)
-    stat = await status()
-    return {"ok": True, "forecast": payload, "accuracy": accuracy, "reconciliation": reconciliation, "status": stat}
+    if _refresh_lock.locked():
+        return {"ok": False, "reason": "refresh_already_running", "forecast": await latest_forecast()}
+    async with _refresh_lock:
+        payload = await forecast(persist=True)
+        accuracy = await candle_accuracy(limit=1200, persist=True)
+        reconciliation = await reconcile_disagreements(limit=750)
+        stat = await status()
+        return {"ok": bool(payload.get("ok") and accuracy.get("ok")), "forecast": payload, "accuracy": accuracy, "reconciliation": reconciliation, "status": stat}
 
 
 async def calendar_month(year: int, month: int) -> dict[str, Any]:
-    """Kronos accountability calendar.
-
-    One row per calendar day. Forecasts are the latest persisted Kronos
-    snapshot for that day; outcomes use SPY daily close movement plus the
-    terminal benchmark curve when available.
-    """
     month = max(1, min(12, int(month)))
-    year = int(year)
-    start = datetime(year, month, 1, tzinfo=timezone.utc)
-    end_day = calendar.monthrange(year, month)[1]
-    end = datetime(year, month, end_day, 23, 59, 59, tzinfo=timezone.utc)
+    zone = ZoneInfo("America/New_York")
+    start = datetime(int(year), month, 1, tzinfo=zone)
+    end = (start + timedelta(days=32)).replace(day=1)
+    query = {"generated_at": {"$gte": start.astimezone(timezone.utc).isoformat(), "$lt": end.astimezone(timezone.utc).isoformat()}, "model_version": kronos_contract.MODEL_VERSION}
     db = get_db()
-    snapshots = await db.kronos_forecast_snapshots.find(
-        {"generated_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}},
-        {"_id": 0},
-    ).sort("generated_at", 1).to_list(500)
-
-    by_day: dict[str, dict[str, Any]] = {}
-    for snap in snapshots:
-        day = str(snap.get("generated_at") or snap.get("created_at") or "")[:10]
-        if day:
-            by_day[day] = snap
-
-    try:
-        from . import pnl_tracker, pricer
-        days_back = max(45, (datetime.now(timezone.utc).date() - start.date()).days + 10)
-        benchmark = await pnl_tracker.daily_total_vs_spy_curve(days=days_back)
-        total_by_day = {r["date"]: r for r in benchmark.get("curve") or []}
-        spy_hist = await pricer.get_history("SPY", days=days_back + 10)
-    except Exception as exc:
-        logger.debug("kronos calendar outcome source degraded: %s", exc)
-        total_by_day = {}
-        spy_hist = {}
-
-    sorted_spy_dates = sorted(spy_hist.keys())
+    preds = await db.kronos_candle_predictions.find(query, {"_id": 0}).sort("generated_at", 1).to_list(20000)
+    outcomes = await db.kronos_candle_outcomes.find({"prediction_id": {"$in": [p["prediction_id"] for p in preds]}}, {"_id": 0}).to_list(20000) if preds else []
+    by_id = {r["prediction_id"]: r for r in outcomes}
     out = []
-    for day_num in range(1, end_day + 1):
-      day = f"{year:04d}-{month:02d}-{day_num:02d}"
-      snap = by_day.get(day)
-      market = (snap or {}).get("market_forecast") or {}
-      cone = (snap or {}).get("portfolio_day_cone") or {}
-      forecast_pct = _num(market.get("forecast_pct"))
-      cone_low = _num(market.get("cone_low_pct"))
-      cone_high = _num(market.get("cone_high_pct"))
-      total_row = total_by_day.get(day) or {}
-      spy_actual = _spy_day_return(day, sorted_spy_dates, spy_hist)
-      total_actual = _num(total_row.get("terminal_total_pct"))
-      verdict = _calendar_verdict(forecast_pct, spy_actual, total_actual)
-      direction_win = _direction_win(forecast_pct, spy_actual)
-      cone_win = _cone_win(cone_low, cone_high, spy_actual)
-      out.append({
-          "date": day,
-          "has_prediction": bool(snap),
-          "status": verdict["status"],
-          "score": verdict["score"],
-          "direction_win": direction_win,
-          "cone_win": cone_win,
-          "spy_prediction_pct": forecast_pct,
-          "spy_actual_pct": spy_actual,
-          "spy_cone_low_pct": cone_low,
-          "spy_cone_high_pct": cone_high,
-          "fund_prediction_usd": _num(cone.get("base_usd")),
-          "fund_cone_low_usd": _num(cone.get("low_usd")),
-          "fund_cone_high_usd": _num(cone.get("high_usd")),
-          "fund_actual_pct": total_actual,
-          "relative_pct": _num(total_row.get("relative_pct")),
-          "confidence": _num(market.get("confidence")),
-          "snapshot_at": (snap or {}).get("generated_at"),
-      })
-
-    years = await _calendar_years(db)
-    evaluated_direction = [d for d in out if d.get("direction_win") is not None]
-    evaluated_cone = [d for d in out if d.get("cone_win") is not None]
-    direction_wins = sum(1 for d in evaluated_direction if d.get("direction_win"))
-    cone_wins = sum(1 for d in evaluated_cone if d.get("cone_win"))
-    return {
-        "ok": True,
-        "year": year,
-        "month": month,
-        "month_label": start.strftime("%B %Y"),
-        "days": out,
-        "summary": {
-            "direction_wins": direction_wins,
-            "direction_losses": len(evaluated_direction) - direction_wins,
-            "direction_win_rate_pct": round(direction_wins / len(evaluated_direction) * 100, 1) if evaluated_direction else None,
-            "cone_wins": cone_wins,
-            "cone_losses": len(evaluated_cone) - cone_wins,
-            "cone_win_rate_pct": round(cone_wins / len(evaluated_cone) * 100, 1) if evaluated_cone else None,
-        },
-        "available_years": years or [year],
-        "source": "kronos_forecast_snapshots + performance benchmark curve",
-    }
+    total = _empty_accuracy_bucket("MONTH")
+    for number in range(1, calendar.monthrange(int(year), month)[1] + 1):
+        day = f"{int(year):04d}-{month:02d}-{number:02d}"
+        issued = [p for p in preds if (_parse_dt(p.get("generated_at")) or start).astimezone(zone).date().isoformat() == day]
+        mature = [by_id[p["prediction_id"]] for p in issued if p["prediction_id"] in by_id]
+        bucket = _empty_accuracy_bucket(day)
+        for row in mature:
+            _add_accuracy_sample(bucket, row)
+            _add_accuracy_sample(total, row)
+        proof = _finalize_accuracy_bucket(bucket)
+        latest_spy = next((p for p in reversed(issued) if p.get("symbol") == "SPY" and p.get("timeframe") == "5m"), {})
+        actual = by_id.get(latest_spy.get("prediction_id"), {})
+        rate = proof.get("direction_win_rate_pct")
+        verdict = ("GOOD" if rate > 50 else "BAD" if rate < 50 else "WATCH") if rate is not None else ("PENDING" if issued else "NO_FORECAST")
+        out.append({"date": day, "has_prediction": bool(issued), "status": verdict,
+                    "score": proof.get("direction_win_rate_pct"), "predictions": len(issued), "resolved_predictions": len(mature),
+                    "pending_predictions": len(issued) - len(mature), "proof": proof,
+                    "direction_win": _direction_win(latest_spy.get("forecast_pct"), actual.get("actual_pct")),
+                    "cone_win": _cone_win(latest_spy.get("cone_low_pct"), latest_spy.get("cone_high_pct"), actual.get("actual_pct")),
+                    "spy_prediction_pct": latest_spy.get("forecast_pct"), "spy_actual_pct": actual.get("actual_pct"),
+                    "spy_cone_low_pct": latest_spy.get("cone_low_pct"), "spy_cone_high_pct": latest_spy.get("cone_high_pct"),
+                    "snapshot_at": latest_spy.get("generated_at"), "target_at": latest_spy.get("target_at"),
+                    "confidence": latest_spy.get("confidence"), "fund_actual_pct": None, "fund_prediction_usd": None})
+    summary = _finalize_accuracy_bucket(total)
+    summary.update({"direction_losses": summary["direction_losses"], "cone_win_rate_pct": summary.get("cone_coverage_pct"),
+                    "predicted_days": sum(d["has_prediction"] for d in out), "scored_days": sum(d["resolved_predictions"] > 0 for d in out)})
+    return {"ok": True, "year": int(year), "month": month, "month_label": start.strftime("%B %Y"), "days": out,
+            "summary": summary, "available_years": await _calendar_years(db),
+            "source": "ET issue dates; exact completed forecast horizons, not daily market returns"}
 
 
-def _spy_day_return(day: str, sorted_dates: list[str], history: dict[str, float]) -> float | None:
-    if day not in history:
-        return None
-    idx = sorted_dates.index(day)
-    if idx <= 0:
-        return None
-    prev = history.get(sorted_dates[idx - 1])
-    cur = history.get(day)
-    if not prev or cur is None:
-        return None
-    return round((cur - prev) / prev * 100.0, 2)
 
 
-def _calendar_verdict(forecast_pct: float | None, spy_actual_pct: float | None, total_actual_pct: float | None) -> dict[str, Any]:
-    if forecast_pct is None:
-        return {"status": "NO_FORECAST", "score": 0}
-    if spy_actual_pct is None:
-        return {"status": "PENDING", "score": 0}
-    if abs(forecast_pct) < 0.06:
-        return {"status": "WATCH", "score": 50}
-    direction_ok = (forecast_pct >= 0 and spy_actual_pct >= 0) or (forecast_pct < 0 and spy_actual_pct < 0)
-    total_ok = total_actual_pct is None or (forecast_pct >= 0 and total_actual_pct >= 0) or (forecast_pct < 0 and total_actual_pct < 0)
-    if direction_ok and total_ok:
-        return {"status": "GOOD", "score": 85}
-    if direction_ok:
-        return {"status": "WATCH", "score": 62}
-    return {"status": "BAD", "score": 20}
 
 
 def _direction_win(forecast_pct: float | None, spy_actual_pct: float | None) -> bool | None:
@@ -1679,90 +1505,33 @@ async def _calendar_years(db) -> list[int]:
 async def battle_card(ticker: str) -> dict[str, Any]:
     t = _ticker(ticker)
     ctx = await _scan_pm_context()
-    scan_rows = _rows(ctx.get("scan"))
-    pm_rows = _pm_rows(ctx.get("pm") if isinstance(ctx.get("pm"), dict) else {})
-    row = next((r for r in scan_rows if _ticker(r.get("ticker") or r.get("symbol")) == t), {})
-    pm_row = next((r for r in pm_rows if _ticker(r.get("ticker") or r.get("symbol")) == t), {})
-
-    pm_action = str(
-        pm_row.get("action")
-        or pm_row.get("route")
-        or pm_row.get("decision")
-        or row.get("pm_action")
-        or row.get("pm_route")
-        or "UNMAPPED"
-    ).upper()
-    instrument = str(pm_row.get("instrument") or pm_row.get("asset_class") or "SCAN").upper()
-    if instrument not in {"EQUITY", "OPTION", "BOTH", "SCAN"}:
-        instrument = "SCAN"
-    score = _score(row, pm_row)
-    bias = _bias(score, pm_action, "OPTION" if instrument == "OPTION" else "EQUITY", None, {})
-    confidence = int(max(18, min(92, 36 + ((score or 5) * 3.2) + (14 if pm_row else 0) + (10 if row else 0))))
-    aligned = _aligned(pm_action, bias["label"])
-    probs = _probabilities(bias["base"], "OPTION" if instrument == "OPTION" else "EQUITY")
-    match = {
-        "ticker": t,
-        "instrument": instrument,
-        "pm_action": pm_action,
-        "case_score": score,
-        "forecast_bias": bias["label"],
-        "forecast_pct": bias["base"],
-        "bear_pct": bias["bear"],
-        "bull_pct": bias["bull"],
-        "confidence": confidence,
-        "kronos_score": _kronos_score(confidence, score, aligned, probs, 0, bias["base"]),
-        "aligned_with_pm": aligned,
-        "attribution": _attribution(score, pm_action, row, instrument, {}),
-        "horizons": _horizons(bias["base"], "OPTION" if instrument == "OPTION" else "EQUITY"),
-        "probabilities": probs,
-        "exit_forecast": _exit_forecast(bias["base"], "OPTION" if instrument == "OPTION" else "EQUITY"),
-        "tripwires": _tripwires({"instrument": "EQUITY", "unrealized_pct": None, "risk": {}}, score, pm_action),
-        "catalysts": _catalysts(row),
-    }
-    return {"ok": True, "ticker": t, "battle_card": match, "generated_at": _now().isoformat()}
+    pm_row = next((r for r in _pm_rows(ctx.get("pm") or {}) if _ticker(r.get("ticker") or r.get("symbol")) == t), {})
+    prediction = await candle_forecast(t, "1d", persist=False)
+    match = {"ticker": t, "instrument": "EQUITY", "pm_action": pm_row.get("action") or pm_row.get("route") or "UNMAPPED",
+             "forecast_bias": {"UP": "BULLISH", "DOWN": "BEARISH", "FLAT": "CHOP"}.get(prediction.get("direction"), "UNAVAILABLE"),
+             "forecast_pct": prediction.get("forecast_pct"), "bear_pct": prediction.get("cone_low_pct"), "bull_pct": prediction.get("cone_high_pct"),
+             "confidence": prediction.get("confidence"), "kronos_score": prediction.get("score"), "probabilities": prediction.get("probabilities") or {},
+             "horizons": prediction.get("horizons") or [], "input_asof": prediction.get("input_asof"), "target_at": prediction.get("target_at"),
+             "exit_forecast": {"research_only": True}, "tripwires": [], "catalysts": []}
+    return {"ok": prediction.get("ok", False), "ticker": t, "match": match, "forecast": match, "prediction": prediction,
+            "battle_card": match, "pm": pm_row, "research_only": True, "generated_at": _now().isoformat()}
 
 
 def build_morning_message(payload: dict[str, Any]) -> str:
     market = payload.get("market_forecast") or {}
-    cone = payload.get("portfolio_day_cone") or {}
-    direction = market.get("direction", "UNKNOWN")
-    pct = market.get("forecast_pct", 0)
-    sign = "+" if _num(pct, 0) >= 0 else ""
-    lines = [
-        "<b>CASE CAPITAL | KRONOS MORNING BRIEF</b>",
-        f"<code>{datetime.now(ZoneInfo('America/New_York')).strftime('%b %d %H:%M ET')}</code>",
-        "",
-        f"<b>SPY today:</b> {direction} {sign}{pct}% "
-        f"(cone {market.get('cone_low_pct')}% to {market.get('cone_high_pct')}%)",
-        f"Confidence: {market.get('confidence', 0)}/100",
-        "",
-        "<b>Open-position day P/L cone:</b>",
-        f"Low: ${cone.get('low_usd', 0)}",
-        f"Base: ${cone.get('base_usd', 0)}",
-        f"High: ${cone.get('high_usd', 0)}",
-        "",
-        f"PM disagreements: {(payload.get('summary') or {}).get('pm_disagreements', 0)}",
-        "<i>Advisory only. Kronos does not execute or override PM.</i>",
-    ]
-    return "\n".join(lines)
+    return "\n".join([
+        "<b>CASE CAPITAL | KRONOS RESEARCH BRIEF</b>",
+        f"SPY: {market.get('direction', 'UNKNOWN')}",
+        f"Input as-of: {market.get('input_asof', 'unavailable')}",
+        f"Target: {market.get('target_at', 'unavailable')}",
+        f"Baseline return estimate: {market.get('forecast_pct')}%",
+        "<i>Uncalibrated research baseline. No trading authority.</i>",
+    ])
 
 
 async def dispatch_morning_forecast(force: bool = False) -> dict[str, Any]:
     from . import telegram_service
-
     payload = await forecast(persist=True)
     sent = await telegram_service.send_message(build_morning_message(payload))
-    try:
-        await get_db().telegram_reports.insert_one(stamped({
-            "type": "kronos_morning_forecast",
-            "sent": bool(sent),
-            "force": force,
-            "payload": {
-                "market_forecast": payload.get("market_forecast"),
-                "portfolio_day_cone": payload.get("portfolio_day_cone"),
-                "summary": payload.get("summary"),
-            },
-        }))
-    except Exception:
-        pass
+    await get_db().telegram_reports.insert_one(stamped({"type": "kronos_morning_forecast", "sent": bool(sent), "force": force, "payload": {"market_forecast": payload.get("market_forecast"), "summary": payload.get("summary")}}))
     return {"ok": bool(sent), "sent": bool(sent), "forecast": payload}
