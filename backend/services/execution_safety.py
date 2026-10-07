@@ -33,6 +33,19 @@ def _expired(value: Any, *, now: datetime) -> bool:
     return expires_at <= now
 
 
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    """Recognize duplicate-key failures without retaining a Mongo dependency.
+
+    The Postgres compatibility store reports uniqueness violations through
+    asyncpg's SQLSTATE ``23505``.  Test doubles and alternate DB drivers may
+    expose only a message, so retain a narrow text fallback as well.
+    """
+    if getattr(exc, "sqlstate", None) == "23505":
+        return True
+    message = str(exc).lower()
+    return "duplicate" in message or "unique" in message
+
+
 def stable_client_order_id(*parts: Any, prefix: str = "cc", max_len: int = 48) -> str:
     """Build a deterministic broker-safe idempotency key."""
     normalized = "|".join(str(part or "").strip().upper() for part in parts)
@@ -92,14 +105,7 @@ async def claim_execution_intent(
             }
         return {"ok": True, "claimed": True, "intent": {k: v for k, v in doc.items() if k != "_id"}}
     except Exception as exc:
-        # Drivers do not all include the word "duplicate" in their exception
-        # text, so recognize the canonical duplicate-key type as well.
-        try:
-            from pymongo.errors import DuplicateKeyError
-        except ImportError:
-            DuplicateKeyError = ()
-        is_duplicate = isinstance(exc, DuplicateKeyError) or "duplicate" in str(exc).lower() or "unique" in str(exc).lower()
-        if not is_duplicate:
+        if not _is_duplicate_key_error(exc):
             raise
         existing = await db.execution_intents.find_one({"_id": doc["_id"]}, {"_id": 0})
         if (

@@ -12,8 +12,23 @@ EnvironmentFile=/opt/case-capital/stock-intel/backend/.env
 ExecStart=/opt/case-capital/stock-intel/backend/.venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8001
 Restart=always
 RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=case-capital-terminal
 
 [Install]
 WantedBy=multi-user.target

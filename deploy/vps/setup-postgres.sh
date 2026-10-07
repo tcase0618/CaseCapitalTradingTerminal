@@ -49,7 +49,7 @@ dsn = f"postgresql://{user}:{password}@127.0.0.1:5432/{db}"
 updates = {
     "POSTGRES_ENABLED": "true",
     "POSTGRES_DSN": dsn,
-    "POSTGRES_POOL_MAX": "5",
+    "POSTGRES_POOL_MAX": "2",
 }
 lines = env_path.read_text().splitlines() if env_path.exists() else []
 seen = set()

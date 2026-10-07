@@ -8,6 +8,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from services import execution_safety
 
 
+class DuplicateKeyError(Exception):
+    sqlstate = "23505"
+
+
 def test_stable_client_order_id_is_retry_stable():
     first = execution_safety.stable_client_order_id("manual", "AAPL", "buy", 25, "2026-08-26", prefix="tf")
     second = execution_safety.stable_client_order_id("manual", "AAPL", "buy", 25, "2026-08-26", prefix="tf")
@@ -25,8 +29,6 @@ def test_claim_execution_intent_blocks_duplicate(monkeypatch):
     class FakeCollection:
         async def insert_one(self, doc):
             if doc["_id"] in inserted:
-                from pymongo.errors import DuplicateKeyError
-
                 raise DuplicateKeyError("dup")
             inserted[doc["_id"]] = doc
 
@@ -69,8 +71,6 @@ def test_claim_execution_intent_reclaims_expired_pre_submit_lease(monkeypatch):
 
     class FakeCollection:
         async def insert_one(self, _doc):
-            from pymongo.errors import DuplicateKeyError
-
             raise DuplicateKeyError("dup")
 
         async def find_one(self, query, projection=None):
