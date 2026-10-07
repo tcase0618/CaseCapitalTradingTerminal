@@ -21,7 +21,7 @@ async def main() -> int:
     if not await postgres_store.init_schema():
         print(json.dumps({"ok": False, "error": postgres_store.last_error()}))
         return 1
-    pool = postgres_store.pool()
+    pool = await postgres_store.get_pool()
     if pool is None:
         print(json.dumps({"ok": False, "error": "Postgres pool unavailable"}))
         return 1

@@ -771,6 +771,17 @@ async def close_pool() -> None:
     _schema_ready = False
 
 
+async def get_pool() -> Any | None:
+    """Return the initialized pool for bounded maintenance operations.
+
+    This is intentionally async so callers cannot bypass schema readiness or
+    accidentally use a pool from another event loop.
+    """
+    if not await init_schema():
+        return None
+    return _pool
+
+
 async def write_event(
     collection: str,
     payload: dict[str, Any],
