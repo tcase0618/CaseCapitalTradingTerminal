@@ -1,0 +1,17 @@
+[Unit]
+Description=Case Capital PostgreSQL backup and verification
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=casecapital
+Group=casecapital
+EnvironmentFile=/opt/case-capital/stock-intel/backend/.env
+ExecStart=/opt/case-capital/stock-intel/deploy/vps/backup-postgres.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/case-capital/backups

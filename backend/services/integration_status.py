@@ -140,6 +140,34 @@ async def integration_status() -> list[dict[str, Any]]:
             reason=str(exc)[:160],
         ))
 
+    try:
+        from . import accountant_research
+        accountant_status = accountant_research.status()
+        out.append(_row(
+            "case_capital_accountant",
+            "Case Capital Accountant (SEC/XBRL Research)",
+            bool(accountant_status.get("ok")),
+            last=_now_iso() if accountant_status.get("configured") else None,
+            detail={
+                "provider": accountant_status.get("provider"),
+                "research_only": accountant_status.get("research_only"),
+                "decision_authority": accountant_status.get("decision_authority"),
+                "wired_to_pm_evidence": accountant_status.get("wired_to_pm_evidence"),
+                "wired_to_execution": accountant_status.get("wired_to_execution"),
+                "cache_ttl_seconds": accountant_status.get("cache_ttl_seconds"),
+            },
+            quality="configured" if accountant_status.get("configured") else "optional",
+            reason=None if accountant_status.get("configured") else "missing ACCOUNTANT_API_BASE_URL",
+        ))
+    except Exception as exc:
+        out.append(_row(
+            "case_capital_accountant",
+            "Case Capital Accountant (SEC/XBRL Research)",
+            False,
+            quality="down",
+            reason=str(exc)[:160],
+        ))
+
     fh_key = os.environ.get("FINNHUB_API_KEY", "").strip()
     fh_ok = False
     fh_reason = "missing FINNHUB_API_KEY"

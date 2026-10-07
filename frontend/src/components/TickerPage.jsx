@@ -16,13 +16,15 @@ export default function TickerPage() {
   const [kronos, setKronos] = useState(null);
   const [pmDossier, setPmDossier] = useState(null);
   const [dossierStatus, setDossierStatus] = useState("loading");
+  const [accountant, setAccountant] = useState(null);
+  const [accountantStatus, setAccountantStatus] = useState("loading");
 
   useEffect(() => {
     if (!ticker) return undefined;
     const controller = new AbortController();
     const request = (path) => axios.get(`${API}${path}`, { signal: controller.signal });
     setData(null); setOpts(null); setFlow(null); setFreeData(null); setKronos(null);
-    setPmDossier(null); setDossierStatus("loading");
+    setPmDossier(null); setDossierStatus("loading"); setAccountant(null); setAccountantStatus("loading");
     request(`/ticker/${ticker}`).then(r => setData(r.data)).catch(error => {
       if (error.name !== "CanceledError") setData({ ticker });
     });
@@ -35,6 +37,12 @@ export default function TickerPage() {
       setDossierStatus("ready");
     }).catch(error => {
       if (error.name !== "CanceledError") setDossierStatus("unavailable");
+    });
+    request(`/research/accountant/${ticker}`).then(r => {
+      setAccountant(r.data);
+      setAccountantStatus(r.data?.ok ? "ready" : "unavailable");
+    }).catch(error => {
+      if (error.name !== "CanceledError") setAccountantStatus("unavailable");
     });
     return () => controller.abort();
   }, [ticker]);
@@ -80,6 +88,7 @@ export default function TickerPage() {
 
       <CompanyProfileCard profile={companyProfile} />
       <PmDossierCard dossier={pmDossier} status={dossierStatus} />
+      <AccountantResearchCard packet={accountant} status={accountantStatus} />
 
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
         <Stat label="SIGNAL SCORE" value={`${data.signal_score || 0}/10`} color={accent} />
@@ -298,6 +307,59 @@ function PmDossierCard({ dossier, status }) {
         </>
       )}
     </Card>
+  );
+}
+
+function AccountantResearchCard({ packet, status }) {
+  const integration = packet?.integration || {};
+  const report = packet?.report || {};
+  const verdict = packet?.report_card?.final_verdict || {};
+  const ready = Boolean(integration.ready_for_readonly_integration);
+  const stance = report.stance || integration.stance || verdict.current_action || "NO REPORT";
+  const stanceColor = /BUY|ACCUMULATE|BULL/i.test(stance) ? "#4ade80"
+    : /EXIT|SELL|BEAR/i.test(stance) ? "#f87171" : accent;
+
+  return (
+    <Card title="ACCOUNTANT // SEC-XBRL RESEARCH">
+      {status === "loading" ? (
+        <div style={{ color: muted, fontSize: 13 }}>Loading Accountant research packet...</div>
+      ) : status === "unavailable" ? (
+        <div style={{ color: muted, fontSize: 13 }}>
+          Accountant research is not currently available for this ticker. This never changes PM routing or execution.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12, marginBottom: 14 }}>
+            <MiniResearchStat label="STANCE" value={stance} color={stanceColor} />
+            <MiniResearchStat label="COMPOSITE" value={report.composite_score != null ? Number(report.composite_score).toFixed(1) : "--"} />
+            <MiniResearchStat label="QUALITY" value={report.data_quality_tier || integration.data_quality_tier || "--"} />
+            <MiniResearchStat label="PIPELINE" value={integration.pipeline_stage || report.pipeline_stage || "--"} color={ready ? "#4ade80" : accent} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, paddingTop: 12, borderTop: hairline }}>
+            <Row k="LATEST FILING" v={report.latest_filing_date || integration.latest_report_card_filed_date || "--"} />
+            <Row k="REPORT AS-OF" v={report.as_of_date || "--"} />
+            <Row k="CANONICAL FACTS" v={integration.canonical_facts_count?.toLocaleString?.() || "--"} />
+          </div>
+          {(report.highlights || []).length > 0 && (
+            <div style={{ marginTop: 12, borderLeft: `2px solid ${accent}`, paddingLeft: 12, color: labelLight, fontSize: 12, lineHeight: 1.65 }}>
+              {(report.highlights || []).slice(0, 3).join(" ")}
+            </div>
+          )}
+          <div style={{ marginTop: 12, color: dim, fontSize: 10, letterSpacing: "0.08em" }}>
+            READ-ONLY SEC/XBRL EVIDENCE · NO PM SCORE OR EXECUTION AUTHORITY · {packet.cache_state?.toUpperCase?.() || "CACHED"}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function MiniResearchStat({ label, value, color = "#e5e7eb" }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ color: dim, fontSize: 9, letterSpacing: "0.1em", marginBottom: 5 }}>{label}</div>
+      <div style={{ color, fontWeight: 800, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value}</div>
+    </div>
   );
 }
 

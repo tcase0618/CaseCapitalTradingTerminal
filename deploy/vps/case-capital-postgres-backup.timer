@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Case Capital PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:10:00 America/New_York
+Persistent=true
+Unit=case-capital-postgres-backup.service
+
+[Install]
+WantedBy=timers.target

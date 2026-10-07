@@ -7,7 +7,7 @@ Target: Ubuntu 24.04 LTS on a small VPS.
 - 1 vCPU
 - 2 GB RAM
 - 50 GB NVMe
-- MongoDB Atlas for database
+- Local PostgreSQL for terminal state and audit history
 - Nginx serves React and proxies `/api` to FastAPI
 - systemd keeps backend alive
 
@@ -34,6 +34,28 @@ sudo nano /opt/case-capital/stock-intel/backend/.env
 sudo systemctl restart case-capital-terminal
 ```
 
+## Postgres operations
+
+Production migrations are explicit so concurrent indexes never run as an
+unbounded application-startup side effect:
+
+```bash
+cd /opt/case-capital/stock-intel/backend
+.venv/bin/python scripts/migrate_postgres.py
+```
+
+The deployment installs a nightly, verified custom-format backup at 03:10 ET.
+Each dump is checked with `pg_restore --list`, saved with mode `0600`, and kept
+for 14 days by default. Verify its timer and latest result with:
+
+```bash
+systemctl list-timers case-capital-postgres-backup.timer
+systemctl status case-capital-postgres-backup.service --no-pager
+```
+
+`deploy/vps/restore-postgres.sh` is deliberately destructive and requires the
+explicit `CASE_CAPITAL_RESTORE_CONFIRM=RESTORE_CASE_CAPITAL` confirmation.
+
 Verify:
 
 ```bash
@@ -55,6 +77,8 @@ git pull origin codex/desktop-checkpoint
 
 cd /opt/case-capital/stock-intel/backend
 .venv/bin/pip install -r requirements.txt
+.venv/bin/python scripts/migrate_postgres.py
+sudo bash ../deploy/vps/install-operational-controls.sh
 sudo systemctl restart case-capital-terminal
 sleep 4
 .venv/bin/python readiness_check.py

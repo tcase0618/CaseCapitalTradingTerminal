@@ -29,6 +29,7 @@ load_dotenv(ROOT_DIR / ".env")
 from services import claude_service, risk_target, scanner, scheduler, telegram_service, usaspending  # noqa: E402
 from services.db import get_db, log_activity  # noqa: E402
 from services.scrapers import fetch_quote  # noqa: E402
+from routers.research import router as research_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("server")
@@ -37,6 +38,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(title="Stock Intel Bot")
 api = APIRouter(prefix="/api")
+api.include_router(research_router)
 OPERATOR_SESSIONS: set[str] = set()
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OPERATOR_TOKEN_VERSION = "cc1"
@@ -831,57 +833,6 @@ async def lse_macro(limit: int = 100):
 async def macro_overview():
     from services import macro_intel
     return await macro_intel.overview()
-
-
-@api.get("/data/free/catalog")
-async def free_data_catalog():
-    from services import free_data
-    return {"sources": free_data.catalog()}
-
-
-@api.get("/data/free/sec/companyfacts/{cik}")
-async def free_data_sec_companyfacts(cik: str):
-    from services import free_data
-    return await free_data.sec_companyfacts(cik)
-
-
-@api.get("/data/free/ticker/{ticker}")
-async def free_data_ticker(ticker: str):
-    from services import free_data
-
-    t = ticker.upper()
-    company_name = None
-    try:
-        fund = await risk_target.fetch_fundamentals(t)
-        company_name = (fund or {}).get("name")
-    except Exception:
-        company_name = None
-    return await free_data.ticker_free_data(t, company_name=company_name)
-
-
-@api.get("/data/free/fred/latest/{series_id}")
-async def free_data_fred_latest(series_id: str):
-    from services import free_data
-    return await free_data.fred_latest(series_id)
-
-
-@api.get("/data/finance-toolkit/status")
-async def finance_toolkit_status():
-    from services import finance_toolkit_source
-    return finance_toolkit_source.status()
-
-
-@api.get("/data/finance-toolkit/profile/{ticker}")
-async def finance_toolkit_profile(ticker: str):
-    from services import finance_toolkit_source
-    return await finance_toolkit_source.company_profile(ticker)
-
-
-@api.get("/data/finance-toolkit/research/{ticker}")
-async def finance_toolkit_research(ticker: str, sections: str | None = None):
-    """Return fundamental research only; this endpoint cannot create or alter a trading decision."""
-    from services import finance_toolkit_source
-    return await finance_toolkit_source.research_bundle(ticker, sections=sections)
 
 
 @api.post("/scan/run")

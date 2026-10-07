@@ -41,6 +41,11 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}/backend' && python3.12 -m venv .v
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}/frontend' && npm ci && REACT_APP_BACKEND_URL= npm run build"
 
 cp "${APP_DIR}/deploy/vps/case-capital-terminal.service" /etc/systemd/system/case-capital-terminal.service
+install -d -o "${APP_USER}" -g "${APP_USER}" -m 700 /opt/case-capital/backups/postgres
+install -o root -g root -m 755 "${APP_DIR}/deploy/vps/backup-postgres.sh" /opt/case-capital/stock-intel/deploy/vps/backup-postgres.sh
+install -o root -g root -m 755 "${APP_DIR}/deploy/vps/restore-postgres.sh" /opt/case-capital/stock-intel/deploy/vps/restore-postgres.sh
+cp "${APP_DIR}/deploy/vps/case-capital-postgres-backup.service" /etc/systemd/system/case-capital-postgres-backup.service
+cp "${APP_DIR}/deploy/vps/case-capital-postgres-backup.timer" /etc/systemd/system/case-capital-postgres-backup.timer
 cp "${APP_DIR}/deploy/vps/nginx-case-capital.conf" /etc/nginx/sites-available/case-capital-terminal
 ln -sf /etc/nginx/sites-available/case-capital-terminal /etc/nginx/sites-enabled/case-capital-terminal
 rm -f /etc/nginx/sites-enabled/default
@@ -48,6 +53,7 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl daemon-reload
 systemctl enable case-capital-terminal
+systemctl enable --now case-capital-postgres-backup.timer
 systemctl restart case-capital-terminal
 systemctl enable nginx
 systemctl restart nginx
