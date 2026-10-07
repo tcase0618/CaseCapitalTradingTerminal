@@ -6,6 +6,47 @@ import pytest
 from services import pm_ratchet
 
 
+@pytest.mark.parametrize(
+    "peak,previous,expected,armed",
+    [(10.0, 8.0, 9.0, False), (10.49, 9.0, 9.0, False),
+     (10.5, 9.0, 10.5, True), (12.0, 11.0, 11.0, True),
+     (10.0, 9.2, 9.2, False)],
+)
+def test_public_stop_policy_locks_five_percent_without_loosening(peak, previous, expected, armed):
+    policy = pm_ratchet.public_stop_policy(10.0, peak, previous)
+    assert policy["active_stop"] == expected
+    assert policy["profit_floor_armed"] is armed
+
+
+@pytest.mark.asyncio
+async def test_public_profit_floor_persists_across_reversal_and_restart(monkeypatch):
+    trade = {
+        "client_order_id": "profit-floor", "ticker": "WIN",
+        "filled_avg_price": 10.0, "current_stop": 9.0,
+        "pm_active_stop": 9.0, "pm_ratchet_level": 0,
+        "pm_ratchet_plan": {"enabled": True, "no_capped_tp": True,
+                            "initial_stop_pct": 10, "max_ratchets": 20},
+    }
+
+    class Trades:
+        async def update_one(self, query, update):
+            assert query["$and"][1] == {"broker_base": "public"}
+            trade.update(update["$set"])
+
+    class Events:
+        async def insert_one(self, event):
+            assert event["broker_base"] == "public"
+
+    monkeypatch.setattr(pm_ratchet, "get_db", lambda: SimpleNamespace(tf_trades=Trades(), pm_ratchet_events=Events()))
+    await pm_ratchet._apply_public_ratchet_marks([dict(trade)], {"WIN": 10.5}, source="test")
+    assert trade["current_stop"] == 10.5
+    assert trade["public_stop_policy"]["profit_floor_armed"] is True
+    await pm_ratchet._apply_public_ratchet_marks([dict(trade)], {"WIN": 10.3}, source="test_restart")
+    assert trade["current_stop"] == 10.5
+    assert trade["pm_active_stop"] == 10.5
+    assert trade["public_stop_policy"]["profit_floor_armed"] is True
+
+
 def test_public_ratchet_mark_requires_a_fresh_executable_quote(monkeypatch):
     monkeypatch.setenv("PUBLIC_MAX_EQUITY_SPREAD_BPS", "300")
     now = datetime.now(timezone.utc).isoformat()
@@ -13,7 +54,7 @@ def test_public_ratchet_mark_requires_a_fresh_executable_quote(monkeypatch):
     wide = pm_ratchet._fresh_public_execution_mark({"bid": 10.00, "ask": 11.00, "quoteTime": now})
     stale = pm_ratchet._fresh_public_execution_mark({"bid": 10.00, "ask": 10.04, "quoteTime": "2020-01-01T00:00:00Z"})
 
-    assert valid == 10.02
+    assert valid == 10.0
     assert wide is None
     assert stale is None
 
@@ -125,9 +166,9 @@ async def test_public_ratchet_initializes_account_protection_for_unplanned_posit
     assert result["coverage_initialized_tickers"] == ["LEGACY"]
     assert updates[0]["pm_ratchet_plan"]["profile"] == "ACCOUNT_PROTECTION"
     assert updates[0]["pm_ratchet_plan"]["anchor_price"] == 8.0
-    assert updates[0]["current_stop"] == 7.2
+    assert updates[0]["current_stop"] == 9.0
     assert updates[0]["protection_state"] == "MONITORED_EXIT_ONLY"
-    assert events == []
+    assert events[0]["active_stop"] == 9.0
 
 
 @pytest.mark.asyncio
