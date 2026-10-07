@@ -59,9 +59,8 @@ PY
 export PGSSLMODE="${CASE_CAPITAL_POSTGRES_SSLMODE:-disable}"
 pg_dump --format=custom --no-owner --file="${tmp}"
 pg_restore --list "${tmp}" >/dev/null
-sha256sum "${tmp}" > "${tmp}.sha256"
 mv "${tmp}" "${final}"
-mv "${tmp}.sha256" "${final}.sha256"
+sha256sum "${final}" > "${final}.sha256"
 trap - EXIT
 
 # Only prune artifacts this job owns. Never glob unrelated application data.
