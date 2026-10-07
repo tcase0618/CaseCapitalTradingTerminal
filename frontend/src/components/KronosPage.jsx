@@ -826,11 +826,11 @@ function ScenarioFan({ selected, rows }) {
 }
 
 function CommandCard({ item, context }) {
-  const candles = normalizeRows(context?.candles).slice(-40);
+  const candles = normalizeRows(context?.candles).slice().sort((a, b) => String(a.timestamp || a.date || "").localeCompare(String(b.timestamp || b.date || ""))).slice(-40);
   const spark = candles.length ? candles.map((r, i) => ({
     i,
     close: numberish(r.close ?? r.c ?? r.price ?? r.value),
-  })).filter(r => r.close != null) : item.path.map((p, i) => ({ i, close: 100 + p.value }));
+  })).filter(r => r.close != null) : [];
 
   return (
     <div>
@@ -912,14 +912,11 @@ function ForecastStack({ item }) {
           )) : <div style={emptySmall}>No attribution payload yet.</div>}
         </div>
         <div style={stackPanel}>
-          <div style={sectionLabel}>PATH PROBABILITIES</div>
+          <div style={sectionLabel}>UNCALIBRATED SCENARIO WEIGHTS</div>
           {[
-            ["+5%", probs.plus_5],
-            ["+10%", probs.plus_10],
-            ["-5%", probs.minus_5],
-            ["-10%", probs.minus_10],
-            ["STOP", probs.stop_hit],
-            ["RATCHET", probs.ratchet_hit],
+            ["UP", probs.up],
+            ["DOWN", probs.down],
+            ["FLAT", probs.flat],
           ].map(([k, v]) => (
             <div key={k} style={probRow}>
               <span>{k}</span>
@@ -931,10 +928,10 @@ function ForecastStack({ item }) {
       <div style={stackGrid}>
         <div style={stackPanel}>
           <div style={sectionLabel}>MULTI-HORIZON FORECAST</div>
-          {Object.entries(horizons).map(([k, h]) => (
+          {(Array.isArray(horizons) ? horizons.map(h => [h.horizon, h]) : Object.entries(horizons)).map(([k, h]) => (
             <div key={k} style={horizonRow}>
               <span>{k}</span>
-              <strong>{signed(h.low_pct)}% / {signed(h.base_pct)}% / {signed(h.high_pct)}%</strong>
+              <strong>{fmtPct(h.cone_low_pct ?? h.low_pct)} / {fmtPct(h.forecast_pct ?? h.base_pct)} / {fmtPct(h.cone_high_pct ?? h.high_pct)}</strong>
             </div>
           ))}
         </div>
@@ -1136,11 +1133,26 @@ function normalizeBackendForecasts(kronos) {
       bullMove,
       edgeScore: numberish(r.kronos_score) ?? 0,
       note: `Backend Kronos forecast from ${r.pm_action || "unmapped PM"} route, current exposure, scan evidence, and risk state.`,
-      path: buildPath(baseMove),
     };
   }).filter(r => r.ticker).sort((a, b) => (b.edgeScore || 0) - (a.edgeScore || 0));
 }
 
+
+function summarizeForecasts(forecasts, lseHealth) {
+  const bullish = forecasts.filter(f => f.bias === "BULLISH").length;
+  const bearish = forecasts.filter(f => f.bias === "BEARISH").length;
+  const chop = forecasts.filter(f => f.bias === "CHOP").length;
+  const aligned = forecasts.filter(f => f.aligned).length;
+  return {
+    underlyings: new Set(forecasts.map(f => f.ticker)).size,
+    bullish, bearish, chop, aligned,
+    netBias: bullish > bearish && bullish >= chop ? "BULLISH" : bearish > bullish ? "BEARISH" : "CHOP",
+    alignedPct: forecasts.length ? Math.round(aligned / forecasts.length * 100) : 0,
+    atRisk: forecasts.filter(f => f.tripwires.length).length,
+    thetaWatch: forecasts.filter(f => f.tripwires.some(t => t.includes("THETA"))).length,
+    lseOnline: Boolean(lseHealth?.ok),
+  };
+}
 
 function buildChartChoices(forecasts) {
   const seen = new Set(["SPY"]);
@@ -1339,71 +1351,6 @@ function inferMacroTone(macro) {
   return { label: "UNKNOWN", detail: "no feed", color: muted };
 }
 
-function forecastBias(score, pmAction, unrealizedPct, instrument, risk = {}) {
-  const pnl = unrealizedPct == null ? 0 : unrealizedPct;
-  const thetaWatch = String(risk.theta_status || "").toUpperCase() === "WATCH";
-  if (pmAction === "PASS") return { label: "BEARISH", color: "#f87171", baseMove: -2.2, bearMove: -6.5, bullMove: 2.8 };
-  if (thetaWatch && instrument === "OPTION") return { label: "HEDGE", color: "#a78bfa", baseMove: 0.8, bearMove: -8.0, bullMove: 8.5 };
-  if (pmAction === "ACCUMULATE") return { label: "BULLISH", color: "#4ade80", baseMove: 5.5, bearMove: -4.5, bullMove: 12 };
-  if (pmAction === "STARTER") return { label: "BULLISH", color: "#86efac", baseMove: 3.8, bearMove: -3.5, bullMove: 8.5 };
-  if (pmAction === "WATCH") return { label: "CHOP", color: "#fbbf24", baseMove: 1.2, bearMove: -3.8, bullMove: 4.5 };
-  if (pmAction === "BOTH" || score >= 8.2) return { label: "BULLISH", color: "#4ade80", baseMove: instrument === "OPTION" ? 24 : 5.5, bearMove: instrument === "OPTION" ? -20 : -4.5, bullMove: instrument === "OPTION" ? 85 : 12 };
-  if (pmAction === "OPTION" || score >= 7) return { label: "BULLISH", color: "#86efac", baseMove: instrument === "OPTION" ? 16 : 3.8, bearMove: instrument === "OPTION" ? -20 : -3.5, bullMove: instrument === "OPTION" ? 55 : 8.5 };
-  if (score <= 4.5 || pnl <= -8) return { label: "BEARISH", color: "#f87171", baseMove: -3.2, bearMove: instrument === "OPTION" ? -20 : -7.5, bullMove: 3.2 };
-  return { label: "CHOP", color: "#fbbf24", baseMove: instrument === "OPTION" ? 5 : 1.2, bearMove: instrument === "OPTION" ? -16 : -3.8, bullMove: instrument === "OPTION" ? 22 : 4.5 };
-}
-
-function confidence(score, decision, signal, position, perf) {
-  let base = 38;
-  if (score != null) base += Math.min(28, Math.max(0, score * 3));
-  if (decision && Object.keys(decision).length) base += 12;
-  if (signal && Object.keys(signal).length) base += 10;
-  if (perf && Object.keys(perf).length) base += 6;
-  if (position.instrument === "OPTION") base -= 5;
-  if (position.risk?.theta_status === "WATCH") base -= 7;
-  return Math.max(18, Math.min(92, Math.round(base)));
-}
-
-function pmAlignment(pmAction, bias) {
-  if (pmAction === "UNMAPPED") return false;
-  if (pmAction === "PASS") return bias === "BEARISH" || bias === "CHOP";
-  if (pmAction === "EQUITY" || pmAction === "OPTION" || pmAction === "BOTH") return bias === "BULLISH" || bias === "HEDGE";
-  return false;
-}
-
-function catalystTags(signal, perf, macro) {
-  const tags = [];
-  const blob = JSON.stringify({ signal, perf }).toLowerCase();
-  if (blob.includes("earn")) tags.push("EARNINGS");
-  if (blob.includes("contract") || blob.includes("sam")) tags.push("CONTRACT");
-  if (blob.includes("fda") || blob.includes("pdufa") || blob.includes("clinical")) tags.push("PHARMA");
-  if (blob.includes("x_factor") || blob.includes("trend") || blob.includes("stocktwits")) tags.push("RETAIL");
-  if (normalizeRows(macro).length) tags.push("MACRO");
-  return [...new Set(tags)].slice(0, 4);
-}
-
-function tripwireList(p, score, pmAction) {
-  const flags = [];
-  if (p.instrument === "OPTION" && p.risk?.hard_stop_triggered) flags.push("HARD STOP");
-  if (p.instrument === "OPTION" && String(p.risk?.theta_status || "").toUpperCase() === "WATCH") flags.push("THETA WATCH");
-  if (p.unrealizedPct != null && p.unrealizedPct <= -8) flags.push("DRAWDOWN");
-  if (score == null) flags.push("NO CASE SCORE");
-  if (pmAction === "UNMAPPED") flags.push("NO PM MAP");
-  return flags;
-}
-
-function forecastNote(position, bias, score, pmAction, catalysts) {
-  const scoreText = score == null ? "no mapped Case Score" : `Case Score ${score.toFixed(1)}`;
-  const catalystText = catalysts.length ? `Catalysts: ${catalysts.join(", ")}.` : "No catalyst tag is mapped yet.";
-  return `${position.instrument} forecast is derived from open exposure, ${scoreText}, PM route ${pmAction}, current P/L pressure, risk checks, and latest scan context. ${catalystText} Proxy mode is advisory only.`;
-}
-
-function buildPath(drift) {
-  return Array.from({ length: 12 }).map((_, i) => {
-    const wobble = Math.sin(i * 1.35) * 0.9;
-    return { step: `T+${i}`, value: Number(((drift / 11) * i + wobble).toFixed(2)) };
-  });
-}
 
 function auditItem(label, value, color) {
   return { label, value, color };

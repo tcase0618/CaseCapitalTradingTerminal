@@ -573,7 +573,10 @@ async def candle_forecast(symbol: str = "SPY", timeframe: str = "5m", limit: int
     result = _apply_candle_learning(result, adjustment)
     result["horizons"] = [{"horizon": "NEXT FULL RTH BAR", "target_at": contract["target_at"], "forecast_pct": result["forecast_pct"], "cone_low_pct": result["cone_low_pct"], "cone_high_pct": result["cone_high_pct"]}]
     identity = json.dumps({"symbol": ticker, "timeframe": tf, "model": result["model_version"], "input": candles, "target": result["target_at"]}, sort_keys=True)
-    result["prediction_id"] = hashlib.sha256(identity.encode()).hexdigest()
+    result["input_hash"] = hashlib.sha256(identity.encode()).hexdigest()
+    # Provider revisions must not turn one issued bar horizon into extra samples.
+    issue_key = "|".join([ticker, tf, result["model_version"], result["input_asof"], result["target_at"]])
+    result["prediction_id"] = hashlib.sha256(issue_key.encode()).hexdigest()
     if persist:
         try:
             db = get_db()
