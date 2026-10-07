@@ -16,7 +16,9 @@ TimeoutStartSec=60
 TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# PostgreSQL client TLS material lives in the service user's .postgresql
+# directory. Keep home immutable but readable to the client library.
+ProtectHome=read-only
 ProtectSystem=full
 ProtectKernelTunables=true
 ProtectKernelModules=true
