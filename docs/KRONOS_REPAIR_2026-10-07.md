@@ -36,7 +36,7 @@ orders, ratchets, or protective exits. Forecasts remain research-only.
 
 ## Honest Limitations
 
-This is `ohlcv_baseline_v2`, not the shiyu-coder/Kronos neural foundation model.
+This is `ohlcv_baseline_v2.1`, not the shiyu-coder/Kronos neural foundation model.
 The previous implementation never loaded that model. No neural model is silently
 substituted, and no predictive edge or calibrated win rate is claimed. A model
 challenger requires separate walk-forward evaluation against the versioned

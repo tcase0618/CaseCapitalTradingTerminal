@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-MODEL_VERSION = "ohlcv_baseline_v2"
+MODEL_VERSION = "ohlcv_baseline_v2.1"
 ET = ZoneInfo("America/New_York")
 MINUTES = {"5m": 5, "15m": 15, "1h": 60, "1d": 1440}
 

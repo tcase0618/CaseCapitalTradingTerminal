@@ -115,6 +115,20 @@ async def test_stale_provider_cannot_create_a_prediction(monkeypatch, db):
 
 
 @pytest.mark.asyncio
+async def test_provider_revision_does_not_inflate_same_horizon_sample_count(monkeypatch, db):
+    from services import london_strategic_edge as lse
+    data = bars()
+    async def candles(*args, **kwargs):
+        return {"ok": True, "rows": list(reversed(data))}
+    monkeypatch.setattr(lse, "candles", candles)
+    first = await kronos.candle_forecast("SPY", persist=True)
+    data[0]["volume"] += 1
+    revised = await kronos.candle_forecast("SPY", persist=True)
+    assert len(db.kronos_candle_predictions.rows) == 1
+    assert revised == first
+
+
+@pytest.mark.asyncio
 async def test_accuracy_waits_for_exact_closed_target(monkeypatch, db):
     from services import london_strategic_edge as lse
     async def candles(*args, **kwargs):
