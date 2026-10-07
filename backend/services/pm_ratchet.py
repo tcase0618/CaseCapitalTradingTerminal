@@ -25,6 +25,24 @@ def _num(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def public_stop_policy(entry: float, observed_peak: float, previous_stop: float = 0.0) -> dict[str, Any]:
+    """Price-based protection, not a guaranteed fee-adjusted realized return."""
+    if entry <= 0 or observed_peak <= 0:
+        return {"enabled": False}
+    trigger = entry * 1.05
+    armed = observed_peak >= trigger
+    stop = max(previous_stop, entry * 0.90, trigger if armed else 0.0)
+    return {
+        "enabled": True,
+        "initial_max_loss_pct": 10.0,
+        "profit_floor_pct": 5.0,
+        "profit_floor_armed": armed,
+        "profit_floor_price": round(trigger, 6),
+        "active_stop": round(stop, 6),
+        "basis": "broker_fill_price_before_fees",
+    }
+
+
 def compute_active_levels(entry: float, current: float, plan: dict[str, Any], previous_stop: float = 0.0) -> dict[str, Any]:
     if entry <= 0 or current <= 0 or not plan.get("enabled"):
         return {"enabled": False}
@@ -60,9 +78,10 @@ def _public_account_protection_plan(entry: float, current: float) -> dict[str, A
     Holdings imported from the broker have no trustworthy original PM thesis.
     When such a holding is already below the default initial stop, anchoring at
     its original cost would create a retroactive stop above the live price and
-    cause an immediate, invented liquidation.  Anchor the migration at the
-    fresh mark instead; subsequent losses are protected and later gains still
-    ratchet normally.  Terminal-owned positions retain their PM-authored plan.
+    cause an immediate liquidation under the historical migration rule.
+    Retain that anchor for the legacy ratchet calculation; the explicit
+    account stop policy now separately enforces the user's cost-based 10%
+    maximum loss distance. Terminal-owned positions retain their PM plan.
     """
     initial_stop_pct = max(1.0, min(50.0, _num(os.environ.get("PUBLIC_ACCOUNT_RATCHET_INITIAL_STOP_PCT"), 10.0)))
     trigger_step_pct = max(0.5, min(25.0, _num(os.environ.get("PUBLIC_ACCOUNT_RATCHET_TRIGGER_STEP_PCT"), 3.0)))
@@ -99,7 +118,7 @@ def _fresh_public_execution_mark(row: dict[str, Any]) -> float | None:
     fresh, _age = safety.quote_is_fresh({"ts": public_execution._execution_quote_timestamp(row)})
     if not fresh or not quote:
         return None
-    mark = _num(quote.get("mid"))
+    mark = _num(quote.get("bid"))
     return mark if mark > 0 else None
 
 
@@ -157,11 +176,14 @@ async def _apply_public_ratchet_marks(
         if ratchet_entry <= 0:
             unpriced.append(ticker)
             continue
-        previous_stop = _num(trade.get("current_stop") or trade.get("stop_price"))
+        previous_stop = max(_num(trade.get(key)) for key in ("current_stop", "pm_active_stop", "stop_price"))
         observed_peak = max(_num(trade.get("peak_price_since_entry"), ratchet_entry), float(current))
         levels = compute_active_levels(ratchet_entry, observed_peak, plan, previous_stop)
         if not levels.get("enabled"):
             continue
+        policy = public_stop_policy(entry, observed_peak, previous_stop)
+        levels["active_stop"] = max(levels["active_stop"], policy["active_stop"])
+        levels["stop_gain_pct"] = round((levels["active_stop"] / entry - 1) * 100.0, 2)
         current_level = int(_num(trade.get("pm_ratchet_level"), 0))
         updates = {
             "pm_active_target": levels["active_target"],
@@ -170,6 +192,7 @@ async def _apply_public_ratchet_marks(
             "pm_last_ratchet_source": source,
             "peak_price_since_entry": observed_peak,
             "pm_last_ratchet_mark": float(current),
+            "public_stop_policy": policy,
         }
         if initialized:
             updates.update({
@@ -180,8 +203,8 @@ async def _apply_public_ratchet_marks(
             })
         if levels["active_stop"] > previous_stop:
             updates["current_stop"] = levels["active_stop"]
-        if levels["ratchet_level"] > current_level:
-            updates["pm_ratchet_level"] = levels["ratchet_level"]
+        if levels["ratchet_level"] > current_level or levels["active_stop"] > previous_stop:
+            updates["pm_ratchet_level"] = max(current_level, levels["ratchet_level"])
             await db.pm_ratchet_events.insert_one(stamped({
                 "client_order_id": trade.get("client_order_id"),
                 "ticker": ticker,
@@ -196,6 +219,7 @@ async def _apply_public_ratchet_marks(
                 "profile": (trade.get("pm_ratchet_plan") or {}).get("profile"),
                 "broker_base": "public",
                 "source": source,
+                "public_stop_policy": policy,
                 "created_at": _now().isoformat(),
             }))
             actions.append({

@@ -1611,6 +1611,10 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 })
                 continue
             stop_price = _stop_price(row)
+            if stop_price > 0:
+                from .pm_ratchet import public_stop_policy
+
+                stop_price = public_stop_policy(price, price, stop_price)["active_stop"]
             if not (0 < stop_price < price):
                 rejected.append({
                     "ticker": ticker,
@@ -2387,7 +2391,7 @@ async def process_protective_exits() -> dict[str, Any]:
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
             refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
             exit_quote = refreshed_quote.get("execution_quote")
-            current = _num((exit_quote or {}).get("mid"))
+            current = _num((exit_quote or {}).get("bid"))
             quantity = _qty(trade)
             if stop <= 0 or current <= 0 or not exit_quote or quantity <= 0 or current > stop:
                 continue
