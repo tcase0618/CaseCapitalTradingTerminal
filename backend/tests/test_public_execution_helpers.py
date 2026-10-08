@@ -606,8 +606,9 @@ async def test_explicit_public_exit_uses_fresh_broker_quantity_and_reconciliatio
     assert result["order_id"] == "forced-exit-1"
     assert client.submitted["quantity"] == 1.67597
     assert client.submitted["session"] == "CORE"
-    assert updates[0]["emergency_exit_order_id"] == "forced-exit-1"
-    assert updates[0]["emergency_exit_reason"] == "operator_forced_exit"
+    assert updates[0]["emergency_exit_status"] == "SUBMIT_UNKNOWN"
+    assert updates[-1]["emergency_exit_order_id"] == "forced-exit-1"
+    assert updates[-1]["emergency_exit_reason"] == "operator_forced_exit"
 
 
 @pytest.mark.asyncio
@@ -805,7 +806,12 @@ async def test_execution_freshness_keeps_newer_stale_public_quote(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
+@pytest.mark.parametrize("entry_allowed", [True, False])
+async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, entry_allowed):
+    async def gate(**kwargs):
+        assert kwargs["scope"] == "equity" and kwargs["ticker"] == "AAPL"
+        return {"ok": entry_allowed, "blockers": [] if entry_allowed else ["global_execution_kill_enabled"]}
+    monkeypatch.setattr("services.execution_gate.check", gate)
     class FakeClient:
         def __init__(self):
             self.submitted = []
@@ -878,6 +884,12 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch):
         [pm_row],
         cycle_id="cycle-1",
     )
+
+    if not entry_allowed:
+        assert result["executed"] == []
+        assert result["rejected"][0]["reason"] == "equity_execution_gate_blocked"
+        assert fake_client.submitted == []
+        return
 
     assert len(result["executed"]) == 1
     assert result["rejected"] == []
@@ -974,7 +986,8 @@ def test_public_learning_accepts_only_verified_measured_thesis_outcome():
 
 
 @pytest.mark.asyncio
-async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monkeypatch):
+@pytest.mark.parametrize('submission_failure', [None, public_execution.public_api.PublicOrderRejected, public_execution.public_api.PublicOrderSubmissionUnknown])
+async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monkeypatch, submission_failure):
     class Cursor:
         def __init__(self, rows):
             self.rows = rows
@@ -994,6 +1007,8 @@ async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monk
             return None
 
         async def get_order(self, _order_id):
+            if _order_id in self.cancelled:
+                return {"status": "CANCELLED"}
             return {"status": "PARTIALLY_FILLED", "filledQuantity": 2, "averagePrice": 10.0}
 
         async def cancel_order(self, order_id):
@@ -1002,6 +1017,8 @@ async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monk
 
         async def submit_equity_order(self, **kwargs):
             self.submitted.append(kwargs)
+            if submission_failure:
+                raise submission_failure('offline fixture')
             return {"preflight": {"outcome": "SUCCESS"}, "order": {"orderId": "new-stop"}}
 
         async def portfolio(self):
@@ -1052,6 +1069,11 @@ async def test_public_reconcile_replaces_protective_stop_after_partial_fill(monk
     assert len(fake_client.submitted) == 1
     assert fake_client.submitted[0]["quantity"] == 2
     assert fake_client.submitted[0]["session"] == "TWENTY_FOUR_HOURS"
+    states = [update['$set'] for _, update in fake_trades.updates if 'protective_order_status' in update['$set']]
+    if submission_failure is public_execution.public_api.PublicOrderRejected:
+        assert any(row.get('protective_attempt') == 1 and row.get('protective_order_id') is None for row in states)
+    elif submission_failure:
+        assert any(row.get('protective_order_status') == 'SUBMIT_UNKNOWN' and row.get('protective_order_id') for row in states)
 
 
 async def _allowed():

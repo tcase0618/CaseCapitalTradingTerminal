@@ -2007,7 +2007,7 @@ async def close(symbol: str, qty: int | None = None, *, emergency: bool = False)
     quote_age = _quote_age_seconds(snap)
     if quote_age is None:
         return {"ok": False, "reason": "fresh_quote_timestamp_missing_for_close", "snapshot": snap}
-    if quote_age > OPTIONS_MAX_QUOTE_AGE_SECONDS:
+    if quote_age > min(OPTIONS_MAX_QUOTE_AGE_SECONDS, 60 if emergency else OPTIONS_MAX_QUOTE_AGE_SECONDS):
         return {"ok": False, "reason": "fresh_quote_stale_for_close", "quote_age_seconds": quote_age, "snapshot": snap}
     pricing, pricing_reason = _execution_limit_from_quote(snap, side="sell", emergency=emergency)
     if not pricing:
@@ -2670,6 +2670,18 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         if qty <= 0:
             continue
         snap = await _option_snapshot(symbol)
+        quote_age = _quote_age_seconds(snap)
+        if not snap.get("ok") or not snap.get("quote_time") or quote_age is None or quote_age > 60:
+            errors.append({"symbol": symbol, "reason": "option_risk_quote_unverified", "quote_age_seconds": quote_age})
+            try:
+                from . import telegram_events
+                await telegram_events.emit_event("option_risk_quote_unverified", severity="critical", scope="options",
+                    ticker=symbol, title="Option protection quote unavailable",
+                    summary="Stop and ratchet evaluation deferred until a fresh option quote is available.",
+                    details=errors[-1], priority="critical")
+            except Exception:
+                logger.exception("Unable to record unverified option risk quote")
+            continue
         price_context = _option_position_context(p, snap)
         entry = _safe_float(price_context.get("entry"))
         current = _safe_float(price_context.get("current"))
@@ -2696,10 +2708,12 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
         if trade_doc and trade_doc.get("exit_policy"):
             prior_exit = trade_doc.get("exit_policy") or prior_exit
         prior_peak = _safe_float(prior_exit.get("peak_premium")) or entry
-        peak_basis = max(entry, current)
-        if pnl_pct is None or _safe_float(pnl_pct) > 0:
-            peak_basis = max(prior_peak, current, entry)
+        peak_basis = max(prior_peak, current, entry)
         ratchet = options_ratchet_state(entry_premium=entry, current_bid=current, peak_premium=peak_basis)
+        prior_floor = _safe_float(prior_exit.get("locked_floor_pct"), OPTIONS_INITIAL_STOP_PCT)
+        ratchet["locked_floor_pct"] = max(prior_floor, ratchet["locked_floor_pct"])
+        ratchet["floor_premium"] = round(entry * (1 + ratchet["locked_floor_pct"] / 100), 2)
+        ratchet["exit_triggered"] = bool(current > 0 and current <= ratchet["floor_premium"])
         theta = snap.get("theta") if snap.get("ok") else None
         theta_pct = (float(theta) / current * 100.0) if theta is not None and current > 0 else None
         days_held = _days_held((trade_doc or {}).get("entry_filled_at"))
@@ -2923,7 +2937,7 @@ async def monitor_open_positions(enforce_hard_stop: bool = True) -> dict[str, An
     }))
     if closed:
         await log_activity(f"Options risk monitor closed {len(closed)} hard-stop position(s)", "warn", {"closed": closed})
-    return {"ok": True, "positions_checked": len(checks), "closed": closed, "pending_closes": pending_closes, "errors": errors, "checks": checks}
+    return {"ok": not errors, "positions_checked": len(checks), "closed": closed, "pending_closes": pending_closes, "errors": errors, "checks": checks}
 
 
 async def sync() -> dict[str, Any]:

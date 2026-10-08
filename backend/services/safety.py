@@ -114,9 +114,9 @@ async def snapshot_day_start_equity(equity: float | None = None, source: str = "
     """Persist the equity baseline used by the daily-loss breaker."""
     if equity is None:
         try:
-            from . import trade_floor
-            account = await trade_floor.get_account() or {}
-            equity = _safe_float(account.get("equity"))
+            from . import public_execution
+            account = await public_execution.portfolio_state()
+            equity = _safe_float(account.get("equity")) if account.get("ok") else 0.0
         except Exception:
             equity = 0.0
     if not equity or equity <= 0:
@@ -142,12 +142,17 @@ async def check_daily_loss(account: dict[str, Any] | None = None, *, source: str
         return {"ok": True, "enabled": False, "reason": "daily_loss_breaker_disabled"}
     if account is None:
         try:
-            from . import trade_floor
-            account = await trade_floor.get_account()
+            from . import public_execution
+            account = await public_execution.portfolio_state()
+            if not account.get("ok"):
+                account = None
         except Exception:
             account = None
     current_equity = _safe_float((account or {}).get("equity"))
     if current_equity <= 0:
+        from .market_dates import is_core_session
+        if is_core_session(_now()):
+            await set_trading(False, "daily_loss_equity_source_unavailable")
         return {"ok": False, "reason": "current_equity_unavailable"}
 
     status = await trading_status()

@@ -369,7 +369,7 @@ async def position_monitor_latest():
     row = await db.bot_state.find_one({"_id": "live_position_snapshot_latest"}, {"_id": 0})
     if row:
         return {"ok": True, **row}
-    return {"ok": True, "snapshot_at": None, "totals": {"positions": 0, "open_orders": 0, "market_value": 0, "unrealized_pl": 0}, "equities": {}, "options": {}}
+    return {"ok": False, "status": "MISSING", "snapshot_at": None, "totals": None, "equities": {}, "options": {}}
 
 
 @api.get("/position_monitor/history")
@@ -2079,6 +2079,8 @@ async def analyze(ticker: str):
 @api.post("/telegram/webhook")
 async def telegram_webhook(req: Request, bg: BackgroundTasks):
     webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if not webhook_secret or not os.environ.get("TELEGRAM_CHAT_ID", "").strip():
+        raise HTTPException(status_code=403, detail="telegram webhook is not configured")
     if webhook_secret:
         provided = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not hmac.compare_digest(provided, webhook_secret):

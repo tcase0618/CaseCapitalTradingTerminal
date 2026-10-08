@@ -212,7 +212,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     try:
         accountant_payload = await timed(
             "accountant_research",
-            accountant_research.enrich_scan_candidates(strategy_payload.get("candidates") or []),
+            asyncio.wait_for(accountant_research.enrich_scan_candidates(strategy_payload.get("candidates") or []), timeout=15.0),
         )
     except Exception as exc:
         accountant_payload = {"ok": False, "reason": f"accountant_enrichment_failed:{exc.__class__.__name__}", "enriched": 0}
@@ -423,11 +423,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
         "options_skipped_sample": (options_execution.get("skipped") if isinstance(options_execution.get("skipped"), list) else [])[:8],
         "funnel": execution_funnel_payload.get("summary") or {},
     }
-    telegram_result: dict[str, Any] = {"skipped": True, "reason": "telegram_env_missing"}
-    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        from . import telegram_events
-        scan["telegram_report_variant"] = "full_terminal"
-        telegram_result = await timed("telegram_dispatch", telegram_events.dispatch_scan_report(scan))
+    telegram_result: dict[str, Any] = {"skipped": True, "reason": "full_cycle_persistence_unverified"}
+    scan["telegram_report_variant"] = "full_terminal"
 
     # scanner.run_scan persists its core document before the specialist/PM
     # stages exist. Update that same document so the latest scan is a complete,
@@ -437,6 +434,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
             {"finished_at": scan.get("finished_at")},
             {"$set": {
                 "full_cycle_finished_at": _now().isoformat(),
+                "cycle_id": scan["cycle_id"],
                 "strategy_payload": strategy_payload,
                 "lottery_result": lottery_result,
                 "lottery_summary": lottery_summary,
@@ -453,6 +451,10 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                 "telegram_report_variant": scan.get("telegram_report_variant"),
             }},
         )
+        persisted_scan = await get_db().scan_results.find_one({"cycle_id": scan["cycle_id"], "full_cycle_finished_at": {"$exists": True}}, {"_id": 0})
+        if persisted_scan and os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+            from . import telegram_events
+            telegram_result = await timed("telegram_dispatch", telegram_events.dispatch_scan_report(persisted_scan))
     except Exception as exc:
         await log_activity(f"Full terminal cycle persistence failed: {exc.__class__.__name__}", "warning")
 

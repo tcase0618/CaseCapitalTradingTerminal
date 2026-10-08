@@ -52,6 +52,14 @@ class PublicAPIError(RuntimeError):
     """Transport, authentication, or schema error from Public."""
 
 
+class PublicOrderRejected(PublicAPIError):
+    """Submission never reached the order-placement endpoint."""
+
+
+class PublicOrderSubmissionUnknown(PublicAPIError):
+    """Placement may have reached the broker; reconcile before retrying."""
+
+
 class PublicTradingBlocked(PermissionError):
     """Raised before a Public order mutation can be sent."""
 
@@ -779,7 +787,10 @@ class PublicAPIClient:
             stop_loss=stop_loss,
             stop_loss_limit=stop_loss_limit,
         )
-        preflight = await self.preflight_single_leg(payload, account_id=account_id)
+        try:
+            preflight = await self.preflight_single_leg(payload, account_id=account_id)
+        except Exception as exc:
+            raise PublicOrderRejected("Public preflight failed before placement") from exc
         # Public communicates validation failures through HTTP errors. A
         # successful preflight returns economics rather than a required verdict.
         outcome = str(
@@ -789,11 +800,16 @@ class PublicAPIClient:
             or ""
         ).upper()
         if outcome and outcome not in {"SUCCESS", "VALID", "OK"}:
-            raise PublicAPIError(f"Public preflight rejected order: {outcome}")
+            raise PublicOrderRejected(f"Public preflight rejected order: {outcome}")
         economic_fields = {"orderValue", "estimatedCost", "buyingPowerRequirement", "estimatedQuantity"}
         if not outcome and not any(preflight.get(key) is not None for key in economic_fields):
-            raise PublicAPIError("Public preflight returned no recognized validation or cost fields")
-        placed = await self.place_order(payload, account_id=account_id)
+            raise PublicOrderRejected("Public preflight returned no recognized validation or cost fields")
+        try:
+            placed = await self.place_order(payload, account_id=account_id)
+        except Exception as exc:
+            raise PublicOrderSubmissionUnknown("Public placement outcome requires reconciliation") from exc
+        if not (placed.get("orderId") or placed.get("id")):
+            raise PublicOrderSubmissionUnknown("Public placement returned no order id")
         return {"preflight": preflight, "order": placed, "payload": payload}
 
     async def get_order(self, order_id: str, account_id: str | None = None) -> dict[str, Any]:

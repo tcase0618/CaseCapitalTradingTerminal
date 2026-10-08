@@ -71,6 +71,12 @@ def _sql_filter_inner(query: dict[str, Any], params: list[Any]) -> tuple[str, bo
         if key.startswith("$"):
             exact = False
             continue
+        # PostgreSQL indexes arrays for numeric segments; the compatibility
+        # matcher only traverses mappings. An inexact SQL filter must also
+        # remain a superset, so omit this predicate entirely.
+        if any(part.isdigit() for part in key.split(".")):
+            exact = False
+            continue
         path = bind(key.split("."))
         expression = f"(payload #> {path}::text[])"
         if not isinstance(condition, dict) or not any(str(k).startswith("$") for k in condition):

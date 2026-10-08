@@ -374,8 +374,9 @@ def _consolidated_scan_report_text(
 async def send_event_immediate(event: dict[str, Any]) -> dict[str, Any]:
     if await _recently_sent(event.get("fingerprint", ""), event.get("severity", "info")):
         return {"ok": True, "sent": False, "deduped": True}
+    heading = "PORTFOLIO SAFETY" if event.get("priority") == "critical" or event.get("severity") == "critical" else str(event.get("severity") or "INFO").upper()
     text = "\n".join([
-        f"<b>CASE CAPITAL | {str(event.get('severity') or 'INFO').upper()}</b>",
+        f"<b>CASE CAPITAL | {heading}</b>",
         f"<code>{_now_et()}</code>",
         "",
         f"Event: <b>{_esc(event.get('title'))}</b>",

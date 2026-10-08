@@ -134,7 +134,7 @@ async def _repair_latest_scan() -> dict[str, Any]:
         return {"ok": True, "outcome": "standby_market_closed", "detail": reason}
     from . import scanner
 
-    payload = await scanner.run_scan(triggered_by="schedule_watchdog")
+    payload = await scanner.run_scan(triggered_by="schedule_watchdog", auto_execute=False)
     return {"ok": True, "outcome": "refreshed", "detail": f"{len(payload.get('results') or [])} scan rows", "finished_at": payload.get("finished_at")}
 
 

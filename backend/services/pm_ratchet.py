@@ -328,15 +328,14 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
         if unpriced:
             coverage_status = "unavailable" if checked and unpriced >= checked else "partial"
         return {
-            # Quote gaps are reported to the monitor as degraded coverage.
-            # They are not service failures: treating them as one created
-            # critical Telegram incidents every overnight session.
-            "ok": True,
+            **result,
+            # Missing quotes leave protection unverified; never report OK.
+            "ok": not unpriced,
+            "monitor_status": "DEGRADED" if unpriced else "OK",
             "degraded": bool(unpriced),
             "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
             "quote_coverage_status": coverage_status,
             "broker_base": broker_base,
-            **result,
         }
     actions: list[dict[str, Any]] = []
     coverage_initialized: list[str] = []

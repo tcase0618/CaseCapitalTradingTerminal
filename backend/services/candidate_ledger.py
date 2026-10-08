@@ -48,6 +48,8 @@ def _candidate_id(cycle_id: str, ticker: str) -> str:
 
 
 def _cycle_id(scan: dict[str, Any]) -> str:
+    if scan.get("cycle_id"):
+        return str(scan["cycle_id"])
     basis = "|".join([
         str(scan.get("finished_at") or scan.get("started_at") or _now().isoformat()),
         str(scan.get("scan_signature") or ""),

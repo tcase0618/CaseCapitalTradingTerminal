@@ -157,7 +157,7 @@ def _merge_congress_signals(by_ticker: dict[str, dict[str, Any]],
 
 async def run_scan(
     triggered_by: str = "manual",
-    auto_execute: bool = True,
+    auto_execute: bool = False,
     run_sidecars: bool = True,
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
@@ -477,6 +477,7 @@ async def run_scan(
     }
     try:
         from . import candidate_ledger
+        scan_doc["cycle_id"] = candidate_ledger._cycle_id(scan_doc)
         ledger = await candidate_ledger.build_from_scan(scan_doc, include_external=False, persist=False)
         scan_doc["candidate_ledger"] = {
             "cycle_id": ledger.get("cycle_id"),

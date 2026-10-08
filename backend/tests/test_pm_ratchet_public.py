@@ -193,7 +193,7 @@ async def test_public_ratchet_initializes_account_protection_for_unplanned_posit
 
 
 @pytest.mark.asyncio
-async def test_public_ratchet_quote_gap_is_degraded_not_a_monitor_failure(monkeypatch):
+async def test_public_ratchet_quote_gap_is_degraded_and_not_ok(monkeypatch):
     trade = {
         "client_order_id": "public-unpriced-1",
         "broker_base": "public",
@@ -223,7 +223,8 @@ async def test_public_ratchet_quote_gap_is_degraded_not_a_monitor_failure(monkey
 
     result = await pm_ratchet.process_open_ratchets(broker_base="public")
 
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert result["monitor_status"] == "DEGRADED"
     assert result["degraded"] is True
     assert result["reason"] == "public_ratchet_quotes_unavailable"
     assert result["quote_coverage_status"] == "unavailable"
