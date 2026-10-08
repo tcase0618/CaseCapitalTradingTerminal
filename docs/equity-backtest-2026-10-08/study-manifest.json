@@ -1,0 +1,33 @@
+{
+  "study_id": "CASE-EQUITY-2026-10-08-v1",
+  "execution_effect": "none",
+  "scope": "Every retained equity-underlying discovery, with research-only and options-source cohorts separately labeled",
+  "source_export_sha256": {
+    "evidence": "ee63c707b43065220f9616ee14a80eec7fac4a0488dff75951ff4ced541184cf",
+    "discovery": "dff4c32237dad9c8dc7a26f1db100b99f78a6c58b67e4816b41850a7678b906b"
+  },
+  "fixed_horizons_sessions": [1,3,5,10,20],
+  "last_completed_close_used": "2026-10-07",
+  "cutoff_reason": "October 8 cached marks were fetched before that session closed; exclude the whole current session consistently rather than assume its cached close was final",
+  "fixed_roundtrip_cost_bps_sensitivity": [0,25,100,250],
+  "episode_inactivity_sessions_sensitivity_planned_not_executed": [1,5,10],
+  "episode_rule_executed": "Earliest ticker/lane observation with no overlapping outcome window, independently for each horizon and entry basis",
+  "primary_comparison": "Earliest nonoverlapping ticker/lane episodes, same-horizon underlying returns versus SPY. Signal marks are diagnostic; next eligible RTH-open entries are modeled counterfactuals, not actual fills.",
+  "alternatives_without_optimization": [
+    "Fixed initial stops of -10% versus -8%, on the same next-session-open cohort",
+    "Tiered full-position profit floors at strictly over +5%, +10%, +20%, with existing uncapped higher floor schedule, activated only after completed-bar high in daily model",
+    "Declared 1/3/5/10/20 session holding windows, all reported rather than selectively showing best",
+    "Descriptive entry-time score and independent-signal-count cohorts only when those frozen fields exist"
+  ],
+  "holdout": "Retrospective chronological last 30% of operating-period sessions, with training labels crossing the boundary purged. Not a prospectively untouched holdout because prior terminal reports have inspected parts of this history.",
+  "inference": "Ticker-cluster bootstrap for descriptive means and paired differences; no IID confidence claims; small holdout cohorts inconclusive; selection/multiple-testing caveats retained",
+  "restrictions": [
+    "No optimizer or live strategy changes",
+    "No forward filling missing prices",
+    "No fabricated OHLC from closes",
+    "No portfolio CAGR/Sharpe/account return from averaged signal returns",
+    "No guaranteed stop fill or guaranteed +5% profit",
+    "No corporate-action adjustment claims without evidence",
+    "All provider failures, immature horizons and invalid observations reported"
+  ]
+}

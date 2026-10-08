@@ -105,6 +105,14 @@ def main():
         '- signal-outcomes.csv and strategy-summary.csv: nonoverlapping recorded-mark diagnostics.',
         '- policy-outcomes.csv and policy-summary.csv: all six matched policies and all horizons, including chronological partitions.',
         '- policy-exclusions.json, regime-summary.csv, monthly-cohorts.csv: missing windows and market-conditioned descriptions.',
+        '', '## Offline Reproduction', '',
+        'Use the recorded immutable input files; do not recollect and call the new snapshot identical.',
+        '```powershell',
+        'python backend/research/run_equity_study.py --input <normalized.json> --public-bars <public-daily-bars-complete.jsonl> --output <results-directory>',
+        'python backend/research/analyze_equity_study.py --results <results-directory> --bars <public-daily-bars-complete.jsonl> --report <RESULTS.md>',
+        'python backend/research/validate_equity_outputs.py --results <results-directory>',
+        '```', '',
+        'The planned 1/5/10-session inactivity sensitivity was not executed; the actual rule is horizon-specific nonoverlapping windows. Spread, dilution and intraday timing filters were not backtested because point-in-time inputs are unavailable.',
         '', 'Primary references: [Public historical bars](https://public.com/api/docs/resources/market-data/get-bars-v2-with-aggregation), [backtest overfitting](https://escholarship.org/uc/item/4w1110bb).']
     Path(args.report).write_text('\n'.join(lines)+'\n',encoding='utf-8')
     # Summaries are safe to version; raw account and signal export files are not.
