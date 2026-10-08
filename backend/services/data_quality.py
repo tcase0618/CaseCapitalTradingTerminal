@@ -7,11 +7,14 @@ and what should block trading until refreshed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
 
 from .db import get_db, log_activity, stamped
+
+logger = logging.getLogger(__name__)
 
 
 CRITICAL_MAX_AGE_MINUTES = {
@@ -500,7 +503,7 @@ async def _attempt_remediation(row: dict[str, Any]) -> dict[str, Any]:
             attempt["action"] = "refresh_latest_scanner_evidence"
             from . import scanner
 
-            payload = await _bounded_attempt(scanner.run_scan(triggered_by="quality_auto_remediation"), timeout=18.0)
+            payload = await _bounded_attempt(scanner.run_scan(triggered_by="quality_auto_remediation", auto_execute=False), timeout=18.0)
             return _finish_attempt(
                 attempt,
                 "refreshed",

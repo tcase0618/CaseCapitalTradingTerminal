@@ -298,19 +298,19 @@ async def refresh_due_returns() -> dict[str, int]:
         updates: dict[str, Any] = {}
         if age_days >= 7 and r.get("return_7d") is None:
             target = add_trading_days(row_calendar_date, 7)
-            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat())
+            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat(), exact=True) if target < today_et else None
             if cur is not None:
                 updates["return_7d"] = round((cur - entry) / entry * 100.0, 2)
                 counters["r7"] += 1
         if age_days >= 30 and r.get("return_30d") is None:
             target = add_trading_days(row_calendar_date, 30)
-            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat())
+            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat(), exact=True) if target < today_et else None
             if cur is not None:
                 updates["return_30d"] = round((cur - entry) / entry * 100.0, 2)
                 counters["r30"] += 1
         if age_days >= 90 and r.get("return_90d") is None:
             target = add_trading_days(row_calendar_date, 90)
-            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat())
+            cur = await pricer.get_close_on_date(r["ticker"], target.isoformat(), exact=True) if target < today_et else None
             if cur is not None:
                 updates["return_90d"] = round((cur - entry) / entry * 100.0, 2)
                 counters["r90"] += 1
@@ -367,7 +367,9 @@ async def refresh_due_strategy_observations(limit: int = 2000) -> dict[str, int]
             if age < horizon or row.get(key) is not None:
                 continue
             target = add_trading_days(observed, horizon)
-            close = await pricer.get_close_on_date(ticker, target.isoformat())
+            if target >= today:
+                continue
+            close = await pricer.get_close_on_date(ticker, target.isoformat(), exact=True)
             if close is None:
                 continue
             updates[key] = round((float(close) - entry) / entry * 100.0, 2)
@@ -655,6 +657,7 @@ async def daily_pnl_curve(days: int = 90) -> list[dict[str, Any]]:
     """Robinhood-style stock curve via configured primary providers. For
     each date in the last N days, average % gain across every ticker that
     had been signaled by that date. Equal-weight."""
+    today = _today_iso()
     db = get_db()
     rows = await db.signal_first_seen.find({}, {"_id": 0}).to_list(2000)
     if not rows:
