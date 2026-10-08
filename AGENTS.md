@@ -27,6 +27,12 @@ Case Capital is a paper-trading terminal with live market-data, portfolio-manage
 - VPS branch: `codex/desktop-checkpoint`.
 - VPS public IP currently used by the terminal: `129.121.101.96`.
 - Use `npm install --legacy-peer-deps` for frontend dependency installs.
+- Build frontend artifacts locally or in CI, not on the 2 GB production VPS.
+  The VPS serves `frontend/build` through nginx and intentionally has no
+  frontend `node_modules`. Upload assets before atomically promoting index.html,
+  verify checksums, and preserve old hashed chunks for open clients and rollback.
+  Keep at least two release manifests and a seven-day old-asset grace period;
+  do not delete unmatched assets without a verified manifest.
 - A dirty VPS `frontend/package-lock.json` has appeared during deploys before; do not let it distract from verifying the deployed commit and build unless it blocks the pull.
 
 ## Product Standards
