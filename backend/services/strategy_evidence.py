@@ -20,6 +20,7 @@ from .kronos_contract import ET, exchange, parse_time
 
 VERSION = "strategy_evidence_v1"
 HORIZONS = (1, 5, 20)
+ASSET_LIMITATION = "These outcomes measure underlying equities, including OPTIONS-named lanes; they are not option-contract returns."
 _refresh_lock = asyncio.Lock()
 
 
@@ -252,7 +253,8 @@ async def _refresh(*, limit: int, lookback_days: int, max_symbols: int) -> dict:
         "exclusions": exclusions, "provider_errors": errors, "provider_symbols": len(symbols),
         "scorecards": [{"strategy_id": strategy, "horizon_sessions": horizon, "scoring_version": version, "mode": mode, **scorecard(rows)}
                        for (strategy, horizon, version, mode), rows in sorted(groups.items())],
-        "limitations": ["Signal marks are not fills; historical mark freshness may be unverified.",
+        "limitations": [ASSET_LIMITATION,
+                        "Signal marks are not fills; historical mark freshness may be unverified.",
                         "Excess returns use prior-close SPY, not a simultaneous entry; not risk-adjusted alpha.",
                         "Net expectancy is unavailable without explicit round-trip costs.",
                         "Per-lane windows are disjoint, but cross-symbol and cross-lane outcomes remain correlated.",
@@ -264,4 +266,10 @@ async def _refresh(*, limit: int, lookback_days: int, max_symbols: int) -> dict:
 
 async def latest() -> dict:
     row = await get_db().bot_state.find_one({"_id": "strategy_evidence_latest"}, {"_id": 0})
-    return (row or {}).get("report") or {"ok": False, "status": "NOT_RUN", "research_only": True, "decision_authority": "NONE", "scorecards": []}
+    report = (row or {}).get("report")
+    if report:
+        limitations = list(report.get("limitations") or [])
+        if ASSET_LIMITATION not in limitations:
+            limitations.insert(0, ASSET_LIMITATION)
+        return {**report, "asset_basis": "UNDERLYING_EQUITY", "limitations": limitations}
+    return {"ok": False, "status": "NOT_RUN", "research_only": True, "decision_authority": "NONE", "scorecards": []}
