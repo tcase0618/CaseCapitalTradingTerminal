@@ -63,6 +63,11 @@
   .workspace-view-overview .command-panel-execution-gate, .workspace-view-overview .command-panel-top-scanner-output { grid-column: 1 / -1 !important; }
 }
 @media (max-width: 768px) {
+  .terminal-frame .terminal-page-body .workspace-funnel-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .terminal-frame .terminal-page-body .workspace-scanner-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .terminal-frame .terminal-page-body .workspace-calendar-grid, .terminal-frame .terminal-page-body .workspace-calendar-weekdays { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; gap: 2px !important; }
+  .terminal-frame .workspace-calendar-grid > div { min-width: 0; padding: 3px !important; overflow-wrap: anywhere; }
+  .terminal-frame .workspace-calendar-grid strong { font-size: 12px !important; }
   .workspace-nav-tools button:first-child { min-height: 40px; }
   .terminal-frame .terminal-page-header { flex-wrap: wrap; }
   .terminal-frame .terminal-page-actions { max-width: 100%; flex-wrap: wrap; }
@@ -71,6 +76,9 @@
   .terminal-frame .terminal-page-actions > .workspace-icon-button { width: 38px !important; min-width: 38px !important; }
   .terminal-frame .terminal-page-title > div:last-child { font-size: 18px !important; }
   .terminal-frame .mobile-command-deck { display: none; }
+  .terminal-frame .terminal-stat { flex: 1 1 145px !important; }
+  .terminal-frame .terminal-stat > div:first-child { white-space: normal !important; overflow: visible !important; letter-spacing: 0 !important; }
+  .terminal-frame .terminal-stat .num { font-size: 20px !important; letter-spacing: 0 !important; }
   .workspace-overview strong { font-size: 22px; }
   .workspace-overview > div { padding: 14px 10px; }
   .workspace-search-backdrop { padding-top: 5vh; }

@@ -5,6 +5,7 @@ import axios from "axios";
 import { API } from "../config";
 import StrategyEvidencePanel from "./StrategyEvidencePanel";
 import LearningPage from "./LearningPage";
+import useDisplayResource from "../hooks/useDisplayResource";
 
 jest.mock("./CrtShell", () => ({ __esModule: true,
   tokens: { accent: "#ffffff", dim: "#999999", muted: "#999999", labelLight: "#ffffff", hairline: "1px solid #333333", cardBg: "#111111" },
@@ -13,6 +14,7 @@ jest.mock("./CrtShell", () => ({ __esModule: true,
   Stat: ({ label, value }) => <div>{label}{value}</div>,
 }));
 jest.mock("axios", () => ({ get: jest.fn(), post: jest.fn() }));
+jest.mock("../hooks/useDisplayResource", () => ({ __esModule: true, default: jest.fn() }));
 jest.mock("sonner", () => ({ toast: jest.fn() }));
 
 const scorecard = (horizon, overrides = {}) => ({
@@ -35,7 +37,7 @@ function renderSaved(report, horizon = 5) {
   finally { spy.mockRestore(); }
 }
 
-beforeEach(() => { jest.clearAllMocks(); });
+beforeEach(() => { jest.clearAllMocks(); useDisplayResource.mockImplementation(() => ({ data: null, error: null, refresh: jest.fn() })); });
 
 test("renders loading without invented performance", () => {
   const html = renderToString(<StrategyEvidencePanel />);
@@ -111,7 +113,7 @@ test("fetches only saved evidence once and filters all horizons locally", async 
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<StrategyEvidencePanel />); });
-    expect(axios.get).toHaveBeenCalledWith(`${API}/research/strategy-evidence`);
+    expect(axios.get).toHaveBeenCalledWith(`${API}/research/strategy-evidence`, expect.objectContaining({ signal: expect.any(AbortSignal), timeout: 12000 }));
     expect(container.textContent).toContain("strategy-5");
     for (const horizon of [1, 20, 5]) {
       await act(async () => {
@@ -150,14 +152,10 @@ test("Learning page renders evidence and shadow mode while retaining active weig
 });
 
 test("Learning page preserves current weights without inventing unsampled win rates", () => {
-  let index = 0;
-  const states = [
-    { weights: [{ weight_key: "test_signal", default_value: 1, current_value: 1.25, sample_count: 0, win_rate: 0.9 }], last_run: { trades_analyzed: 0, overall_win_rate: 0.9 } },
-    [{ signal_combo: "test_combo", trade_count: 0, win_rate: null }],
-    null, [], [], false, null,
-  ];
-  const spy = jest.spyOn(React, "useState").mockImplementation(initial => [index < states.length ? states[index++] : initial, jest.fn()]);
-  try {
+  useDisplayResource.mockImplementation(url => ({ error: null, refresh: jest.fn(), data:
+    url.endsWith("/learning/status") ? { weights: [{ weight_key: "test_signal", default_value: 1, current_value: 1.25, sample_count: 0, win_rate: 0.9 }], last_run: { trades_analyzed: 0, overall_win_rate: 0.9 } }
+      : url.endsWith("/learning/combos") ? [{ signal_combo: "test_combo", trade_count: 0, win_rate: null }] : null,
+  }));
     const html = renderToString(<LearningPage />);
     expect(html).toContain("1.25");
     expect(html).toContain("TEST SIGNAL");
@@ -165,5 +163,4 @@ test("Learning page preserves current weights without inventing unsampled win ra
     expect(html).not.toContain("90.0%");
     const parsed = new DOMParser().parseFromString(html, "text/html");
     expect(parsed.querySelector('[data-testid="combo-test_combo"]').children[2].textContent).toBe("—");
-  } finally { spy.mockRestore(); }
 });

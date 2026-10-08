@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import axios from "axios";
+import { RefreshCw } from "lucide-react";
+import useDisplayResource from "../hooks/useDisplayResource";
 import { API } from "../config";
 import { toast } from "sonner";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, LineChart, Line, Legend } from "recharts";
@@ -8,38 +10,68 @@ import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline } = tokens;
 
+const performanceDisplayStyles = `
+  .performance-display { min-width: 0; max-width: 100%; }
+  .performance-display [class^="performance-grid"] > * { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    .performance-display .performance-grid-six { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+    .performance-display .performance-grid-three,
+    .performance-display .performance-grid-two,
+    .performance-display .performance-grid-auto { grid-template-columns: minmax(0, 1fr) !important; }
+  }
+  @media (max-width: 600px) {
+    .performance-display .performance-grid-six { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+    .performance-display .performance-grid-proof,
+    .performance-display .performance-grid-risk { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px; }
+    .performance-display .performance-grid-proof > :first-child { grid-column: 1 / -1; }
+  }
+`;
+
 export default function PerformancePage() {
-  const [perf, setPerf] = useState(null);
-  const [backtest, setBacktest] = useState(null);
-  const [tracker, setTracker] = useState(null);
-  const [curve, setCurve] = useState(null);
-  const [optionsCurve, setOptionsCurve] = useState(null);
-  const [benchmarkCurve, setBenchmarkCurve] = useState(null);
   const [curveDays, setCurveDays] = useState(90);
   const [seeding, setSeeding] = useState(false);
   const [refreshingPrices, setRefreshingPrices] = useState(false);
-  const [priceSource, setPriceSource] = useState(null);
-  const [edge, setEdge] = useState(null);
-  const [optionsGap, setOptionsGap] = useState(null);
-
-  const refresh = useCallback(async () => {
-    // Use independent .catch so one failure doesn't kill the others
-    axios.get(`${API}/performance/summary`, { timeout: 20000 }).then(r => setPerf(r.data)).catch(e => console.error("perf:", e));
-    axios.get(`${API}/backtest/summary`, { timeout: 15000 }).then(r => setBacktest(r.data)).catch(e => console.error("backtest:", e));
-    axios.get(`${API}/signals/tracker?limit=200&_=${Date.now()}`, { timeout: 15000 }).then(r => setTracker(r.data)).catch(e => console.error("tracker:", e));
-    axios.get(`${API}/signals/curve?days=${curveDays}`, { timeout: 15000 }).then(r => setCurve(r.data.curve)).catch(e => console.error("curve:", e));
-    axios.get(`${API}/signals/options_curve?days=${curveDays}`, { timeout: 15000 }).then(r => setOptionsCurve(r.data.curve)).catch(e => console.error("opt curve:", e));
-    axios.get(`${API}/signals/benchmark_curve?days=${curveDays}`, { timeout: 20000 }).then(r => setBenchmarkCurve(r.data)).catch(e => console.error("benchmark curve:", e));
-    axios.get(`${API}/admin/price_source`, { timeout: 6000 }).then(r => setPriceSource(r.data)).catch(() => {});
-    axios.get(`${API}/edge/overview`, { timeout: 10000 }).then(r => setEdge(r.data)).catch(e => console.error("edge:", e));
-    axios.get(`${API}/signals/options_gap?limit=500&threshold_pct=50`, { timeout: 15000 }).then(r => setOptionsGap(r.data)).catch(e => console.error("options gap:", e));
-  }, [curveDays]);
-  useEffect(() => {
-    refresh();
-    // v5.1 — auto-refresh every 30s so charts update in real-time without manual reload
-    const t = setInterval(() => refresh(), 30000);
-    return () => clearInterval(t);
-  }, [refresh]);
+  const perfRead = useDisplayResource(`${API}/performance/summary`, 30000);
+  const backtestRead = useDisplayResource(`${API}/backtest/summary`, 30000);
+  const trackerRead = useDisplayResource(`${API}/signals/tracker?limit=200`, 30000);
+  const curveRead = useDisplayResource(`${API}/signals/curve?days=${curveDays}`, 30000);
+  const optionsCurveRead = useDisplayResource(`${API}/signals/options_curve?days=${curveDays}`, 30000);
+  const benchmarkRead = useDisplayResource(`${API}/signals/benchmark_curve?days=${curveDays}`, 30000);
+  const priceRead = useDisplayResource(`${API}/admin/price_source`, 30000);
+  const edgeRead = useDisplayResource(`${API}/edge/overview`, 30000);
+  const gapRead = useDisplayResource(`${API}/signals/options_gap?limit=500&threshold_pct=50`, 30000);
+  const perf = perfRead.data;
+  const backtest = backtestRead.data;
+  const tracker = trackerRead.data;
+  const curve = curveRead.data?.curve;
+  const optionsCurve = optionsCurveRead.data?.curve;
+  const benchmarkCurve = benchmarkRead.data;
+  const priceSource = priceRead.data;
+  const priceSourceLabel = typeof priceSource?.source === "string" && priceSource.source.trim()
+    ? priceSource.source.toUpperCase().replace("+", " + ") : "UNAVAILABLE";
+  const edge = edgeRead.data;
+  const optionsGap = gapRead.data;
+  const displayReads = [
+    ["Performance", perfRead], ["Backtest", backtestRead], ["Tracker", trackerRead],
+    ["Stock curve", curveRead], ["Options curve", optionsCurveRead], ["Benchmark", benchmarkRead],
+    ["Price source", priceRead], ["Edge", edgeRead], ["Options gap", gapRead],
+  ];
+  const failedReads = displayReads.filter(([, resource]) => resource.error).map(([label]) => label);
+  const displayRefreshing = displayReads.some(([, resource]) => resource.refreshing);
+  const { refresh: refreshPerf } = perfRead;
+  const { refresh: refreshBacktest } = backtestRead;
+  const { refresh: refreshTracker } = trackerRead;
+  const { refresh: refreshCurve } = curveRead;
+  const { refresh: refreshOptionsCurve } = optionsCurveRead;
+  const { refresh: refreshBenchmark } = benchmarkRead;
+  const { refresh: refreshPrice } = priceRead;
+  const { refresh: refreshEdge } = edgeRead;
+  const { refresh: refreshGap } = gapRead;
+  const refresh = useCallback(() => Promise.allSettled([
+    refreshPerf(), refreshBacktest(), refreshTracker(), refreshCurve(), refreshOptionsCurve(),
+    refreshBenchmark(), refreshPrice(), refreshEdge(), refreshGap(),
+  ]), [refreshPerf, refreshBacktest, refreshTracker, refreshCurve, refreshOptionsCurve,
+    refreshBenchmark, refreshPrice, refreshEdge, refreshGap]);
 
   const seedBacktest = async () => {
     setSeeding(true);
@@ -73,13 +105,16 @@ export default function PerformancePage() {
     <CrtShell title="PERFORMANCE TRACKER"
       headerRight={
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <button type="button" data-testid="performance-display-refresh" onClick={refresh}
+            title="Reload displayed data" aria-label="Reload displayed data" aria-busy={displayRefreshing}
+            disabled={displayRefreshing} style={btnGhost(displayRefreshing)}><RefreshCw size={15} /></button>
           {priceSource && (
             <div data-testid="price-source-badge" style={{
               fontSize: 9, letterSpacing: "0.14em",
               color: priceSource.finnhub_available ? "#4ade80" : priceSource.massive_available ? "#5eead4" : muted,
               border: `0.5px solid ${priceSource.finnhub_available ? "#4ade80" : priceSource.massive_available ? "#5eead4" : tokens.dim}`,
               padding: "4px 8px", fontFamily: "Courier New",
-            }}>SRC · {priceSource.source.toUpperCase().replace("+", " + ")}</div>
+            }}>SRC · {priceSourceLabel}</div>
           )}
           <button data-testid="refresh-prices-btn" onClick={refreshPrices} disabled={refreshingPrices}
             style={btnGhost(refreshingPrices)}>{refreshingPrices ? "REFRESHING..." : "[ REFRESH PRICES ]"}</button>
@@ -87,10 +122,15 @@ export default function PerformancePage() {
             style={btnPrimary(seeding)}>{seeding ? "SEEDING..." : "[ SEED BACKTEST ]"}</button>
         </div>
       }>
+      <div className="performance-display">
+      <style>{performanceDisplayStyles}</style>
+      {failedReads.length > 0 && <div role="alert" className="workspace-data-warning">
+        {failedReads.length} PERFORMANCE DATA REQUEST(S) FAILED: {failedReads.join(", ")}. Last loaded values may be outdated; missing values are unavailable.
+      </div>}
       <DataConfidenceStrip
         title="PERFORMANCE DATA CONFIDENCE"
         items={[
-          { label: "Price Source", value: priceSource?.source ? priceSource.source.toUpperCase().replace("+", " + ") : "CHECKING", color: priceSource?.finnhub_available || priceSource?.massive_available ? "#4ade80" : "#fbbf24" },
+          { label: "Price Source", value: priceRead.loading ? "CHECKING" : priceSourceLabel, color: priceSource?.finnhub_available || priceSource?.massive_available ? "#4ade80" : "#fbbf24" },
           { label: "Signals", value: tracker?.tracked ?? "--", detail: "tracked records" },
           { label: "Benchmark", value: benchmarkCurve?.benchmark || "SPY", color: accent },
           { label: "Forward Proof", value: proof?.rows?.length || proof?.sample_size || 0, color: accent2 },
@@ -362,7 +402,7 @@ export default function PerformancePage() {
               {"// BY IV CRUSH RISK LEVEL"}
             </div>
             {options.by_crush_risk.map((r) => (
-              <div key={r.crush_risk} style={{
+              <div key={r.crush_risk} className="performance-grid-risk" style={{
                 display: "grid", gridTemplateColumns: "120px 60px 100px 100px",
                 fontSize: 12, padding: "6px 0", color: labelLight,
               }}>
@@ -433,6 +473,7 @@ export default function PerformancePage() {
           </table>
         </Card>
       )}
+      </div>
     </CrtShell>
   );
 }
@@ -452,7 +493,7 @@ function EdgeProofCard({ edge }) {
         <div style={{ color: muted, fontSize: 12, padding: 10 }}>Loading edge proof...</div>
       ) : (
         <div style={{ display: "grid", gap: 14 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
+          <div className="performance-grid-six" style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
             <MiniEdge label="TRUTH" value={truth.truth_grade || "--"} color={gradeColor} />
             <MiniEdge label="GATE" value={truth.decision || "--"} color={truth.decision === "BLOCK" ? "#f87171" : accent} />
             <MiniEdge label="SAMPLE" value={e.sample ?? "--"} color={e.sample >= 100 ? "#4ade80" : "#fbbf24"} />
@@ -460,7 +501,7 @@ function EdgeProofCard({ edge }) {
             <MiniEdge label="EXPECTANCY" value={`${fmt(e.expectancy_pct)}%`} color={pctColor(e.expectancy_pct)} />
             <MiniEdge label="ALPHA" value={e.alpha_grade || "UNPROVEN"} color={e.alpha_grade === "POSITIVE" ? "#4ade80" : "#fbbf24"} />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div className="performance-grid-three" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
             <div style={edgePanel}>
               <div style={edgeLabel}>OPTIONS</div>
               <div style={edgeText}>{edge.options?.ready || 0} ready / {edge.options?.total || 0} total</div>
@@ -477,7 +518,7 @@ function EdgeProofCard({ edge }) {
               <div style={edgeSub}>{(attribution.data_truth?.single_letter_tickers || []).join(", ") || "no single-letter warnings"}</div>
             </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div className="performance-grid-two" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <AttributionList title="OPTIONS PLAYBOOK LANES" rows={optionLanes} />
             <AttributionList title="CASE COURT POSTURES" rows={casePostures} />
           </div>
@@ -511,7 +552,7 @@ function ForwardProofCard({ proof }) {
         <div style={{ color: muted, fontSize: 12, padding: 10 }}>Loading forward metrics...</div>
       ) : (
         <div style={{ display: "grid", gap: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
+          <div className="performance-grid-six" style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
             <MiniEdge label="REGIME" value={(regime.status || "UNKNOWN").toUpperCase()} color={regimeColor} />
             <MiniEdge label="PLAYBOOK" value={regime.playbook || "--"} color={regimeColor} />
             <MiniEdge label="30D N" value={terminal.n ?? 0} color={(terminal.n || 0) >= 50 ? "#4ade80" : "#fbbf24"} />
@@ -519,11 +560,11 @@ function ForwardProofCard({ proof }) {
             <MiniEdge label="ALPHA/SPY" value={`${fmt(alpha.expectancy_pct)}%`} color={pctColor(alpha.expectancy_pct)} />
             <MiniEdge label="PEAD" value={tags.pead_confirmed ?? 0} color={accent} />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 10 }}>
+          <div className="performance-grid-two" style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 10 }}>
             <div style={edgePanel}>
               <div style={edgeLabel}>TOP 30D SIGNAL PROOF</div>
               {(proof.signals_30d || []).slice(0, 6).map((r, i) => (
-                <div key={`${r.signal}-${i}`} style={{ display: "grid", gridTemplateColumns: "1fr 54px 70px 70px", gap: 8, borderTop: i ? hairline : "none", padding: "7px 0", fontSize: 11 }}>
+                <div key={`${r.signal}-${i}`} className="performance-grid-proof" style={{ display: "grid", gridTemplateColumns: "1fr 54px 70px 70px", gap: 8, borderTop: i ? hairline : "none", padding: "7px 0", fontSize: 11 }}>
                   <span style={{ color: labelLight, overflowWrap: "anywhere" }}>{r.signal}</span>
                   <span style={{ color: muted, textAlign: "right" }}>n={r.n}</span>
                   <span style={{ color: pctColor(r.win_rate_pct - 50), textAlign: "right" }}>{Number(r.win_rate_pct || 0).toFixed(1)}%</span>
@@ -585,13 +626,13 @@ function OptionsAlphaGapCard({ data }) {
         <div style={{ color: muted, padding: 18 }}>Building options alpha gap diagnostics...</div>
       ) : (
         <div style={{ display: "grid", gap: 14 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+          <div className="performance-grid-auto" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
             <MiniGap label="Closed Equity Avg" value={data.closed_equity_avg_pct != null ? `${fmt(data.closed_equity_avg_pct)}%` : "—"} color={pctColor(data.closed_equity_avg_pct)} />
             <MiniGap label="Closed Option Proxy Avg" value={data.closed_option_proxy_avg_pct != null ? `${fmt(data.closed_option_proxy_avg_pct)}%` : "—"} color={pctColor(data.closed_option_proxy_avg_pct)} />
             <MiniGap label={`${threshold}%+ Proxy Plays`} value={data.option_proxy_threshold_plus || 0} color="#fbbf24" />
             <MiniGap label="Captured / Attempted" value={data.captured_or_attempted_threshold_plus || 0} color={accent2} />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
+          <div className="performance-grid-auto" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
             <MiniBreakdown title="CAPTURE STATUS" rows={statusCounts} color={accent} />
             <MiniBreakdown title="TOP BLOCKERS" rows={blockerCounts} color="#f87171" />
           </div>
@@ -746,9 +787,9 @@ function BenchmarkCurve({ data, days, setDays }) {
                   labelFormatter={(l) => `${l}`}
                 />
                 <Legend wrapperStyle={{ color: tokens.labelLight, fontSize: 10, letterSpacing: "0.1em" }} />
-                <Line type="monotone" dataKey="terminal_total_pct" name="TERMINAL TOTAL" stroke={accent} strokeWidth={2.4} dot={false} connectNulls />
-                <Line type="monotone" dataKey="spy_return_pct" name="S&P 500 / SPY" stroke="#9ca3af" strokeWidth={1.8} dot={false} connectNulls />
-                <Line type="monotone" dataKey="relative_pct" name="RELATIVE EDGE" stroke="#5eead4" strokeWidth={1.4} strokeDasharray="5 5" dot={false} connectNulls />
+                <Line isAnimationActive={false} type="monotone" dataKey="terminal_total_pct" name="TERMINAL TOTAL" stroke={accent} strokeWidth={2.4} dot={false} connectNulls />
+                <Line isAnimationActive={false} type="monotone" dataKey="spy_return_pct" name="S&P 500 / SPY" stroke="#9ca3af" strokeWidth={1.8} dot={false} connectNulls />
+                <Line isAnimationActive={false} type="monotone" dataKey="relative_pct" name="RELATIVE EDGE" stroke="#5eead4" strokeWidth={1.4} strokeDasharray="5 5" dot={false} connectNulls />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -856,7 +897,7 @@ function PerfCurve({ title, curve, days, setDays, gradId, strokeColor,
                   formatter={(v) => [`${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`, "AVG GAIN"]}
                   labelFormatter={(l) => `${l}`}
                 />
-                <Area type="monotone" dataKey="avg_gain_pct" stroke={strokeColor} strokeWidth={2}
+                <Area isAnimationActive={false} type="monotone" dataKey="avg_gain_pct" stroke={strokeColor} strokeWidth={2}
                   fill={`url(#${gradId})`} />
               </AreaChart>
             </ResponsiveContainer>

@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
+const record = value => value && typeof value === "object" && !Array.isArray(value);
+const list = value => Array.isArray(value) ? value.filter(record) : [];
+const textList = value => Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
+const num = value => (typeof value === "number" || (typeof value === "string" && value.trim())) && Number.isFinite(Number(value)) ? Number(value) : null;
+const metric = (value, suffix = "") => num(value) == null ? "-" : `${num(value)}${suffix}`;
+const text = value => typeof value === "string" || typeof value === "number" ? value : "-";
+const returnColor = value => num(value) == null ? muted : num(value) >= 0 ? "#4ade80" : "#f87171";
 
 const TIER = {
   JACKPOT: "#d7bd68",
@@ -22,34 +29,46 @@ const VARIANTS = [
 export default function LotteryPage() {
   const [board, setBoard] = useState(null);
   const [tab, setTab] = useState("candidates");
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState(null);
+  const requestRef = useRef(null);
+  const toastTimer = useRef(null);
+  const [loadError, setLoadError] = useState(false);
+  const mountedRef = useRef(false);
 
   const showToast = (kind, msg) => {
+    if (!mountedRef.current) return;
     setToast({ kind, msg });
-    setTimeout(() => setToast(null), 4500);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 4500);
   };
 
   const load = useCallback(async () => {
+    if (!mountedRef.current) return;
+    requestRef.current?.abort();
+    const controller = new AbortController(); requestRef.current = controller;
     setLoading(true);
+    setLoadError(false);
     try {
-      const { data } = await axios.get(`${API}/lottery/board`);
-      setBoard(data);
+      const { data } = await axios.get(`${API}/lottery/board`, { signal: controller.signal, timeout: 20000 });
+      if (!controller.signal.aborted) { setBoard(record(data) ? data : null); setLoadError(!record(data)); }
     } catch (e) {
-      showToast("err", `Lottery League load failed: ${e?.message || "unknown"}`);
+      if (!controller.signal.aborted) { setLoadError(true); showToast("err", `Lottery League load failed: ${e?.message || "unknown"}`); }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // Board reads grade closed tickets in the backend; do not introduce polling.
+  useEffect(() => { mountedRef.current = true; load(); return () => { mountedRef.current = false; requestRef.current?.abort(); clearTimeout(toastTimer.current); }; }, [load]);
 
   const runScan = async () => {
     setScanning(true);
     try {
       const { data } = await axios.post(`${API}/lottery/scan`);
-      showToast("ok", `Lottery League scan complete - ${data.count || 0} candidates`);
+      showToast("ok", `Lottery League scan complete - ${metric(data.count)} candidates`);
       await load();
       setTab("candidates");
     } catch (e) {
@@ -98,8 +117,8 @@ export default function LotteryPage() {
     }
   };
 
-  const candidates = board?.candidates || [];
-  const tickets = board?.tickets || [];
+  const candidates = list(board?.candidates);
+  const tickets = list(board?.tickets).map(row => ({ ...row, ladder: list(row.ladder) }));
   const grades = board?.jackpot_board || {};
   const truth = board?.truth_board || {};
   const truthCombined = truth?.combined || {};
@@ -108,6 +127,12 @@ export default function LotteryPage() {
   const book = board?.book || {};
   const gate = board?.gate || {};
   const top = candidates[0] || null;
+  const candidatesAvailable = Array.isArray(board?.candidates);
+  const ticketsAvailable = Array.isArray(board?.tickets);
+  const incomplete = board != null && (!candidatesAvailable || !ticketsAvailable || candidates.length !== board.candidates.length || tickets.length !== board.tickets.length || !record(board.book) || !record(board.gate) || !record(board.jackpot_board) || !record(board.truth_board) || board.truth_board.ok === false || [board.truth_board.segments?.variant, board.truth_board.segments?.catalyst_class, board.truth_board.segments?.float_tier, board.truth_board.segments?.score_bucket, board.truth_board.latest_grades].some(value => value != null && (!Array.isArray(value) || list(value).length !== value.length)));
+  const pageCount = Math.max(1, Math.ceil(candidates.length / 30));
+  const activePage = Math.min(page, pageCount - 1);
+  useEffect(() => { setPage(0); }, [board]);
   const eligible = candidates.filter(c => c.eligible).length;
   const jackpot = candidates.filter(c => c.tier === "JACKPOT").length;
 
@@ -120,6 +145,9 @@ export default function LotteryPage() {
         </button>
       }
     >
+      {loading && <div role="status" style={{ color: muted, marginBottom: 12 }}>Loading Lottery board...</div>}
+      {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Lottery display unavailable. Any retained rows are from the previous load, not a new scan.</div>}
+      {incomplete && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Lottery response is incomplete. Missing observations are unavailable, not zero performance.</div>}
       <section className="lottery-hero" style={hero}>
         <div style={{ minWidth: 0 }}>
           <div style={eyebrow}>MOONSHOT DESK / SEPARATE BOOK / HAIRCUT TRUTH</div>
@@ -130,25 +158,25 @@ export default function LotteryPage() {
           </p>
         </div>
         <div style={gateBox}>
-          <span style={{ color: gate.color === "red" ? "#f87171" : "#4ade80" }}>{gate.status || "UNKNOWN"}</span>
+          <span style={{ color: gate.color === "red" ? "#f87171" : gate.color === "green" ? "#4ade80" : muted }}>{text(gate.status || "UNKNOWN")}</span>
           <small>{gate.reason || "No regime gate loaded."}</small>
         </div>
       </section>
 
       <div className="lottery-stat-strip" style={statStrip}>
-        <Stat label="CANDIDATES" value={loading ? "--" : candidates.length} sub={`${eligible} ELIGIBLE`} color={accent2} accentBar />
-        <Stat label="JACKPOT TIER" value={jackpot} sub="SCORE >= 80" color={TIER.JACKPOT} />
-        <Stat label="OPEN TICKETS" value={tickets.length} sub={`${book.max_open_tickets || 6} MAX`} color="#4ade80" />
+        <Stat label="CANDIDATES" value={candidatesAvailable ? candidates.length : "-"} sub={`${candidatesAvailable ? eligible : "-"} ELIGIBLE`} color={accent2} accentBar />
+        <Stat label="JACKPOT TIER" value={candidatesAvailable ? jackpot : "-"} sub="SCORE >= 80" color={TIER.JACKPOT} />
+        <Stat label="OPEN TICKETS" value={ticketsAvailable ? tickets.length : "-"} sub={`${metric(book.max_open_tickets)} MAX`} color="#4ade80" />
         <Stat label="CAP USAGE" value={fmtPct(book.cap_usage_pct)} sub={`${fmtMoney(book.deployed_dollars)} DEPLOYED`} color={accent} />
-        <Stat label="EV/TICKET" value={fmtPct(truthCombined.ev_per_ticket_pct_haircut ?? grades.ev_per_ticket_pct_haircut)} sub="CLOSED / HAIRCUT" color={(truthCombined.ev_per_ticket_pct_haircut ?? grades.ev_per_ticket_pct_haircut ?? 0) >= 0 ? "#4ade80" : "#f87171"} />
-        <Stat label="KILL STATUS" value={truthCombined.decision_status || grades.kill_status || "GATHERING"} sub={`${truthCombined.n_to_decision ?? grades.n_to_variant_decision ?? 60} TO DECISION`} color={truthCombined.decision_status === "RETIRE" || grades.kill_status === "RETIRE_VARIANT" ? "#f87171" : accent2} />
+        <Stat label="EV/TICKET" value={fmtPct(truthCombined.ev_per_ticket_pct_haircut ?? grades.ev_per_ticket_pct_haircut)} sub="CLOSED / HAIRCUT" color={returnColor(truthCombined.ev_per_ticket_pct_haircut ?? grades.ev_per_ticket_pct_haircut)} />
+        <Stat label="KILL STATUS" value={text(truthCombined.decision_status || grades.kill_status || "UNKNOWN")} sub={`${metric(truthCombined.n_to_decision ?? grades.n_to_variant_decision)} TO DECISION`} color={truthCombined.decision_status === "RETIRE" || grades.kill_status === "RETIRE_VARIANT" ? "#f87171" : accent2} />
       </div>
 
       <div className="lottery-league-grid" style={leagueGrid}>
         <Card title="LEAGUE BANNER">
           <div className="lottery-banner-grid" style={bannerGrid}>
             <Info label="Ticket Unit" value={fmtMoney(book.ticket_notional)} note="Priced as total-loss risk" />
-            <Info label="Daily Budget" value={`${book.max_daily_tickets || 2} ticket(s)`} note="Regime adjusted" />
+            <Info label="Daily Budget" value={metric(book.max_daily_tickets, " ticket(s)")} note="Regime adjusted" />
             <Info label="Book Cap" value={fmtMoney(book.cap_dollars)} note="5% of paper equity fence" />
             <Info label="Latest Scan" value={shortTime(board?.scan?.scanned_at)} note={board?.scan?.rubric_version || board?.rubric_version} />
           </div>
@@ -160,8 +188,8 @@ export default function LotteryPage() {
                 <span>{top.company || top.ticker}</span>
               </div>
               <div style={{ textAlign: "right" }}>
-                <b style={{ color: TIER[top.tier] || accent }}>{top.score}/100</b>
-                <small>{(top.triggers || []).slice(0, 4).join(" / ") || "NO TRIGGER"}</small>
+                <b style={{ color: TIER[top.tier] || accent }}>{metric(top.score, "/100")}</b>
+                <small>{textList(top.triggers).slice(0, 4).join(" / ") || "TRIGGERS UNAVAILABLE"}</small>
               </div>
             </div>
           )}
@@ -169,7 +197,7 @@ export default function LotteryPage() {
 
         <Card title="JACKPOT BOARD">
           <div className="lottery-jackpot-grid" style={jackpotGrid}>
-            <Proof label="Closed" value={grades.closed || 0} />
+            <Proof label="Closed" value={metric(grades.closed)} />
             <Proof label="Hit +30%" value={fmtRate(grades.hit_rate_30)} />
             <Proof label="Hit +100%" value={fmtRate(grades.hit_rate_100)} />
             <Proof label="Hit +300%" value={fmtRate(grades.hit_rate_300)} />
@@ -177,7 +205,7 @@ export default function LotteryPage() {
             <Proof label="Top-1 P/L" value={fmtPct(grades.top1_concentration_pct)} />
           </div>
           <div style={haircutLine}>
-            HEADLINE GRADES INCLUDE {grades.haircut?.round_trip_pct ?? 2.5}% ROUND-TRIP HAIRCUT
+            HEADLINE GRADES INCLUDE {metric(grades.haircut?.round_trip_pct, "%")} ROUND-TRIP HAIRCUT
           </div>
         </Card>
       </div>
@@ -198,11 +226,16 @@ export default function LotteryPage() {
       {tab === "candidates" && (
         <Card title={`CANDIDATE BOARD - ${candidates.length} SCORED`}>
           <div style={candidateGrid}>
-            {candidates.slice(0, 30).map(c => (
+            {candidates.slice(activePage * 30, (activePage + 1) * 30).map(c => (
               <CandidateCard key={c.ticker} candidate={c} onTicket={() => issueTicket(c)} />
             ))}
-            {!candidates.length && <Empty text="No League candidates loaded. Run League Scan." />}
+            {!candidates.length && <Empty text={candidatesAvailable ? "No candidates returned by the current board." : "Candidate board unavailable."} />}
           </div>
+          {candidates.length > 30 && <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginTop: 12 }}>
+            <button aria-label="Previous Lottery page" disabled={activePage === 0} onClick={() => setPage(activePage - 1)} style={tabBtn(false)}>PREVIOUS</button>
+            <span>{activePage * 30 + 1}-{Math.min((activePage + 1) * 30, candidates.length)} OF {candidates.length}</span>
+            <button aria-label="Next Lottery page" disabled={activePage >= pageCount - 1} onClick={() => setPage(activePage + 1)} style={tabBtn(false)}>NEXT</button>
+          </div>}
         </Card>
       )}
 
@@ -210,7 +243,7 @@ export default function LotteryPage() {
         <Card title={`LIVE TICKETS - ${tickets.length}`}>
           <div style={ticketGrid}>
             {tickets.map(t => <TicketCard key={t.ticket_id} ticket={t} onSettle={() => settleTicket(t)} />)}
-            {!tickets.length && <Empty text="No open Lottery League tickets." />}
+            {!tickets.length && <Empty text={ticketsAvailable ? "No open Lottery League tickets returned." : "Ticket board unavailable."} />}
           </div>
         </Card>
       )}
@@ -219,7 +252,7 @@ export default function LotteryPage() {
         <div style={truthStack}>
           <Card title="TRUTH BOARD - CLOSED TICKETS ONLY">
             <div className="lottery-jackpot-grid" style={jackpotGrid}>
-              <Proof label="Closed" value={truthCombined.n || 0} />
+              <Proof label="Closed" value={metric(truthCombined.n)} />
               <Proof label="EV Haircut" value={fmtPct(truthCombined.ev_per_ticket_pct_haircut)} />
               <Proof label="Median" value={fmtPct(truthCombined.median_ticket_pct)} />
               <Proof label="Hit +30%" value={fmtRate(truthCombined.hit_rate_30)} />
@@ -230,13 +263,13 @@ export default function LotteryPage() {
               RAW IS DIAGNOSTIC. HEADLINE TRUTH USES +1.0% ENTRY / -1.5% EXIT HAIRCUT.
             </div>
           </Card>
-          <SegmentTable title="VARIANT TRUTH" rows={truth?.segments?.variant || []} />
+          <SegmentTable title="VARIANT TRUTH" rows={list(truth?.segments?.variant)} available={Array.isArray(truth?.segments?.variant)} />
           <SegmentTable title="CATALYST / FLOAT / SCORE BUCKETS" rows={[
-            ...(truth?.segments?.catalyst_class || []),
-            ...(truth?.segments?.float_tier || []),
-            ...(truth?.segments?.score_bucket || []),
-          ]} />
-          <GradeRows rows={truth?.latest_grades || []} />
+            ...list(truth?.segments?.catalyst_class),
+            ...list(truth?.segments?.float_tier),
+            ...list(truth?.segments?.score_bucket),
+          ]} available={[truth?.segments?.catalyst_class, truth?.segments?.float_tier, truth?.segments?.score_bucket].every(Array.isArray)} />
+          <GradeRows rows={list(truth?.latest_grades)} available={Array.isArray(truth?.latest_grades)} />
         </div>
       )}
 
@@ -262,12 +295,13 @@ export default function LotteryPage() {
       {tab === "method" && (
         <Card title="HONESTY FOOTER - NON-REMOVABLE">
           <div style={methodGrid}>
-            {Object.entries(board?.honesty || {}).map(([key, value]) => (
+            {Object.entries(record(board?.honesty) ? board.honesty : {}).map(([key, value]) => (
               <div key={key} style={methodCard}>
                 <div style={eyebrow}>{key.replace(/_/g, " ").toUpperCase()}</div>
-                <p>{value}</p>
+                <p>{text(value)}</p>
               </div>
             ))}
+            {!record(board?.honesty) && <Empty text="Methodology data unavailable." />}
           </div>
         </Card>
       )}
@@ -279,7 +313,7 @@ export default function LotteryPage() {
 
 function CandidateCard({ candidate, onTicket }) {
   const color = TIER[candidate.tier] || muted;
-  const scoreItems = Object.entries(candidate.components || {});
+  const scoreItems = Object.entries(record(candidate.components) ? candidate.components : {});
   return (
     <div data-testid={`lottery-candidate-${candidate.ticker}`} style={candidateCard(color)}>
       <div style={candidateHead}>
@@ -288,10 +322,11 @@ function CandidateCard({ candidate, onTicket }) {
           <strong style={{ color }}>${candidate.ticker}</strong>
           <span>{candidate.company || candidate.sector || "-"}</span>
         </div>
-        <b>{candidate.score}/100</b>
+        <b>{metric(candidate.score, "/100")}</b>
       </div>
       <div style={chipRow}>
-        {(candidate.triggers || ["NO_TRIGGER"]).slice(0, 5).map(x => <span key={x} style={chip}>{x}</span>)}
+        {textList(candidate.triggers).slice(0, 5).map(x => <span key={x} style={chip}>{x}</span>)}
+        {!Array.isArray(candidate.triggers) && <span style={chip}>TRIGGERS UNAVAILABLE</span>}
       </div>
       <div style={scoreBars}>
         {scoreItems.map(([key, value]) => <ScoreBar key={key} label={key} value={value} max={key === "catalyst" ? 25 : key === "gap_surge" ? 20 : 15} />)}
@@ -299,15 +334,15 @@ function CandidateCard({ candidate, onTicket }) {
               <div className="lottery-micro-grid" style={microGrid}>
         <Info label="Price" value={fmtMoney(candidate.price)} />
         <Info label="Change" value={fmtPct(candidate.change_pct)} />
-        <Info label="RVOL" value={candidate.relative_volume || "-"} />
-        <Info label="Rotation" value={candidate.rotation || "-"} />
+        <Info label="RVOL" value={metric(candidate.relative_volume)} />
+        <Info label="Rotation" value={metric(candidate.rotation)} />
         <Info label="Float" value={candidate.float_confidence || "UNKNOWN"} />
-        <Info label="Dilution" value={candidate.dilution?.label || "CLEAR"} color={candidate.dilution?.active ? "#f87171" : "#4ade80"} />
+        <Info label="Dilution" value={candidate.dilution?.label || "UNKNOWN"} color={candidate.dilution?.active === true ? "#f87171" : candidate.dilution?.active === false ? "#4ade80" : muted} />
       </div>
       {candidate.penalties?.length ? (
-        <div style={penaltyLine}>{candidate.penalties.map(p => `${p.label} -${p.points}`).join(" / ")}</div>
+        <div style={penaltyLine}>{list(candidate.penalties).map(p => `${text(p.label)} -${metric(p.points)}`).join(" / ")}</div>
       ) : (
-        <div style={{ ...penaltyLine, color: "#4ade80" }}>NO ACTIVE PENALTY</div>
+        <div style={{ ...penaltyLine, color: muted }}>{Array.isArray(candidate.penalties) && candidate.penalties.length === 0 ? "NO ACTIVE PENALTY" : "PENALTY DATA UNAVAILABLE"}</div>
       )}
       <button onClick={onTicket} disabled={!candidate.eligible} style={ticketBtn(candidate.eligible)}>
         {candidate.eligible ? "OPEN PAPER TICKET" : "NOT ELIGIBLE"}
@@ -317,24 +352,24 @@ function CandidateCard({ candidate, onTicket }) {
 }
 
 function TicketCard({ ticket, onSettle }) {
-  const entry = Number(ticket.entry_price || 0);
-  const current = Number(ticket.current_price || entry || 0);
-  const move = entry ? ((current - entry) / entry) * 100 : 0;
+  const entry = num(ticket.entry_price);
+  const current = num(ticket.current_price);
+  const move = entry != null && entry > 0 && current != null ? ((current - entry) / entry) * 100 : null;
   return (
     <div data-testid={`lottery-ticket-${ticket.ticker}`} style={ticketCard}>
       <div style={candidateHead}>
         <div>
           <div style={eyebrow}>{ticket.variant || "V1"}</div>
           <strong style={{ color: accent }}>${ticket.ticker}</strong>
-          <span>{ticket.status || "OPEN"} / {ticket.ticket_id}</span>
+          <span>{text(ticket.status || "UNKNOWN")} / {text(ticket.ticket_id)}</span>
         </div>
-        <b style={{ color: move >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(move)}</b>
+        <b style={{ color: returnColor(move) }}>{fmtPct(move)}</b>
       </div>
       <div style={ladder}>
         {(ticket.ladder || []).map((leg, idx) => (
-          <div key={idx} style={ladderLeg(leg.status !== "WAITING")}>
+          <div key={idx} style={ladderLeg(typeof leg.status === "string" && leg.status !== "WAITING")}>
             <span>{typeof leg.level === "number" ? `+${Math.round(leg.level * 100)}%` : "TRAIL"}</span>
-            <small>{leg.status || "WAITING"}</small>
+            <small>{text(leg.status || "UNKNOWN")}</small>
           </div>
         ))}
       </div>
@@ -350,12 +385,12 @@ function TicketCard({ ticket, onSettle }) {
 }
 
 function ScoreBar({ label, value, max }) {
-  const pct = Math.max(0, Math.min(100, (Number(value || 0) / max) * 100));
+  const pct = num(value) == null ? null : Math.max(0, Math.min(100, (num(value) / max) * 100));
   return (
     <div style={scoreRow}>
       <span>{label.replace(/_/g, " ")}</span>
-      <div style={barTrack}><i style={{ ...barFill, width: `${pct}%` }} /></div>
-      <b>{value}</b>
+      <div style={barTrack}>{pct != null && <i style={{ ...barFill, width: `${pct}%` }} />}</div>
+      <b>{metric(value)}</b>
     </div>
   );
 }
@@ -364,8 +399,8 @@ function Info({ label, value, note, color = labelLight }) {
   return (
     <div style={infoBox}>
       <span>{label}</span>
-      <strong style={{ color }}>{value ?? "-"}</strong>
-      {note && <small>{note}</small>}
+      <strong style={{ color }}>{text(value)}</strong>
+      {note && <small>{text(note)}</small>}
     </div>
   );
 }
@@ -379,7 +414,7 @@ function Proof({ label, value }) {
   );
 }
 
-function SegmentTable({ title, rows }) {
+function SegmentTable({ title, rows, available }) {
   return (
     <Card title={title}>
       <div style={tableWrap}>
@@ -403,15 +438,15 @@ function SegmentTable({ title, rows }) {
                 <td>{r.segment}</td>
                 <td>{r.dimension}</td>
                 <td>{r.n}</td>
-                <td style={{ color: Number(r.ev_per_ticket_pct_haircut || 0) >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(r.ev_per_ticket_pct_haircut)}</td>
+                <td style={{ color: returnColor(r.ev_per_ticket_pct_haircut) }}>{fmtPct(r.ev_per_ticket_pct_haircut)}</td>
                 <td>{fmtPct(r.median_ticket_pct)}</td>
                 <td>{fmtRate(r.hit_rate_30)}</td>
                 <td>{fmtRate(r.hit_rate_100)}</td>
                 <td>{fmtPct(r.mfe_vs_realized_gap_pct)}</td>
-                <td style={{ color: r.decision_status === "RETIRE" ? "#f87171" : accent2 }}>{r.decision_status || "GATHERING"}</td>
+                <td style={{ color: r.decision_status === "RETIRE" ? "#f87171" : accent2 }}>{text(r.decision_status || "UNKNOWN")}</td>
               </tr>
             ))}
-            {!rows?.length && <tr><td colSpan="9">NO CLOSED GRADED TICKETS YET</td></tr>}
+            {!rows?.length && <tr><td colSpan="9">{available ? "NO SEGMENTS RETURNED" : "SEGMENT DATA UNAVAILABLE"}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -419,7 +454,7 @@ function SegmentTable({ title, rows }) {
   );
 }
 
-function GradeRows({ rows }) {
+function GradeRows({ rows, available }) {
   return (
     <Card title="LATEST COURT-ADMISSIBLE GRADES">
       <div style={tableWrap}>
@@ -445,15 +480,15 @@ function GradeRows({ rows }) {
                   <td>${g.ticker}</td>
                   <td>{g.variant}</td>
                   <td>{exit.exit_reason}</td>
-                  <td>{truth.realized_multiple}x</td>
-                  <td>{truth.peak_multiple}x</td>
+                  <td>{metric(truth.realized_multiple, "x")}</td>
+                  <td>{metric(truth.peak_multiple, "x")}</td>
                   <td>{fmtPct(truth.mae_pct)}</td>
                   <td>{fmtPct(truth.raw_return_pct)}</td>
-                  <td style={{ color: Number(truth.haircut_return_pct || 0) >= 0 ? "#4ade80" : "#f87171" }}>{fmtPct(truth.haircut_return_pct)}</td>
+                  <td style={{ color: returnColor(truth.haircut_return_pct) }}>{fmtPct(truth.haircut_return_pct)}</td>
                 </tr>
               );
             })}
-            {!rows?.length && <tr><td colSpan="8">OPEN TICKETS DO NOT COUNT. CLOSED FILLS WILL APPEAR HERE.</td></tr>}
+            {!rows?.length && <tr><td colSpan="8">{available ? "NO CLOSED GRADES RETURNED. OPEN TICKETS DO NOT COUNT." : "CLOSED GRADES UNAVAILABLE"}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -479,26 +514,27 @@ function LearningPanel({ learning, learnedConfig, truth, reload, showToast }) {
     <div style={truthStack}>
       <Card title="LOTTERY LEARNING ENGINE">
         <div style={learningGrid}>
-          <Info label="Status" value={learnedConfig?.status || "GATHERING"} color={learnedConfig?.status === "RETIRE_LEAGUE" ? "#f87171" : accent2} />
-          <Info label="Sample" value={`${learnedConfig?.sample_count || truth?.n || 0}/150`} note="closed graded tickets" />
-          <Info label="Min Score" value={learnedConfig?.min_ticket_score ?? 60} note="learned gate recommendation" />
-          <Info label="Ladder Bias" value={learnedConfig?.ladder_bias || "baseline"} />
+          <Info label="Status" value={learnedConfig?.status || "UNKNOWN"} color={learnedConfig?.status === "RETIRE_LEAGUE" ? "#f87171" : accent2} />
+          <Info label="Sample" value={metric(learnedConfig?.sample_count ?? truth?.n, "/150")} note="closed graded tickets" />
+          <Info label="Min Score" value={metric(learnedConfig?.min_ticket_score)} note="learned gate recommendation" />
+          <Info label="Ladder Bias" value={learnedConfig?.ladder_bias || "UNKNOWN"} />
         </div>
         <p style={learningNote}>{learnedConfig?.reason || "Learning waits for closed, graded Lottery tickets before changing thresholds."}</p>
         <button onClick={run} disabled={running} style={primaryBtn(running)}>{running ? "RUNNING..." : "RUN LOTTERY LEARNING"}</button>
       </Card>
       <Card title="LATEST LEARNING NOTES">
         <div style={methodGrid}>
-          {(learning?.notes || ["No learning run has completed yet."]).map((note, idx) => (
+          {textList(learning?.notes).map((note, idx) => (
             <div key={idx} style={methodCard}><p>{note}</p></div>
           ))}
+          {!textList(learning?.notes).length && <Empty text="No learning notes available." />}
         </div>
       </Card>
       <Card title="PREFERRED / PENALIZED SEGMENTS">
         <div style={variantGrid}>
-          <LearnList title="PREFERRED" rows={learnedConfig?.preferred_segments || []} color="#4ade80" />
-          <LearnList title="PENALIZED" rows={learnedConfig?.penalized_segments || []} color="#f87171" />
-          <LearnList title="RETIRED VARIANTS" rows={(learnedConfig?.retired_variants || []).map(x => ({ segment: x, dimension: "variant" }))} color="#f87171" />
+          <LearnList title="PREFERRED" rows={list(learnedConfig?.preferred_segments)} color="#4ade80" />
+          <LearnList title="PENALIZED" rows={list(learnedConfig?.penalized_segments)} color="#f87171" />
+          <LearnList title="RETIRED VARIANTS" rows={textList(learnedConfig?.retired_variants).map(x => ({ segment: x, dimension: "variant" }))} color="#f87171" />
         </div>
       </Card>
     </div>
@@ -527,18 +563,21 @@ function Toast({ toast }) {
 }
 
 function fmtMoney(value) {
+  if (num(value) == null) return "-";
   const n = Number(value);
   if (!Number.isFinite(n)) return "-";
   return `$${n.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: n < 100 ? 2 : 0 })}`;
 }
 
 function fmtPct(value) {
+  if (num(value) == null) return "-";
   const n = Number(value);
   if (!Number.isFinite(n)) return "-";
   return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
 }
 
 function fmtRate(value) {
+  if (num(value) == null) return "-";
   const n = Number(value);
   if (!Number.isFinite(n)) return "-";
   return `${(n * 100).toFixed(0)}%`;
@@ -546,6 +585,7 @@ function fmtRate(value) {
 
 function shortTime(value) {
   if (!value) return "-";
+  if (!Number.isFinite(new Date(value).getTime())) return "-";
   try { return new Date(value).toLocaleString(); } catch { return String(value).slice(0, 16); }
 }
 
@@ -558,7 +598,7 @@ function variantCopy(key) {
 
 const hero = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) 300px",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))",
   gap: 14,
   border: "1px solid rgba(215,189,104,0.24)",
   background: "linear-gradient(135deg, rgba(8,16,20,0.96), rgba(3,4,8,0.98))",
@@ -569,15 +609,15 @@ const eyebrow = { color: accent2, fontSize: 9, letterSpacing: "0.18em", fontWeig
 const h1 = { color: accent, fontSize: 28, lineHeight: 1.12, margin: "8px 0", letterSpacing: "0.06em", fontWeight: 900 };
 const lede = { color: muted, fontSize: 13, lineHeight: 1.55, maxWidth: 860, margin: 0 };
 const gateBox = { border: hairline, background: pageBg, padding: 14, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8 };
-const statStrip = { display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 14 };
-const leagueGrid = { display: "grid", gridTemplateColumns: "1.25fr 0.75fr", gap: 14, alignItems: "start" };
-const bannerGrid = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 };
+const statStrip = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 140px), 1fr))", background: cardBg, border: hairline, marginBottom: 14 };
+const leagueGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", gap: 14, alignItems: "start" };
+const bannerGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 140px), 1fr))", gap: 10 };
 const topTicket = { display: "flex", justifyContent: "space-between", gap: 14, marginTop: 14, paddingTop: 14, borderTop: hairline };
 const tabs = { display: "flex", flexWrap: "wrap", gap: 6, margin: "14px 0" };
-const candidateGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: 12 };
-const ticketGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 12 };
-const variantGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 };
-const methodGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 };
+const candidateGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 310px), 1fr))", gap: 12 };
+const ticketGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 330px), 1fr))", gap: 12 };
+const variantGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))", gap: 12 };
+const methodGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))", gap: 12 };
 const truthStack = { display: "grid", gap: 14 };
 const jackpotGrid = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 };
 const learningGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 };

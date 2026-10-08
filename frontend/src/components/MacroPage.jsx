@@ -1,36 +1,52 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
+const rowsOf = value => Array.isArray(value) ? value.filter(row => row && typeof row === "object") : [];
 
 export default function MacroPage() {
   const [active, setActive] = useState("WORLD");
   const [data, setData] = useState(null);
   const [eventsData, setEventsData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const requestRef = useRef(null);
 
   const load = useCallback(async () => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
+    setError(false);
     try {
-      const [overviewRes, eventsRes] = await Promise.all([
-        axios.get(`${API}/macro/overview`, { timeout: 45000 }),
-        axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 }, timeout: 25000 }),
+      const [overviewRes, eventsRes] = await Promise.allSettled([
+        axios.get(`${API}/macro/overview`, { timeout: 45000, signal: controller.signal }),
+        axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 }, timeout: 25000, signal: controller.signal }),
       ]);
-      setData(overviewRes.data);
-      setEventsData(eventsRes.data);
-      setActive(prev => prev === "EVENTS" || overviewRes.data?.regions?.some(r => r.key === prev) ? prev : "WORLD");
+      if (controller.signal.aborted) return;
+      if (overviewRes.status === "fulfilled") {
+        setData(overviewRes.value.data);
+        setActive(prev => prev === "EVENTS" || rowsOf(overviewRes.value.data?.regions).some(r => r.key === prev) ? prev : "WORLD");
+      }
+      if (eventsRes.status === "fulfilled") setEventsData(eventsRes.value.data);
+      setError(overviewRes.status === "rejected" || eventsRes.status === "rejected");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); return () => requestRef.current?.abort(); }, [load]);
 
-  const regions = useMemo(() => data?.regions || [], [data]);
+  const regions = useMemo(() => rowsOf(data?.regions).map(region => ({
+    ...region, label: String(region.label || region.key || "UNKNOWN"),
+    signal: region.signal || { color: muted, label: "UNKNOWN", score: "--" },
+    coverage: region.coverage || { fresh: "--", stale: "--", missing: "--", total: "--" },
+    categories: rowsOf(region.categories).map(category => ({ ...category, label: String(category.label || category.key || "UNKNOWN"), indicators: rowsOf(category.indicators).map(row => ({ ...row, bias: String(row.bias || "missing"), freshness: String(row.freshness || "unknown"), unit: String(row.unit || "") })) })),
+  })), [data]);
   const current = regions.find(r => r.key === active) || regions[0] || null;
-  const eventRows = useMemo(() => eventsData?.events || [], [eventsData]);
+  const eventRows = useMemo(() => rowsOf(eventsData?.events), [eventsData]);
   const nextEvent = eventsData?.next_event || eventRows.find(e => Number(e.hours_until) >= 0);
   const totals = useMemo(() => {
     const rows = regions.flatMap(r => r.categories || []).flatMap(c => c.indicators || []);
@@ -48,8 +64,9 @@ export default function MacroPage() {
       title="MACRO COMMAND"
       headerRight={<button onClick={load} disabled={loading} style={buttonStyle(accent2)}>{loading ? "SYNCING" : "SYNC MACRO DATA"}</button>}
     >
+      {error && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Macro refresh incomplete. Available prior data is retained; unavailable feeds are not empty results.</div>}
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
-        <Stat label="DATA MODEL" value={data?.ok ? "LIVE" : "LOADING"} sub="FRED + WORLD BANK + LSE" color={data?.ok ? "#4ade80" : muted} accentBar />
+        <Stat label="DATA MODEL" value={data?.ok ? "AVAILABLE" : loading ? "LOADING" : "UNAVAILABLE"} sub="FRED + WORLD BANK + LSE" color={data?.ok ? "#4ade80" : muted} accentBar />
         <Stat label="EVENTS" value={eventRows.length} sub={(eventsData?.macro_source || "FOREX FACTORY").toUpperCase()} color={eventsData?.source?.fresh ? "#4ade80" : "#fbbf24"} />
         <Stat label="FRESH" value={totals.fresh} sub={`/ ${totals.total} INDICATORS`} color="#4ade80" />
         <Stat label="WATCH" value={totals.watch} sub="2-3Y OLD" color="#fbbf24" />
@@ -67,7 +84,7 @@ export default function MacroPage() {
         </button>
         {regions.map(region => (
           <button key={region.key} onClick={() => setActive(region.key)} style={tabStyle(active === region.key, region.signal?.color)}>
-            {region.label.toUpperCase()}
+            {String(region.label || region.key || "UNKNOWN").toUpperCase()}
           </button>
         ))}
       </div>

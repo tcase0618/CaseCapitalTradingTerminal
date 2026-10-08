@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
+import useDisplayResource from "../hooks/useDisplayResource";
 import { API } from "../config";
 import { CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -28,8 +29,6 @@ export default function PortfolioManagerPage() {
   const [fundTab, setFundTab] = useState("TOTAL");
   const [learningTab, setLearningTab] = useState("EQUITIES");
   const [backtestTab, setBacktestTab] = useState("EQUITIES");
-  const [learning, setLearning] = useState(null);
-  const [optionsLearning, setOptionsLearning] = useState(null);
   const [backtest, setBacktest] = useState(null);
   const [optionsBacktest, setOptionsBacktest] = useState(null);
   const [optionsPlan, setOptionsPlan] = useState(null);
@@ -58,30 +57,51 @@ export default function PortfolioManagerPage() {
     watch_score: "45",
   });
   const [loading, setLoading] = useState(false);
+  const [readErrors, setReadErrors] = useState({});
+  const controllers = useRef(new Set());
+  const planSequence = useRef(0);
+  const backtestAttempted = useRef(false);
+  const calendarAttempted = useRef(false);
+  const readGet = useCallback(async (url, options = {}) => {
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    const source = url.split("/").slice(-2).join("/");
+    try {
+      const response = await axios.get(url, { timeout: 20000, ...options, signal: controller.signal });
+      if (controller.signal.aborted) throw new Error("Display read cancelled");
+      if (response.data == null || response.data.error) throw new Error(response.data?.error || "Empty response");
+      setReadErrors(previous => ({ ...previous, [source]: null }));
+      return response;
+    } catch (error) {
+      if (!controller.signal.aborted) setReadErrors(previous => ({ ...previous, [source]: error.message || "Unavailable" }));
+      throw error;
+    } finally {
+      controllers.current.delete(controller);
+    }
+  }, []);
+  useEffect(() => {
+    const pending = controllers.current;
+    return () => pending.forEach(controller => controller.abort());
+  }, []);
 
   const load = useCallback(async () => {
+    const requestId = ++planSequence.current;
     setLoading(true);
     try {
       const params = { mode };
       if (equity !== "" && Number(equity) > 0) params.equity = Number(equity);
-      const r = await axios.get(`${API}/portfolio_manager/latest`, {
+      const r = await readGet(`${API}/portfolio_manager/latest`, {
         params,
       });
-      setPlan(r.data);
+      if (requestId === planSequence.current) setPlan(r.data);
+    } catch {
+      // readGet reports failures without replacing the last successful plan.
     } finally {
-      setLoading(false);
+      if (requestId === planSequence.current) setLoading(false);
     }
-  }, [equity, mode]);
+  }, [equity, mode, readGet]);
 
   useEffect(() => { load(); }, [load]);
-
-  useEffect(() => {
-    let cancelled = false;
-    axios.get(`${API}/portfolio_manager/learning/status`)
-      .then(r => { if (!cancelled) setLearning(r.data); })
-      .catch(() => { if (!cancelled) setLearning(null); });
-    return () => { cancelled = true; };
-  }, []);
 
   const loadBacktest = useCallback(async () => {
     setBacktestLoading(true);
@@ -91,93 +111,89 @@ export default function PortfolioManagerPage() {
         if (k === "mode") return;
         if (v !== "" && Number.isFinite(Number(v))) params[k] = Number(v);
       });
-      const r = await axios.get(`${API}/portfolio_manager/backtest`, { params });
+      const r = await readGet(`${API}/portfolio_manager/backtest`, { params });
       setBacktest(r.data);
+    } catch {
+      // Leave prior sandbox results visible alongside the read failure.
     } finally {
       setBacktestLoading(false);
     }
-  }, [sandbox]);
+  }, [sandbox, readGet]);
 
   useEffect(() => {
-    if (subtab !== "BACKTEST" || backtestTab !== "EQUITIES" || backtest) return;
+    if (subtab !== "BACKTEST" || backtestTab !== "EQUITIES" || backtest || backtestAttempted.current) return;
+    backtestAttempted.current = true;
     loadBacktest();
   }, [subtab, backtestTab, backtest, loadBacktest]);
 
   useEffect(() => {
-    if (subtab !== "LEARNING" || learningTab !== "OPTIONS" || optionsLearning) return;
-    axios.get(`${API}/portfolio_manager/options/learning/status`)
-      .then(r => setOptionsLearning(r.data))
-      .catch(() => setOptionsLearning(null));
-  }, [subtab, learningTab, optionsLearning]);
-
-  useEffect(() => {
     if (subtab !== "BACKTEST" || backtestTab !== "OPTIONS" || optionsBacktest) return;
-    axios.get(`${API}/portfolio_manager/options/backtest`)
+    readGet(`${API}/portfolio_manager/options/backtest`)
       .then(r => setOptionsBacktest(r.data))
       .catch(() => setOptionsBacktest(null));
-  }, [subtab, backtestTab, optionsBacktest]);
+  }, [subtab, backtestTab, optionsBacktest, readGet]);
 
   useEffect(() => {
-    axios.get(`${API}/portfolio_manager/options/latest`)
+    readGet(`${API}/portfolio_manager/options/latest`)
       .then(r => setOptionsPlan(r.data))
       .catch(() => setOptionsPlan(null));
-  }, []);
+  }, [readGet]);
 
   useEffect(() => {
-    axios.get(`${API}/portfolio_manager/rulesets`)
+    readGet(`${API}/portfolio_manager/rulesets`)
       .then(r => setRulesets(r.data))
       .catch(() => setRulesets(null));
-  }, []);
+  }, [readGet]);
 
   useEffect(() => {
-    axios.get(`${API}/system/health`)
+    readGet(`${API}/system/health`)
       .then(r => setHealth(r.data))
       .catch(() => setHealth(null));
-  }, []);
+  }, [readGet]);
 
   const loadPlCalendar = useCallback(async () => {
     setPlCalendarLoading(true);
     try {
-      const r = await axios.get(`${API}/signals/benchmark_curve`, { params: { days: 900 }, timeout: 20000 });
+      const r = await readGet(`${API}/signals/benchmark_curve`, { params: { days: 900 }, timeout: 20000 });
       setPlCalendar(r.data);
-      const rows = r.data?.curve || [];
+      const rows = pmRows(r.data?.curve);
       setSelectedPlDay(rows.slice().reverse().find(row => dateParts(row.date).month === plMonth && dateParts(row.date).year === plYear) || null);
     } catch (e) {
-      setPlCalendar({ curve: [], error: e.message });
-      setSelectedPlDay(null);
+      // Keep last-good calendar data; readGet publishes the failure.
     } finally {
       setPlCalendarLoading(false);
     }
-  }, [plMonth, plYear]);
+  }, [plMonth, plYear, readGet]);
 
   useEffect(() => {
-    if (subtab !== "P/L CALENDAR" || plCalendar || plCalendarLoading) return;
+    if (subtab !== "P/L CALENDAR" || plCalendar || plCalendarLoading || calendarAttempted.current) return;
+    calendarAttempted.current = true;
     loadPlCalendar();
   }, [subtab, plCalendar, plCalendarLoading, loadPlCalendar]);
 
   useEffect(() => {
     if (subtab !== "P/L CALENDAR" || !plCalendar?.curve?.length) return;
-    const rows = plCalendar.curve || [];
+    const rows = pmRows(plCalendar.curve);
     setSelectedPlDay(rows.slice().reverse().find(row => dateParts(row.date).month === plMonth && dateParts(row.date).year === plYear) || null);
   }, [subtab, plCalendar, plMonth, plYear]);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      axios.get(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
-      axios.get(`${API}/options_desk/positions`).catch(() => ({ data: { positions: [] } })),
-      axios.get(`${API}/options_desk/orders`).catch(() => ({ data: { orders: [] } })),
+      readGet(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
+      readGet(`${API}/options_desk/positions`).catch(() => ({ data: null })),
+      readGet(`${API}/options_desk/orders`).catch(() => ({ data: null })),
     ]).then(([accountRes, positionsRes, ordersRes]) => {
       if (cancelled) return;
       setOptionsAccount(accountRes.data);
-      setOptionsPositions(positionsRes.data.positions || []);
-      setOptionsOrders(ordersRes.data.orders || []);
+      if (positionsRes.data) setOptionsPositions(pmRows(positionsRes.data.positions));
+      if (ordersRes.data) setOptionsOrders(pmRows(ordersRes.data.orders));
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [readGet]);
 
   const rows = useMemo(() => {
-    const all = plan?.recommendations || [];
+    const all = pmRows(plan?.recommendations);
     if (filter === "ALL") return all;
     if (filter === "ACTIVE") return all.filter(r => r.action === "ACCUMULATE" || r.action === "STARTER");
     return all.filter(r => r.action === filter);
@@ -226,6 +242,10 @@ export default function PortfolioManagerPage() {
           </button>
         </div>
       }>
+      <style>{pmResponsiveCss}</style>
+      {Object.values(readErrors).some(Boolean) && <div role="alert" style={{ color: "#f87171", padding: 12, border: hairline, marginBottom: 16 }}>
+        Display unavailable: {Object.entries(readErrors).filter(([, value]) => value).map(([source]) => source).join(", ")}. Last successful data retained where available.
+      </div>}
       <div style={{
         padding: "14px 18px", border: `0.5px solid ${accent2}`,
         background: `${accent2}10`, color: accent2, fontSize: 11,
@@ -265,23 +285,23 @@ export default function PortfolioManagerPage() {
         optionsPositions={optionsPositions}
         optionsOrders={optionsOrders}
         refreshRules={() => {
-          axios.get(`${API}/portfolio_manager/rulesets`).then(r => setRulesets(r.data));
+          readGet(`${API}/portfolio_manager/rulesets`).then(r => setRulesets(r.data)).catch(() => {});
           load();
         }}
         refreshHealth={() => {
-          axios.get(`${API}/system/health`).then(r => setHealth(r.data));
+          readGet(`${API}/system/health`).then(r => setHealth(r.data)).catch(() => {});
         }}
         refreshOptions={() => {
           Promise.all([
-            axios.get(`${API}/portfolio_manager/options/latest`).catch(() => ({ data: null })),
-            axios.get(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
-            axios.get(`${API}/options_desk/positions`).catch(() => ({ data: { positions: [] } })),
-            axios.get(`${API}/options_desk/orders`).catch(() => ({ data: { orders: [] } })),
+            readGet(`${API}/portfolio_manager/options/latest`).catch(() => ({ data: null })),
+            readGet(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
+            readGet(`${API}/options_desk/positions`).catch(() => ({ data: null })),
+            readGet(`${API}/options_desk/orders`).catch(() => ({ data: null })),
           ]).then(([planRes, accountRes, positionsRes, ordersRes]) => {
-            setOptionsPlan(planRes.data);
+            if (planRes.data) setOptionsPlan(planRes.data);
             setOptionsAccount(accountRes.data);
-            setOptionsPositions(positionsRes.data.positions || []);
-            setOptionsOrders(ordersRes.data.orders || []);
+            if (positionsRes.data) setOptionsPositions(pmRows(positionsRes.data.positions));
+            if (ordersRes.data) setOptionsOrders(pmRows(ordersRes.data.orders));
           });
         }}
       />}
@@ -298,12 +318,7 @@ export default function PortfolioManagerPage() {
         refresh={loadPlCalendar}
       />}
 
-      {subtab === "LEARNING" && <LearningHubView
-        active={learningTab}
-        setActive={setLearningTab}
-        equityLearning={learning}
-        optionsLearning={optionsLearning}
-      />}
+      {subtab === "LEARNING" && <PMLearningDisplay active={learningTab} setActive={setLearningTab} />}
 
       {subtab === "BACKTEST" && <BacktestHubView
         active={backtestTab}
@@ -344,11 +359,11 @@ function FundHubView({
 }) {
   const optionSummary = optionsPlan?.summary || {};
   const optionAccount = optionsAccount?.account || {};
-  const equityBasis = Number(summary.equity_basis || 0);
-  const optionEquity = Number(optionAccount.equity || optionsPlan?.options_equity_basis || 20000);
+  const equityBasis = pmNumber(summary.equity_basis);
+  const optionEquity = pmNumber(optionAccount.equity ?? optionsPlan?.options_equity_basis);
   const totalCapital = equityBasis + optionEquity;
   const plannedEquityRisk = Number(summary.planned_risk || 0);
-  const optionReadyRisk = (optionsPlan?.candidates || [])
+  const optionReadyRisk = pmRows(optionsPlan?.candidates)
     .filter(c => c.manual_fire_ready)
     .reduce((acc, c) => acc + Number(c.risk_budget || 0), 0);
   const totalSummary = {
@@ -428,7 +443,7 @@ function FundHubView({
 }
 
 function PMCalendarView({ data, loading, month, year, selected, setSelected, setMonth, setYear, refresh }) {
-  const rows = data?.curve || [];
+  const rows = pmRows(data?.curve);
   const years = calendarYears(rows, year);
   const cells = buildPmCalendarCells(year, month, rows);
   const monthRows = rows.filter(r => dateParts(r.date).year === year && dateParts(r.date).month === month);
@@ -457,12 +472,12 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
           <div style={calendarHeroTile(pctColor(summary.relativeAvg))}><span>Return Diff</span><strong>{fmtPct(summary.relativeAvg)}</strong><small>fund minus SPY</small></div>
           <div style={calendarHeroTile("#a78bfa")}><span>Range</span><strong>{fmtPct(summary.best)}</strong><small>worst {fmtPct(summary.worst)}</small></div>
         </div>
-        <div style={calendarBoard}>
+        <div className="pm-owned-calendar" style={calendarBoard}>
           <div style={{ minWidth: 0 }}>
             <div style={calendarWeekHeader}>
               {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => <span key={d}>{d}</span>)}
             </div>
-            <div style={calendarGrid}>
+            <div className="pm-owned-calendar-days" style={calendarGrid}>
               {cells.map((cell, i) => (
                 <button
                   key={cell.date || `blank-${i}`}
@@ -527,34 +542,34 @@ function TotalFundView({ data }) {
   const equityRisk = Number(data.plannedEquityRisk || 0);
   const optionRisk = Number(data.optionReadyRisk || 0);
   const totalRisk = equityRisk + optionRisk;
-  const totalCapital = Number(data.totalCapital || 0);
-  const riskPct = totalCapital > 0 ? (totalRisk / totalCapital) * 100 : 0;
+  const totalCapital = data.totalCapital;
+  const riskPct = totalCapital > 0 ? (totalRisk / totalCapital) * 100 : NaN;
   const fundReady = Boolean(data.health?.ready_for_pm && data.optionsAccount?.ok);
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="TOTAL FUND CAPITAL" value={`$${Math.round(totalCapital).toLocaleString()}`} sub="EQUITIES + OPTIONS" color={accent} accentBar />
-        <Stat label="EQUITIES FUND" value={`$${Math.round(data.equityBasis || 0).toLocaleString()}`} sub={`${data.summary?.accumulate || 0} ACC / ${data.summary?.starter || 0} START`} color={accent2} />
-        <Stat label="OPTIONS FUND" value={`$${Math.round(data.optionEquity || 0).toLocaleString()}`} sub={`${optionSummary.ready || 0} READY / ${optionSummary.total || 0} CAND`} color={accent} />
-        <Stat label="TOTAL PLANNED RISK" value={`$${Math.round(totalRisk).toLocaleString()}`} sub={`${riskPct.toFixed(2)}% OF CAPITAL`} color="#fbbf24" />
+        <Stat label="TOTAL FUND CAPITAL" value={pmMoney(totalCapital)} sub="EQUITIES + OPTIONS" color={accent} accentBar />
+        <Stat label="EQUITIES FUND" value={pmMoney(data.equityBasis)} sub={`${data.summary?.accumulate || 0} ACC / ${data.summary?.starter || 0} START`} color={accent2} />
+        <Stat label="OPTIONS FUND" value={pmMoney(data.optionEquity)} sub={`${optionSummary.ready || 0} READY / ${optionSummary.total || 0} CAND`} color={accent} />
+        <Stat label="TOTAL PLANNED RISK" value={`$${Math.round(totalRisk).toLocaleString()}`} sub={`${fmtPct(riskPct)} OF CAPITAL`} color="#fbbf24" />
         <Stat label="OPTIONS ROUTED" value={(optionSummary.option || 0) + (optionSummary.both || 0)} sub={`${optionSummary.both || 0} BOTH`} color="#4ade80" />
         <Stat label="FUND HEALTH" value={fundReady ? "READY" : "CHECK"} sub="PM / DESKS" color={fundReady ? "#4ade80" : "#f87171"} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="TOTAL CAPITAL SPLIT" accentColor={accent}>
-          <PlanRow k="TOTAL CAPITAL" v={`$${Number(totalCapital || 0).toFixed(2)}`} color={accent} />
-          <PlanRow k="EQUITIES CAPITAL" v={`$${Number(data.equityBasis || 0).toFixed(2)}`} color={accent2} />
-          <PlanRow k="OPTIONS CAPITAL" v={`$${Number(data.optionEquity || 0).toFixed(2)}`} color={accent} />
-          <PlanRow k="EQUITIES SHARE" v={`${totalCapital ? ((Number(data.equityBasis || 0) / totalCapital) * 100).toFixed(1) : "0.0"}%`} />
-          <PlanRow k="OPTIONS SHARE" v={`${totalCapital ? ((Number(data.optionEquity || 0) / totalCapital) * 100).toFixed(1) : "0.0"}%`} />
+          <PlanRow k="TOTAL CAPITAL" v={pmMoney(totalCapital)} color={accent} />
+          <PlanRow k="EQUITIES CAPITAL" v={pmMoney(data.equityBasis)} color={accent2} />
+          <PlanRow k="OPTIONS CAPITAL" v={pmMoney(data.optionEquity)} color={accent} />
+          <PlanRow k="EQUITIES SHARE" v={fmtPct(totalCapital > 0 ? (data.equityBasis / totalCapital) * 100 : null)} />
+          <PlanRow k="OPTIONS SHARE" v={fmtPct(totalCapital > 0 ? (data.optionEquity / totalCapital) * 100 : null)} />
         </Card>
 
         <Card title="TOTAL RISK ALLOCATION" accentColor="#fbbf24">
           <PlanRow k="TOTAL PLANNED RISK" v={`$${Number(totalRisk || 0).toFixed(2)}`} color="#fbbf24" />
           <PlanRow k="EQUITIES PLANNED RISK" v={`$${Number(equityRisk || 0).toFixed(2)}`} color={accent2} />
           <PlanRow k="OPTIONS READY RISK" v={`$${Number(optionRisk || 0).toFixed(2)}`} color={accent} />
-          <PlanRow k="RISK / TOTAL CAPITAL" v={`${riskPct.toFixed(2)}%`} color={riskPct <= 3 ? "#4ade80" : riskPct <= 5 ? "#fbbf24" : "#f87171"} />
+          <PlanRow k="RISK / TOTAL CAPITAL" v={fmtPct(riskPct)} color={riskPct <= 3 ? "#4ade80" : riskPct <= 5 ? "#fbbf24" : "#f87171"} />
           <PlanRow k="OPTIONS OPEN POSITIONS" v={data.optionsPositions?.length || 0} />
         </Card>
 
@@ -583,8 +598,8 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="EQUITY BASIS" value={`$${Math.round(summary.equity_basis || 0)}`} sub={(summary.equity_source || "fallback").toUpperCase()} color={accent} accentBar />
-        <Stat label="PM MODE" value={summary.mode || plan?.mode || "—"} sub={`REGIME ${(regime.status || "UNKNOWN").toUpperCase()}`} color={regime.status === "red" || regime.status === "doomsday" ? "#f87171" : regime.status === "yellow" || regime.status === "downtrend" ? "#fbbf24" : accent2} />
+        <Stat label="EQUITY BASIS" value={`$${Math.round(summary.equity_basis || 0)}`} sub={String(summary.equity_source || "UNKNOWN").toUpperCase()} color={accent} accentBar />
+        <Stat label="PM MODE" value={summary.mode || plan?.mode || "—"} sub={`REGIME ${String(regime.status || "UNKNOWN").toUpperCase()}`} color={regime.status === "red" || regime.status === "doomsday" ? "#f87171" : regime.status === "yellow" || regime.status === "downtrend" ? "#fbbf24" : accent2} />
         <Stat label="RULESET" value={plan?.ruleset?.name || "DEFAULT"} sub={plan?.ruleset?.ruleset_id || "PM"} color={accent} />
         <Stat label="ACCUMULATE" value={summary.accumulate || 0} sub="FULL RULE PASS" color="#4ade80" />
         <Stat label="STARTERS" value={summary.starter || 0} sub="PARTIAL SIZE" color={accent2} />
@@ -593,7 +608,7 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
       </div>
 
       <Card title="PM ROUTING SUMMARY - EQUITY VS OPTIONS" accentColor={accent2}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 160px), 1fr))", gap: 10 }}>
           <RouteTile label="EQUITY" value={routeSummary.equity || 0} color={accent2} />
           <RouteTile label="OPTION" value={routeSummary.option || 0} color={accent} />
           <RouteTile label="BOTH" value={routeSummary.both || 0} color="#4ade80" />
@@ -602,12 +617,12 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
         </div>
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18, marginBottom: 22 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: 18, marginBottom: 22 }}>
         <Card title="EXPOSURE PIE - SECTOR" accentColor={accent2}>
-          <ExposurePie data={exposure.by_sector || []} />
+          <ExposurePie data={pmRows(exposure.by_sector)} />
         </Card>
         <Card title="EXPOSURE PIE - ACTION" accentColor={accent}>
-          <ExposurePie data={exposure.by_action || []} />
+          <ExposurePie data={pmRows(exposure.by_action)} />
         </Card>
         <Card title="CASH PLAN" accentColor="#fbbf24">
           <PlanRow k="CAPITAL" v={`$${Number(summary.equity_basis || 0).toFixed(2)}`} />
@@ -617,8 +632,8 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
           <PlanRow k="TARGET UPSIDE" v={`$${Number(summary.target_upside_usd || 0).toFixed(2)}`} color="#4ade80" />
         </Card>
         <Card title="RISK SHOCK TEST" accentColor="#f87171">
-          {(summary.shock_tests || []).length ? (
-            (summary.shock_tests || []).map(test => (
+          {pmRows(summary.shock_tests).length ? (
+            pmRows(summary.shock_tests).map(test => (
               <PlanRow
                 key={test.name}
                 k={test.name}
@@ -648,7 +663,7 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
 
       <Card title={`EQUITIES FUND - ${rows.length} ROWS`}>
         {!plan ? (
-          <div style={{ color: muted, padding: 20 }}>Loading portfolio plan...</div>
+          <div style={{ color: muted, padding: 20 }}>No portfolio plan available.</div>
         ) : !rows.length ? (
           <div style={{ color: muted, padding: 20 }}>No rows in this filter.</div>
         ) : (
@@ -694,10 +709,10 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
                     <td style={{ ...td, color: Number(r.risk_reward || 0) >= 1.8 ? "#4ade80" : "#fbbf24", fontWeight: 800 }}>{Number(r.risk_reward || 0).toFixed(2)}</td>
                     <td style={{ ...td, color: accent2, fontWeight: 700 }}>{r.option_view}</td>
                     <td style={{ ...td, minWidth: 260 }}>
-                      {(r.reasons || []).slice(0, 3).map((x, i) => (
+                      {pmText(r.reasons).slice(0, 3).map((x, i) => (
                         <div key={`r-${i}`} style={{ color: i === 0 ? labelLight : muted, marginBottom: 4 }}>{x}</div>
                       ))}
-                      {(r.cautions || []).slice(0, 2).map((x, i) => (
+                      {pmText(r.cautions).slice(0, 2).map((x, i) => (
                         <div key={`c-${i}`} style={{ color: "#fbbf24", marginBottom: 4 }}>{x}</div>
                       ))}
                     </td>
@@ -710,7 +725,7 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
       </Card>
 
       <Card title="EQUITIES FUND RULE BOOK">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 12 }}>
           {Object.entries(plan?.rules?.actions || {}).map(([k, v]) => (
             <div key={k} style={{ border: hairline, padding: 12, background: "#050509" }}>
               <div style={{ color: ACTION_COLOR[k] || accent, fontSize: 11, fontWeight: 800, letterSpacing: "0.14em" }}>{k}</div>
@@ -721,7 +736,7 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
       </Card>
 
       <Card title="RATCHET RULES">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 12 }}>
           <RatchetRule name="TACTICAL" text="Lower-upside names: tighter +10% TP / -7% SL, then 3% price steps raise stop 3% and target 5%." />
           <RatchetRule name="CORE" text="Mid/high-quality names: +15% TP / -10% SL, then every +5% move raises stop 5% and target 10%." />
           <RatchetRule name="RUNNER" text="High-upside or volatile names: +25% TP / -15% SL, then +10% steps raise stop 7.5% and target 18%." />
@@ -741,15 +756,15 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
 
 function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rulesets, health, refreshOptions }) {
   const summary = optionsPlan?.summary || {};
-  const candidates = optionsPlan?.candidates || [];
+  const candidates = pmRows(optionsPlan?.candidates);
   const account = optionsAccount?.account || {};
   const riskPolicy = candidates.find(c => c.risk_policy)?.risk_policy || {};
   const optionsHealthOk = Boolean(optionsAccount?.ok && optionsAccount?.paper_only);
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="OPTIONS EQUITY" value={`$${Number(account.equity || 20000).toLocaleString()}`} sub={optionsAccount?.configured ? "SEPARATE PAPER" : "KEYS MISSING"} color={accent} accentBar />
-        <Stat label="BUYING POWER" value={`$${Number(account.buying_power || 0).toLocaleString()}`} sub={(account.status || "UNKNOWN").toUpperCase()} color={optionsHealthOk ? "#4ade80" : "#f87171"} />
+        <Stat label="OPTIONS EQUITY" value={pmMoney(account.equity)} sub={optionsAccount?.configured ? "SEPARATE PAPER" : "KEYS MISSING"} color={accent} accentBar />
+        <Stat label="BUYING POWER" value={`$${Number(account.buying_power || 0).toLocaleString()}`} sub={String(account.status || "UNKNOWN").toUpperCase()} color={optionsHealthOk ? "#4ade80" : "#f87171"} />
         <Stat label="CANDIDATES" value={summary.total || 0} sub={`${summary.ready || 0} MANUAL READY`} color={accent2} />
         <Stat label="OPTION" value={summary.option || 0} sub="PM ROUTED" color={accent} />
         <Stat label="BOTH" value={summary.both || 0} sub="HIGH CONVICTION" color="#4ade80" />
@@ -757,7 +772,7 @@ function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rules
       </div>
 
       <Card title="OPTIONS FUND ROUTING" accentColor={accent2}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 160px), 1fr))", gap: 10 }}>
           <RouteTile label="EQUITY ONLY" value={summary.equity || 0} color={accent2} />
           <RouteTile label="OPTION" value={summary.option || 0} color={accent} />
           <RouteTile label="BOTH" value={summary.both || 0} color="#4ade80" />
@@ -766,7 +781,7 @@ function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rules
         </div>
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(320px, 0.75fr)", gap: 18, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18, alignItems: "start" }}>
         <Card title="OPTIONS FUND CANDIDATE QUEUE">
           <OptionsDecisionTable rows={candidates} />
         </Card>
@@ -792,7 +807,7 @@ function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rules
         </Card>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="OPTIONS OPEN POSITIONS" accentColor={accent}>
           <SimpleOptionsList rows={positions} empty="No open options positions." />
         </Card>
@@ -827,10 +842,10 @@ function SimpleOptionsList({ rows, empty }) {
 
 function FundGovernanceView({ fund, rulesets, health, optionsAccount, refreshRules, refreshHealth }) {
   const isOptions = fund === "OPTIONS";
-  const active = rulesets?.rulesets?.find(r => r.active) || null;
+  const active = pmRows(rulesets?.rulesets).find(r => r.active) || null;
   const healthOk = isOptions ? Boolean(optionsAccount?.ok && optionsAccount?.paper_only) : Boolean(health?.alpaca?.ok);
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
       <Card title={`${fund} PM RULES`} accentColor={accent}>
         {!rulesets ? (
           <div style={{ color: muted, padding: 20 }}>Loading PM rules...</div>
@@ -899,7 +914,7 @@ function RouteTile({ label, value, color }) {
 function ExposurePie({ data }) {
   if (!data.length) return <div style={{ color: muted, padding: 20 }}>No active exposure.</div>;
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", minHeight: 160, gap: 14, alignItems: "center" }}>
+    <div className="pm-owned-exposure" style={{ display: "grid", gridTemplateColumns: "160px minmax(0, 1fr)", minHeight: 160, gap: 14, alignItems: "center" }}>
       <ResponsiveContainer width="100%" height={160}>
         <PieChart>
           <Pie data={data} dataKey="value" nameKey="name" innerRadius={42} outerRadius={68} stroke="#050509" strokeWidth={2}>
@@ -924,7 +939,21 @@ function ExposurePie({ data }) {
   );
 }
 
-function LearningHubView({ active, setActive, equityLearning, optionsLearning }) {
+function PMLearningDisplay({ active, setActive }) {
+  const url = active === "EQUITIES" ? `${API}/portfolio_manager/learning/status` : `${API}/portfolio_manager/options/learning/status`;
+  const read = useDisplayResource(url, 300000);
+  return <div>
+    {read.error && <div role="alert" style={{ color: "#f87171", padding: 12 }}>Learning display unavailable. Last successful data retained where available.
+      <button onClick={read.refresh} style={outlineButton(accent)}>RETRY LEARNING</button>
+    </div>}
+    <LearningHubView active={active} setActive={setActive}
+      equityLearning={active === "EQUITIES" ? read.data : null}
+      optionsLearning={active === "OPTIONS" ? read.data : null}
+      unavailable={Boolean(read.error && !read.data)} />
+  </div>;
+}
+
+function LearningHubView({ active, setActive, equityLearning, optionsLearning, unavailable }) {
   return (
     <>
       <div style={{
@@ -954,7 +983,7 @@ function LearningHubView({ active, setActive, equityLearning, optionsLearning })
           </button>
         ))}
       </div>
-      {active === "EQUITIES"
+      {unavailable ? null : active === "EQUITIES"
         ? <PMLearningView learning={equityLearning} />
         : <OptionsLearningView learning={optionsLearning} />}
     </>
@@ -965,13 +994,13 @@ function PMLearningView({ learning }) {
   if (!learning) {
     return <Card title="PM LEARNING ENGINE"><div style={{ color: muted, padding: 20 }}>Loading PM learning state...</div></Card>;
   }
-  const actionRows = learning.action_stats || [];
-  const sectorRows = learning.sector_stats || [];
-  const signalRows = learning.signal_stats || [];
+  const actionRows = pmRows(learning.action_stats);
+  const sectorRows = pmRows(learning.sector_stats);
+  const signalRows = pmRows(learning.signal_stats);
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="PHASE" value={(learning.phase || "—").toUpperCase()} sub="PM ENGINE" color={accent} accentBar />
+        <Stat label="PHASE" value={String(learning.phase || "UNKNOWN").toUpperCase()} sub="PM ENGINE" color={accent} accentBar />
         <Stat label="SAMPLES" value={learning.samples || 0} sub={`FULL ${learning.min_full_samples}`} color={accent2} />
         <Stat label="PENDING" value={learning.pending_outcomes || 0} sub="AWAIT RETURNS" color="#fbbf24" />
         <Stat label="DECISIONS" value={learning.reconstructed_decisions || 0} sub="REBUILT FROM SCANS" color={labelLight} />
@@ -985,7 +1014,7 @@ function PMLearningView({ learning }) {
         PM LEARNING IS SEPARATE FROM TRADE FLOOR LEARNING: it grades PM decisions, thresholds, modes, and sizing rules.
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="ACTION PERFORMANCE" accentColor={accent2}>
           <LearningTable rows={actionRows} label="ACTION" />
         </Card>
@@ -999,7 +1028,7 @@ function PMLearningView({ learning }) {
       </Card>
 
       <Card title="LATEST PM DECISIONS">
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <table className="pm-owned-table" style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr>
               <th style={th}>TICKER</th>
@@ -1011,7 +1040,7 @@ function PMLearningView({ learning }) {
             </tr>
           </thead>
           <tbody>
-            {(learning.latest_decisions || []).map(r => (
+            {pmRows(learning.latest_decisions).map(r => (
               <tr key={`${r.ticker}-${r.action}`} style={{ borderTop: hairline }}>
                 <td style={{ ...td, color: accent, fontWeight: 800 }}>${r.ticker}</td>
                 <td style={{ ...td, color: ACTION_COLOR[r.action] || labelLight, fontWeight: 800 }}>{r.action}</td>
@@ -1030,8 +1059,8 @@ function PMLearningView({ learning }) {
       </Card>
 
       <Card title="LEARNING RECOMMENDATIONS">
-        {(learning.recommendations || []).length ? (
-          (learning.recommendations || []).map((x, i) => (
+        {pmText(learning.recommendations).length ? (
+          pmText(learning.recommendations).map((x, i) => (
             <div key={i} style={{ color: labelLight, padding: "8px 0", borderBottom: hairline, fontSize: 12 }}>{x}</div>
           ))
         ) : (
@@ -1052,13 +1081,13 @@ function OptionsLearningView({ learning }) {
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="PHASE" value={(learning.phase || "PRE_EXECUTION").toUpperCase()} sub="OPTIONS PM" color={accent} accentBar />
+        <Stat label="PHASE" value={String(learning.phase || "UNKNOWN").toUpperCase()} sub="OPTIONS PM" color={accent} accentBar />
         <Stat label="ORDERS" value={learning.orders || 0} sub="PAPER DATA" color={accent2} />
         <Stat label="READY" value={learning.ready_candidates || 0} sub="MANUAL FIRE" color="#4ade80" />
         <Stat label="OPTION/BOTH" value={(routes.OPTION || 0) + (routes.BOTH || 0)} sub="PM ROUTED" color="#fbbf24" />
       </div>
       <Card title="OPTIONS ROUTE COUNTS" accentColor={accent2}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 160px), 1fr))", gap: 10 }}>
           <RouteTile label="EQUITY" value={routes.EQUITY || 0} color={accent2} />
           <RouteTile label="OPTION" value={routes.OPTION || 0} color={accent} />
           <RouteTile label="BOTH" value={routes.BOTH || 0} color="#4ade80" />
@@ -1066,10 +1095,10 @@ function OptionsLearningView({ learning }) {
         </div>
       </Card>
       <Card title="LATEST OPTIONS PM DECISIONS">
-        <OptionsDecisionTable rows={learning.latest_decisions || []} />
+        <OptionsDecisionTable rows={pmRows(learning.latest_decisions)} />
       </Card>
       <Card title="OPTIONS LEARNING RECOMMENDATIONS">
-        {(learning.recommendations || []).map((x, i) => (
+        {pmText(learning.recommendations).map((x, i) => (
           <div key={i} style={{ color: labelLight, padding: "8px 0", borderBottom: hairline, fontSize: 12 }}>{x}</div>
         ))}
       </Card>
@@ -1082,10 +1111,10 @@ function OptionsBacktestView({ backtest }) {
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="METHOD" value={(backtest?.method || "V1").toUpperCase()} sub="OPTIONS REPLAY" color={accent} accentBar />
+        <Stat label="METHOD" value={String(backtest?.method || "UNKNOWN").toUpperCase()} sub="OPTIONS REPLAY" color={accent} accentBar />
         <Stat label="CANDIDATES" value={summary.total || 0} sub={`${summary.ready || 0} READY`} color={accent2} />
         <Stat label="RISK READY" value={`$${Number(summary.risk_budget_ready || 0).toFixed(0)}`} sub={`${Number(summary.risk_pct || 0).toFixed(2)}% BASIS`} color="#fbbf24" />
-        <Stat label="EQUITY BASIS" value={`$${Number(summary.equity_basis || 20000).toLocaleString()}`} sub="OPTIONS DESK" color={labelLight} />
+        <Stat label="EQUITY BASIS" value={pmMoney(summary.equity_basis)} sub="OPTIONS DESK" color={labelLight} />
       </div>
       <Card title="OPTIONS BACKTEST NOTE" accentColor="#fbbf24">
         <div style={{ color: muted, fontSize: 12, lineHeight: 1.7 }}>
@@ -1093,7 +1122,7 @@ function OptionsBacktestView({ backtest }) {
         </div>
       </Card>
       <Card title="OPTIONS REPLAY SAMPLE">
-        <OptionsDecisionTable rows={backtest?.sample_rows || []} />
+        <OptionsDecisionTable rows={pmRows(backtest?.sample_rows)} />
       </Card>
     </>
   );
@@ -1127,7 +1156,7 @@ function OptionsDecisionTable({ rows }) {
               <td style={td}>{Number(r.risk_reward || 0).toFixed(2)}</td>
               <td style={{ ...td, color: "#fbbf24" }}>${Number(r.risk_budget || 0).toFixed(2)}</td>
               <td style={{ ...td, color: r.data_provider === "ALPACA_OPTIONS" ? accent2 : "#fbbf24", fontWeight: 800 }}>
-                {(r.data_provider || r.instrument?.data_provider || "UNKNOWN").replace("_OPTIONS", "")}
+                {String(r.data_provider || r.instrument?.data_provider || "UNKNOWN").replace("_OPTIONS", "")}
                 <br /><span style={{ color: muted }}>{r.data_quality || r.instrument?.data_quality || "-"}</span>
               </td>
               <td style={td}>{r.contracts || 0}</td>
@@ -1199,7 +1228,7 @@ function PMBacktestView({ backtest, sandbox, setSandbox, loadBacktest, loading }
       </div>
 
       <Card title="SANDBOX RULE TESTER" accentColor={accent2}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))", gap: 10 }}>
           <SandboxSelect label="MODE" value={sandbox.mode} onChange={v => setField("mode", v)} />
           <SandboxInput label="EQUITY" value={sandbox.equity} onChange={v => setField("equity", v)} />
           <SandboxInput label="GROSS CAP" value={sandbox.max_gross_deployment_pct} onChange={v => setField("max_gross_deployment_pct", v)} />
@@ -1227,12 +1256,12 @@ function PMBacktestView({ backtest, sandbox, setSandbox, loadBacktest, loading }
         </div>
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="ACTION BACKTEST" accentColor={accent}>
-          <BacktestTable rows={backtest?.action_stats || []} label="ACTION" />
+          <BacktestTable rows={pmRows(backtest?.action_stats)} label="ACTION" />
         </Card>
         <Card title="RATCHET BACKTEST" accentColor={accent2}>
-          <BacktestTable rows={backtest?.ratchet_stats || []} label="RATCHET" />
+          <BacktestTable rows={pmRows(backtest?.ratchet_stats)} label="RATCHET" />
         </Card>
       </div>
 
@@ -1240,7 +1269,7 @@ function PMBacktestView({ backtest, sandbox, setSandbox, loadBacktest, loading }
         <div style={{ color: muted, fontSize: 11, marginBottom: 10, lineHeight: 1.6 }}>
           {summary.exit_simulation_note || "Simulation appears when matured returns are available."}
         </div>
-        <SimTable rows={backtest?.exit_simulation_by_ratchet || []} />
+        <SimTable rows={pmRows(backtest?.exit_simulation_by_ratchet)} />
       </Card>
 
       <Card title="SAMPLE PM BACKTEST DECISIONS">
@@ -1263,7 +1292,7 @@ function PMBacktestView({ backtest, sandbox, setSandbox, loadBacktest, loading }
                 </tr>
               </thead>
               <tbody>
-                {(backtest.sample_decisions || []).map((r, i) => (
+                {pmRows(backtest.sample_decisions).map((r, i) => (
                   <tr key={`${r.scan_date}-${r.ticker}-${i}`} style={{ borderTop: hairline }}>
                     <td style={td}>{r.scan_date}</td>
                     <td style={{ ...td, color: accent, fontWeight: 800 }}>${r.ticker}</td>
@@ -1330,7 +1359,7 @@ function SandboxSelect({ label, value, onChange }) {
 function BacktestTable({ rows, label }) {
   if (!rows.length) return <div style={{ color: muted, padding: 20 }}>No backtest rows yet.</div>;
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <table className="pm-owned-table" style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr>
           <th style={th}>{label}</th>
@@ -1366,7 +1395,7 @@ function BacktestTable({ rows, label }) {
 function SimTable({ rows }) {
   if (!rows.length) return <div style={{ color: muted, padding: 20 }}>No simulated exits yet.</div>;
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <table className="pm-owned-table" style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr>
           <th style={th}>RATCHET</th>
@@ -1531,7 +1560,7 @@ function PMRulesView({ rulesets, refresh }) {
               </tr>
             </thead>
             <tbody>
-              {(rulesets.rulesets || []).map(r => (
+              {pmRows(rulesets.rulesets).map(r => (
                 <tr key={r.ruleset_id} style={{ borderTop: hairline }}>
                   <td style={{ ...td, color: accent, fontWeight: 800 }}>{r.name}<br /><span style={{ color: muted }}>{r.ruleset_id}</span></td>
                   <td style={{ ...td, color: r.active ? "#4ade80" : muted, fontWeight: 800 }}>{r.active ? "ACTIVE" : "INACTIVE"}</td>
@@ -1558,7 +1587,7 @@ function PMRulesView({ rulesets, refresh }) {
         </div>
       </Card>
       <Card title="PM RULE LAB - CREATE VERSION" accentColor={accent2}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))", gap: 10 }}>
           <SandboxInput label="NAME" value={draft.name} onChange={v => setDraftField("name", v)} />
           <SandboxSelect label="MODE" value={draft.mode} onChange={v => setDraftField("mode", v)} />
           <SandboxInput label="GROSS CAP" value={draft.max_gross_deployment_pct} onChange={v => setDraftField("max_gross_deployment_pct", v)} />
@@ -1661,7 +1690,7 @@ function SystemHealthView({ health, refresh }) {
           <Stat key={label} label={label} value={ok ? "READY" : "BLOCKED"} sub={i === 0 ? "SYSTEM" : "CHECK"} color={ok ? "#4ade80" : "#f87171"} accentBar={i === 0} />
         ))}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="EXECUTION DIAGNOSTIC" accentColor={health.alpaca?.ok ? "#4ade80" : "#f87171"}>
           <PlanRow k="ALPACA" v={health.alpaca?.ok ? "ACCOUNT OK" : "BLOCKED"} color={health.alpaca?.ok ? "#4ade80" : "#f87171"} />
           <PlanRow k="BASE URL" v={health.alpaca?.base_url || "--"} />
@@ -1728,7 +1757,7 @@ function SystemHealthView({ health, refresh }) {
       </div>
       <Card title="BLOCKERS">
         {(health.blockers || []).length ? (
-          health.blockers.map((x, i) => <div key={i} style={{ color: "#f87171", padding: "8px 0", borderBottom: hairline, fontSize: 12 }}>{x}</div>)
+          pmText(health.blockers).map((x, i) => <div key={i} style={{ color: "#f87171", padding: "8px 0", borderBottom: hairline, fontSize: 12 }}>{x}</div>)
         ) : (
           <div style={{ color: "#4ade80", padding: 20 }}>No blockers detected.</div>
         )}
@@ -1740,7 +1769,7 @@ function SystemHealthView({ health, refresh }) {
 function LearningTable({ rows, label }) {
   if (!rows.length) return <div style={{ color: muted, padding: 20 }}>No matured outcomes yet.</div>;
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <table className="pm-owned-table" style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr>
           <th style={th}>{label}</th>
@@ -1786,8 +1815,8 @@ function buildPmCalendarCells(year, month, rows) {
 }
 
 function pmCalendarSummary(rows) {
-  const vals = rows.map(r => Number(r.terminal_total_pct)).filter(Number.isFinite);
-  const relativeVals = rows.map(r => Number(r.relative_pct)).filter(Number.isFinite);
+  const vals = rows.map(r => pmNumber(r.terminal_total_pct)).filter(Number.isFinite);
+  const relativeVals = rows.map(r => pmNumber(r.relative_pct)).filter(Number.isFinite);
   const spyWins = relativeVals.filter(v => v > 0).length;
   const spyLosses = relativeVals.filter(v => v < 0).length;
   const green = vals.filter(v => v > 0).length;
@@ -1809,8 +1838,10 @@ function pmWeekSummary(cells) {
   const weeks = [];
   for (let i = 0; i < cells.length; i += 7) {
     const rows = cells.slice(i, i + 7).map(c => c.row).filter(Boolean);
-    const total = rows.reduce((sum, row) => sum + (Number(row.terminal_total_pct) || 0), 0);
-    const spy = rows.reduce((sum, row) => sum + (Number(row.spy_return_pct) || 0), 0);
+    const values = rows.map(row => pmNumber(row.terminal_total_pct));
+    const total = values.length && values.every(Number.isFinite) ? values.reduce((sum, value) => sum + value, 0) : null;
+    const spyValues = rows.map(row => pmNumber(row.spy_return_pct));
+    const spy = spyValues.length && spyValues.every(Number.isFinite) ? spyValues.reduce((sum, value) => sum + value, 0) : null;
     const green = rows.filter(row => Number(row.terminal_total_pct) > 0).length;
     weeks.push({ days: rows.length, total, spy, green });
   }
@@ -1918,7 +1949,7 @@ function pmCalendarCell(cell, active) {
 
 function PMWeekRail({ weeks }) {
   return (
-    <div style={calendarWeekRail}>
+    <div className="pm-owned-week-rail" style={calendarWeekRail}>
       {weeks.map((week, idx) => {
         const color = pctColor(week.total);
         return (
@@ -1934,7 +1965,7 @@ function PMWeekRail({ weeks }) {
 }
 
 const calendarShellHeader = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
-const calendarHeroStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10, marginBottom: 18 };
+const calendarHeroStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 145px), 1fr))", gap: 10, marginBottom: 18 };
 const calendarHeroTile = (color) => ({
   border: `0.5px solid ${color}55`,
   background: `linear-gradient(145deg, ${color}16, rgba(255,255,255,0.025))`,
@@ -1978,7 +2009,7 @@ const calendarWeekCard = (color) => ({
   fontFamily: "JetBrains Mono",
   cursor: "default",
 });
-const pmDetailGrid = { display: "grid", gridTemplateColumns: "minmax(330px, 0.9fr) minmax(0, 1.1fr)", gap: 18, alignItems: "start" };
+const pmDetailGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 330px), 1fr))", gap: 18, alignItems: "start" };
 const selectStyle = {
   background: "#050509",
   border: hairline,
@@ -1994,7 +2025,7 @@ function PlanRow({ k, v, color = labelLight }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 0", borderBottom: hairline }}>
       <span style={{ color: muted, fontSize: 10, letterSpacing: "0.14em" }}>{k}</span>
-      <span className="num" style={{ color, fontSize: 12, fontWeight: 800 }}>{v}</span>
+      <span className="num" style={{ color, fontSize: 12, fontWeight: 800, minWidth: 0, overflowWrap: "anywhere", textAlign: "right" }}>{v}</span>
     </div>
   );
 }
@@ -2007,3 +2038,15 @@ function RatchetRule({ name, text }) {
     </div>
   );
 }
+const pmRows = value => Array.isArray(value) ? value.filter(row => row && typeof row === "object" && !Array.isArray(row)) : [];
+const pmText = value => Array.isArray(value) ? value.filter(row => typeof row === "string" || typeof row === "number") : [];
+const pmNumber = value => value == null || value === "" ? NaN : Number(value);
+const pmMoney = value => Number.isFinite(pmNumber(value)) ? `$${Number(value).toFixed(2)}` : "--";
+const pmResponsiveCss = `
+  .pm-owned-table { display: block; overflow-x: auto; max-width: 100%; }
+  @media (max-width: 700px) {
+    .pm-owned-calendar, .pm-owned-exposure { grid-template-columns: minmax(0, 1fr) !important; }
+    .pm-owned-week-rail { grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); padding-top: 0 !important; }
+    .pm-owned-calendar-days { overflow-x: auto; grid-template-columns: repeat(7, minmax(78px, 1fr)) !important; }
+  }
+`;

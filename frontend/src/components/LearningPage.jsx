@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { toast } from "sonner";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import StrategyEvidencePanel from "./StrategyEvidencePanel";
+import useDisplayResource from "../hooks/useDisplayResource";
 
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
@@ -12,23 +13,22 @@ const STROKES = ["#c8a84b", "#5eead4", "#f87171", "#a78bfa", "#fb923c", "#4ade80
                   "#60a5fa", "#fbbf24", "#f472b6", "#34d399", "#e879f9", "#facc15"];
 
 export default function LearningPage() {
-  const [status, setStatus] = useState(null);
-  const [combos, setCombos] = useState([]);
-  const [preview, setPreview] = useState(null);
-  const [signalStats, setSignalStats] = useState([]);
-  const [history, setHistory] = useState([]);
+  const statusRead = useDisplayResource(`${API}/learning/status`, 60000);
+  const combosRead = useDisplayResource(`${API}/learning/combos`, 60000);
+  const previewRead = useDisplayResource(`${API}/learning/preview`, 60000);
+  const statsRead = useDisplayResource(`${API}/learning/signal_stats`, 60000);
+  const historyRead = useDisplayResource(`${API}/learning/weight_history?limit=2000`, 60000);
+  const status = statusRead.data;
+  const preview = previewRead.data;
+  const combos = Array.isArray(combosRead.data) ? combosRead.data : [];
+  const signalStats = Array.isArray(statsRead.data) ? statsRead.data : [];
+  const history = useMemo(() => Array.isArray(historyRead.data) ? historyRead.data : [], [historyRead.data]);
+  const invalidList = [combosRead, statsRead, historyRead].some(read => read.data != null && !Array.isArray(read.data));
+  const loadFailed = [statusRead, combosRead, previewRead, statsRead, historyRead].some(read => read.error);
   const [running, setRunning] = useState(false);
   const [selectedSignal, setSelectedSignal] = useState(null);
 
-  const refresh = useCallback(async () => {
-    // Independent .catch so one failure doesn't kill the page
-    axios.get(`${API}/learning/status`).then(r => setStatus(r.data)).catch(e => console.error("status:", e));
-    axios.get(`${API}/learning/combos`).then(r => setCombos(r.data)).catch(e => console.error("combos:", e));
-    axios.get(`${API}/learning/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
-    axios.get(`${API}/learning/signal_stats`).then(r => setSignalStats(r.data)).catch(e => console.error("stats:", e));
-    axios.get(`${API}/learning/weight_history?limit=2000`).then(r => setHistory(r.data)).catch(e => console.error("history:", e));
-  }, []);
-  useEffect(() => { refresh(); }, [refresh]);
+  const refresh = () => Promise.all([statusRead, combosRead, previewRead, statsRead, historyRead].map(read => read.refresh()));
 
   const runCycle = async () => {
     setRunning(true);
@@ -50,7 +50,7 @@ export default function LearningPage() {
   };
 
   const lastRun = status?.last_run;
-  const weights = useMemo(() => status?.weights || [], [status?.weights]);
+  const weights = useMemo(() => Array.isArray(status?.weights) ? status.weights : [], [status?.weights]);
 
   // Build history chart data: { ts: ..., [signal]: value } grouped by timestamp
   const historyChart = useMemo(() => {
@@ -84,6 +84,7 @@ export default function LearningPage() {
           <button data-testid="reset-weights-btn" onClick={reset} style={btnGhost}>[ RESET ]</button>
         </div>
       }>
+      {(loadFailed || invalidList) && <div className="workspace-data-warning" role="status">Learning data is incomplete or unavailable. Last loaded values may be outdated; missing observations are not zero results.</div>}
       <StrategyEvidencePanel />
       {/* Status strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
@@ -125,7 +126,7 @@ export default function LearningPage() {
               </tr>
             </thead>
             <tbody>
-              {preview.rows.filter(r => r.would_change).map(r => (
+              {(Array.isArray(preview.rows) ? preview.rows : []).filter(r => r.would_change).map(r => (
                 <tr key={r.weight_key} data-testid={`preview-${r.weight_key}`} style={{ borderTop: hairline }}>
                   <td style={{ ...td, color: accent, fontSize: 12 }}>{r.weight_key.replace(/_/g, " ").toUpperCase()}</td>
                   <td style={td}>{r.current?.toFixed(2)}</td>
@@ -147,7 +148,7 @@ export default function LearningPage() {
       </Card>
 
       <Card title="INSIGHTS — LAST CYCLE">
-        {(!lastRun?.insights || lastRun.insights.length === 0) ? (
+        {(!Array.isArray(lastRun?.insights) || lastRun.insights.length === 0) ? (
           <div style={{ color: muted, fontSize: 13, padding: "8px 0", letterSpacing: "0.05em" }}>
             Shadow proposals require completed outcomes. Descriptive signal results do not establish predictive edge; active weights remain unchanged.
           </div>

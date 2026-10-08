@@ -15,16 +15,17 @@ export default function StrategyEvidencePanel() {
 
   useEffect(() => {
     let cancelled = false;
-    axios.get(`${API}/research/strategy-evidence`).then(({ data }) => {
+    const controller = new AbortController();
+    axios.get(`${API}/research/strategy-evidence`, { signal: controller.signal, timeout: 12000 }).then(({ data }) => {
       if (!cancelled) {
         if (!data || typeof data.ok !== "boolean") setError(true);
         else setReport(data);
       }
     }).catch(() => { if (!cancelled) setError(true); });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, []);
 
-  const rows = Array.isArray(report?.scorecards) ? report.scorecards.filter(row => row.horizon_sessions === horizon) : [];
+  const rows = Array.isArray(report?.scorecards) ? report.scorecards.filter(row => row && row.horizon_sessions === horizon) : [];
   const generated = report?.generated_at ? new Date(report.generated_at) : null;
   const timestamp = generated && Number.isFinite(generated.getTime()) ? generated.toISOString() : "--";
 

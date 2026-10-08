@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
+import useDisplayResource, { displayResource } from "../hooks/useDisplayResource";
 import { API } from "../config";
 import {
   ResponsiveContainer,
@@ -25,6 +26,19 @@ const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = to
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 500, textAlign: "left" };
 const td = { padding: "11px 8px", color: labelLight, letterSpacing: "0.04em", fontSize: 12, borderTop: hairline, verticalAlign: "top" };
 const biasColors = { BULLISH: "#4ade80", BEARISH: "#f87171", CHOP: "#fbbf24", HEDGE: "#a78bfa" };
+const isRecord = value => value != null && typeof value === "object" && !Array.isArray(value);
+const records = value => Array.isArray(value) ? value.filter(isRecord) : [];
+const texts = value => Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
+const displayText = value => typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) || isValidElement(value) ? value : "--";
+const columns = width => `repeat(auto-fit, minmax(min(${width}px, 100%), 1fr))`;
+// These producers only read persisted proof; PM and authority reads can rebuild
+// on cache miss, so they remain on the existing guarded batch cadence.
+const PERSISTED_READS = new Set(["/kronos/forecast", "/kronos/status", "/kronos/accuracy?limit=900", "/kronos/learning?limit=900", "/kronos/disagreements?limit=250"]);
+function usePersistedKronos(path, setter) {
+  const resource = useDisplayResource(`${API}${path}`, 60000);
+  useEffect(() => { setter(resource.data); }, [resource.data, resource.updatedAt, setter]);
+  return resource;
+}
 
 export default function KronosPage() {
   const [scan, setScan] = useState(null);
@@ -62,13 +76,45 @@ export default function KronosPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const refreshInFlight = useRef(false);
+  const mounted = useRef(false);
+  const lastGood = useRef(new Map());
+  const nextReadAt = useRef(0);
+  const sandboxRequest = useRef(null);
+  const calendarRequest = useRef(null);
+  const [visibleVersion, setVisibleVersion] = useState(0);
+  const [displayFailures, setDisplayFailures] = useState([]);
+  const persistedForecast = usePersistedKronos("/kronos/forecast", setKronos);
+  const persistedStatus = usePersistedKronos("/kronos/status", setKronosStatus);
+  const persistedAccuracy = usePersistedKronos("/kronos/accuracy?limit=900", setKronosAccuracy);
+  const persistedLearning = usePersistedKronos("/kronos/learning?limit=900", setKronosLearning);
+  const persistedDisagreements = usePersistedKronos("/kronos/disagreements?limit=250", setDisagreements);
+  useEffect(() => { setLastSync(persistedForecast.data?.generated_at || null); }, [persistedForecast.data]);
 
-  const refresh = useCallback(async () => {
-    if (refreshInFlight.current) return;
-    refreshInFlight.current = true;
+  const refresh = useCallback(async (force = false) => {
+    if (!mounted.current || refreshInFlight.current || (!force && (document.visibilityState === "hidden" || Date.now() < nextReadAt.current))) return;
+    const controller = new AbortController();
+    refreshInFlight.current = controller;
+    nextReadAt.current = Date.now() + 60000;
     setLoading(true);
-    const get = (path, fallback, timeout = 10000) =>
-      axios.get(`${API}${path}`, { timeout }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
+    const failures = [];
+    const get = async (path, fallback, timeout = 10000) => {
+      try {
+        if (PERSISTED_READS.has(path)) {
+          const resource = displayResource(`${API}${path}`, 60000);
+          const cached = resource.getSnapshot();
+          if (force || cached.updatedAt == null || Date.now() - cached.updatedAt >= 60000) await resource.refresh(force);
+          const state = resource.getSnapshot();
+          if (state.error) failures.push(path);
+          return { data: state.data };
+        }
+        const response = await axios.get(`${API}${path}`, { timeout, signal: controller.signal });
+        if (!controller.signal.aborted) lastGood.current.set(path, response.data);
+        return response;
+      } catch (error) {
+        failures.push(path);
+        return { data: lastGood.current.get(path) || null };
+      }
+    };
     try {
       const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, accuracyRes, learningRes, disagreementRes] = await Promise.all([
         get("/scan/latest", { results: [] }),
@@ -86,6 +132,7 @@ export default function KronosPage() {
         get("/kronos/learning?limit=900", { ok: false, health: "UNKNOWN", recommendations: [] }, 16000),
         get("/kronos/disagreements?limit=250", { rows: [] }),
       ]);
+      if (!mounted.current || controller.signal.aborted) return;
       setScan(scanRes.data);
       setPm(pmRes.data);
       setEquityPositions(eqRes.data);
@@ -95,22 +142,27 @@ export default function KronosPage() {
       setTracker(trackerRes.data);
       setLseHealth(healthRes.data);
       setMacro(macroRes.data);
-      setKronos(kronosRes.data);
-      setKronosStatus(statusRes.data);
-      setKronosAccuracy(accuracyRes.data);
-      setKronosLearning(learningRes.data);
-      setDisagreements(disagreementRes.data);
+      // Persisted subscribers own these values. A slower context batch must
+      // not overwrite a newer cache publication with its earlier snapshot.
+      setDisplayFailures(failures);
       if (!kronosRes.data?.error && kronosRes.data?.generated_at) setLastSync(kronosRes.data.generated_at);
     } finally {
-      refreshInFlight.current = false;
-      setLoading(false);
+      if (refreshInFlight.current === controller) refreshInFlight.current = false;
+      if (mounted.current && !controller.signal.aborted) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     refresh();
     const id = setInterval(refresh, 60000);
-    return () => clearInterval(id);
+    const visible = () => { if (document.visibilityState !== "hidden") { setVisibleVersion(value => value + 1); refresh(); } };
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      mounted.current = false; refreshInFlight.current?.abort?.(); refreshInFlight.current = false; nextReadAt.current = 0;
+      sandboxRequest.current?.abort(); calendarRequest.current?.abort();
+      clearInterval(id); document.removeEventListener("visibilitychange", visible);
+    };
   }, [refresh]);
 
   const forceRefresh = useCallback(async () => {
@@ -142,12 +194,12 @@ export default function KronosPage() {
   const selected = activeForecasts.find(f => f.key === selectedKey) || activeForecasts[0] || null;
   const selectedBackend = useMemo(() => {
     if (!selected) return null;
-    return (kronos?.forecasts || []).find(r =>
+    return records(kronos?.forecasts).find(r =>
       (Boolean(r.contract) && String(r.contract) === String(selected.contract || ""))
       || (String(r.ticker || "").toUpperCase() === selected.ticker && String(r.instrument || "").toUpperCase() === selected.instrument)
     );
   }, [kronos, selected]);
-  const selectedFull = selected ? { ...selected, ...(selectedBackend || {}) } : null;
+  const selectedFull = selected ? { ...(selectedBackend || {}), ...selected } : null;
   const market = useMemo(() => kronos?.market_forecast || {}, [kronos]);
   const cone = useMemo(() => kronos?.portfolio_day_cone || {}, [kronos]);
   const chartChoices = useMemo(() => buildChartChoices(activeForecasts), [activeForecasts]);
@@ -160,21 +212,22 @@ export default function KronosPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const ticker = selected?.ticker;
-    if (!ticker) {
+    if (!ticker || tab !== "FORECAST" || document.visibilityState === "hidden") {
       setSelectedContext(null);
       return () => { cancelled = true; };
     }
     setSelectedContext({ loading: true, ticker });
     Promise.all([
-      axios.get(`${API}/data/lse/ticker/${ticker}`, { timeout: 10000 }).catch(e => ({ data: { error: e.message, degraded: true } })),
-      axios.get(`${API}/data/lse/candles/${ticker}?timeframe=1d&limit=80&order=desc`, { timeout: 10000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
-      axios.get(`${API}/data/lse/options_flow?underlying=${ticker}&limit=40&max_dte=90`, { timeout: 10000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
+      axios.get(`${API}/data/lse/ticker/${encodeURIComponent(ticker)}`, { timeout: 10000, signal: controller.signal }).catch(e => ({ data: { error: e.message, degraded: true } })),
+      axios.get(`${API}/data/lse/candles/${encodeURIComponent(ticker)}?timeframe=1d&limit=80&order=desc`, { timeout: 10000, signal: controller.signal }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
+      axios.get(`${API}/data/lse/options_flow?underlying=${encodeURIComponent(ticker)}&limit=40&max_dte=90`, { timeout: 10000, signal: controller.signal }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
     ]).then(([profile, candles, flow]) => {
       if (!cancelled) setSelectedContext({ loading: false, ticker, profile: profile.data, candles: candles.data, flow: flow.data });
     });
-    return () => { cancelled = true; };
-  }, [selected?.ticker, lastSync]);
+    return () => { cancelled = true; controller.abort(); };
+  }, [selected?.ticker, lastSync, tab, visibleVersion]);
 
   const stats = useMemo(() => summarizeForecasts(activeForecasts, lseHealth, selectedContext), [activeForecasts, lseHealth, selectedContext]);
   const scenario = selectedFull ? buildScenario(selectedFull) : [];
@@ -184,15 +237,18 @@ export default function KronosPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    if (tab !== "FORECAST" || document.visibilityState === "hidden") return undefined;
     const ticker = chartChoice?.ticker || "SPY";
     setChartLoading(true);
+    setChartCandles(null);
     setCandleSuite(null);
     const path = ticker === "SPY"
       ? `${API}/price/history/SPY?days=140`
-      : `${API}/data/lse/candles/${ticker}?timeframe=1d&limit=140&order=desc`;
+      : `${API}/data/lse/candles/${encodeURIComponent(ticker)}?timeframe=1d&limit=140&order=desc`;
     Promise.all([
-      axios.get(path, { timeout: 12000 }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
-      axios.get(`${API}/kronos/candle_forecast/${ticker}`, { timeout: 20000 }).catch(e => ({ data: { ok: false, error: e.message, timeframes: [] } })),
+      axios.get(path, { timeout: 12000, signal: controller.signal }).catch(e => ({ data: { rows: [], error: e.message, degraded: true } })),
+      axios.get(`${API}/kronos/candle_forecast/${encodeURIComponent(ticker)}`, { timeout: 20000, signal: controller.signal }).catch(e => ({ data: { ok: false, error: e.message, timeframes: [] } })),
     ])
       .then(([priceRes, candleRes]) => {
         if (!cancelled) {
@@ -203,55 +259,89 @@ export default function KronosPage() {
       .finally(() => {
         if (!cancelled) setChartLoading(false);
       });
-    return () => { cancelled = true; };
-  }, [chartChoice?.ticker, lastSync]);
+    return () => { cancelled = true; controller.abort(); };
+  }, [chartChoice?.ticker, lastSync, tab, visibleVersion]);
 
   const runSandbox = useCallback(async (symbol) => {
+    sandboxRequest.current?.abort();
+    const controller = new AbortController();
+    sandboxRequest.current = controller;
     const ticker = normalizeTicker(symbol || sandboxDraft || "SPY") || "SPY";
     setSandboxSymbol(ticker);
     setSandboxLoading(true);
+    setSandbox(null);
     const get = (path, fallback, timeout = 10000) =>
-      axios.get(`${API}${path}`, { timeout }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
+      axios.get(`${API}${path}`, { timeout, signal: controller.signal }).catch(e => ({ data: { ...fallback, error: e.message, degraded: true } }));
     const [profile, candles, flow, macroRes] = await Promise.all([
-      get(`/data/lse/ticker/${ticker}`, { error: "missing profile" }),
-      get(`/data/lse/candles/${ticker}?timeframe=1d&limit=120&order=desc`, { rows: [] }),
-      get(`/data/lse/options_flow?underlying=${ticker}&limit=80&max_dte=120`, { rows: [] }),
+      get(`/data/lse/ticker/${encodeURIComponent(ticker)}`, { error: "missing profile" }),
+      get(`/data/lse/candles/${encodeURIComponent(ticker)}?timeframe=1d&limit=120&order=desc`, { rows: [] }),
+      get(`/data/lse/options_flow?underlying=${encodeURIComponent(ticker)}&limit=80&max_dte=120`, { rows: [] }),
       get("/data/lse/macro?limit=80", { economic_calendar: [], bond_yields: [] }),
     ]);
+    if (!mounted.current || controller.signal.aborted) return;
     setSandbox({ ticker, profile: profile.data, candles: candles.data, flow: flow.data, macro: macroRes.data, syncedAt: new Date().toISOString() });
     setSandboxLoading(false);
   }, [sandboxDraft]);
 
   useEffect(() => {
-    if (tab === "SANDBOX" && !sandbox && !sandboxLoading) runSandbox(sandboxSymbol);
-  }, [tab, sandbox, sandboxLoading, sandboxSymbol, runSandbox]);
+    if (tab === "SANDBOX" && document.visibilityState !== "hidden" && !sandbox && !sandboxLoading) runSandbox(sandboxSymbol);
+    if (tab !== "SANDBOX") { sandboxRequest.current?.abort(); if (sandboxLoading) setSandboxLoading(false); }
+  }, [tab, sandbox, sandboxLoading, sandboxSymbol, runSandbox, visibleVersion]);
 
   const loadCalendar = useCallback(async (year = calendarYear, month = calendarMonth) => {
+    calendarRequest.current?.abort();
+    const controller = new AbortController();
+    calendarRequest.current = controller;
     setCalendarLoading(true);
+    setCalendar(null); setSelectedCalendarDay(null);
     try {
-      const r = await axios.get(`${API}/kronos/calendar`, { params: { year, month }, timeout: 12000 });
+      const r = await axios.get(`${API}/kronos/calendar`, { params: { year, month }, timeout: 12000, signal: controller.signal });
+      if (!mounted.current || controller.signal.aborted) return;
       setCalendar(r.data);
-      setSelectedCalendarDay((r.data.days || []).find(d => d.has_prediction) || (r.data.days || [])[0] || null);
+      setSelectedCalendarDay(records(r.data?.days).find(d => d.has_prediction) || records(r.data?.days)[0] || null);
     } catch (e) {
+      if (!mounted.current || controller.signal.aborted) return;
       setCalendar({ ok: false, error: e.message, year, month, days: [] });
       setSelectedCalendarDay(null);
     } finally {
-      setCalendarLoading(false);
+      if (mounted.current && !controller.signal.aborted) setCalendarLoading(false);
     }
   }, [calendarMonth, calendarYear]);
 
   useEffect(() => {
-    if (tab === "CALENDAR" && !calendar && !calendarLoading) loadCalendar();
-  }, [tab, calendar, calendarLoading, loadCalendar]);
+    if (tab === "CALENDAR" && document.visibilityState !== "hidden" && !calendar && !calendarLoading) loadCalendar();
+    if (tab !== "CALENDAR") { calendarRequest.current?.abort(); if (calendarLoading) setCalendarLoading(false); }
+  }, [tab, calendar, calendarLoading, loadCalendar, visibleVersion]);
+
+  const malformed = [
+    ["forecasts", kronos, kronos?.forecasts], ["disagreements", disagreements, disagreements?.rows],
+    ["disagreement summary", disagreements, disagreements?.summary], ["calendar days", calendar, calendar?.days],
+    ["candle timeframes", candleSuite, candleSuite?.timeframes],
+    ["accuracy timeframes", kronosAccuracy?.by_timeframe, kronosAccuracy?.by_timeframe],
+    ["accuracy regimes", kronosAccuracy?.by_regime, kronosAccuracy?.by_regime],
+    ["recent proof", kronosAccuracy?.recent, kronosAccuracy?.recent],
+    ...records(kronos?.forecasts).flatMap(row => [
+      [`${row.ticker || "forecast"} tripwires`, row.tripwires, row.tripwires, item => typeof item === "string"],
+      [`${row.ticker || "forecast"} catalysts`, row.catalysts, row.catalysts, item => typeof item === "string"],
+      [`${row.ticker || "forecast"} attribution`, row.attribution, row.attribution],
+      [`${row.ticker || "forecast"} exit tiers`, row.exit_forecast?.tiers, row.exit_forecast?.tiers],
+    ]),
+  ].filter(([, owner, list, valid = isRecord]) => owner != null && (!Array.isArray(list) || list.some(item => !valid(item)))).map(([name]) => name);
+  const persistedErrors = [persistedForecast, persistedStatus, persistedAccuracy, persistedLearning, persistedDisagreements].some(resource => resource.error);
 
   return (
     <CrtShell
       title="KRONOS FORECAST LAB"
       headerRight={<div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
-        <button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "SYNCING" : "REFRESH VIEW"}</button>
+        <button onClick={() => refresh(true)} disabled={loading} style={buttonStyle(accent2)}>{loading ? "SYNCING" : "REFRESH VIEW"}</button>
         <button onClick={forceRefresh} disabled={actionLoading} style={buttonStyle(accent)}>{actionLoading ? "RUNNING" : "FORCE KRONOS"}</button>
       </div>}
     >
+      {(displayFailures.length > 0 || persistedErrors || malformed.length > 0) && <div role="status" className="workspace-data-warning" data-testid="kronos-display-warning">
+        {(displayFailures.length > 0 || persistedErrors) && "Some Kronos data could not refresh. Last loaded values may be outdated."}
+        {displayFailures.length > 0 && ` Sources: ${displayFailures.join(", ")}.`}
+        {malformed.length > 0 && ` Unavailable or malformed lists: ${malformed.join(", ")}.`}
+      </div>}
       <div style={hero}>
         <MarketForecastBand market={market} cone={cone} />
         <div style={bootBox}>
@@ -318,6 +408,7 @@ export default function KronosPage() {
             setCalendarYear(next);
             loadCalendar(next, calendarMonth);
           }}
+          setPeriod={(year, month) => { setCalendarYear(year); setCalendarMonth(month); loadCalendar(year, month); }}
           refresh={() => loadCalendar(calendarYear, calendarMonth)}
         />
       )}
@@ -419,15 +510,15 @@ function KronosStatusPanel({ status, lseHealth, pm, lastSync }) {
 
 function KronosAccuracyPanel({ accuracy, compact = false }) {
   const overall = accuracy?.overall || {};
-  const tfRows = accuracy?.by_timeframe || [];
-  const regimeRows = accuracy?.by_regime || [];
-  const recent = accuracy?.recent || [];
-  const ok = accuracy?.ok !== false;
+  const tfRows = records(accuracy?.by_timeframe);
+  const regimeRows = records(accuracy?.by_regime);
+  const recent = records(accuracy?.recent);
+  const ok = accuracy?.ok === true;
   return (
     <div style={{ display: "grid", gap: 14, marginTop: compact ? 0 : 18 }}>
       <div style={proofGrid}>
-        <Mini label="PROOF SAMPLE" value={overall.sample ?? 0} color={labelLight} />
-        <Mini label="PENDING" value={overall.pending ?? accuracy?.pending ?? 0} color={(overall.pending || accuracy?.pending) ? "#fbbf24" : "#4ade80"} />
+        <Mini label="PROOF SAMPLE" value={overall.sample ?? "--"} color={labelLight} />
+        <Mini label="PENDING" value={overall.pending ?? accuracy?.pending ?? "--"} color={(overall.pending || accuracy?.pending) ? "#fbbf24" : muted} />
         <Mini label="DIR WIN" value={overall.direction_win_rate_pct == null ? "-" : `${overall.direction_win_rate_pct}%`} color={rateColor(overall.direction_win_rate_pct)} />
         <Mini label="CONE HIT" value={overall.cone_coverage_pct == null ? "-" : `${overall.cone_coverage_pct}%`} color={rateColor(overall.cone_coverage_pct)} />
         <Mini label="MAE" value={overall.mae_pct == null ? "-" : `${overall.mae_pct}%`} color={errorColor(overall.mae_pct)} />
@@ -512,7 +603,7 @@ function SelectionMatrix({ rows, selectedKey, onSelect }) {
 
 function KronosTerminalChart({ choice, choices, candles, candleSuite, forecast, loading, onSelect }) {
   const rows = buildTerminalChartRows(candles, forecast);
-  const candleRows = candleSuite?.timeframes || [];
+  const candleRows = records(candleSuite?.timeframes);
   const primary = candleSuite?.primary || candleRows.find(r => r?.ok);
   const color = forecast?.color || accent2;
   const last = rows.filter(r => r.actual != null).slice(-1)[0];
@@ -683,10 +774,11 @@ function SandboxView({ draft, setDraft, run, loading, data }) {
   );
 }
 
-function KronosCalendarView({ data, loading, month, year, selected, setSelected, setMonth, setYear, refresh }) {
-  const years = data?.available_years?.length ? data.available_years : [year, year - 1, year - 2];
-  const cells = buildCalendarCells(year, month, data?.days || []);
-  const summary = calendarSummary(data?.days || []);
+function KronosCalendarView({ data, loading, month, year, selected, setSelected, setMonth, setYear, setPeriod, refresh }) {
+  const availableYears = Array.isArray(data?.available_years) ? data.available_years.filter(value => Number.isInteger(value)) : [];
+  const years = availableYears.length ? availableYears : [year, year - 1, year - 2];
+  const cells = buildCalendarCells(year, month, records(data?.days));
+  const summary = calendarSummary(records(data?.days));
   const apiSummary = data?.summary || {};
   const weeks = calendarWeekSummary(cells);
   return (
@@ -702,7 +794,10 @@ function KronosCalendarView({ data, loading, month, year, selected, setSelected,
             </select>
             <button onClick={refresh} disabled={loading} style={buttonStyle(accent2)}>{loading ? "LOADING" : "REFRESH MONTH"}</button>
           </div>
-          <button onClick={() => { setMonth(new Date().getMonth() + 1); setYear(new Date().getFullYear()); }} style={calendarMonthButton}>THIS MONTH</button>
+          <button onClick={() => {
+            const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "numeric" }).formatToParts(new Date());
+            setPeriod(Number(parts.find(part => part.type === "year").value), Number(parts.find(part => part.type === "month").value));
+          }} style={calendarMonthButton}>THIS MONTH</button>
         </div>
         <div style={calendarHeroStats}>
           <div style={calendarHeroTile("#4ade80")}><span>Good Days</span><strong>{summary.good}</strong><small>prediction wins</small></div>
@@ -801,8 +896,8 @@ function ScenarioFan({ selected, rows }) {
   return (
     <div>
       <div style={miniGrid}>
-        <Mini label="BASE CASE" value={`${selected.baseMove >= 0 ? "+" : ""}${selected.baseMove.toFixed(1)}%`} color={selected.color} />
-        <Mini label="BEAR FLOOR" value={`${selected.bearMove.toFixed(1)}%`} color="#f87171" />
+        <Mini label="BASE CASE" value={fmtPct(selected.baseMove)} color={selected.color} />
+        <Mini label="BEAR FLOOR" value={fmtPct(selected.bearMove)} color="#f87171" />
         <Mini label="UPPER CONE" value={`${signed(selected.bullMove)}%`} color="#4ade80" />
         <Mini label="EDGE SCORE" value={selected.edgeScore} color={accent2} />
       </div>
@@ -861,7 +956,7 @@ function CommandCard({ item, context }) {
         <PlanRow k="Kronos Read" v={item.bias} color={item.color} />
         <PlanRow k="PM Agreement" v={item.aligned ? "ALIGNED" : "CONFLICT / WATCH"} color={item.aligned ? "#4ade80" : "#fbbf24"} />
         <PlanRow k="Known Catalysts" v={item.catalysts.length ? item.catalysts.join(", ") : "No mapped catalyst"} />
-        <PlanRow k="Data Context" v={context?.loading ? "Loading LSE context" : context?.profile?.error ? "LSE profile degraded" : "LSE profile linked"} color={context?.profile?.error ? "#fbbf24" : accent2} />
+        <PlanRow k="Data Context" v={context?.loading ? "Loading LSE context" : context?.profile?.error ? "LSE profile degraded" : context?.profile?.ok ? "LSE profile linked" : "LSE profile unavailable"} color={context?.profile?.error ? "#fbbf24" : accent2} />
       </div>
       <ForecastStack item={item} />
     </div>
@@ -894,7 +989,7 @@ function MarketForecastBand({ market, cone }) {
 }
 
 function ForecastStack({ item }) {
-  const attribution = item.attribution || [];
+  const attribution = records(item.attribution);
   const horizons = item.horizons || {};
   const probs = item.probabilities || {};
   const exit = item.exit_forecast || item.exitForecast || {};
@@ -906,7 +1001,7 @@ function ForecastStack({ item }) {
           {attribution.length ? attribution.map(a => (
             <div key={a.factor} style={barRow}>
               <span>{a.factor}</span>
-              <div style={barTrack}><div style={{ ...barFill, width: `${Math.max(4, Number(a.weight || 0))}%` }} /></div>
+              <div style={barTrack}><div style={{ ...barFill, width: `${Math.min(100, Math.max(0, numberish(a.weight) ?? 0))}%` }} /></div>
               <strong>{a.state}</strong>
             </div>
           )) : <div style={emptySmall}>No attribution payload yet.</div>}
@@ -928,7 +1023,7 @@ function ForecastStack({ item }) {
       <div style={stackGrid}>
         <div style={stackPanel}>
           <div style={sectionLabel}>MULTI-HORIZON FORECAST</div>
-          {(Array.isArray(horizons) ? horizons.map(h => [h.horizon, h]) : Object.entries(horizons)).map(([k, h]) => (
+          {(Array.isArray(horizons) ? records(horizons).map(h => [h.horizon, h]) : isRecord(horizons) ? Object.entries(horizons).filter(([, h]) => isRecord(h)) : []).map(([k, h]) => (
             <div key={k} style={horizonRow}>
               <span>{k}</span>
               <strong>{fmtPct(h.cone_low_pct ?? h.low_pct)} / {fmtPct(h.forecast_pct ?? h.base_pct)} / {fmtPct(h.cone_high_pct ?? h.high_pct)}</strong>
@@ -939,7 +1034,7 @@ function ForecastStack({ item }) {
           <div style={sectionLabel}>EXIT FORECAST</div>
           <PlanRow k="Style" v={exit.style || "ADVISORY"} color={accent2} />
           <PlanRow k="Hard Stop" v={exit.hard_stop_pct == null ? "-" : `${exit.hard_stop_pct}%`} color="#f87171" />
-          {(exit.tiers || []).slice(0, 6).map(t => (
+          {records(exit.tiers).slice(0, 6).map(t => (
             <PlanRow key={t.trigger_pct} k={`+${t.trigger_pct}%`} v={`lock +${t.locked_floor_pct}% / ${t.probability}%`} color="#fbbf24" />
           ))}
         </div>
@@ -949,8 +1044,12 @@ function ForecastStack({ item }) {
 }
 
 function DisagreementView({ data, liveRows }) {
-  const rows = data?.rows || [];
-  const summary = data?.summary || [];
+  const rows = records(data?.rows);
+  const summary = records(data?.summary);
+  const [page, setPage] = useState(0);
+  const lastPage = Math.max(0, Math.ceil(rows.length / 80) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const offset = currentPage * 80;
   const reconciliation = data?.reconciliation || {};
   const resolved = rows.filter(r => r.status === "RESOLVED").length;
   const open = rows.filter(r => !r.status || r.status === "OPEN_AUDIT" || r.status === "OUT_FOR_AUDIT").length;
@@ -973,7 +1072,7 @@ function DisagreementView({ data, liveRows }) {
                 <tr><th style={th}>TIME</th><th style={th}>TICKER</th><th style={th}>TYPE</th><th style={th}>PM</th><th style={th}>KRONOS</th><th style={th}>SCORE</th><th style={th}>ACTUAL</th><th style={th}>WINNER</th><th style={th}>STATUS</th></tr>
               </thead>
               <tbody>
-                {rows.slice(0, 80).map((r, i) => (
+                {rows.slice(offset, offset + 80).map((r, i) => (
                   <tr key={`${r.generated_at}-${r.ticker}-${i}`}>
                     <td style={td}>{fmtDate(r.generated_at)}</td>
                     <td style={{ ...td, color: accent, fontWeight: 900 }}>${r.ticker}</td>
@@ -990,6 +1089,11 @@ function DisagreementView({ data, liveRows }) {
             </table>
           </div>
         )}
+        {rows.length > 80 && <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginTop: 12 }}>
+          <span style={{ color: muted }}>{offset + 1}-{Math.min(offset + 80, rows.length)} OF {rows.length}</span>
+          <button disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)} style={buttonStyle(accent2)}>Previous</button>
+          <button disabled={currentPage === lastPage} onClick={() => setPage(currentPage + 1)} style={buttonStyle(accent2)}>Next</button>
+        </div>}
       </Card>
     </div>
   );
@@ -999,8 +1103,8 @@ function MemoryItem({ label, value, detail }) {
   return (
     <div style={{ border: hairline, background: "rgba(255,255,255,0.018)", padding: 14 }}>
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.14em", marginBottom: 8 }}>{label}</div>
-      <div style={{ color: accent, fontSize: 20, fontWeight: 900, letterSpacing: "0.08em" }}>{value}</div>
-      <div style={{ color: muted, fontSize: 11, lineHeight: 1.5, marginTop: 8 }}>{detail}</div>
+      <div style={{ color: accent, fontSize: 20, fontWeight: 900, letterSpacing: "0.08em" }}>{displayText(value)}</div>
+      <div style={{ color: muted, fontSize: 11, lineHeight: 1.5, marginTop: 8 }}>{displayText(detail)}</div>
     </div>
   );
 }
@@ -1102,7 +1206,7 @@ function AuditGrid({ scan, pm, equityPositions, optionPositions, optionRisk, tra
 }
 
 function normalizeBackendForecasts(kronos) {
-  return (kronos?.forecasts || []).map((r) => {
+  return records(kronos?.forecasts).map((r) => {
     const ticker = normalizeTicker(r.ticker || r.symbol);
     const instrument = String(r.instrument || "EQUITY").toUpperCase();
     const bias = String(r.forecast_bias || r.bias || "CHOP").toUpperCase();
@@ -1124,8 +1228,8 @@ function normalizeBackendForecasts(kronos) {
       confidence: numberish(r.confidence),
       aligned: Boolean(r.aligned_with_pm),
       horizon: r.target_at ? `RTH target ${new Date(r.target_at).toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric" })} ${fmtTime(r.target_at)}` : "UNAVAILABLE",
-      catalysts: r.catalysts || [],
-      tripwires: r.tripwires || [],
+      catalysts: texts(r.catalysts),
+      tripwires: texts(r.tripwires),
       marketValue: numberish(r.market_value),
       unrealizedPct: numberish(r.unrealized_pct),
       baseMove,
@@ -1358,19 +1462,19 @@ function auditItem(label, value, color) {
 
 function normalizeRows(payload) {
   if (!payload) return [];
-  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload)) return records(payload);
   if (payload.economic_calendar || payload.bond_yields) {
-    return [...(payload.economic_calendar || []), ...(payload.bond_yields || [])];
+    return [...records(payload.economic_calendar), ...records(payload.bond_yields)];
   }
-  return payload.rows || payload.data || payload.events || payload.results || payload.flow || [];
+  return records(payload.rows || payload.data || payload.events || payload.results || payload.flow);
 }
 
 function normalizeEquityPositions(data) {
-  return data?.positions || [];
+  return records(data?.positions);
 }
 
 function normalizePmRows(data) {
-  return data?.recommendations || data?.decisions || data?.plan || data?.rows || data?.candidates || data?.summary?.decisions || [];
+  return records(data?.recommendations || data?.decisions || data?.plan || data?.rows || data?.candidates || data?.summary?.decisions);
 }
 
 function normalizeTicker(v) {
@@ -1384,7 +1488,7 @@ function inferUnderlying(symbol) {
 }
 
 function numberish(v) {
-  if (v == null || v === "") return null;
+  if (v == null || typeof v === "boolean" || String(v).trim() === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
@@ -1396,18 +1500,19 @@ function normalizePct(v) {
 }
 
 function fmtMoney(v) {
-  if (v == null) return "-";
-  return `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  const n = numberish(v);
+  if (n == null) return "-";
+  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 }
 
 function fmtPct(v) {
-  if (v == null) return "-";
-  const n = Number(v);
+  const n = numberish(v);
+  if (n == null) return "-";
   return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
 }
 
 function fmtTime(v) {
-  if (!v) return "--";
+  if (!v || !Number.isFinite(new Date(v).getTime())) return "--";
   return new Date(v).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" });
 }
 
@@ -1511,7 +1616,7 @@ function MiniProb({ label, value, color }) {
 }
 
 function CandleHorizonTable({ rows }) {
-  const clean = (rows || []).filter(r => r?.ok);
+  const clean = records(rows).filter(r => r.ok);
   if (!clean.length) {
     return <div style={{ ...explainText, border: hairline, padding: 14, marginTop: 14 }}>Kronos candle engine is waiting on enough OHLCV rows.</div>;
   }
@@ -1547,9 +1652,9 @@ function CandleHorizonTable({ rows }) {
 
 function PlanRow({ k, v, color = labelLight }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "150px minmax(0, 1fr)", gap: 12, padding: "9px 0", borderTop: hairline }}>
+    <div style={{ display: "grid", gridTemplateColumns: columns(150), gap: 12, padding: "9px 0", borderTop: hairline }}>
       <span style={{ color: dim, fontSize: 10, letterSpacing: "0.14em" }}>{k}</span>
-      <strong style={{ color, fontSize: 12, letterSpacing: "0.06em", overflowWrap: "anywhere" }}>{v}</strong>
+      <strong style={{ color, fontSize: 12, letterSpacing: "0.06em", overflowWrap: "anywhere" }}>{displayText(v)}</strong>
     </div>
   );
 }
@@ -1558,7 +1663,7 @@ function Mini({ label, value, color }) {
   return (
     <div style={{ border: hairline, padding: 12, background: "rgba(255,255,255,0.018)", minWidth: 0 }}>
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.14em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
-      <div style={{ color, fontSize: 16, letterSpacing: "0.04em", marginTop: 7, fontWeight: 900, overflowWrap: "anywhere" }}>{value}</div>
+      <div style={{ color, fontSize: 16, letterSpacing: "0.04em", marginTop: 7, fontWeight: 900, overflowWrap: "anywhere" }}>{displayText(value)}</div>
     </div>
   );
 }
@@ -1648,7 +1753,7 @@ const tooltipStyle = {
 
 const hero = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) minmax(260px, 360px)",
+  gridTemplateColumns: columns(280),
   gap: 18,
   border: `0.5px solid ${accent2}55`,
   background: `linear-gradient(135deg, rgba(167,139,250,0.08), rgba(94,234,212,0.035) 45%, ${pageBg})`,
@@ -1660,7 +1765,7 @@ const bootBox = { border: hairline, background: "rgba(0,0,0,0.22)", padding: 14,
 const bootRow = { display: "flex", justifyContent: "space-between", gap: 12, color: muted, fontSize: 10, letterSpacing: "0.13em" };
 const marketBand = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+  gridTemplateColumns: columns(170),
   gap: 10,
   marginTop: 16,
 };
@@ -1677,19 +1782,19 @@ const marketCell = {
 
 const topGrid = {
   display: "grid",
-  gridTemplateColumns: "minmax(330px, 0.85fr) minmax(0, 1.15fr)",
+  gridTemplateColumns: columns(330),
   gap: 22,
 };
 
 const middleGrid = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)",
+  gridTemplateColumns: columns(320),
   gap: 22,
 };
 
 const bottomGrid = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 0.8fr)",
+  gridTemplateColumns: columns(320),
   gap: 22,
 };
 
@@ -1706,10 +1811,10 @@ const auditGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minm
 const tabBar = { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 };
 const memoryGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 18 };
 const proofGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))", gap: 10 };
-const proofTables = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 };
+const proofTables = { display: "grid", gridTemplateColumns: columns(320), gap: 12 };
 const proofRow = {
   display: "grid",
-  gridTemplateColumns: "minmax(80px, 1fr) 54px 72px 82px 80px",
+  gridTemplateColumns: columns(80),
   gap: 8,
   alignItems: "center",
   borderTop: hairline,
@@ -1718,11 +1823,11 @@ const proofRow = {
   fontSize: 10,
   letterSpacing: "0.06em",
 };
-const terminalChartLayout = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 210px", gap: 16, alignItems: "stretch" };
+const terminalChartLayout = { display: "grid", gridTemplateColumns: columns(300), gap: 16, alignItems: "stretch" };
 const terminalChartBody = { minWidth: 0 };
 const chartHeaderRow = { display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", marginBottom: 12, flexWrap: "wrap" };
 const chartSelectorRail = { border: hairline, background: "rgba(0,0,0,0.18)", padding: 12, display: "flex", flexDirection: "column", gap: 8, maxHeight: 535, overflowY: "auto" };
-const kronosCommandGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.55fr) minmax(300px, 0.75fr)", gap: 14, alignItems: "stretch", marginBottom: 14 };
+const kronosCommandGrid = { display: "grid", gridTemplateColumns: columns(300), gap: 14, alignItems: "stretch", marginBottom: 14 };
 const tradingViewShell = { border: hairline, background: "rgba(0,0,0,0.2)", minWidth: 0, overflow: "hidden" };
 const candlePredictionPanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, minWidth: 0 };
 const probGrid = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12 };
@@ -1731,7 +1836,7 @@ const ohlcBox = { border: hairline, background: "rgba(0,0,0,0.16)", padding: 10,
 const candleFeatureStack = { marginTop: 12 };
 const candleTableWrap = { border: hairline, background: "rgba(0,0,0,0.18)", marginBottom: 14, overflowX: "auto" };
 const loadingText = { height: "100%", display: "grid", placeItems: "center", color: muted, fontSize: 12, letterSpacing: "0.12em" };
-const sandboxControlRow = { display: "grid", gridTemplateColumns: "190px auto minmax(0, 1fr)", gap: 14, alignItems: "end" };
+const sandboxControlRow = { display: "grid", gridTemplateColumns: columns(180), gap: 14, alignItems: "end" };
 const sandboxInput = {
   width: "100%",
   marginTop: 8,
@@ -1745,7 +1850,7 @@ const sandboxInput = {
   fontWeight: 900,
   outline: "none",
 };
-const sandboxGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(320px, 0.75fr)", gap: 22 };
+const sandboxGrid = { display: "grid", gridTemplateColumns: columns(320), gap: 22 };
 const calendarShellHeader = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
 const calendarHeroStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10, marginBottom: 18 };
 const calendarHeroTile = (color) => ({
@@ -1770,12 +1875,12 @@ const calendarMonthButton = {
   fontWeight: 900,
   cursor: "pointer",
 };
-const calendarBoard = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 120px", gap: 12, alignItems: "stretch" };
+const calendarBoard = { display: "grid", gridTemplateColumns: columns(280), gap: 12, alignItems: "stretch" };
 const calendarToolbar = { display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 16 };
 const calendarLegend = { display: "flex", gap: 14, flexWrap: "wrap", color: muted, fontSize: 10, letterSpacing: "0.12em" };
 const calendarWeekHeader = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 10, letterSpacing: "0.08em", margin: "12px 0 8px" };
 const calendarGrid = { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 };
-const calendarDetailGrid = { display: "grid", gridTemplateColumns: "minmax(320px, 0.8fr) minmax(0, 1.2fr)", gap: 18, alignItems: "start" };
+const calendarDetailGrid = { display: "grid", gridTemplateColumns: columns(320), gap: 18, alignItems: "start" };
 const calendarDayNumber = { alignSelf: "flex-end", color: dim, fontSize: 10, lineHeight: 1 };
 const calendarDayPayload = { display: "grid", gap: 3, placeItems: "center", textAlign: "center", color: labelLight, minHeight: 54 };
 const calendarWeekRail = { display: "grid", gap: 7, alignContent: "start", paddingTop: 24 };
@@ -1802,7 +1907,7 @@ const selectStyle = {
   fontFamily: "JetBrains Mono, Courier New",
   fontWeight: 800,
 };
-const stackGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12 };
+const stackGrid = { display: "grid", gridTemplateColumns: columns(230), gap: 12 };
 const stackPanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 12, minWidth: 0 };
 const sectionLabel = { color: accent2, fontSize: 9, letterSpacing: "0.16em", fontWeight: 900, marginBottom: 10 };
 const barRow = { display: "grid", gridTemplateColumns: "95px minmax(0, 1fr) 70px", gap: 8, alignItems: "center", color: muted, fontSize: 10, padding: "6px 0", borderTop: hairline };

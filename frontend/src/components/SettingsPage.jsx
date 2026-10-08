@@ -1,10 +1,24 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import useDisplayResource from "../hooks/useDisplayResource";
 import { API, BACKEND_BASE_URL } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
+
+const isRecord = value => value != null && typeof value === "object" && !Array.isArray(value);
+const isText = value => typeof value === "string" || (typeof value === "number" && Number.isFinite(value));
+const displayText = value => isText(value) ? value : "--";
+const records = value => Array.isArray(value) ? value.filter(isRecord) : [];
+const texts = value => Array.isArray(value) ? value.filter(isText) : [];
+const responsiveColumns = width => `repeat(auto-fit, minmax(min(${width}px, 100%), 1fr))`;
+
+function useSettingsDisplay(path, setter) {
+  const resource = useDisplayResource(`${API}${path}`, 30000);
+  useEffect(() => { setter(resource.data); }, [resource.data, resource.updatedAt, setter]);
+  return resource;
+}
 
 export default function SettingsPage() {
   const [status, setStatus] = useState(null);
@@ -19,24 +33,36 @@ export default function SettingsPage() {
   const [telegramOps, setTelegramOps] = useState(null);
   const [truth, setTruth] = useState(null);
 
-  const loadSystem = async () => {
-    await Promise.allSettled([
-      axios.get(`${API}/status`, { timeout: 6000 }).then(r => setStatus(r.data)).catch(() => setStatus({})),
-      axios.get(`${API}/admin/pipeline_criteria`, { timeout: 8000 }).then(r => setCriteria(r.data)).catch(() => {}),
-      axios.get(`${API}/admin/integration_status`, { timeout: 12000 }).then(r => setAdmin(r.data)).catch(() => {}),
-      axios.get(`${API}/desktop/diagnostics`, { timeout: 8000 }).then(r => setDiagnostics(r.data)).catch(() => {}),
-      axios.get(`${API}/desktop/update_strategy`, { timeout: 8000 }).then(r => setUpdateStrategy(r.data)).catch(() => {}),
-      axios.get(`${API}/research/dashboard?limit_scans=180`, { timeout: 15000 }).then(r => setResearch(r.data)).catch(() => setResearch({ ok: false })),
-      axios.get(`${API}/telegram/events?limit=20`, { timeout: 8000 }).then(r => setTelegramOps(r.data)).catch(() => setTelegramOps({ ok: false })),
-      axios.get(`${API}/data_truth/overview`, { timeout: 10000 }).then(r => setTruth(r.data)).catch(() => setTruth({ ok: false })),
-    ]);
-  };
+  const statusDisplay = useSettingsDisplay("/status", setStatus);
+  const criteriaDisplay = useSettingsDisplay("/admin/pipeline_criteria", setCriteria);
+  const adminDisplay = useSettingsDisplay("/admin/integration_status", setAdmin);
+  const diagnosticsDisplay = useSettingsDisplay("/desktop/diagnostics", setDiagnostics);
+  const updateDisplay = useSettingsDisplay("/desktop/update_strategy", setUpdateStrategy);
+  const researchDisplay = useSettingsDisplay("/research/dashboard?limit_scans=180", setResearch);
+  const telegramDisplay = useSettingsDisplay("/telegram/events?limit=20", setTelegramOps);
+  const truthDisplay = useSettingsDisplay("/data_truth/overview", setTruth);
+  const displaySources = [
+    ["System status", statusDisplay], ["Pipeline criteria", criteriaDisplay], ["Integration status", adminDisplay],
+    ["Desktop diagnostics", diagnosticsDisplay], ["Update strategy", updateDisplay],
+    ["Research", researchDisplay], ["Telegram", telegramDisplay], ["Data truth", truthDisplay],
+  ];
+  const failedSources = displaySources.filter(([, resource]) => resource.error || resource.data?.ok === false).map(([label]) => label);
+  const malformedSources = displaySources.filter(([, resource]) => resource.updatedAt != null && !isRecord(resource.data)).map(([label]) => label);
+  const listFields = [
+    ["diagnostics.checklist", diagnostics, "checklist", isRecord],
+    ["update_strategy.next_steps", updateStrategy, "next_steps", isText],
+    ["research.promotion_gates", research, "promotion_gates", isRecord],
+    ["telegram.events", telegramOps, "events", isRecord], ["telegram.deliveries", telegramOps, "deliveries", isRecord],
+    ["admin.integrations", admin, "integrations", isRecord], ["admin.jobs", admin, "jobs", isRecord],
+    ["admin.commands", admin, "commands", item => isRecord(item) && typeof item.cmd === "string"],
+    ["criteria.pre_filter", criteria, "pre_filter", isRecord],
+    ["criteria.final_screener", criteria, "final_screener", item => isRecord(item) && typeof item.weight === "number" && Number.isFinite(item.weight)],
+  ];
+  const malformedLists = listFields.filter(([, data, field, valid]) => data != null &&
+    (!Array.isArray(data[field]) || data[field].some(item => !valid(item)))).map(([label]) => label);
 
-  useEffect(() => {
-    loadSystem();
-    const id = setInterval(loadSystem, 30000);
-    return () => clearInterval(id);
-  }, []);
+  // Only the existing manual actions request immediate display refreshes.
+  const loadSystem = async () => { await Promise.allSettled(displaySources.map(([, resource]) => resource.refresh())); };
 
   const refreshBackendLink = async () => {
     if (backendRefreshing) return;
@@ -159,14 +185,19 @@ export default function SettingsPage() {
 
   return (
     <CrtShell title="SETTINGS & SYSTEM">
-      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 14, marginBottom: 18 }}>
+      {(failedSources.length > 0 || malformedSources.length > 0 || malformedLists.length > 0) && <div role="status" data-testid="settings-display-warning" className="workspace-data-warning">
+        {failedSources.length > 0 && <div>Some settings data could not refresh: {failedSources.join(", ")}. Last loaded values may be outdated.</div>}
+        {malformedSources.length > 0 && <div>Malformed settings responses: {malformedSources.join(", ")}.</div>}
+        {malformedLists.length > 0 && <div>Settings lists are unavailable or malformed: {malformedLists.join(", ")}.</div>}
+      </div>}
+      <div className="settings-display-grid" style={{ display: "grid", gridTemplateColumns: responsiveColumns(360), gap: 14, marginBottom: 18 }}>
         <Card title="DESKTOP DIAGNOSTICS" accentColor={diagnostics?.ok ? "#4ade80" : "#fbbf24"}
           action={<button data-testid="copy-desktop-diagnostics" onClick={copyDiagnostics} style={btnTeal}>[ COPY DIAGNOSTICS ]</button>}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
-            {(diagnostics?.checklist || []).slice(0, 8).map(item => (
+          <div style={{ display: "grid", gridTemplateColumns: responsiveColumns(110), gap: 8, marginBottom: 12 }}>
+            {records(diagnostics?.checklist).slice(0, 8).map(item => (
               <div key={item.key} style={{ border: hairline, background: item.ok ? "rgba(74,222,128,0.055)" : "rgba(250,204,21,0.055)", padding: 9 }}>
                 <div style={{ color: item.ok ? "#4ade80" : "#fbbf24", fontSize: 10, fontWeight: 900 }}>{item.ok ? "READY" : "SYNC"}</div>
-                <div style={{ color: labelLight, fontSize: 9, letterSpacing: "0.1em", marginTop: 5 }}>{item.label}</div>
+                <div style={{ color: labelLight, fontSize: 9, letterSpacing: "0.1em", marginTop: 5 }}>{displayText(item.label)}</div>
               </div>
             ))}
           </div>
@@ -180,25 +211,25 @@ export default function SettingsPage() {
         </Card>
 
         <Card title="UPDATE STRATEGY" accentColor={accent}>
-          <Row k="CHANNEL" v={(updateStrategy?.channel || "LOCAL").toUpperCase()} c={accent} />
+          <Row k="CHANNEL" v={typeof updateStrategy?.channel === "string" ? updateStrategy.channel.toUpperCase() : "--"} c={accent} />
           <Row k="CURRENT VERSION" v={updateStrategy?.current_version || "0.1.0"} />
           <Row k="INSTALLER EXISTS" v={updateStrategy?.installer_exists ? "YES" : "NO"} c={updateStrategy?.installer_exists ? "#4ade80" : "#f87171"} />
           <div style={{ color: muted, fontSize: 11, lineHeight: 1.6, margin: "10px 0 12px" }}>
-            {updateStrategy?.recommended_strategy || "Local installer now; GitHub Releases updater once release flow is stable."}
+            {displayText(updateStrategy?.recommended_strategy)}
           </div>
-          {(updateStrategy?.next_steps || []).map((step, i) => (
+          {texts(updateStrategy?.next_steps).map((step, i) => (
             <div key={i} style={{ color: labelLight, fontSize: 10, padding: "5px 0", borderBottom: hairline }}>
               <span style={{ color: accent }}>{String(i + 1).padStart(2, "0")}</span> {step}
             </div>
           ))}
           <div style={{ color: dim, fontSize: 9, marginTop: 10, overflowWrap: "anywhere" }}>
-            {updateStrategy?.installer_path}
+            {displayText(updateStrategy?.installer_path)}
           </div>
         </Card>
       </div>
       {/* v5.1 — Integration Status / Scheduled Jobs / Telegram Commands */}
       <Card title="R&D ENGINE STATUS" accentColor={(research?.stats?.matured_outcomes || 0) > 0 ? accent2 : "#fbbf24"}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: responsiveColumns(110), gap: 8, marginBottom: 12 }}>
           <MiniStatus label="MODE" value="HOURLY" color={accent2} />
           <MiniStatus label="DECISIONS" value={research?.stats?.reconstructed_decisions ?? "--"} color={accent} />
           <MiniStatus label="MATURED" value={research?.stats?.matured_outcomes ?? "--"} color={(research?.stats?.matured_outcomes || 0) > 0 ? "#4ade80" : "#fbbf24"} />
@@ -208,29 +239,29 @@ export default function SettingsPage() {
         </div>
         <Row k="LATEST SCAN" v={research?.source_map?.latest_scan_at || "--"} c={accent2} />
         <Row k="LSE MARKET DATA" v={research?.source_map?.lse?.ok ? "LIVE" : "DEGRADED"} c={research?.source_map?.lse?.ok ? "#4ade80" : "#fbbf24"} />
-        <Row k="PROMOTION GATE" v={(research?.promotion_gates || []).find(g => g.name === "Matured outcomes")?.detail || "waiting for outcomes"} c="#fbbf24" />
+        <Row k="PROMOTION GATE" v={records(research?.promotion_gates).find(g => g.name === "Matured outcomes")?.detail || "--"} c="#fbbf24" />
         <div style={{ color: muted, fontSize: 11, lineHeight: 1.55, marginTop: 10 }}>
           R&D stays in the background until enough 7D/30D/90D outcomes mature. It collects evidence and snapshots, but the full tab is hidden for now.
         </div>
       </Card>
       <Card title="TELEGRAM OPS LAYER" accentColor={truth?.decision === "BLOCK" ? "#f87171" : accent2}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: responsiveColumns(110), gap: 8, marginBottom: 12 }}>
           <MiniStatus label="TRUTH" value={truth?.truth_grade || "--"} color={truth?.truth_grade === "A" || truth?.truth_grade === "B" ? "#4ade80" : truth?.truth_grade === "C" ? "#fbbf24" : "#f87171"} />
           <MiniStatus label="GATE" value={truth?.decision || "--"} color={truth?.decision === "BLOCK" ? "#f87171" : accent2} />
-          <MiniStatus label="EVENTS" value={(telegramOps?.events || []).length} color={accent} />
-          <MiniStatus label="DELIVERIES" value={(telegramOps?.deliveries || []).length} color={labelLight} />
+          <MiniStatus label="EVENTS" value={Array.isArray(telegramOps?.events) ? records(telegramOps.events).length : "--"} color={accent} />
+          <MiniStatus label="DELIVERIES" value={Array.isArray(telegramOps?.deliveries) ? records(telegramOps.deliveries).length : "--"} color={labelLight} />
           <MiniStatus label="MODE" value="GROUPED" color={accent2} />
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: responsiveColumns(150), gap: 8, marginBottom: 12 }}>
           <button onClick={() => sendTelegramOps("scan")} style={btnTeal}>[ SEND SCAN REPORT ]</button>
           <button onClick={() => sendTelegramOps("qc")} style={btnGold}>[ SEND QC REPORT ]</button>
           <button onClick={() => sendTelegramOps("daily")} style={btnGold}>[ SEND DAILY ]</button>
           <button onClick={() => sendTelegramOps("weekly")} style={btnDim}>[ SEND WEEKLY ]</button>
         </div>
-        {(telegramOps?.deliveries || []).slice(0, 5).map((d, i) => (
-          <div key={`${d.created_at}-${i}`} style={{ display: "grid", gridTemplateColumns: "140px 1fr 70px", gap: 8, borderTop: hairline, padding: "7px 0", fontSize: 10 }}>
-            <span style={{ color: accent }}>{d.batch_type || "batch"}</span>
-            <span style={{ color: labelLight }}>{d.title || d.message_preview || "--"}</span>
+        {records(telegramOps?.deliveries).slice(0, 5).map((d, i) => (
+          <div key={`${d.created_at}-${i}`} style={{ display: "grid", gridTemplateColumns: "minmax(0, 140px) minmax(0, 1fr) 50px", gap: 8, borderTop: hairline, padding: "7px 0", fontSize: 10, overflowWrap: "anywhere" }}>
+            <span style={{ color: accent }}>{displayText(d.batch_type || "batch")}</span>
+            <span style={{ color: labelLight }}>{displayText(d.title || d.message_preview)}</span>
             <span style={{ color: d.sent ? "#4ade80" : "#fbbf24", textAlign: "right" }}>{d.sent ? "SENT" : "HELD"}</span>
           </div>
         ))}
@@ -238,49 +269,49 @@ export default function SettingsPage() {
           Telegram is grouped by scan, execution, QC, and scheduled reports. Routine refreshes stay silent unless status changes or severity rises.
         </div>
       </Card>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 18 }}>
-        <Card title={`INTEGRATION STATUS · ${(admin?.integrations || []).length}`} accentColor={accent}>
+      <div className="settings-display-grid" style={{ display: "grid", gridTemplateColumns: responsiveColumns(280), gap: 14, marginBottom: 18 }}>
+        <Card title={`INTEGRATION STATUS · ${Array.isArray(admin?.integrations) ? records(admin.integrations).length : "--"}`} accentColor={accent}>
           {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
-            admin.integrations.map((i, idx) => (
+            (Array.isArray(admin.integrations) ? admin.integrations : []).filter(isRecord).map((i, idx) => (
               <div key={idx} data-testid={`integ-${i.key}`} style={{
-                display: "grid", gridTemplateColumns: "1fr 60px 80px",
+                display: "grid", gridTemplateColumns: "minmax(0, 1fr) 60px 80px", overflowWrap: "anywhere",
                 padding: "6px 0", borderBottom: hairline, fontSize: 10, gap: 8, alignItems: "center",
               }}>
-                <span style={{ color: labelLight }}>{i.name}</span>
+                <span style={{ color: labelLight }}>{displayText(i.name)}</span>
                 <span style={{ color: i.ok ? "#4ade80" : "#f87171", fontWeight: 700, fontSize: 9, letterSpacing: "0.1em" }}>
                   {i.ok ? "● LIVE" : "○ DOWN"}
                 </span>
-                <span style={{ color: dim, fontSize: 9 }}>{(i.last || "").slice(5, 16) || "—"}</span>
+                <span style={{ color: dim, fontSize: 9 }}>{typeof i.last === "string" ? i.last.slice(5, 16) || "—" : "—"}</span>
               </div>
             ))}
         </Card>
-        <Card title={`SCHEDULED JOBS · ${(admin?.jobs || []).length}`} accentColor={accent2}>
+        <Card title={`SCHEDULED JOBS · ${Array.isArray(admin?.jobs) ? records(admin.jobs).length : "--"}`} accentColor={accent2}>
           {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
-            admin.jobs.map((j, idx) => (
+            (Array.isArray(admin.jobs) ? admin.jobs : []).filter(isRecord).map((j, idx) => (
               <div key={idx} data-testid={`job-${j.id}`} style={{
                 padding: "6px 0", borderBottom: hairline, fontSize: 10,
               }}>
-                <div style={{ color: accent2, fontWeight: 700 }}>{j.name}</div>
-                <div style={{ color: dim, fontSize: 9, marginTop: 2 }}>{j.cron}</div>
+                <div style={{ color: accent2, fontWeight: 700 }}>{displayText(j.name)}</div>
+                <div style={{ color: dim, fontSize: 9, marginTop: 2 }}>{displayText(j.cron)}</div>
               </div>
             ))}
         </Card>
-        <Card title={`TELEGRAM COMMANDS · ${(admin?.commands || []).length}`} accentColor="#4ade80">
+        <Card title={`TELEGRAM COMMANDS · ${Array.isArray(admin?.commands) ? records(admin.commands).length : "--"}`} accentColor="#4ade80">
           {!admin ? <div style={{ color: muted, padding: 8 }}>Loading...</div> :
-            admin.commands.map((c, idx) => (
-              <div key={idx} data-testid={`cmd-${c.cmd.replace('/', '')}`} style={{
-                display: "grid", gridTemplateColumns: "100px 1fr",
+            (Array.isArray(admin.commands) ? admin.commands : []).filter(isRecord).map((c, idx) => (
+              <div key={idx} data-testid={`cmd-${typeof c.cmd === "string" ? c.cmd.replace('/', '') : idx}`} style={{
+                display: "grid", gridTemplateColumns: "minmax(0, 100px) minmax(0, 1fr)", overflowWrap: "anywhere",
                 padding: "6px 0", borderBottom: hairline, fontSize: 10, gap: 8,
               }}>
-                <span style={{ color: "#4ade80", fontFamily: "JetBrains Mono", fontWeight: 700 }}>{c.cmd}</span>
-                <span style={{ color: dim }}>{c.desc}</span>
+                <span style={{ color: "#4ade80", fontFamily: "JetBrains Mono", fontWeight: 700 }}>{displayText(c.cmd)}</span>
+                <span style={{ color: dim }}>{displayText(c.desc)}</span>
               </div>
             ))}
         </Card>
       </div>
 
       {/* ── Pipeline Criteria ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 4 }}>
+      <div className="settings-display-grid" style={{ display: "grid", gridTemplateColumns: responsiveColumns(360), gap: 20, marginBottom: 4 }}>
         <Card title="PIPELINE CRITERIA · PRE-FILTER SCREENER" accentColor={accent2}>
           <div style={{ color: muted, fontSize: 11, marginBottom: 12, letterSpacing: "0.04em", lineHeight: 1.6 }}>
             What has to be true about a ticker for it to get flagged and passed to the scoring engine.
@@ -288,15 +319,15 @@ export default function SettingsPage() {
           {!criteria ? (
             <div style={{ color: muted, padding: 10 }}>Loading...</div>
           ) : (
-            criteria.pre_filter.map((r, i) => (
+            (Array.isArray(criteria.pre_filter) ? criteria.pre_filter : []).filter(isRecord).map((r, i) => (
               <div key={i} style={{
-                display: "grid", gridTemplateColumns: "180px 1fr",
+                display: "grid", gridTemplateColumns: "minmax(0, 180px) minmax(0, 1fr)", overflowWrap: "anywhere",
                 padding: "8px 0", borderBottom: hairline, fontSize: 12, gap: 12,
               }}>
                 <span style={{ color: accent2, letterSpacing: "0.08em", fontWeight: 700 }}>
-                  {r.rule}
+                  {displayText(r.rule)}
                 </span>
-                <span style={{ color: labelLight, fontSize: 11, lineHeight: 1.5 }}>{r.detail}</span>
+                <span style={{ color: labelLight, fontSize: 11, lineHeight: 1.5 }}>{displayText(r.detail)}</span>
               </div>
             ))
           )}
@@ -310,32 +341,32 @@ export default function SettingsPage() {
             <div style={{ color: muted, padding: 10 }}>Loading...</div>
           ) : (
             <>
-              {criteria.final_screener.map((w, i) => (
+              {(Array.isArray(criteria.final_screener) ? criteria.final_screener : []).filter(isRecord).map((w, i) => (
                 <div key={i} style={{
-                  display: "grid", gridTemplateColumns: "1.6fr 60px 1fr",
+                  display: "grid", gridTemplateColumns: "minmax(0, 1.6fr) 60px minmax(0, 1fr)", overflowWrap: "anywhere",
                   padding: "8px 0", borderBottom: hairline, fontSize: 12, gap: 12, alignItems: "center",
                 }}>
                   <span style={{ color: accent, letterSpacing: "0.06em", fontWeight: 700, fontSize: 11 }}>
-                    {w.key}
+                    {displayText(w.key)}
                   </span>
                   <span className="num" style={{
                     color: accent, fontWeight: 700, fontSize: 14, textAlign: "right",
                     fontFamily: "JetBrains Mono",
-                  }}>{w.weight?.toFixed(2)}</span>
-                  <span style={{ color: muted, fontSize: 10, lineHeight: 1.5 }}>{w.description}</span>
+                  }}>{typeof w.weight === "number" && Number.isFinite(w.weight) ? w.weight.toFixed(2) : "--"}</span>
+                  <span style={{ color: muted, fontSize: 10, lineHeight: 1.5 }}>{displayText(w.description)}</span>
                 </div>
               ))}
               <div style={{ marginTop: 12, padding: "10px 0", borderTop: `0.5px solid ${accent}33`,
                               color: labelLight, fontSize: 10, letterSpacing: "0.08em", lineHeight: 1.6 }}>
-                <span style={{ color: dim }}>FORMULA:</span> {criteria.axiom_score_formula}
+                <span style={{ color: dim }}>FORMULA:</span> {displayText(criteria.axiom_score_formula)}
               </div>
             </>
           )}
         </Card>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-        <div>
+      <div className="settings-display-grid" style={{ display: "grid", gridTemplateColumns: responsiveColumns(360), gap: 20 }}>
+        <div style={{ minWidth: 0 }}>
           <Card title="INTEGRATIONS STATUS">
             <Row k="POSTGRESQL" v="[CONNECTED]" c="#4ade80" />
             <Row k="TELEGRAM BOT" v="[ACTIVE — @CaseCapitalTerminalQuant]" c="#4ade80" />
@@ -367,9 +398,9 @@ export default function SettingsPage() {
           </Card>
         </div>
 
-        <div>
+        <div style={{ minWidth: 0 }}>
           <Card title="SYSTEM STATUS"
-            action={<div style={{ display: "flex", gap: 8 }}>
+            action={<div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button data-testid="settings-force-backend-boot" onClick={forceBootBackend} disabled={backendBooting} style={btnDanger}>
                 [ {backendBooting ? "BOOTING" : "FORCE BOOT BACKEND"} ]
               </button>
@@ -390,7 +421,7 @@ export default function SettingsPage() {
           </Card>
 
           <Card title="MANUAL TRIGGERS">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: responsiveColumns(160), gap: 10 }}>
               <button data-testid="trigger-learning-btn" onClick={runLearning} style={btnGold}>
                 [ RUN LEARNING CYCLE ]
               </button>
@@ -436,10 +467,10 @@ function Row({ k, v, c = "#e5e7eb" }) {
   return (
     <div style={{
       display: "flex", justifyContent: "space-between", padding: "7px 0",
-      fontSize: 13, letterSpacing: "0.04em",
+      fontSize: 13, letterSpacing: "0.04em", flexWrap: "wrap", gap: 8, minWidth: 0, overflowWrap: "anywhere",
     }}>
       <span style={{ color: dim, fontSize: 11, letterSpacing: "0.12em" }}>{k}</span>
-      <span style={{ color: c, fontWeight: c === "#e5e7eb" ? 400 : 700 }}>{v}</span>
+      <span style={{ color: c, fontWeight: c === "#e5e7eb" ? 400 : 700, minWidth: 0 }}>{displayText(v)}</span>
     </div>
   );
 }
@@ -447,7 +478,7 @@ function Row({ k, v, c = "#e5e7eb" }) {
 function MiniStatus({ label, value, color }) {
   return (
     <div style={{ border: hairline, background: `${color}0d`, padding: 9, minWidth: 0 }}>
-      <div style={{ color, fontSize: 14, fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis" }}>{value}</div>
+      <div style={{ color, fontSize: 14, fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis" }}>{displayText(value)}</div>
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.12em", marginTop: 5 }}>{label}</div>
     </div>
   );
