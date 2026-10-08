@@ -31,7 +31,8 @@ environment change is authorized by the offline backtest result.
 - Browser fixtures: 136 checks passed, zero failures or mutation requests.
 - Main promotion backend: 109 research/reporting tests and 90 PM/execution-helper
   regression tests passed; touched production Python compiled.
-- Offline study: 47 tests plus 126 subtests passed before final data run.
+- Offline study: 50 tests plus 126 subtests passed before final data run.
+- Integrated VPS release: 249 backend/research tests plus 126 subtests passed.
 
 These are offline/fixture checks, not a guarantee of investment performance or
 complete broker-lifecycle safety. Deployment revision, static checksums and live

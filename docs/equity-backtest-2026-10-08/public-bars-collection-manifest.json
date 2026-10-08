@@ -1,0 +1,42 @@
+{
+  "parts": [
+    {
+      "name": "public-daily-bars.jsonl",
+      "rows": 976,
+      "sha256": "876e56b12b360ffdf67d78e6beec1bbb0651383a00cd8827e0b318ba4d221458"
+    },
+    {
+      "name": "public-daily-bars-resume.jsonl",
+      "rows": 773,
+      "sha256": "18c83c36a5a4ba891a1f78c4b923f4e69a88cefb5a995f0d1f68488b61fe8b90"
+    },
+    {
+      "name": "public-daily-bars-expanded.jsonl",
+      "rows": 2393,
+      "sha256": "a82c77a34f4c35e904918f5ef8b120f0d0e1e3b01247950993f47e2c0a18fc3a"
+    },
+    {
+      "name": "bars-pilot.jsonl",
+      "rows": 4,
+      "sha256": "0166bb32edfd62ebc73310866976b609c65cf6bcf7d370ba691dc2b808c68dd1"
+    }
+  ],
+  "counts": {
+    "duplicate_responses": 90,
+    "unique_symbols": 4056,
+    "request_errors": 0,
+    "empty_bar_payloads": 377
+  },
+  "missing_requested_symbols": [],
+  "differing_duplicate_response_symbols": [
+    "LDOS",
+    "NVDA",
+    "TENX",
+    "WK"
+  ],
+  "recovered_failed_symbols": [
+    "WK"
+  ],
+  "deduplication": "First successful response retained; only failed responses may be replaced by a recorded successful retry; different successful responses never silently substituted",
+  "cutoff": "2026-10-07; downstream excludes all October 8 bars"
+}

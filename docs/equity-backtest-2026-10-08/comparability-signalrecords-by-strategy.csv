@@ -1,0 +1,13 @@
+assessed_records,cache_assessed_unflagged,cache_current_session_completion_unverified,cache_invalid_entry,cache_no_exact_cache_session,cache_severe_ratio_flag,cache_unresolved_session,flagged_names,flagged_records,flagged_unique_tickers,public_assessed_unflagged,public_current_session_completion_unverified,public_invalid_entry,public_public_pending_failed_or_no_exact_session,public_severe_ratio_flag,public_unresolved_session,strategy_id,total_records,unflagged_sensitivity_records,unresolved_records
+740,739,18,1,2,,,,0,0,195,18,1,546,,,CORE,760,740,20
+577,576,20,5,1,,1,,0,0,114,20,5,463,,1,earnings_calendar,603,577,26
+562,562,10,,1,,,,0,0,158,10,,405,,,earnings_core_overlap,573,562,11
+3,3,,,,,,,0,0,2,,,1,,,lottery_catalyst_runner,3,3,0
+143,128,,,4,15,,CTNT|DCX|DLXY|GCDT|IPDN|MGN|NCT|RETO|SDEV|TRUG|VRME,15,11,20,,,127,,,lottery_day2_continuation,147,128,4
+206,197,12,1,25,7,4,CNXU|JAGX|OPTT,7,3,27,12,1,202,,4,lottery_dilution_read,246,199,40
+1129,1116,67,,26,2,14,ETHA|ZCSH,2,2,216,67,,928,,14,options_breakout_call,1225,1127,96
+11,11,,,,,,,0,0,2,,,9,,,options_event_defined_risk,11,11,0
+42,42,,,,,,,0,0,13,,,29,,,options_leaps_trend,42,42,0
+2202,2169,120,,190,21,48,AXTX|ETHA|LITZ|NBIZ|QBTX|SMU,21,6,413,120,,1961,6,48,options_tactical_momentum_call,2548,2181,346
+65,65,3,14,,,,,0,0,16,3,14,49,,,pharma_calendar,82,65,17
+1160,1130,,185,58,30,,AREN|BIAFW|BTLN|CTVA|GOSS|IPDN|JAGX|LCGMF|NFE|NXXT|OPTT|TRUG|VIVK|ZCSH,30,14,59,,185,1159,,,sec_filings,1403,1130,243

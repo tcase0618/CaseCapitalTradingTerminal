@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "exhaustive_rows": {
+    "all-sighting-outcomes.csv": 310875,
+    "all-raw-source-outcomes.csv": 397345
+  },
+  "matched_policy_windows": 41532,
+  "verified_policy_summaries": 1692,
+  "policy_rows": 249192,
+  "checks": [
+    "entry/close arithmetic",
+    "stable observation IDs",
+    "six identical policy cohorts",
+    "same-window SPY",
+    "paired policy differences",
+    "all summary means and win rates"
+  ],
+  "not_proven": [
+    "historical price-basis correctness",
+    "intraday fills",
+    "future alpha",
+    "broker safety"
+  ]
+}
