@@ -321,6 +321,41 @@ def _aggregate_expression(doc: dict[str, Any], expression: Any) -> Any:
     return expression
 
 
+def _accumulate_group(grouped, row, spec):
+    group_id = _aggregate_expression(row, spec.get("_id"))
+    serialized_id = json.dumps(normalize_json(group_id), sort_keys=True, default=_json_default)
+    bucket = grouped.setdefault(serialized_id, {"_id": group_id, "__seen": set()})
+    for field, accumulator in spec.items():
+        if field == "_id" or not isinstance(accumulator, dict) or len(accumulator) != 1:
+            continue
+        operator, expression = next(iter(accumulator.items()))
+        value = _aggregate_expression(row, expression)
+        if operator == "$sum":
+            bucket[field] = (bucket.get(field) or 0) + (_num_for_aggregate(value) if expression != 1 else 1)
+        elif operator == "$first" and field not in bucket:
+            bucket[field] = value
+        elif operator == "$last":
+            bucket[field] = value
+        elif operator == "$max":
+            if field not in bucket or (value is not None and (bucket[field] is None or value > bucket[field])):
+                bucket[field] = value
+        elif operator == "$min":
+            if field not in bucket or (value is not None and (bucket[field] is None or value < bucket[field])):
+                bucket[field] = value
+        elif operator == "$push":
+            bucket.setdefault(field, []).append(value)
+        elif operator == "$addToSet":
+            marker = json.dumps(normalize_json(value), sort_keys=True, default=_json_default)
+            seen_key = f"{field}:{marker}"
+            if seen_key not in bucket["__seen"]:
+                bucket["__seen"].add(seen_key)
+                bucket.setdefault(field, []).append(value)
+
+
+def _group_results(grouped):
+    return [{key: value for key, value in row.items() if key != "__seen"} for row in grouped.values()]
+
+
 class PostgresAggregateCursor:
     """Small, explicit aggregation subset used by remaining terminal code."""
     def __init__(self, collection: "PostgresCollection", pipeline: list[dict[str, Any]]):
@@ -334,7 +369,14 @@ class PostgresAggregateCursor:
         while pipeline and "$match" in pipeline[0]:
             match = pipeline.pop(0)["$match"]
             query = {"$and": [query, match]} if query else match
-        rows, _ = await self.collection._read(query)
+        if pipeline and "$group" in pipeline[0] and hasattr(self.collection, "_iter_read"):
+            grouped = {}
+            spec = pipeline.pop(0)["$group"]
+            async for row in self.collection._iter_read(query):
+                _accumulate_group(grouped, row, spec)
+            rows = _group_results(grouped)
+        else:
+            rows, _ = await self.collection._read(query)
         for stage in pipeline:
             if "$match" in stage:
                 rows = [row for row in rows if _matches(row, stage["$match"])]
@@ -365,35 +407,8 @@ class PostgresAggregateCursor:
                 spec = stage["$group"]
                 grouped: dict[str, dict[str, Any]] = {}
                 for row in rows:
-                    group_id = _aggregate_expression(row, spec.get("_id"))
-                    serialized_id = json.dumps(normalize_json(group_id), sort_keys=True, default=_json_default)
-                    bucket = grouped.setdefault(serialized_id, {"_id": group_id, "__seen": set()})
-                    for field, accumulator in spec.items():
-                        if field == "_id" or not isinstance(accumulator, dict) or len(accumulator) != 1:
-                            continue
-                        operator, expression = next(iter(accumulator.items()))
-                        value = _aggregate_expression(row, expression)
-                        if operator == "$sum":
-                            bucket[field] = (bucket.get(field) or 0) + (_num_for_aggregate(value) if expression != 1 else 1)
-                        elif operator == "$first" and field not in bucket:
-                            bucket[field] = value
-                        elif operator == "$last":
-                            bucket[field] = value
-                        elif operator == "$max":
-                            if field not in bucket or (value is not None and (bucket[field] is None or value > bucket[field])):
-                                bucket[field] = value
-                        elif operator == "$min":
-                            if field not in bucket or (value is not None and (bucket[field] is None or value < bucket[field])):
-                                bucket[field] = value
-                        elif operator == "$push":
-                            bucket.setdefault(field, []).append(value)
-                        elif operator == "$addToSet":
-                            marker = json.dumps(normalize_json(value), sort_keys=True, default=_json_default)
-                            seen_key = f"{field}:{marker}"
-                            if seen_key not in bucket["__seen"]:
-                                bucket["__seen"].add(seen_key)
-                                bucket.setdefault(field, []).append(value)
-                rows = [{key: value for key, value in row.items() if key != "__seen"} for row in grouped.values()]
+                    _accumulate_group(grouped, row, spec)
+                rows = _group_results(grouped)
         return rows[:length] if length is not None else rows
 
     def __aiter__(self):

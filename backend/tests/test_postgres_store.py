@@ -175,3 +175,19 @@ async def test_aggregate_pushes_leading_match_before_materialization():
         {"$group": {"_id": "$strategy", "n": {"$sum": 1}}},
     ]).to_list(None)
     assert result == [{"_id": "LOTTERY", "n": 1}]
+
+
+@pytest.mark.asyncio
+async def test_group_first_aggregation_streams_without_retaining_input():
+    class Collection:
+        async def _iter_read(self, query):
+            assert query == {"family": "LOTTERY"}
+            for index in range(1000):
+                yield {"ticker": "ABC", "value": index, "signals": "RVOL"}
+        async def _read(self, query):
+            raise AssertionError("must not materialize input collection")
+    rows = await postgres_store.PostgresAggregateCursor(Collection(), [
+        {"$match": {"family": "LOTTERY"}},
+        {"$group": {"_id": "$ticker", "n": {"$sum": 1}, "first": {"$first": "$value"}, "last": {"$last": "$value"}, "lo": {"$min": "$value"}, "hi": {"$max": "$value"}, "signals": {"$addToSet": "$signals"}}},
+    ]).to_list(None)
+    assert rows == [{"_id": "ABC", "n": 1000, "first": 0, "last": 999, "lo": 0, "hi": 999, "signals": ["RVOL"]}]

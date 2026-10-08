@@ -51,10 +51,15 @@ def seal(sftp, remote, destination, key):
     temporary = target.with_suffix(target.suffix + '.partial')
     with sftp.open(canonical, 'rb') as source, temporary.open('xb') as output:
         output.write(b'CCVPS1' + nonce)
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-            size += len(chunk)
-            output.write(cipher.update(chunk))
+        source_size = source.stat().st_size
+        for offset in range(0, source_size, 1024 * 1024):
+            blocks = [(position, min(65536, source_size - position)) for position in range(offset, min(offset + 1024 * 1024, source_size), 65536)]
+            for chunk in source.readv(blocks, max_concurrent_prefetch_requests=16):
+                digest.update(chunk)
+                size += len(chunk)
+                output.write(cipher.update(chunk))
+            if offset % (64 * 1024 * 1024) == 0:
+                print(json.dumps({'file': target.name, 'copied_bytes': size}), flush=True)
         output.write(cipher.finalize())
         output.write(cipher.tag)
     # Verify the stored ciphertext and GCM tag without writing plaintext.
@@ -86,20 +91,71 @@ def seal(sftp, remote, destination, key):
     return record
 
 
+def unseal(source, output, key):
+    record = json.loads(source.with_suffix(source.suffix + '.json').read_text())
+    if output.exists():
+        raise RuntimeError('Refusing to overwrite recovery output')
+    temporary = output.with_suffix(output.suffix + '.partial')
+    digest = hashlib.sha256()
+    created = False
+    try:
+        target = temporary.open('xb')
+        created = True
+        with target, source.open('rb') as stream:
+            header = stream.read(18)
+            if header[:6] != b'CCVPS1':
+                raise RuntimeError('Unknown archive format')
+            stream.seek(-16, 2)
+            decoder = Cipher(algorithms.AES(key), modes.GCM(header[6:], stream.read(16))).decryptor()
+            decoder.authenticate_additional_data(record['remote_file'].encode())
+            stream.seek(18)
+            remaining = source.stat().st_size - 34
+            while remaining > 0:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise RuntimeError('Truncated archive')
+                remaining -= len(chunk)
+                plaintext = decoder.update(chunk)
+                digest.update(plaintext)
+                target.write(plaintext)
+            tail = decoder.finalize()
+            digest.update(tail)
+            target.write(tail)
+        if digest.hexdigest() != record['plaintext_sha256'] or temporary.stat().st_size != record['bytes']:
+            raise RuntimeError('Recovered archive checksum mismatch')
+        temporary.rename(output)
+    except Exception:
+        if created:
+            temporary.unlink(missing_ok=True)
+        raise
+    return {'verified': True, 'output': str(output), 'bytes': record['bytes']}
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--host', required=True)
-    parser.add_argument('--hostkey-sha256', required=True)
+    parser.add_argument('--host')
+    parser.add_argument('--hostkey-sha256')
     parser.add_argument('--destination', type=Path, required=True)
-    parser.add_argument('--remote-file', action='append', required=True)
+    parser.add_argument('--remote-file', action='append', default=[])
+    parser.add_argument('--decrypt-file', type=Path)
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     args.destination.mkdir(parents=True, exist_ok=True)
     key_file = args.destination / 'archive-key.dpapi'
     if key_file.exists():
         key = protect_key(key_file.read_bytes(), decrypt=True)
     else:
+        if args.decrypt_file:
+            raise RuntimeError('Recovery key missing')
         key = os.urandom(32)
         key_file.write_bytes(protect_key(key))
+    if args.decrypt_file:
+        if not args.output:
+            raise RuntimeError('Explicit recovery --output required')
+        print(json.dumps(unseal(args.decrypt_file, args.output, key)))
+        return
+    if not args.host or not args.hostkey_sha256 or not args.remote_file:
+        raise RuntimeError('Archive host, pinned fingerprint, and source files required')
     class PinnedPolicy(paramiko.MissingHostKeyPolicy):
         def missing_host_key(self, client, hostname, hostkey):
             fingerprint = base64.b64encode(hashlib.sha256(hostkey.asbytes()).digest()).decode().rstrip('=')
