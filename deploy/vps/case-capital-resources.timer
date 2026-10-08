@@ -1,0 +1,11 @@
+[Unit]
+Description=Case Capital one-minute memory samples
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=1
+Unit=case-capital-resources.service
+
+[Install]
+WantedBy=timers.target

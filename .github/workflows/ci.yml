@@ -2,7 +2,7 @@ name: Case Capital CI
 
 on:
   push:
-    branches: [main, "codex/**"]
+    branches: [main, "codex/**", Claude-Gpt-audit]
   pull_request:
     branches: [main]
 
@@ -12,6 +12,16 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: resource_contract_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     defaults:
       run:
         working-directory: backend
@@ -19,6 +29,7 @@ jobs:
       POSTGRES_ENABLED: "false"
       RUN_EXTERNAL_API_TESTS: "false"
       RUN_LIVE_TRADING_TESTS: "false"
+      POSTGRES_TEST_DSN: postgresql://postgres:test-only-password@localhost:5432/resource_contract_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,3 +57,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --legacy-peer-deps
       - run: CI=false npm run build
+      - name: Create deployment checksums
+        run: find build -type f -print0 | sort -z | xargs -0 sha256sum > frontend-assets.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terminal-frontend-${{ github.sha }}
+          path: |
+            frontend/build
+            frontend/frontend-assets.sha256
+          retention-days: 14

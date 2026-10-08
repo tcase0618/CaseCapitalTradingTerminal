@@ -1,0 +1,11 @@
+[Unit]
+Description=Case Capital read-only memory telemetry
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/case-capital/stock-intel/deploy/vps/resource-snapshot.py
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
