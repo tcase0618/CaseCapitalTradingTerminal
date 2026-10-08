@@ -494,7 +494,7 @@ export function CrtShell({ title, children, headerRight = null }) {
               }} />
         )}
         {/* ── Sidebar ── */}
-        <aside className="terminal-sidebar" style={{
+        <aside className="terminal-sidebar" aria-hidden={isMobile && !drawerOpen ? true : undefined} inert={isMobile && !drawerOpen} style={{
           background: `linear-gradient(180deg, rgba(14,17,24,0.98) 0%, rgba(5,7,11,0.99) 100%)`,
           borderRight: hairline,
           padding: "18px 14px 18px 16px",

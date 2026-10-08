@@ -66,6 +66,9 @@
   .workspace-nav-tools button:first-child { min-height: 40px; }
   .terminal-frame .terminal-page-header { flex-wrap: wrap; }
   .terminal-frame .terminal-page-actions { max-width: 100%; flex-wrap: wrap; }
+  .terminal-frame .terminal-page-actions { display: grid !important; grid-template-columns: 38px 38px 38px minmax(0, 1fr) !important; gap: 8px !important; }
+  .terminal-frame .inst-confidence-items { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .terminal-frame .terminal-page-actions > .workspace-icon-button { width: 38px !important; min-width: 38px !important; }
   .terminal-frame .terminal-page-title > div:last-child { font-size: 18px !important; }
   .terminal-frame .mobile-command-deck { display: none; }
   .workspace-overview strong { font-size: 22px; }

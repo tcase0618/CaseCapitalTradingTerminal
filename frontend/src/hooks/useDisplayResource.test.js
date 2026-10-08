@@ -14,11 +14,23 @@ test("coalesces concurrent GETs and keeps a stable snapshot between updates", as
   const first = resource.refresh();
   const second = resource.refresh();
   expect(first).toBe(second);
+  await Promise.resolve();
   expect(axios.get).toHaveBeenCalledTimes(1);
   resolve({ data: { count: 17 } });
   await first;
   expect(resource.getSnapshot().data).toEqual({ count: 17 });
   expect(resource.getSnapshot()).toBe(resource.getSnapshot());
+  resource.dispose();
+});
+
+test("automatic failures back off; an explicit refresh can retry immediately", async () => {
+  axios.get.mockRejectedValue(new Error("timeout"));
+  const resource = make();
+  await resource.refresh();
+  await resource.refresh();
+  expect(axios.get).toHaveBeenCalledTimes(1);
+  await resource.refresh(true);
+  expect(axios.get).toHaveBeenCalledTimes(2);
   resource.dispose();
 });
 

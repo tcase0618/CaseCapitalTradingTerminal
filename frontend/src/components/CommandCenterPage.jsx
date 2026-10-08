@@ -232,7 +232,7 @@ export default function CommandCenterPage() {
       const resource = displayResource(`${API}${path}`, 20000);
       const cached = resource.getSnapshot();
       if (cached.data != null && mounted.current) setter(cached.data);
-      const promise = !force && cached.updatedAt && Date.now() - cached.updatedAt < 20000 ? Promise.resolve() : resource.refresh();
+      const promise = !force && cached.updatedAt && Date.now() - cached.updatedAt < 20000 ? Promise.resolve() : resource.refresh(force);
       return promise.then(() => {
         const state = resource.getSnapshot();
         if (state.error) throw state.error;
@@ -242,13 +242,13 @@ export default function CommandCenterPage() {
     const calls = [
       read("/status", setStatus),
       read("/scan/latest", setScan),
+      read("/position_monitor/latest", setPositionMonitor),
+      read("/portfolio_manager/latest", setPm),
       read("/scan/funnel/today", setScanFunnel),
       read("/admin/integration_status", setAdmin),
       read("/system/health", setHealth),
       read("/execution_gate/overview", setExecutionGate),
       read("/trade_floor/positions", setTradeFloor),
-      read("/position_monitor/latest", setPositionMonitor),
-      read("/portfolio_manager/latest", setPm),
       read("/admin/price_source", setPriceSource),
       read("/activity?limit=12", data => setActivity(data || [])),
       read("/telegram/events?limit=12", data => setTelegramEvents(data?.events || data || [])),
