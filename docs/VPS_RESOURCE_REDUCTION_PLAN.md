@@ -149,12 +149,74 @@ quote-to-decision latency; verified history and backup recovery. Measure over a
 full session, not a single quiet request. Revert the specific release if any
 of those checks fails. Cleanup is performed only after its recovery path exists.
 
-## Current completion boundary
+## Implementation record (October 8, 2026)
 
-Frontend workbench changes are deployed and their 26 local frontend tests pass.
-Initial main JavaScript gzip decreased from approximately 422 KB to 132 KB;
-this is bundle reduction, not a claim of equivalent end-to-end latency gains.
-Backend PID stayed unchanged during final static deployment. This document is
-a plan: its cleanup and backend optimizations have not been executed. Production
-RAM pressure and backend availability remain unresolved and must not be described
-as a fully healthy terminal.
+Implemented and deployed SQL predicate prefiltering, bounded fallback keyset
+batches of 32 documents, SQL counts for exact supported predicates, and streamed
+group-first aggregation. Python matching remains authoritative. Numeric and
+unsupported predicates intentionally retain the Python matcher to avoid changing
+bool/int/float semantics. Sorted unsupported queries and aggregations with a
+leading sort can still materialize their filtered input; this is not a claim
+that every compatibility operation has been rewritten in SQL. Batch iteration
+does not provide an immutable transaction snapshot across concurrent writes;
+stable-input equivalence was tested, and connection release avoids deadlocking
+write-during-iteration consumers. No result truncation was added.
+
+Strategy evidence now loads saved outcomes only for the active episode IDs in
+200-ID batches. The grouped daily research price cache expires old entries and
+retains at most eight maps; execution quote freshness is unchanged. PostgreSQL
+pool size, work_mem, autovacuum, financial rules, and monitor cadence were left
+unchanged. An EXPLAIN ANALYZE on the NVDA price-cache lookup used the existing
+collection index and ran in 1.347 ms, so no speculative index was added.
+
+CI now includes Claude-Gpt-audit, an isolated PostgreSQL service for real
+contract tests, and a checksummed frontend build artifact. Production Node
+build-only dependencies were removed after verifying nginx serves static build
+files and no Node process uses the directory. The static build, old hashed
+assets, lockfiles, and the existing dirty lockfile diff were preserved. Backend
+virtualenv dependencies were retained. No browser/VNC process was removed.
+
+One-minute read-only OS telemetry is installed as case-capital-resources.timer.
+Journald is capped at 256 MB, with a 1 GB free-space reserve and 14-day maximum
+retention, after checksum-verified encrypted off-host archival of old journals.
+Logrotate was missing despite configuration files being present; it was installed
+from Ubuntu's configured repository and its timer enabled. Nginx rotation uses
+20 MB maxsize at rotation checks and 14 generations, retaining its reopen hook.
+Application stdout continues to use journald. npm/apt/pip disposable caches were
+cleared; installed Python dependencies and market/history data were not removed.
+
+The latest dump restored into a separate scratch PostgreSQL database: 320,141
+snapshot rows and 1,743,757 event rows, including trade and option-order history.
+The scratch database was removed after verification; production was not restored
+over or altered for this test. Backup creation is low-priority, and the former
+automatic pruning based merely on pg_restore --list was removed. Current backup
+generations are recent and retained. Unarchived backups are never auto-pruned.
+Ongoing off-host backup transfer requires an authenticated destination; it has
+not been scheduled using a saved SSH password.
+
+Off-host archives use AES-GCM with a current-Windows-user DPAPI-protected key.
+The key is not portable to another Windows account or machine without an
+additional key-escrow design. The VPS retains current PostgreSQL backups; the
+off-host copy is additional protection, not their replacement. Recovery is
+available through deploy/vps/sealed-archive.py --decrypt-file and verified against
+plaintext checksum and GCM authentication. No plaintext archives are written by
+the copy operation, and no SSH password is persisted.
+
+Early post-deploy readings: approximately 1.4-1.5 GB available RAM, 35-42 MB swap
+used, and no active swap traffic in the short measured intervals. During the
+next midnight scan, backend memory increased as expected; final sustained-load
+measurements belong in the completion report rather than extrapolating from
+startup. Root filesystem usage decreased from 18 GB to approximately 16 GB,
+with about 32 GB available. Authenticated status, PostgreSQL, monitor, trading
+status, and daily scan-funnel reads returned HTTP 200. No manually triggered
+scan/order was used for verification, and no execution settings were changed.
+
+The full offline backend suite passed 559 tests, with 13 skipped and 153
+deselected by repository configuration. Real PostgreSQL TEMP-table tests also
+passed on the VPS; they test scalar/array/null/missing values, account paths,
+pagination, numeric fallback, streamed groups, and pool release. Encrypted
+archive round-trip and tamper rejection were tested. These results do not certify
+every external broker/provider, daytime load, or unrun live integration test.
+
+A paid RAM upgrade was not performed: current measured headroom does not justify
+one yet. No VPS services were removed or OOM-inducing memory caps imposed.
