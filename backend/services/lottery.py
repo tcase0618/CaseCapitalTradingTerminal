@@ -885,29 +885,46 @@ async def record_filled_lottery_entry(
 
 async def close_filled_lottery_entry(
     *, broker: str, entry_order_id: str, exit_price: float, exit_quantity: float, reason: str,
+    exit_order_id: str | None = None,
 ) -> dict[str, Any]:
-    """Close the Lottery ledger row when its broker sell fill is confirmed."""
+    """Record a sell fill; with an exit order id, quantity is cumulative."""
     if not entry_order_id or exit_price <= 0 or exit_quantity <= 0:
         return {"ok": False, "closed": False, "reason": "invalid_exit_fill"}
     db = get_db()
     ticket = await db.ll_tickets.find_one({"broker": broker, "broker_order_id": str(entry_order_id), "status": {"$in": ["OPEN", "HALTED"]}}, {"_id": 0})
     if not ticket:
         return {"ok": True, "closed": False, "reason": "ticket_not_found"}
+    accounted = dict(ticket.get("exit_order_fills") or {})
+    delta_quantity = float(exit_quantity)
+    if exit_order_id:
+        prior = accounted.get(str(exit_order_id)) or {}
+        prior_quantity = _num(prior.get("quantity"), 0)
+        delta_quantity = max(0.0, float(exit_quantity) - prior_quantity)
+        if delta_quantity <= 0:
+            return {"ok": True, "closed": False, "reason": "exit_fill_already_accounted"}
+        cumulative_value = float(exit_quantity) * float(exit_price)
+        delta_value = cumulative_value - _num(prior.get("value"), 0)
+        if delta_value <= 0:
+            return {"ok": False, "closed": False, "reason": "invalid_incremental_exit_value"}
+        accounted[str(exit_order_id)] = {"quantity": float(exit_quantity), "value": cumulative_value}
+        exit_price = delta_value / delta_quantity
     entry = _num(ticket.get("entry_fill_price") or ticket.get("entry_price"), 0)
     raw_pct = ((exit_price - entry) / entry * 100) if entry else 0
     existing_qty = _num(ticket.get("quantity_remaining"), _num(ticket.get("quantity"), 0))
-    remaining_qty = max(0.0, existing_qty - float(exit_quantity))
+    remaining_qty = max(0.0, existing_qty - delta_quantity)
     update = {
         "status": "CLOSED" if remaining_qty <= 0 else "OPEN",
         "exit_price": round(float(exit_price), 6),
         "exit_fill_price": round(float(exit_price), 6),
-        "exit_quantity": float(exit_quantity),
+        "exit_quantity": delta_quantity,
         "exit_reason": reason,
         "raw_return_pct": round(raw_pct, 2),
         "haircut_return_pct": round(raw_pct - ROUND_TRIP_HAIRCUT_PCT, 2),
         "quantity_remaining": remaining_qty,
         "last_exit_at": _now().isoformat(),
     }
+    if exit_order_id:
+        update["exit_order_fills"] = accounted
     if remaining_qty <= 0:
         update["closed_at"] = _now().isoformat()
     else:

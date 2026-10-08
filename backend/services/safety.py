@@ -150,10 +150,9 @@ async def check_daily_loss(account: dict[str, Any] | None = None, *, source: str
             account = None
     current_equity = _safe_float((account or {}).get("equity"))
     if current_equity <= 0:
-        from .market_dates import is_core_session
-        if is_core_session(_now()):
-            await set_trading(False, "daily_loss_equity_source_unavailable")
-        return {"ok": False, "reason": "current_equity_unavailable"}
+        # A data outage is not a verified loss or an operator halt. The Public
+        # entry path rejects this attempt and retries on the next cycle.
+        return {"ok": False, "reason": "current_equity_unavailable", "scope": "public_equity", "temporary": True}
 
     status = await trading_status()
     daily = status.get("daily_loss_breaker") or {}

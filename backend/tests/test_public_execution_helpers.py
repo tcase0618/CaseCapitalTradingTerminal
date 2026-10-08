@@ -807,11 +807,21 @@ async def test_execution_freshness_keeps_newer_stale_public_quote(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry_allowed", [True, False])
-async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, entry_allowed):
+@pytest.mark.parametrize("loss_state", ["ok", "unavailable", "tripped", "exception"])
+async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, entry_allowed, loss_state):
     async def gate(**kwargs):
         assert kwargs["scope"] == "equity" and kwargs["ticker"] == "AAPL"
         return {"ok": entry_allowed, "blockers": [] if entry_allowed else ["global_execution_kill_enabled"]}
     monkeypatch.setattr("services.execution_gate.check", gate)
+    async def loss_check(**kwargs):
+        if loss_state == "exception":
+            raise RuntimeError("offline DB outage")
+        if loss_state == "unavailable":
+            return {"ok": False, "reason": "current_equity_unavailable", "temporary": True}
+        if loss_state == "tripped":
+            return {"ok": True, "tripped": True}
+        return {"ok": True, "tripped": False}
+    monkeypatch.setattr(public_execution.safety, "check_daily_loss", loss_check)
     class FakeClient:
         def __init__(self):
             self.submitted = []
@@ -889,6 +899,15 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, 
         assert result["executed"] == []
         assert result["rejected"][0]["reason"] == "equity_execution_gate_blocked"
         assert fake_client.submitted == []
+        return
+
+    if loss_state != "ok":
+        assert result["executed"] == [] and fake_client.submitted == []
+        assert result["rejected"][0]["reason"] == {
+            "unavailable": "current_equity_unavailable",
+            "tripped": "public_daily_loss_breaker",
+            "exception": "public_loss_check_unavailable",
+        }[loss_state]
         return
 
     assert len(result["executed"]) == 1

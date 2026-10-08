@@ -165,7 +165,7 @@ async def test_daily_loss_breaker_reads_public_and_halts_on_drawdown(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_unavailable_public_equity_halts_during_session(monkeypatch):
+async def test_unavailable_public_equity_rejects_temporarily_without_global_halt(monkeypatch):
     actions = []
     async def portfolio():
         return {'ok': False}
@@ -174,8 +174,9 @@ async def test_unavailable_public_equity_halts_during_session(monkeypatch):
     monkeypatch.setattr(public_execution, 'portfolio_state', portfolio)
     monkeypatch.setattr(safety, 'set_trading', halt)
     monkeypatch.setattr(market_dates, 'is_core_session', lambda now: True)
-    assert not (await safety.check_daily_loss())['ok']
-    assert actions == [(False, 'daily_loss_equity_source_unavailable')]
+    result = await safety.check_daily_loss()
+    assert not result['ok'] and result['temporary'] and result['scope'] == 'public_equity'
+    assert actions == []
 
 
 def test_trading_dates_skip_holidays_and_respect_early_close():

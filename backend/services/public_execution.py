@@ -1555,6 +1555,13 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 rejected.append({"ticker": ticker, "reason": "equity_execution_gate_blocked",
                                  "blockers": gate.get("blockers") or [safety_status.get("reason") or "safety_halt"]})
                 continue
+            try:
+                loss_check = await safety.check_daily_loss(source="public_equity_entry")
+            except Exception:
+                loss_check = {"ok": False, "reason": "public_loss_check_unavailable", "temporary": True}
+            if not loss_check.get("ok") or loss_check.get("tripped"):
+                rejected.append({"ticker": ticker, "reason": loss_check.get("reason") or "public_daily_loss_breaker", "temporary": bool(loss_check.get("temporary"))})
+                continue
             day2_allowed, day2_reason = _day2_entry_gate(row)
             if not day2_allowed:
                 rejected.append({"ticker": ticker, "reason": day2_reason})
@@ -1760,8 +1767,6 @@ async def reconcile() -> dict[str, Any]:
                                       "qty_total": filled_after_cancel, "qty_remaining": filled_after_cancel,
                                       "filled_avg_price": _num(confirmed_order.get("averagePrice") or confirmed_order.get("average_price")),
                                       "last_order_status": str(confirmed_order.get("status") or "UNKNOWN").upper()}})
-                        order_updates += 1
-                        continue
                     cancel_status = str((cancel_result or {}).get("status") or (cancel_result or {}).get("orderStatus") or "").upper()
                     if cancel_status not in {"CANCELLED", "CANCELED", "EXPIRED"}:
                         # Some broker cancel endpoints acknowledge with an
@@ -1776,16 +1781,18 @@ async def reconcile() -> dict[str, Any]:
                         confirmed = str((current or {}).get("status") or (current or {}).get("orderStatus") or "").upper()
                         if confirmed not in {"CANCELLED", "CANCELED", "EXPIRED"}:
                             raise RuntimeError(f"Public cancellation not confirmed: {confirmed or cancel_status or 'UNKNOWN'}")
-                    await db.tf_trades.update_one(
-                        {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                        {"$set": {"status": "CLOSED", "fill_status": "EXPIRED_BY_TERMINAL", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_pending_order_ttl"}},
-                    )
-                    await execution_safety.mark_execution_intent(trade.get("client_order_id"), "expired", {"reason": "public_pending_order_ttl"})
-                    order_updates += 1
+                    if filled_after_cancel <= 0:
+                        await db.tf_trades.update_one(
+                            {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                            {"$set": {"status": "CLOSED", "fill_status": "EXPIRED_BY_TERMINAL", "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": "public_pending_order_ttl"}},
+                        )
+                        await execution_safety.mark_execution_intent(trade.get("client_order_id"), "expired", {"reason": "public_pending_order_ttl"})
+                        order_updates += 1
+                        continue
                 except Exception:
                     logger.exception("Public stale-order cancellation failed for %s", ticker)
                     poll_errors += 1
-                continue
+                    continue
             try:
                 order = await _get_order_with_portfolio_fallback(
                     client,
@@ -1796,15 +1803,23 @@ async def reconcile() -> dict[str, Any]:
                 poll_errors += 1
                 continue
             status = str(order.get("status") or "").upper()
-            if status in {"FILLED", "PARTIALLY_FILLED"}:
-                filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
+            filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
+            terminal_entry = status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}
+            if filled_qty > 0 and (status in {"FILLED", "PARTIALLY_FILLED"} or terminal_entry):
+                position = next((p for p in _positions(portfolio_snapshot) if _symbol(p) == ticker), None)
+                previous_fills = _num(trade.get("qty_total"))
+                remaining_qty = min(filled_qty, _qty(position)) if position else min(
+                    filled_qty, _qty(trade) + max(0.0, filled_qty - previous_fills)
+                )
                 fill_time = trade.get("filled_at") or order.get("updatedAt") or order.get("updated_at") or datetime.now(timezone.utc).isoformat()
-                update = {"fill_status": status, "qty_total": filled_qty, "qty_remaining": filled_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": fill_time, "last_order_status": status}
+                update = {"fill_status": "PARTIALLY_FILLED" if terminal_entry else status, "qty_total": filled_qty, "qty_remaining": remaining_qty, "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price")), "filled_at": fill_time, "last_order_status": status}
                 stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
                 protective_id = trade.get("protective_order_id")
                 protective_qty = _num(trade.get("protective_order_qty"))
-                needs_protective = filled_qty > 0 and stop > 0 and (
-                    not protective_id or abs(protective_qty - filled_qty) > 1e-8
+                needs_protective = remaining_qty > 0 and stop > 0 and not (
+                    trade.get("emergency_exit_order_id") or trade.get("public_phase_order_id")
+                ) and (
+                    not protective_id or abs(protective_qty - remaining_qty) > 1e-8
                     or abs(_num(trade.get("protective_stop_price"), stop) - stop) > 0.0001
                 )
                 if filled_qty > 0 and stop > 0 and _routing_rejects_stop(trade):
@@ -1821,6 +1836,9 @@ async def reconcile() -> dict[str, Any]:
                             cancelled = await client.get_order(str(protective_id))
                             if str(cancelled.get("status") or cancelled.get("orderStatus") or "").upper() not in {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "FAILED"}:
                                 raise RuntimeError("Protective stop cancellation is not confirmed")
+                            cancelled_fills = _num(cancelled.get("filledQuantity") or cancelled.get("filled_quantity"))
+                            if cancelled_fills > _num(trade.get("protective_filled_qty")):
+                                raise RuntimeError("Protective cancellation has unaccounted fills; reconcile before replacing")
                             update.update({"protective_order_id": None, "protective_order_status": "REPLACEMENT_CANCELLED"})
                         except Exception as exc:
                             update.update({"protective_order_status": "REPLACEMENT_CANCEL_FAILED", "protective_order_error": str(exc)[:220]})
@@ -1828,7 +1846,7 @@ async def reconcile() -> dict[str, Any]:
                             order_updates += 1
                             continue
                     stop_attempt = int(trade.get("protective_attempt") or 0)
-                    stop_client_id = execution_safety.stable_client_order_id("public_protective", trade.get("client_order_id"), ticker, stop, filled_qty, stop_attempt, prefix="public")
+                    stop_client_id = execution_safety.stable_client_order_id("public_protective", trade.get("client_order_id"), ticker, stop, remaining_qty, stop_attempt, prefix="public")
                     stop_claim = await execution_safety.claim_execution_intent(
                         scope="public_equity_exit",
                         client_order_id=stop_client_id,
@@ -1839,14 +1857,15 @@ async def reconcile() -> dict[str, Any]:
                     if stop_claim.get("ok"):
                         try:
                             expected_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"case-capital:public:{stop_client_id}"))
-                            update.update({"protective_order_id": expected_id, "protective_order_qty": filled_qty,
+                            update.update({"protective_order_id": expected_id, "protective_order_qty": remaining_qty,
+                                           "protective_filled_qty": 0.0,
                                            "protective_stop_price": stop, "protective_order_status": "SUBMIT_UNKNOWN"})
                             await db.tf_trades.update_one(
                                 {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": update})
                             protective = await client.submit_equity_order(
                                 symbol=ticker,
                                 side="SELL",
-                                quantity=filled_qty,
+                                quantity=remaining_qty,
                                 stop_price=stop,
                                 limit_price=round(stop * 0.99, 4 if stop < 1 else 2),
                                 **_protective_order_terms(),
@@ -1856,7 +1875,7 @@ async def reconcile() -> dict[str, Any]:
                             protective_id = protective_order.get("orderId") or protective_order.get("id")
                             if not protective_id:
                                 raise RuntimeError("Public protective order response missing order id")
-                            update.update({"protective_order_id": protective_id, "protective_order_qty": filled_qty, "protective_stop_price": stop, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
+                            update.update({"protective_order_id": protective_id, "protective_order_qty": remaining_qty, "protective_stop_price": stop, "protective_order_status": "SUBMITTED", "protective_order_preflight": protective.get("preflight")})
                             update["protective_order_type"] = "STOP_LIMIT"
                             update["protective_order_gap_risk"] = "STOP_LIMIT_MAY_NOT_FILL_BELOW_LIMIT"
                             await execution_safety.mark_execution_intent(stop_client_id, "submitted", {"order_id": protective_id, "broker": BROKER_BASE})
@@ -1891,14 +1910,6 @@ async def reconcile() -> dict[str, Any]:
                     except Exception:
                         logger.exception("Lottery fill ledger failed for Public order %s", trade.get("public_order_id"))
                 order_updates += 1
-            elif status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"} and _num(order.get("filledQuantity") or order.get("filled_quantity")) > 0:
-                filled_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
-                await db.tf_trades.update_one(
-                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
-                    {"$set": {"status": "OPEN", "fill_status": "PARTIALLY_FILLED", "qty_total": filled_qty,
-                              "qty_remaining": filled_qty, "last_order_status": status,
-                              "filled_avg_price": _num(order.get("averagePrice") or order.get("average_price"))}})
-                order_updates += 1
             elif status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one({"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": {"status": "CLOSED", "fill_status": status, "qty_remaining": 0.0, "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": f"public_order_{status.lower()}", "last_order_status": status}})
                 order_updates += 1
@@ -1919,7 +1930,7 @@ async def reconcile() -> dict[str, Any]:
                 continue
             emergency_status = str(emergency.get("status") or emergency.get("orderStatus") or "").upper()
             update = {"emergency_exit_status": emergency_status, "last_order_status": emergency_status}
-            if emergency_status in {"FILLED", "PARTIALLY_FILLED"}:
+            if _num(emergency.get("filledQuantity") or emergency.get("filled_quantity")) > 0:
                 exit_reason = str(trade.get("emergency_exit_reason") or "public_emergency_limit_exit")
                 exit_qty = _num(emergency.get("filledQuantity") or emergency.get("filled_quantity"))
                 exit_price = _num(emergency.get("averagePrice") or emergency.get("average_price"))
@@ -1954,6 +1965,7 @@ async def reconcile() -> dict[str, Any]:
                         entry_order_id=str(trade.get("public_order_id") or ""),
                         exit_price=exit_price,
                         exit_quantity=exit_qty,
+                        exit_order_id=emergency_id,
                         reason=f"{exit_reason}_filled",
                     )
                 except Exception:
@@ -1980,7 +1992,7 @@ async def reconcile() -> dict[str, Any]:
                 poll_errors += 1
                 continue
             protective_status = str(protective.get("status") or protective.get("orderStatus") or "").upper()
-            if protective_status in {"FILLED", "PARTIALLY_FILLED"}:
+            if _num(protective.get("filledQuantity") or protective.get("filled_quantity")) > 0:
                 cumulative_exit_qty = _num(protective.get("filledQuantity") or protective.get("filled_quantity"))
                 exit_price = _num(protective.get("averagePrice") or protective.get("average_price") or protective.get("limitPrice") or protective.get("limit_price"))
                 prior_exit_qty = _num(trade.get("protective_filled_qty"))
@@ -1992,7 +2004,11 @@ async def reconcile() -> dict[str, Any]:
                     )
                     order_updates += 1
                     continue
-                remaining = max(0.0, _qty(trade) - exit_qty)
+                # The portfolio snapshot may already include these fills.
+                # Derive from the sell order's original quantity, not from a
+                # holding that has already been reduced by the same fill.
+                order_basis = _num(trade.get("protective_order_qty"), _qty(trade) + prior_exit_qty)
+                remaining = min(_qty(trade), max(0.0, order_basis - cumulative_exit_qty))
                 update = {
                     "protective_order_status": protective_status,
                     "protective_filled_qty": cumulative_exit_qty,
@@ -2029,18 +2045,20 @@ async def reconcile() -> dict[str, Any]:
                             broker="public",
                             entry_order_id=str(trade.get("public_order_id") or ""),
                             exit_price=exit_price,
-                            exit_quantity=exit_qty,
+                            exit_quantity=cumulative_exit_qty,
+                            exit_order_id=str(protective_id),
                             reason="public_protective_stop_filled",
                         )
                     except Exception:
                         logger.exception("Lottery exit ledger failed for Public order %s", trade.get("public_order_id"))
                 order_updates += 1
-            elif protective_status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
+            if protective_status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                     {"$set": {
                         "protective_order_id": None,
                         "protective_order_qty": 0.0,
+                        "protective_filled_qty": 0.0,
                         "protective_order_status": protective_status,
                         "last_order_status": protective_status,
                         "protective_rearm_required": True,
@@ -2258,6 +2276,20 @@ async def _retire_terminal_emergency_order(trade: dict[str, Any], order: dict[st
     status = str(order.get("status") or order.get("orderStatus") or "").upper()
     if status not in {"FILLED", "CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "FAILED"}:
         return False
+    cumulative_qty = _num(order.get("filledQuantity") or order.get("filled_quantity"))
+    if cumulative_qty > 0:
+        price = _num(order.get("averagePrice") or order.get("average_price"))
+        if price <= 0:
+            return False
+        if trade.get("public_order_id"):
+            from . import lottery
+            recorded = await lottery.close_filled_lottery_entry(
+                broker="public", entry_order_id=str(trade["public_order_id"]),
+                exit_order_id=str(trade.get("emergency_exit_order_id")),
+                exit_price=price, exit_quantity=cumulative_qty, reason="public_emergency_limit_exit_filled",
+            )
+            if not recorded.get("ok"):
+                return False
     history = list(trade.get("emergency_exit_history") or [])
     history.append({"order_id": trade.get("emergency_exit_order_id"), "status": status,
                     "filled_quantity": _num(order.get("filledQuantity") or order.get("filled_quantity")),
@@ -2265,6 +2297,8 @@ async def _retire_terminal_emergency_order(trade: dict[str, Any], order: dict[st
     update = {"emergency_exit_order_id": None, "emergency_exit_status": status,
               "emergency_exit_history": history, "emergency_exit_filled_qty": 0.0,
               "emergency_exit_attempt": int(trade.get("emergency_exit_attempt") or 0) + 1}
+    if cumulative_qty > 0:
+        update["qty_remaining"] = max(0.0, _num(trade.get("emergency_exit_order_qty"), _qty(trade)) - cumulative_qty)
     await get_db().tf_trades.update_one(
         {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE,
          "emergency_exit_order_id": trade.get("emergency_exit_order_id")}, {"$set": update})

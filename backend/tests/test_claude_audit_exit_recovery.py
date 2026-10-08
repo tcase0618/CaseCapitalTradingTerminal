@@ -38,7 +38,7 @@ class MemoryCollection:
 def exit_case(monkeypatch):
     trade = dict(ticker='TEST', broker_base='public', status='OPEN', fill_status='FILLED',
                  client_order_id='entry-test', qty_remaining=1.5, current_stop=10)
-    db = SimpleNamespace(tf_trades=MemoryCollection([trade]), execution_intents=MemoryCollection())
+    db = SimpleNamespace(tf_trades=MemoryCollection([trade]), execution_intents=MemoryCollection(), ll_tickets=MemoryCollection())
     alerts = []
 
     class Client:
@@ -87,6 +87,7 @@ def exit_case(monkeypatch):
         return {'sent': True}
     monkeypatch.setattr(public_execution, 'enabled', lambda: True)
     monkeypatch.setattr(public_execution, 'get_db', lambda: db)
+    monkeypatch.setattr('services.lottery.get_db', lambda: db)
     monkeypatch.setattr(execution_safety, 'get_db', lambda: db)
     monkeypatch.setattr(public_api, 'PublicAPIClient', lambda **kwargs: client)
     monkeypatch.setattr(public_execution, '_public_session_now', lambda: 'CORE')
@@ -113,7 +114,7 @@ async def test_terminal_emergency_order_retries_with_new_intent(exit_case, statu
 async def test_partial_exit_requires_confirmed_cancel_before_replacement(exit_case, confirmed):
     trade, client, db, _ = exit_case
     await public_execution.process_protective_exits()
-    client.orders['exit-1'] = {'status': 'PARTIALLY_FILLED', 'filledQuantity': 1.0}
+    client.orders['exit-1'] = {'status': 'PARTIALLY_FILLED', 'filledQuantity': 1.0, 'averagePrice': 9.0}
     client.quantity = 0.5
     client.cancel_confirmed = confirmed
     await public_execution.process_protective_exits()
