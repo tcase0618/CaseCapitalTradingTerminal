@@ -214,8 +214,11 @@ async def _refresh(*, limit: int, lookback_days: int, max_symbols: int) -> dict:
     truncated = len(observations) > limit
     episode_rows, exclusions = episodes(observations[:limit])
     # First retain persisted resolved facts. Provider outages must not erase them.
-    saved = await db.strategy_evidence_outcomes.find({"version": VERSION}, {"_id": 0}).to_list(None)
-    saved_map = {r["episode_id"]: r for r in saved}
+    saved_map = {}
+    episode_ids = [row["episode_id"] for row in episode_rows]
+    for offset in range(0, len(episode_ids), 200):
+        saved = await db.strategy_evidence_outcomes.find({"version": VERSION, "episode_id": {"$in": episode_ids[offset:offset + 200]}}, {"_id": 0}).to_list(None)
+        saved_map.update({r["episode_id"]: r for r in saved})
     due = [r for r in episode_rows if r["episode_id"] not in saved_map and parse_time(r["target_at"]) <= now]
     symbols = sorted(set(r["ticker"] for r in due))[:max(1, min(500, max_symbols))]
     start = (cutoff - timedelta(days=10)).date().isoformat()

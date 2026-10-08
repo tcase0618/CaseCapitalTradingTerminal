@@ -491,6 +491,21 @@ _grouped_cache_at: dict[str, datetime] = {}
 _grouped_lock = asyncio.Lock()
 
 
+def _store_grouped(date_iso: str, values: dict[str, float]) -> None:
+    now = _now()
+    for key, timestamp in list(_grouped_cache_at.items()):
+        if now - timestamp > timedelta(hours=1):
+            _grouped_cache_at.pop(key, None)
+            _grouped_cache.pop(key, None)
+    _grouped_cache[date_iso] = values
+    _grouped_cache_at[date_iso] = now
+    # Whole-market daily maps are research caches, not execution quotes.
+    while len(_grouped_cache) > 8:
+        oldest = min(_grouped_cache_at, key=_grouped_cache_at.get)
+        _grouped_cache_at.pop(oldest, None)
+        _grouped_cache.pop(oldest, None)
+
+
 async def _massive_grouped(date_iso: str) -> dict[str, float]:
     """ONE call returns close for every US stock on `date_iso`.
     Free-tier-friendly: 1 request handles 12,000+ tickers.
@@ -515,14 +530,12 @@ async def _massive_grouped(date_iso: str) -> dict[str, float]:
                 timeout=30.0,
             )
             if r.status_code != 200:
-                _grouped_cache[date_iso] = {}
-                _grouped_cache_at[date_iso] = _now()
+                _store_grouped(date_iso, {})
                 return {}
             data = r.json()
             results = data.get("results") or []
             out = {row["T"]: float(row["c"]) for row in results if row.get("T") and row.get("c") is not None}
-            _grouped_cache[date_iso] = out
-            _grouped_cache_at[date_iso] = _now()
+            _store_grouped(date_iso, out)
             return out
         except Exception as e:
             logger.debug("massive grouped %s failed: %s", date_iso, e)

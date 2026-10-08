@@ -25,6 +25,81 @@ _pool: Any | None = None
 _last_error: str | None = None
 _schema_ready = False
 _MISSING = object()
+READ_BATCH_SIZE = 32
+_read_stats = {"reads": 0, "streamed_reads": 0, "sql_filtered_reads": 0, "fallback_reads": 0, "rows_examined": 0}
+
+
+def _sql_filter(query: dict[str, Any], params: list[Any]) -> tuple[str, bool]:
+    import re
+    initial = len(params)
+    sql, exact = _sql_filter_inner(query, params)
+    used = sorted({int(value) for value in re.findall(r"\$(\d+)", sql) if int(value) > initial})
+    mapping = {old: initial + offset + 1 for offset, old in enumerate(used)}
+    values = [params[index - 1] for index in used]
+    del params[initial:]
+    params.extend(values)
+    return re.sub(r"\$(\d+)", lambda match: f"${mapping.get(int(match[1]), int(match[1]))}", sql), exact
+
+
+def _sql_filter_inner(query: dict[str, Any], params: list[Any]) -> tuple[str, bool]:
+    """Compile exact supported predicates; unsupported clauses are supersets.
+
+    Python remains the final matcher. Numeric equality/ranges deliberately stay
+    in Python because its bool/float/int equivalence differs from JSONB.
+    """
+    def bind(value):
+        params.append(value)
+        return f"${len(params)}"
+
+    def equal(expression, expected):
+        if expected is None:
+            return f"({expression} is null or {expression} = 'null'::jsonb or {expression} @> '[null]'::jsonb)", True
+        if isinstance(expected, str):
+            scalar = bind(json.dumps(expected))
+            array = bind(json.dumps([expected]))
+            return f"({expression} = {scalar}::jsonb or (jsonb_typeof({expression}) = 'array' and {expression} @> {array}::jsonb))", True
+        return "true", False
+
+    clauses, exact = [], True
+    for key, condition in query.items():
+        if key in {"$and", "$or"}:
+            children = [_sql_filter_inner(child, params) for child in condition]
+            join = " and " if key == "$and" else " or "
+            clauses.append("(" + join.join(sql for sql, _ in children) + ")" if children else ("true" if key == "$and" else "false"))
+            exact = exact and all(ok for _, ok in children)
+            continue
+        if key.startswith("$"):
+            exact = False
+            continue
+        path = bind(key.split("."))
+        expression = f"(payload #> {path}::text[])"
+        if not isinstance(condition, dict) or not any(str(k).startswith("$") for k in condition):
+            sql, ok = equal(expression, condition)
+            clauses.append(sql)
+            exact = exact and ok
+            continue
+        for operator, expected in condition.items():
+            ok = True
+            if operator == "$exists":
+                sql = f"{expression} is {'not ' if expected else ''}null"
+            elif operator in {"$in", "$nin"}:
+                children = [equal(expression, value) for value in expected]
+                ok = all(known for _, known in children)
+                sql = "(" + " or ".join(s for s, _ in children) + ")" if children else "false"
+                if operator == "$nin":
+                    sql = f"not coalesce({sql}, false)" if ok else "true"
+            elif operator == "$ne":
+                sql, ok = equal(expression, expected)
+                sql = f"not coalesce({sql}, false)" if ok else "true"
+            elif operator in {"$gt", "$gte", "$lt", "$lte"} and isinstance(expected, str):
+                symbol = {"$gt": ">", "$gte": ">=", "$lt": "<", "$lte": "<="}[operator]
+                value = bind(expected)
+                sql = f"(jsonb_typeof({expression}) = 'string' and ({expression} #>> '{{}}') collate \"C\" {symbol} {value}::text collate \"C\")"
+            else:
+                sql, ok = "true", False
+            clauses.append(sql)
+            exact = exact and ok
+    return " and ".join(f"({sql})" for sql in clauses) or "true", exact
 
 # These collections are current-state telemetry. Their snapshots remain
 # durable, but retaining a full immutable event for every heartbeat/quote
@@ -167,6 +242,11 @@ def _project(doc: dict[str, Any], projection: dict[str, Any] | None) -> dict[str
     return out
 
 
+def _decode_payload(row: Any) -> Any:
+    payload = row["payload"]
+    return json.loads(payload) if isinstance(payload, str) else payload
+
+
 class PostgresCursor:
     def __init__(self, collection: "PostgresCollection", query: dict[str, Any] | None, projection: dict[str, Any] | None):
         self.collection, self.query, self.projection = collection, query or {}, projection
@@ -213,8 +293,25 @@ class PostgresCursor:
 
     def __aiter__(self):
         async def gen():
-            for row in await self.to_list(None):
-                yield row
+            if self._sort:
+                for row in await self.to_list(None):
+                    yield row
+            else:
+                skipped, emitted = 0, 0
+                if self._limit == 0:
+                    return
+                stream = self.collection._iter_read(self.query)
+                try:
+                    async for row in stream:
+                        if skipped < self._skip:
+                            skipped += 1
+                            continue
+                        yield _project(row, self.projection)
+                        emitted += 1
+                        if self._limit is not None and emitted >= self._limit:
+                            break
+                finally:
+                    await stream.aclose()
         return gen()
 
 
@@ -231,8 +328,14 @@ class PostgresAggregateCursor:
         self.pipeline = pipeline
 
     async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
-        rows, _ = await self.collection._read({})
-        for stage in self.pipeline:
+        pipeline = list(self.pipeline)
+        # Filtering before materialization avoids retaining unrelated history.
+        query = {}
+        while pipeline and "$match" in pipeline[0]:
+            match = pipeline.pop(0)["$match"]
+            query = {"$and": [query, match]} if query else match
+        rows, _ = await self.collection._read(query)
+        for stage in pipeline:
             if "$match" in stage:
                 rows = [row for row in rows if _matches(row, stage["$match"])]
             elif "$sort" in stage:
@@ -319,22 +422,11 @@ class PostgresCollection:
         limit: int | None = None,
         skip: int = 0,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Read a collection with a SQL fast path for common UI queries.
-
-        The compatibility layer must retain Python matching for legacy Mongo
-        predicates.  It must not, however, deserialize an entire collection
-        for the routine ``latest`` and activity-table queries used every few
-        seconds by the frontend.  Direct equality JSONB filters plus temporal
-        sorting are exact and safe to execute in PostgreSQL.
-        """
+        """Filter in SQL, stream fallback rows, and preserve Python matching."""
         if not await init_schema() or _pool is None:
             raise RuntimeError(_last_error or "Postgres is unavailable")
-        simple_query = query or {}
-        sql_exact = all(
-            not str(key).startswith("$") and "." not in str(key)
-            and not (isinstance(value, dict) and any(str(op).startswith("$") for op in value))
-            for key, value in simple_query.items()
-        )
+        params: list[Any] = [self.name]
+        predicate, sql_exact = _sql_filter(query or {}, params)
         temporal_keys = {
             "ts", "created_at", "updated_at", "finished_at", "started_at",
             "generated_at", "submitted_at", "scanned_at", "snapshot_at",
@@ -343,13 +435,10 @@ class PostgresCollection:
         }
         sql_sort = sort[0] if sort and len(sort) == 1 and sort[0][0] in temporal_keys else None
         use_window = sql_exact and limit is not None and limit >= 0 and (not sort or sql_sort is not None)
-        async with _pool.acquire() as conn:
-            if use_window:
-                params: list[Any] = [self.name]
-                where = "collection=$1"
-                if simple_query:
-                    params.append(json.dumps(normalize_json(simple_query), default=_json_default))
-                    where += f" and payload @> ${len(params)}::jsonb"
+        _read_stats["reads"] += 1
+        if use_window:
+            async with _pool.acquire() as conn:
+                where = f"collection=$1 and ({predicate})"
                 order = ""
                 if sql_sort:
                     params.append(sql_sort[0])
@@ -360,19 +449,56 @@ class PostgresCollection:
                     f"select payload from cc_collection_snapshots where {where}{order} offset ${len(params) - 1} limit ${len(params)}",
                     *params,
                 )
-            else:
-                rows = await conn.fetch("select payload from cc_collection_snapshots where collection=$1", self.name)
-        documents: list[dict[str, Any]] = []
-        for row in rows:
-            payload = row["payload"]
-            if isinstance(payload, str):
-                payload = json.loads(payload)
-            if isinstance(payload, dict) and _matches(payload, query):
+            return [payload for row in rows if isinstance(payload := _decode_payload(row), dict) and _matches(payload, query)], True
+        documents = []
+        skipped = 0
+        if limit == 0:
+            return [], True
+        stream = self._iter_read(query)
+        try:
+            async for payload in stream:
+                if not sort and skipped < skip:
+                    skipped += 1
+                    continue
                 documents.append(payload)
-        # When this is true PostgreSQL already applied both the requested
-        # window and any supported ordering.  The cursor must not apply skip
-        # or limit a second time.
-        return documents, use_window
+                if not sort and limit is not None and len(documents) >= limit:
+                    break
+        finally:
+            await stream.aclose()
+        # Unsorted fallback windows were applied after the final matcher.
+        return documents, not bool(sort)
+
+    async def _iter_read(self, query: dict[str, Any] | None = None):
+        if not await init_schema() or _pool is None:
+            raise RuntimeError(_last_error or "Postgres is unavailable")
+        params = [self.name]
+        predicate, exact = _sql_filter(query or {}, params)
+        _read_stats["streamed_reads"] += 1
+        _read_stats["sql_filtered_reads" if predicate != "true" else "fallback_reads"] += 1
+        sql = f"select payload from cc_collection_snapshots where collection=$1 and ({predicate})"
+        # Release the connection before yielding: consumers often write inside
+        # async iteration, which would deadlock the small pool with held cursors.
+        # Keyset paging never revisits a key and bounds each decoded batch.
+        last_key = None
+        while True:
+            page_params = list(params)
+            key_filter = ""
+            if last_key is not None:
+                page_params.append(last_key)
+                key_filter = f" and doc_key > ${len(page_params)}::text"
+            async with _pool.acquire() as conn:
+                rows = await conn.fetch(sql.replace("select payload", "select doc_key, payload") + key_filter + f" order by doc_key limit {READ_BATCH_SIZE}", *page_params)
+            if not rows:
+                break
+            last_key = rows[-1]["doc_key"]
+            for row in rows:
+                _read_stats["rows_examined"] += 1
+                payload = _decode_payload(row)
+                if isinstance(payload, dict) and _matches(payload, query):
+                    yield payload
+            if len(rows) < READ_BATCH_SIZE:
+                break
+            await asyncio.sleep(0)
 
     def find(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None, **kwargs: Any) -> PostgresCursor:
         return PostgresCursor(self, query, projection)
@@ -497,12 +623,20 @@ class PostgresCollection:
         return PostgresResult(deleted_count=1 if result.endswith("1") else 0)
 
     async def count_documents(self, query: dict[str, Any] | None = None, **kwargs: Any) -> int:
-        rows, _ = await self._read(query)
-        return len(rows)
+        if not await init_schema() or _pool is None:
+            raise RuntimeError(_last_error or "Postgres is unavailable")
+        params = [self.name]
+        predicate, exact = _sql_filter(query or {}, params)
+        if exact:
+            async with _pool.acquire() as conn:
+                return int(await conn.fetchval(f"select count(*) from cc_collection_snapshots where collection=$1 and ({predicate})", *params))
+        count = 0
+        async for _ in self._iter_read(query):
+            count += 1
+        return count
 
     async def distinct(self, key: str, query: dict[str, Any] | None = None, **kwargs: Any) -> list[Any]:
-        rows, _ = await self._read(query)
-        values = {_path_get(row, key) for row in rows}
+        values = {_path_get(row, key) async for row in self._iter_read(query)}
         return list(values)
 
     async def create_index(self, *args: Any, **kwargs: Any) -> str:
@@ -912,4 +1046,6 @@ async def status() -> dict[str, Any]:
         "last_error": _last_error,
         "mirrored_counts": counts,
         "critical_collections": list(CRITICAL_COLLECTIONS),
+        "read_stats": dict(_read_stats),
+        "read_batch_size": READ_BATCH_SIZE,
     }

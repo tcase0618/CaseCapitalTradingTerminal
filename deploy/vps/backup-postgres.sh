@@ -35,12 +35,12 @@ trap 'rm -f "${tmp}"; unset PGPASSWORD' EXIT
 # Do not pass a DSN containing a password as a process argument. Root can read
 # command lines, so hand libpq its password through the process environment.
 # It is removed immediately after pg_dump exits and never written to disk.
-eval "$(python3 - "${POSTGRES_DSN}" <<'PY'
+eval "$(python3 - <<'PY'
 from shlex import quote
 from urllib.parse import unquote, urlparse
-import sys
+import os
 
-parsed = urlparse(sys.argv[1])
+parsed = urlparse(os.environ['POSTGRES_DSN'])
 if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or not parsed.username:
     raise SystemExit("POSTGRES_DSN must be a PostgreSQL URL with host and username")
 database = parsed.path.lstrip("/")
@@ -57,13 +57,12 @@ print(
 PY
 )"
 export PGSSLMODE="${CASE_CAPITAL_POSTGRES_SSLMODE:-disable}"
-pg_dump --format=custom --no-owner --file="${tmp}"
+nice -n 10 ionice -c 3 pg_dump --format=custom --no-owner --file="${tmp}"
 pg_restore --list "${tmp}" >/dev/null
 mv "${tmp}" "${final}"
 sha256sum "${final}" > "${final}.sha256"
 trap - EXIT
 
-# Only prune artifacts this job owns. Never glob unrelated application data.
-find "${BACKUP_DIR}" -maxdepth 1 -type f -name 'case-capital-*.dump' -mtime "+${RETENTION_DAYS}" -print -delete
-find "${BACKUP_DIR}" -maxdepth 1 -type f -name 'case-capital-*.dump.sha256' -mtime "+${RETENTION_DAYS}" -print -delete
+# Pruning is a separate operator step after off-host checksum and restore
+# verification. A readable archive listing alone does not prove recoverability.
 echo "Backup verified: ${final}"

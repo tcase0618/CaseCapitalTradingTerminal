@@ -128,10 +128,50 @@ async def test_postgres_cursor_uses_sql_window_for_latest_dashboard_reads(monkey
     monkeypatch.setattr(postgres_store, "init_schema", lambda: _schema_ready())
     rows = await postgres_store.PostgresCollection("candidate_ledgers").find({"_id": "latest"}).sort("generated_at", -1).skip(0).to_list(1)
     assert rows == [{"_id": "latest", "generated_at": "2026-09-14T12:00:00Z"}]
-    assert "payload @>" in connection.sql
+    assert "payload #>" in connection.sql
     assert "order by payload #>>" in connection.sql
     assert connection.params[-2:] == (0, 1)
 
 
 async def _schema_ready():
     return True
+
+
+def test_sql_filter_never_negates_an_inexact_predicate():
+    params = ["test"]
+    sql, exact = postgres_store._sql_filter({"qty": {"$ne": 1}, "status": "OPEN"}, params)
+    assert not exact
+    assert "not coalesce(true" not in sql
+    assert "OPEN" not in sql  # Values are bound, including suspicious input.
+    sql, exact = postgres_store._sql_filter({"$or": [{"qty": 1}, {"status": "OPEN"}]}, ["test"])
+    assert not exact and "true" in sql
+
+
+@pytest.mark.asyncio
+async def test_fallback_window_applies_after_matching_without_loading_collection(monkeypatch):
+    collection = postgres_store.PostgresCollection("test")
+    examined = []
+    async def stream(query):
+        for index in range(10000):
+            examined.append(index)
+            if index % 2:
+                yield {"qty": index}
+    monkeypatch.setattr(postgres_store, "_pool", object())
+    monkeypatch.setattr(postgres_store, "init_schema", _schema_ready)
+    monkeypatch.setattr(collection, "_iter_read", stream)
+    result = await collection.find({"qty": {"$gt": 0}}).skip(1).to_list(2)
+    assert result == [{"qty": 3}, {"qty": 5}]
+    assert len(examined) == 6
+
+
+@pytest.mark.asyncio
+async def test_aggregate_pushes_leading_match_before_materialization():
+    class Collection:
+        async def _read(self, query):
+            assert query == {"strategy": "LOTTERY"}
+            return [{"strategy": "LOTTERY", "qty": 2}], False
+    result = await postgres_store.PostgresAggregateCursor(Collection(), [
+        {"$match": {"strategy": "LOTTERY"}},
+        {"$group": {"_id": "$strategy", "n": {"$sum": 1}}},
+    ]).to_list(None)
+    assert result == [{"_id": "LOTTERY", "n": 1}]
