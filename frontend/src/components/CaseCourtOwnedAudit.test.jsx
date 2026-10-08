@@ -122,4 +122,3 @@ test("RUN COURT remains an explicit manual command with original params", async 
   await click("RUN COURT");
   expect(axios.post.mock.calls).toEqual([["/api/case_court/refresh", null, { params: { limit: 30 }, timeout: 30000 }]]);
 });
-
