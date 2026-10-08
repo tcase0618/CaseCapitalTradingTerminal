@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Download, Search, RefreshCw } from "lucide-react";
+import { displayResource } from "../hooks/useDisplayResource";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../config";
@@ -94,20 +96,22 @@ function missionState(loading, ok, readyLabel, blockedLabel) {
 function riskLevel(pos) {
   if (pos?.below_stop) return { label: "STOP", color: "#f87171" };
   if (pos?.instrument === "OPTION") {
-    const plpc = normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct);
+    const plpc = positionReturnPct(pos);
     if (plpc != null) {
       if (plpc <= -15) return { label: "HIGH", color: "#f87171" };
       if (plpc <= -5) return { label: "MED", color: "#fbbf24" };
       return { label: "LOW", color: "#8cc665" };
     }
   }
-  const dist = Number(pos?.dist_to_stop_pct);
+  const dist = pos?.dist_to_stop_pct == null || pos?.dist_to_stop_pct === "" ? NaN : Number(pos.dist_to_stop_pct);
   if (Number.isFinite(dist)) {
     if (dist <= 1) return { label: "HIGH", color: "#f87171" };
     if (dist <= 3) return { label: "MED", color: "#fbbf24" };
     return { label: "LOW", color: "#8cc665" };
   }
-  const plpc = Number(pos?.unrealized_plpc ?? pos?.unrealized_intraday_plpc ?? 0) * 100;
+  if (pos?.unrealized_plpc == null && pos?.unrealized_intraday_plpc == null) return { label: "UNKNOWN", color: muted };
+  const plpc = positionReturnPct(pos);
+  if (plpc == null) return { label: "UNKNOWN", color: muted };
   if (plpc <= -10) return { label: "HIGH", color: "#f87171" };
   if (plpc <= -4) return { label: "MED", color: "#fbbf24" };
   return { label: "LOW", color: "#8cc665" };
@@ -115,36 +119,37 @@ function riskLevel(pos) {
 
 function stopDistanceLabel(pos) {
   if (pos?.instrument === "OPTION") {
-    const plpc = normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct);
+    const plpc = positionReturnPct(pos);
     return plpc == null ? "OPT MARK" : `${plpc >= 0 ? "+" : ""}${plpc.toFixed(2)}% P/L`;
   }
   if (pos?.below_stop) return "BREACHED";
-  const dist = Number(pos?.dist_to_stop_pct);
+  const dist = pos?.dist_to_stop_pct == null || pos?.dist_to_stop_pct === "" ? NaN : Number(pos.dist_to_stop_pct);
   if (Number.isFinite(dist)) return `${dist >= 0 ? "+" : ""}${dist.toFixed(2)}%`;
-  return "NO STOP";
+  return pos?.current_stop > 0 ? "DIST --" : "NO STOP";
 }
 
 function stopDistanceColor(pos) {
   if (pos?.below_stop) return "#f87171";
   if (pos?.instrument === "OPTION") {
-    const plpc = normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct);
+    const plpc = positionReturnPct(pos);
     if (plpc == null) return muted;
     if (plpc <= -15) return "#f87171";
     if (plpc <= -5) return "#fbbf24";
     return "#4ade80";
   }
-  const dist = Number(pos?.dist_to_stop_pct);
+  const dist = pos?.dist_to_stop_pct == null || pos?.dist_to_stop_pct === "" ? NaN : Number(pos.dist_to_stop_pct);
   if (!Number.isFinite(dist)) return muted;
   if (dist <= 1) return "#f87171";
   if (dist <= 3) return "#fbbf24";
   return "#4ade80";
 }
 
-function normalizedPctNumber(v) {
-  if (v == null || v === "") return null;
-  const n = Number(v);
-  if (!Number.isFinite(n)) return null;
-  return Math.abs(n) <= 1 ? n * 100 : n;
+export function positionReturnPct(pos) {
+  const value = pos?.unrealized_pct ?? pos?.unrealized_plpc ?? pos?.unrealized_intraday_plpc;
+  if (value == null || value === "" || !Number.isFinite(Number(value))) return null;
+  // Public snapshot currently retains percentage points under the legacy plpc key.
+  const percentUnits = pos?.unrealized_pct != null || pos?.return_units === "percent" || pos?.asset_class === "public_equity";
+  return Number(value) * (percentUnits ? 1 : 100);
 }
 
 function optionRoot(symbol) {
@@ -152,11 +157,11 @@ function optionRoot(symbol) {
   return m ? m[1] : String(symbol || "").toUpperCase();
 }
 
-function buildCommandPositions(tradeFloor, monitor) {
+export function buildCommandPositions(tradeFloor, monitor) {
   const equityStops = new Map(
     (tradeFloor?.live_alpaca || []).map(p => [String(p.symbol || p.ticker || "").toUpperCase(), p]),
   );
-  const equities = ((monitor?.equities?.positions?.length ? monitor.equities.positions : tradeFloor?.live_alpaca) || [])
+  const equities = ((Array.isArray(monitor?.equities?.positions) ? monitor.equities.positions : tradeFloor?.live_alpaca) || [])
     .map(p => {
       const symbol = String(p.symbol || p.ticker || "").toUpperCase();
       const stopRow = equityStops.get(symbol) || {};
@@ -215,39 +220,64 @@ export default function CommandCenterPage() {
   const [completed, setCompleted] = useState([]);
   const [initialLoad, setInitialLoad] = useState(true);
   const [loadWarning, setLoadWarning] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [workspaceView, setWorkspaceView] = useState("overview");
+  const refreshInFlight = useRef(false);
+  const mounted = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    const read = (path, setter) => {
+      const resource = displayResource(`${API}${path}`, 20000);
+      const cached = resource.getSnapshot();
+      if (cached.data != null && mounted.current) setter(cached.data);
+      const promise = !force && cached.updatedAt && Date.now() - cached.updatedAt < 20000 ? Promise.resolve() : resource.refresh();
+      return promise.then(() => {
+        const state = resource.getSnapshot();
+        if (state.error) throw state.error;
+        if (mounted.current) setter(state.data);
+      });
+    };
     const calls = [
-      axios.get(`${API}/status`).then(r => setStatus(r.data)),
-      axios.get(`${API}/scan/latest`).then(r => setScan(r.data)),
-      axios.get(`${API}/scan/funnel/today`).then(r => setScanFunnel(r.data)),
-      axios.get(`${API}/admin/integration_status`).then(r => setAdmin(r.data)),
-      axios.get(`${API}/system/health`).then(r => setHealth(r.data)),
-      axios.get(`${API}/execution_gate/overview`).then(r => setExecutionGate(r.data)),
-      axios.get(`${API}/trade_floor/positions`).then(r => setTradeFloor(r.data)),
-      axios.get(`${API}/position_monitor/latest`).then(r => setPositionMonitor(r.data)),
-      axios.get(`${API}/portfolio_manager/latest`).then(r => setPm(r.data)),
-      axios.get(`${API}/admin/price_source`).then(r => setPriceSource(r.data)),
-      axios.get(`${API}/activity?limit=12`).then(r => setActivity(r.data || [])),
-      axios.get(`${API}/telegram/events?limit=12`).then(r => setTelegramEvents(r.data?.events || r.data || [])),
-      axios.get(`${API}/data_quality/overview`).then(r => setQualityOverview(r.data)),
+      read("/status", setStatus),
+      read("/scan/latest", setScan),
+      read("/scan/funnel/today", setScanFunnel),
+      read("/admin/integration_status", setAdmin),
+      read("/system/health", setHealth),
+      read("/execution_gate/overview", setExecutionGate),
+      read("/trade_floor/positions", setTradeFloor),
+      read("/position_monitor/latest", setPositionMonitor),
+      read("/portfolio_manager/latest", setPm),
+      read("/admin/price_source", setPriceSource),
+      read("/activity?limit=12", data => setActivity(data || [])),
+      read("/telegram/events?limit=12", data => setTelegramEvents(data?.events || data || [])),
+      read("/data_quality/overview", setQualityOverview),
     ];
     const results = await Promise.allSettled(calls);
     const failed = results.filter(result => result.status === "rejected").length;
-    setLoadWarning(failed ? `${failed} COMMAND CENTER DATA REQUEST(S) FAILED - DISPLAY IS INCOMPLETE` : "");
-    setInitialLoad(false);
+    if (mounted.current) {
+      setLoadWarning(failed ? `${failed} DATA REQUEST(S) FAILED - LAST LOADED VALUES MAY BE OUTDATED` : "");
+      if (!failed) setLastUpdated(Date.now());
+      setInitialLoad(false);
+    }
+    refreshInFlight.current = false;
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     refresh();
-    const id = setInterval(refresh, 20000);
-    return () => clearInterval(id);
+    const visibleRefresh = () => { if (document.visibilityState !== "hidden") refresh(); };
+    const id = setInterval(visibleRefresh, 20000);
+    document.addEventListener("visibilitychange", visibleRefresh);
+    return () => { mounted.current = false; clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh); };
   }, [refresh]);
 
   const livePositions = useMemo(
     () => buildCommandPositions(tradeFloor, positionMonitor),
     [tradeFloor, positionMonitor],
   );
+  const portfolioLoaded = Array.isArray(positionMonitor?.equities?.positions) || Array.isArray(tradeFloor?.live_alpaca);
   const integrations = admin?.integrations || [];
   const pmSummary = pm?.summary || {};
   const account = health?.alpaca?.account || {};
@@ -274,7 +304,7 @@ export default function CommandCenterPage() {
       const item = { id: cmd.id, label: cmd.label, detail, at: new Date().toISOString(), ok: true };
       setCompleted(prev => [item, ...prev.filter(x => x.id !== cmd.id)].slice(0, 8));
       toast(`${cmd.label.toUpperCase()} COMPLETE - ${detail}`);
-      await refresh();
+      await refresh(true);
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "failed";
       const item = { id: cmd.id, label: cmd.label, detail, at: new Date().toISOString(), ok: false };
@@ -301,7 +331,7 @@ export default function CommandCenterPage() {
       setPriceSource(data.price_source || null);
       setBackendRefresh({ ok: true, at: data.refreshed_at || new Date().toISOString() });
       toast("BACKEND REFRESH COMPLETE");
-      await refresh();
+      await refresh(true);
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "failed";
       setBackendRefresh({ ok: false, at: new Date().toISOString(), detail });
@@ -332,11 +362,21 @@ export default function CommandCenterPage() {
           { label: "Execution Gate", value: gateDecision, color: gateColor },
           { label: "Execution Score", value: qualityOverview?.execution_score == null ? "--" : qualityOverview.execution_score, color: Number(qualityOverview?.execution_score || 0) >= 100 ? "#4ade80" : "#fbbf24" },
           { label: "Data Quality", value: qualityOverview?.data_score ?? qualityOverview?.score ?? "CHECKING" },
-          { label: "Backend Refresh", value: backendRefreshing ? "SYNCING" : "20S", color: backendRefreshing ? "#fbbf24" : accent2 },
+          { label: "Last Complete Sync (ET)", value: lastUpdated ? fmtTime(lastUpdated) : "--", color: loadWarning ? "#fbbf24" : accent2 },
         ]}
       />
 
-      <div className="command-control-grid command-center-grid" style={commandGrid}>
+      <section className="workspace-overview" aria-label="Portfolio overview">
+        <div><span>HELD POSITIONS</span><strong>{portfolioLoaded ? livePositions.length : "--"}</strong><small>Equities + paper options</small></div>
+        <div><span>MARKET VALUE</span><strong>{!portfolioLoaded ? "--" : fmtMoney2(livePositions.reduce((total, position) => total + Number(position.market_value || 0), 0)).replace("+", "")}</strong><small>Combined display, not deployable cash</small></div>
+        <div><span>UNREALIZED P/L</span><strong style={{ color: livePositions.reduce((total, position) => total + Number(position.unrealized_pl || 0), 0) < 0 ? "#f87171" : accent2 }}>{!portfolioLoaded ? "--" : fmtMoney2(livePositions.reduce((total, position) => total + Number(position.unrealized_pl || 0), 0))}</strong><small>Open positions only</small></div>
+        <div><span>TODAY'S PM APPROVALS</span><strong>{scanFunnel?.counts?.pm_approved ?? "--"}</strong><small>Approvals are not broker fills</small></div>
+      </section>
+      <div className="workspace-section-toolbar">
+        <div className="workspace-segmented" aria-label="Command Center view">{["overview", "operations"].map(view => <button key={view} type="button" aria-pressed={workspaceView === view} onClick={() => setWorkspaceView(view)}>{view === "overview" ? "Overview" : "Operations"}</button>)}</div>
+        <button type="button" className="workspace-icon-button" title="Reload displayed data" aria-label="Reload displayed data" onClick={() => refresh(true)}><RefreshCw size={15} /></button>
+      </div>
+      <div className={`command-control-grid command-center-grid workspace-view-${workspaceView}`} style={commandGrid}>
         <OpsPanel title="SCAN FUNNEL" sub="TODAY" action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={tinyButton(accent2)}>{backendRefreshing ? "SYNC" : "REFRESH"}</button>}>
           <ScanFunnel scan={scan} scanFunnel={scanFunnel} pmSummary={pmSummary} gateDecision={gateDecision} livePositions={livePositions} />
         </OpsPanel>
@@ -410,7 +450,7 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
           {sub && <span style={opsSub}>({sub})</span>}
         </div>
         <div className="command-panel-actions" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          {live && <span style={livePill}><span className="dot dot-green pulse-dot" /> LIVE</span>}
+          {live && <span style={livePill}>RECORDED</span>}
           {action}
         </div>
       </div>
@@ -419,7 +459,8 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
   );
 }
 
-function ScanFunnel({ scan, scanFunnel, pmSummary, gateDecision, livePositions }) {
+export function ScanFunnel({ scan, scanFunnel, pmSummary, gateDecision, livePositions }) {
+  if (!scanFunnel?.counts) return <div><div style={funnelStats}>{["SCANNED", "PM APPROVED", "GATED", "EXECUTED"].map(label => <FunnelStat key={label} label={label} value="--" color={muted} />)}</div><Empty text="Daily terminal funnel not loaded." /></div>;
   const counts = scanFunnel?.counts || {};
   const scanned = Number(counts.scanned ?? scan?.pre_filter_passed ?? scan?.results_count ?? scan?.results?.length ?? 0);
   const accumulate = Number(pmSummary?.accumulate || 0);
@@ -430,8 +471,8 @@ function ScanFunnel({ scan, scanFunnel, pmSummary, gateDecision, livePositions }
   const reviewed = approved + watch + rejected;
   const routed = Number(counts.routed ?? reviewed);
   const unclassified = Number(counts.unclassified ?? Math.max(0, routed - reviewed));
-  const gated = Number(counts.gated ?? (["PASS", "ALLOW"].includes(gateDecision) ? approved : 0));
-  const executed = Number(counts.executed ?? livePositions?.length ?? 0);
+  const gated = counts.gated ?? "--";
+  const executed = counts.executed ?? "--";
   const bars = [
     ["Approved", approved, "#4ade80"],
     ["Watch", watch, "#fbbf24"],
@@ -488,16 +529,28 @@ function BarRow({ label, value, pct, color = "#f87171" }) {
   );
 }
 
-function PositionHeat({ positions }) {
+export function PositionHeat({ positions }) {
   const [sort, setSort] = useState({ key: "risk", dir: "desc" });
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
   const sortedRows = useMemo(() => {
-    const rows = [...(positions || [])];
+    const rows = (positions || []).filter(position => `${position.symbol} ${position.contract_symbol || ""} ${position.instrument}`.toLowerCase().includes(query.trim().toLowerCase()));
     rows.sort((a, b) => comparePosition(a, b, sort.key, sort.dir));
     return rows;
-  }, [positions, sort]);
-  const rows = sortedRows.slice(0, 12);
-  const totalMv = rows.reduce((s, p) => s + Number(p.market_value || 0), 0);
-  const totalPl = rows.reduce((s, p) => s + Number(p.unrealized_pl || 0), 0);
+  }, [positions, sort, query]);
+  const lastPage = Math.max(0, Math.ceil(sortedRows.length / 12) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const rows = sortedRows.slice(currentPage * 12, currentPage * 12 + 12);
+  const totalMv = (positions || []).reduce((s, p) => s + Number(p.market_value || 0), 0);
+  const totalPl = (positions || []).reduce((s, p) => s + Number(p.unrealized_pl || 0), 0);
+  const exportRows = () => {
+    const fields = ["symbol", "instrument", "qty", "market_value", "unrealized_pl", "current_stop", "dist_to_stop_pct"];
+    const escape = value => `"${String(value ?? "").replace(/"/g, '""').replace(/^[=+@-]/, "'$&")}"`;
+    const csv = [fields, ...sortedRows.map(row => fields.map(field => row[field]))].map(row => row.map(escape).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+    const link = document.createElement("a"); link.href = url; link.download = "case-capital-holdings.csv"; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
   const setSortKey = (key) => {
     setSort(prev => ({ key, dir: prev.key === key && prev.dir === "desc" ? "asc" : "desc" }));
   };
@@ -509,6 +562,8 @@ function PositionHeat({ positions }) {
   );
   return (
     <div style={tableWrap}>
+      <div className="workspace-table-toolbar"><label><Search size={14} /><input aria-label="Filter holdings" placeholder="Filter holdings" value={query} onChange={event => { setQuery(event.target.value); setPage(0); }} /></label><span>{sortedRows.length} / {positions?.length || 0} positions</span><button type="button" className="workspace-icon-button" aria-label="Export filtered holdings" title="Export filtered holdings" onClick={exportRows}><Download size={15} /></button></div>
+      <DataTableShell minWidth={620}>
       <div style={heatHeader}>
         <SortHead id="symbol">SYMBOL</SortHead>
         <SortHead id="qty">POS</SortHead>
@@ -536,10 +591,12 @@ function PositionHeat({ positions }) {
           </Link>
         );
       })}
-      {!rows.length && <Empty text="No live positions." />}
+      {!rows.length && <Empty text={query ? "No matching positions." : "No positions loaded."} />}
       <div style={heatFooter}>
-        <span>TOTALS</span><span>{fmtQty(rows.reduce((s, p) => s + Number(p.qty || 0), 0))}</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span>{rows.filter(p => p.instrument === "OPTION").length} OPT</span><span>PORTFOLIO</span>
+        <span>FULL BOOK</span><span>{positions?.length || 0} POS</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span>{positions.filter(p => p.instrument === "OPTION").length} OPT</span><span>PORTFOLIO</span>
       </div>
+      </DataTableShell>
+      {lastPage > 0 && <div className="workspace-pagination"><button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</button><span>{currentPage + 1} / {lastPage + 1}</span><button type="button" disabled={currentPage === lastPage} onClick={() => setPage(currentPage + 1)}>Next</button></div>}
     </div>
   );
 }
@@ -561,9 +618,9 @@ function positionRiskRank(pos) {
 }
 
 function positionDistanceValue(pos) {
-  if (pos?.instrument === "OPTION") return normalizedPctNumber(pos?.unrealized_plpc ?? pos?.unrealized_pct) ?? -999;
+  if (pos?.instrument === "OPTION") return positionReturnPct(pos) ?? -999;
   if (pos?.below_stop) return -999;
-  const dist = Number(pos?.dist_to_stop_pct);
+  const dist = pos?.dist_to_stop_pct == null || pos?.dist_to_stop_pct === "" ? NaN : Number(pos.dist_to_stop_pct);
   return Number.isFinite(dist) ? dist : -998;
 }
 
@@ -610,7 +667,7 @@ function QualityMatrix({ integrations, qualityOverview, priceSource }) {
       <div style={qualityScore}>OVERALL QUALITY SCORE <span>{score} / 100</span></div>
       <div style={{ ...rejectionTitle, marginTop: 9, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         PRICE SOURCE:
-        <SourceBadge source={priceSource?.provider || priceSource?.source || "CONFIG"} status={priceSource?.provider ? "LIVE" : "CONFIG"} />
+        <SourceBadge source={priceSource?.provider || priceSource?.source || "CONFIG"} status="CONFIGURED" />
       </div>
     </div>
   );
@@ -618,7 +675,7 @@ function QualityMatrix({ integrations, qualityOverview, priceSource }) {
 
 function EventTape({ activity, completed }) {
   const rows = [
-    ...completed.map(c => ({ time: c.at, type: c.ok ? "ORDER" : "ALERT", symbol: c.id.toUpperCase(), message: `${c.label}: ${c.detail}`, status: c.ok ? "SENT" : "ALERT" })),
+    ...completed.map(c => ({ time: c.at, type: c.ok ? "COMMAND" : "ALERT", symbol: c.id.toUpperCase(), message: `${c.label}: ${c.detail}`, status: c.ok ? "COMPLETE" : "ALERT" })),
     ...(activity || []).map(normalizeEvent),
   ].slice(0, 9);
   return <Tape rows={rows} empty="No recent command/event rows." />;
@@ -629,10 +686,9 @@ function TelegramQueue({ events, completed }) {
     time: e.created_at || e.ts,
     channel: e.channel || e.batch_type || "#case-capital-alerts",
     message: e.summary || e.title || e.message || e.event_type || "Telegram event",
-    status: e.status || e.delivery_status || "QUEUED",
+    status: e.status || e.delivery_status || "UNKNOWN",
   }));
-  const commandRows = completed.map(c => ({ time: c.at, channel: "#case-capital-ops", message: c.label, status: c.ok ? "SENT" : "FAILED" }));
-  const rows = [...commandRows, ...eventRows].slice(0, 9);
+  const rows = eventRows.slice(0, 9);
   return (
     <div>
       <div style={telegramHeader}><span>TIME</span><span>CHANNEL</span><span>MESSAGE PREVIEW</span><span>STATUS</span></div>

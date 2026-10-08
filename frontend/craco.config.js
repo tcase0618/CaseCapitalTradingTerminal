@@ -57,6 +57,9 @@ let webpackConfig = {
 
 webpackConfig.devServer = (devServerConfig) => {
   devServerConfig.historyApiFallback = true;
+  if (process.env.DEV_API_PROXY_TARGET) {
+    devServerConfig.proxy = { "/api": { target: process.env.DEV_API_PROXY_TARGET, changeOrigin: true } };
+  }
 
   // Add health check endpoints if enabled
   if (config.enableHealthCheck && setupHealthEndpoints && healthPluginInstance) {

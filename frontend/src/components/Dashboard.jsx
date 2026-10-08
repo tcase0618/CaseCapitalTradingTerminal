@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { displayResource } from "../hooks/useDisplayResource";
 import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, SystemBar, tokens as crtTokens } from "./CrtShell";
@@ -156,27 +157,36 @@ export default function Dashboard() {
   const [openPanel, setOpenPanel] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const t = useClock();
-
-  const refresh = useCallback(async () => {
-    // Independent fetches — one slow/failing endpoint shouldn't blank the dashboard
-    axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(e => console.error("status:", e));
-    axios.get(`${API}/scan/latest`).then(r => setScan(r.data)).catch(e => console.error("scan:", e));
-    axios.get(`${API}/activity?limit=20`).then(r => setActivity(r.data)).catch(e => console.error("activity:", e));
-    axios.get(`${API}/watchlist`).then(r => setWatchlist(r.data)).catch(e => console.error("wl:", e));
-    axios.get(`${API}/alerts`).then(r => setAlerts(r.data)).catch(e => console.error("alerts:", e));
-    axios.get(`${API}/contracts?days=90&min_amount=1000000`)
-      .then(r => setContracts(r.data.contracts || []))
-      .catch(e => console.error("contracts:", e));
-    axios.get(`${API}/congress/recent?days=30`).then(r => setCongress(r.data)).catch(e => console.error("congress:", e));
-    axios.get(`${API}/squeeze/leaderboard/top?limit=10`).then(r => setSqueezeLb(r.data)).catch(e => console.error("squeeze:", e));
-    axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
-    axios.get(`${API}/scan/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
-    axios.get(`${API}/scan/tabs`).then(r => setScanTabs(r.data)).catch(e => console.error("scan-tabs:", e));
-    axios.get(`${API}/scan/replay_calendar?days=90`).then(r => setReplayCalendar(r.data)).catch(e => console.error("replay-calendar:", e));
+  const mounted = useRef(false);
+  const [displayError, setDisplayError] = useState("");
+  const refresh = useCallback(async (force = false) => {
+    const reads = [
+      ["/status", setStatus, 15000], ["/scan/latest", setScan, 15000],
+      ["/activity?limit=20", setActivity, 15000], ["/watchlist", setWatchlist, 15000], ["/alerts", setAlerts, 15000],
+      ["/contracts?days=90&min_amount=1000000", data => setContracts(data.contracts || []), 300000],
+      ["/congress/recent?days=30", setCongress, 300000], ["/squeeze/leaderboard/top?limit=10", setSqueezeLb, 60000],
+      ["/fy/status", setFyStatus, 300000], ["/scan/preview", setPreview, 60000], ["/scan/tabs", setScanTabs, 15000],
+      ["/scan/replay_calendar?days=90", setReplayCalendar, 60000],
+    ];
+    const results = await Promise.allSettled(reads.map(async ([path, setter, interval]) => {
+      const resource = displayResource(`${API}${path}`, interval);
+      const cached = resource.getSnapshot();
+      if (cached.data != null && mounted.current) setter(cached.data);
+      if (force || !cached.updatedAt || Date.now() - cached.updatedAt >= interval) await resource.refresh();
+      const state = resource.getSnapshot();
+      if (state.error) throw state.error;
+      if (mounted.current) setter(state.data);
+    }));
+    if (mounted.current) setDisplayError(results.some(result => result.status === "rejected") ? "Some scanner data could not refresh. Last loaded values may be outdated." : "");
   }, []);
 
-  useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
+  useEffect(() => {
+    mounted.current = true; refresh();
+    const visibleRefresh = () => { if (document.visibilityState !== "hidden") refresh(); };
+    const id = setInterval(visibleRefresh, 15000);
+    document.addEventListener("visibilitychange", visibleRefresh);
+    return () => { mounted.current = false; clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh); };
+  }, [refresh]);
 
   useEffect(() => {
     if (!selected) {
@@ -199,7 +209,7 @@ export default function Dashboard() {
       const { data } = await axios.post(`${API}/scan/run`);
       setScan(data);
       toast(`SCAN COMPLETE — ${data.results?.length || 0} TARGETS`);
-      refresh();
+      refresh(true);
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "request failed";
       toast(`SCAN FAILED - ${detail}`);
@@ -223,15 +233,15 @@ export default function Dashboard() {
 
   const addWatch = async () => {
     if (!tInput.trim()) return;
-    try { await axios.post(`${API}/watchlist`, { ticker: tInput.trim() }); setTInput(""); refresh(); } catch {}
+    try { await axios.post(`${API}/watchlist`, { ticker: tInput.trim() }); setTInput(""); refresh(true); } catch {}
   };
-  const removeWatch = async (t) => { await axios.delete(`${API}/watchlist/${t}`); refresh(); };
+  const removeWatch = async (t) => { await axios.delete(`${API}/watchlist/${t}`); refresh(true); };
   const addAlert = async () => {
     if (!aTicker.trim() || !aPrice) return;
     try { await axios.post(`${API}/alerts`, { ticker: aTicker.trim(), target_price: parseFloat(aPrice) });
-          setATicker(""); setAPrice(""); refresh(); } catch {}
+          setATicker(""); setAPrice(""); refresh(true); } catch {}
   };
-  const removeAlert = async (t) => { await axios.delete(`${API}/alerts/${t}`); refresh(); };
+  const removeAlert = async (t) => { await axios.delete(`${API}/alerts/${t}`); refresh(true); };
 
   const results = useMemo(() => {
     const r = [...((scan && scan.results) || [])];
@@ -304,8 +314,9 @@ export default function Dashboard() {
           {scanning ? "SCANNING..." : "[ RUN SCAN ]"}
         </button>
       }>
+      {displayError && <div role="status" className="workspace-data-warning">{displayError}</div>}
       {/* === MAIN === */}
-      <div style={{ marginLeft: -30, marginRight: -30, marginTop: -22 }}>
+      <div style={{ minWidth: 0 }}>
         {/* Metrics */}
         <div className="fade-in" style={{
           background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
