@@ -4,6 +4,7 @@ import { API } from "../config";
 import { toast } from "sonner";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid, Legend } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import StrategyEvidencePanel from "./StrategyEvidencePanel";
 
 const { accent, dim, muted, labelLight, hairline } = tokens;
 
@@ -35,7 +36,7 @@ export default function LearningPage() {
     try {
       const { data } = await axios.post(`${API}/learning/run`);
       if (data.skipped) toast(`SKIPPED — ${data.reason}`);
-      else toast(`COMPLETE — ${data.trades} TRADES · ${data.changes} WEIGHTS ADJUSTED`);
+      else toast("SHADOW ANALYSIS COMPLETE - PROPOSALS ONLY; ACTIVE WEIGHTS UNCHANGED");
       refresh();
     } catch { toast("LEARNING FAILED"); }
     setRunning(false);
@@ -75,31 +76,30 @@ export default function LearningPage() {
   }, [historyChart.keys, weights]);
 
   return (
-    <CrtShell title="LEARNING ENGINE"
+    <CrtShell title="LEARNING ENGINE / SHADOW"
       headerRight={
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button data-testid="run-learning-btn" onClick={runCycle} disabled={running}
             style={btnPrimary(running)}>{running ? "ANALYZING..." : "[ RUN CYCLE ]"}</button>
           <button data-testid="reset-weights-btn" onClick={reset} style={btnGhost}>[ RESET ]</button>
         </div>
       }>
+      <StrategyEvidencePanel />
       {/* Status strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
         <Stat label="LAST RUN" value={lastRun ? new Date(lastRun.run_at).toLocaleDateString() : "NEVER"}
               sub={lastRun?.run_at ? new Date(lastRun.run_at).toLocaleTimeString() : "—"} color={accent} />
         <Stat label="TRADES ANALYZED" value={preview?.trades_available || 0}
               sub={`${preview?.trades_30d || 0} × 30D + ${(preview?.trades_live || 0) - (preview?.trades_30d || 0)} × LIVE`} />
-        <Stat label="OVERALL WIN RATE" value={`${((lastRun?.overall_win_rate || 0) * 100).toFixed(1)}%`}
-              color={(lastRun?.overall_win_rate || 0) >= 0.5 ? "#4ade80" : "#f87171"} sub="ALL TRADES" />
+        <Stat label="OVERALL WIN RATE" value={lastRun?.trades_analyzed > 0 && lastRun?.overall_win_rate != null ? `${(lastRun.overall_win_rate * 100).toFixed(1)}%` : "—"}
+              color={lastRun?.overall_win_rate == null ? muted : lastRun.overall_win_rate >= 0.5 ? "#4ade80" : "#f87171"} sub="ALL TRADES" />
         <Stat label="PENDING CHANGES" value={preview?.would_change_count || 0}
               color={preview?.would_change_count > 0 ? "#fb923c" : muted} sub="IF RUN NOW" />
-        <Stat label="WEIGHTS ADJUSTED" value={Object.keys(lastRun?.weights_changed || {}).length}
-              sub="LAST CYCLE" />
-        <Stat label="NEXT AUTO RUN" value="SUN 02:00" sub="ET WEEKLY" />
+        <Stat label="MODE" value="SHADOW" sub="PROPOSALS ONLY" />
       </div>
 
       {/* PREVIEW — what the next cycle would do */}
-      <Card title={`PENDING ADJUSTMENTS — DRY-RUN OF NEXT CYCLE${preview?.would_run ? "" : ` · BLOCKED (NEED ${preview?.min_required || 10}+ COMPLETED TRADES)`}`}
+      <Card title={`SHADOW PROPOSALS — NOT APPLIED${preview?.would_run ? "" : ` · BLOCKED (NEED ${preview?.min_required || 10}+ COMPLETED TRADES)`}`}
         action={preview && (
           <div style={{ fontSize: 11, color: muted, letterSpacing: "0.1em" }}>
             {preview.trades_available} / {preview.min_required} TRADES
@@ -133,7 +133,7 @@ export default function LearningPage() {
                   <td style={{ ...td, color: r.delta > 0 ? "#4ade80" : "#f87171" }}>
                     {r.delta > 0 ? "+" : ""}{r.delta?.toFixed(2)} ({r.pct >= 0 ? "+" : ""}{r.pct?.toFixed(1)}%)
                   </td>
-                  <td style={td}>{r.win_rate != null ? `${(r.win_rate * 100).toFixed(0)}%` : "—"}</td>
+                  <td style={td}>{r.samples > 0 && r.win_rate != null ? `${(r.win_rate * 100).toFixed(0)}%` : "—"}</td>
                   <td style={td}>{r.samples}</td>
                   <td style={{ ...td, color: r.basis === "30d" ? "#4ade80" : accent, fontSize: 10 }}>
                     {r.basis ? r.basis.toUpperCase() : "—"}
@@ -181,7 +181,7 @@ export default function LearningPage() {
         }>
         {historyChart.data.length === 0 ? (
           <div style={{ color: muted, fontSize: 13, padding: "12px 0" }}>
-            No weight changes recorded yet. Once the engine starts adjusting weights, the trajectory of each signal's importance will plot here.
+            No weight history recorded yet. Shadow proposals do not change active weights.
           </div>
         ) : (
           <div style={{ width: "100%", height: 320, marginLeft: -8 }}>
@@ -212,7 +212,7 @@ export default function LearningPage() {
         )}
       </Card>
 
-      <Card title="LIVE SIGNAL WEIGHTS — POST-LEARNING VALUES IN USE BY SCANNER">
+      <Card title="ACTIVE SIGNAL WEIGHTS — CURRENT SCANNER VALUES">
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ color: dim, letterSpacing: "0.12em", textAlign: "left" }}>
@@ -234,7 +234,7 @@ export default function LearningPage() {
                   <td style={{ ...td, color: deltaColor }}>
                     {delta > 0 ? "+" : ""}{delta.toFixed(2)}
                   </td>
-                  <td style={td}>{w.win_rate != null ? `${(w.win_rate * 100).toFixed(0)}%` : "—"}</td>
+                  <td style={td}>{w.sample_count > 0 && w.win_rate != null ? `${(w.win_rate * 100).toFixed(0)}%` : "—"}</td>
                   <td style={{ ...td, color: muted }}>{w.sample_count || 0}</td>
                   <td style={td}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -283,7 +283,7 @@ export default function LearningPage() {
                   <td style={{
                     ...td,
                     color: s.win_rate == null ? muted : s.win_rate >= 0.65 ? "#4ade80" : s.win_rate < 0.40 ? "#f87171" : accent,
-                  }}>{s.win_rate != null ? `${(s.win_rate * 100).toFixed(0)}%` : "—"}</td>
+                  }}>{s.n > 0 && s.win_rate != null ? `${(s.win_rate * 100).toFixed(0)}%` : "—"}</td>
                   <td style={{ ...td, color: pctColor(s.avg_live) }}>{fmt(s.avg_live)}%</td>
                   <td style={{ ...td, color: pctColor(s.avg_30d) }}>{fmt(s.avg_30d)}%</td>
                   <td style={{ ...td, color: s.best != null ? "#4ade80" : muted }}>
@@ -321,7 +321,7 @@ export default function LearningPage() {
                   <td style={{
                     ...td,
                     color: c.win_rate >= 0.65 ? "#4ade80" : c.win_rate < 0.40 ? "#f87171" : accent,
-                  }}>{(c.win_rate * 100).toFixed(0)}%</td>
+                  }}>{c.trade_count > 0 && c.win_rate != null ? `${(c.win_rate * 100).toFixed(0)}%` : "—"}</td>
                   <td style={{
                     ...td,
                     color: c.avg_return_30d >= 0 ? "#4ade80" : "#f87171",

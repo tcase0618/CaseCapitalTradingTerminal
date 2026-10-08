@@ -1130,7 +1130,7 @@ def start_scheduler():
                     f"<code>{datetime.now(ET).strftime('%b %d %H:%M ET')}</code>\n\n"
                     f"Trades analyzed: <b>{res.get('trades', 0)}</b>\n"
                     f"Overall win rate: <b>{res.get('win_rate', 0):.1%}</b>\n"
-                    f"Weights adjusted: <b>{res.get('changes', 0)}</b>\n\n"
+                    f"Shadow proposals: <b>{res.get('proposed_change_count', 0)}</b> | Applied: <b>0</b>\n\n"
                     "<b>Insights:</b>\n" + "\n".join(f"- {i}" for i in res["insights"][:5])
                 )
                 await telegram_service.send_message(msg)
@@ -1217,6 +1217,20 @@ def start_scheduler():
         CronTrigger(day_of_week="sun", hour=19, minute=50, timezone=ET),
         id="truth_review_weekly_packet",
         replace_existing=True,
+    )
+    async def _strategy_evidence_job():
+        try:
+            from . import strategy_evidence
+            result = await strategy_evidence.refresh()
+            await log_activity("Strategy evidence refreshed (research only)", "info" if result.get("ok") else "warn",
+                               {"observations": result.get("observations"), "scorecards": len(result.get("scorecards") or []),
+                                "truncated": result.get("truncated"), "provider_errors": result.get("provider_errors")})
+        except Exception as exc:
+            logger.exception("strategy evidence refresh failed: %s", exc)
+    _scheduler.add_job(
+        _strategy_evidence_job,
+        CronTrigger(day_of_week="mon-fri", hour=21, minute=15, timezone=ET),
+        id="strategy_evidence_nightly", replace_existing=True, max_instances=1,
     )
     _scheduler.start()
     logger.info(

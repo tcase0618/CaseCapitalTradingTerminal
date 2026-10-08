@@ -380,6 +380,25 @@ def format_brief(r: dict[str, Any]) -> str:
     )
 
 
+def _known_iv_rank(value: Any) -> float | None:
+    try:
+        rank = float(value)
+        return rank if 0 <= rank <= 100 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _format_iv_rank(value: Any, suffix: str = "%") -> str:
+    rank = _known_iv_rank(value)
+    return "UNKNOWN" if rank is None else f"{rank:g}{suffix}"
+
+
+def _low_iv_entry(opts: dict[str, Any] | None) -> bool:
+    opts = opts or {}
+    rank = _known_iv_rank(opts.get("iv_rank"))
+    return rank is not None and rank < 35 and opts.get("strategy") == "LONG_CALL"
+
+
 def _format_options_block(opts: dict[str, Any] | None) -> str:
     """Telegram options block (Part 12). Returns '' when no options data."""
     if not opts:
@@ -387,9 +406,10 @@ def _format_options_block(opts: dict[str, Any] | None) -> str:
     strat = opts.get("strategy") or "LONG_CALL"
     name = _esc(opts.get("strategy_name") or strat.replace("_", " ").title())
     one = _esc(opts.get("one_liner") or opts.get("strategy_reason") or "")
-    crush = opts.get("crush_risk") or "MODERATE"
-    iv_rank = opts.get("iv_rank")
-    iv_label = opts.get("iv_label") or ""
+    rank = _known_iv_rank(opts.get("iv_rank"))
+    crush = "UNKNOWN" if rank is None else opts.get("crush_risk") or "MODERATE"
+    iv_rank = _format_iv_rank(rank)
+    iv_label = (opts.get("iv_label") or "") if rank is not None else ""
     flow = opts.get("flow") or {}
     bias = flow.get("flow_bias") or "NEUTRAL"
     cp = flow.get("call_put_ratio") or 0
@@ -412,7 +432,7 @@ def _format_options_block(opts: dict[str, Any] | None) -> str:
             f"Sell ${spread['sell_strike']}{contract.get('type','C')} exp {_esc(spread['expiration'])}\n"
             f"   └ Net debit: ${spread['net_debit']} · Max profit: ${spread['max_profit']}\n"
             f"   └ Max loss: ${spread['max_loss']} · BE: ${spread['break_even']} · R/R: {spread['risk_reward']}:1\n"
-            f"   └ IV rank: {iv_rank}% {_esc(iv_label)}"
+            f"   └ IV rank: {iv_rank} {_esc(iv_label)}"
             f"{_crush_line(crush)}"
             f"\n⚡ FLOW: {_esc(bias)} · P/C ratio {cp}"
         )
@@ -426,7 +446,7 @@ def _format_options_block(opts: dict[str, Any] | None) -> str:
         f"   └ Play: ${contract['strike']}{contract.get('type','C')} exp {_esc(contract['expiration'])}\n"
         f"   └ Premium: ~${contract['premium']} · Max loss: ${contract['max_loss']}\n"
         f"   └ R/R per contract · Liquidity: {_esc(contract.get('liquidity','?'))}\n"
-        f"   └ IV rank: {iv_rank}% {_esc(iv_label)}"
+        f"   └ IV rank: {iv_rank} {_esc(iv_label)}"
         f"{_crush_line(crush)}"
         f"\n⚡ FLOW: {_esc(bias)} · P/C ratio {cp}"
     )
@@ -477,7 +497,7 @@ def _format_one_card(rank: int, r: dict[str, Any]) -> str:
         opts_line = (
             f"🎯 <b>{_esc(opts.get('strategy_name') or opts.get('strategy','OPTS'))}</b> · "
             f"${c.get('strike')}{c.get('type','')[:1]} {_esc(c.get('expiration',''))} "
-            f"@${c.get('premium')} · IV {opts.get('iv_rank','?')}%"
+            f"@${c.get('premium')} · IV {_format_iv_rank(opts.get('iv_rank'))}"
         )
 
     lot_line = ""
@@ -1148,17 +1168,14 @@ async def handle_update(update: dict[str, Any]) -> None:
         ticker = args[0].upper().lstrip("$")
         from . import options_engine
         iv = await options_engine.calculate_iv_rank(ticker)
-        if iv.get("iv_rank") is None:
-            await send_message(f"No IV data for ${_esc(ticker)}.", chat_id=chat_id)
-            return
         # Build a fake stock for crush risk
         stock = {"ticker": ticker, "signals": [], "time_target": {"days_remaining": 30}}
-        chain = {"iv_rank": iv["iv_rank"]}
+        chain = {"iv_rank": _known_iv_rank(iv.get("iv_rank"))}
         crush = options_engine.assess_iv_crush_risk(stock, chain)
         await send_message(
             f"📊 <b>IV — ${_esc(ticker)}</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"IV rank: <b>{iv['iv_rank']}/100</b> ({_esc(iv.get('iv_label','?'))})\n"
+            f"IV rank: <b>{_format_iv_rank(chain['iv_rank'], '/100')}</b> ({_esc(iv.get('iv_label') or 'UNKNOWN') if chain['iv_rank'] is not None else 'UNKNOWN'})\n"
             f"ATM IV: {iv.get('atm_iv') or '—'}\n"
             f"30d HV: {iv.get('hv_30') or '—'}\n"
             f"Crush risk: <b>{_esc(crush['crush_risk'])}</b>\n"
@@ -1218,9 +1235,7 @@ async def handle_update(update: dict[str, Any]) -> None:
             title = "📉 PUTS — UNUSUAL FLOW"
         else:  # /noiv
             picks = [r for r in results
-                     if (r.get("options", {}) or {}).get("iv_rank") is not None
-                     and r["options"]["iv_rank"] < 35
-                     and (r.get("options", {}) or {}).get("strategy") == "LONG_CALL"]
+                     if _low_iv_entry(r.get("options"))]
             picks.sort(key=lambda x: x["options"]["iv_rank"])
             title = "🟢 LOW IV ENTRIES (<35)"
         if not picks:
@@ -1232,7 +1247,7 @@ async def handle_update(update: dict[str, Any]) -> None:
             ct = opts.get("contract") or {}
             f = opts.get("flow") or {}
             lines.append(
-                f"\n<b>${_esc(r['ticker'])}</b> · IV {opts.get('iv_rank','?')}% · "
+                f"\n<b>${_esc(r['ticker'])}</b> · IV {_format_iv_rank(opts.get('iv_rank'))} · "
                 f"P/C {f.get('call_put_ratio','?')} · "
                 f"{_esc(opts.get('strategy_name') or opts.get('strategy','?'))}"
                 + (f" · ${ct.get('strike')}{ct.get('type','')} exp {ct.get('expiration','')}" if ct else "")

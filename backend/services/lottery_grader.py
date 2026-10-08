@@ -6,6 +6,7 @@ that permanent record. Open tickets can be monitored, but they never enter EV.
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime, timezone
 from statistics import median
 from typing import Any
@@ -341,6 +342,7 @@ def default_learned_config() -> dict[str, Any]:
 
 
 async def run_learning_cycle(triggered_by: str = "operator") -> dict[str, Any]:
+    """Grade outcomes and append SHADOW proposals, never promote active config."""
     board = await truth_board(limit=5000)
     grades = board["latest_grades"]
     all_grades = await get_db().ll_grades.find({}, {"_id": 0}).to_list(5000)
@@ -353,7 +355,8 @@ async def run_learning_cycle(triggered_by: str = "operator") -> dict[str, Any]:
         "score_bucket": _aggregate(all_grades, "score_bucket"),
     }
     changes: list[dict[str, Any]] = []
-    config = default_learned_config()
+    active_config = deepcopy(board["learned_config"])
+    config = deepcopy(active_config)
     config["sample_count"] = combined.get("n", 0)
 
     retired = [
@@ -385,7 +388,7 @@ async def run_learning_cycle(triggered_by: str = "operator") -> dict[str, Any]:
     high = score_rows.get("70-79")
     if low and low.get("n", 0) >= 10 and _num(low.get("ev_per_ticket_pct_haircut"), 0) <= -10:
         config["min_ticket_score"] = 70
-        changes.append({"type": "raise_min_ticket_score", "from": 60, "to": 70, "reason": "60-69 bucket negative EV"})
+        changes.append({"type": "raise_min_ticket_score", "from": active_config.get("min_ticket_score", 60), "to": 70, "reason": "60-69 bucket negative EV"})
     elif high and high.get("n", 0) >= 10 and _num(high.get("ev_per_ticket_pct_haircut"), 0) >= 15:
         config["min_ticket_score"] = 60
 
@@ -407,24 +410,23 @@ async def run_learning_cycle(triggered_by: str = "operator") -> dict[str, Any]:
 
     run = stamped({
         "ran_at": _now().isoformat(),
+        "mode": "SHADOW",
+        "applied": False,
         "triggered_by": triggered_by,
         "learning_version": LEARNING_VERSION,
         "grader_version": GRADER_VERSION,
         "sample_count": combined.get("n", 0),
         "combined": combined,
         "segments": segments,
-        "changes": changes,
-        "learned_config": config,
+        "changes": [],
+        "proposed_changes": changes,
+        "learned_config": active_config,
+        "proposed_learned_config": config,
         "notes": _learning_notes(combined, changes),
     })
     db = get_db()
     await db.ll_learning_runs.insert_one(run)
-    await db.ll_learned_config.update_one(
-        {"_id": "current"},
-        {"$set": {**config, "updated_at": _now().isoformat()}},
-        upsert=True,
-    )
-    await log_activity(f"Lottery Learning cycle: {combined.get('n', 0)} closed tickets, {len(changes)} changes", "info", {"changes": changes})
+    await log_activity(f"Lottery SHADOW learning: {combined.get('n', 0)} closed tickets, {len(changes)} proposals, 0 applied", "info", {"mode": "SHADOW", "applied": False})
     run.pop("_id", None)
     return {"ok": True, **run}
 
@@ -432,13 +434,14 @@ async def run_learning_cycle(triggered_by: str = "operator") -> dict[str, Any]:
 def _learning_notes(combined: dict[str, Any], changes: list[dict[str, Any]]) -> list[str]:
     n = combined.get("n", 0)
     if not n:
-        return ["No closed graded Lottery tickets yet. Learning is armed but waiting for truth data."]
+        return ["SHADOW only: no closed graded Lottery tickets yet; active config unchanged."]
     notes = [
+        "SHADOW proposals only; active config unchanged. Sample counts never authorize promotion.",
         f"Headline EV is {combined.get('ev_per_ticket_pct_haircut')}% on {n} closed tickets.",
         f"Median ticket is {combined.get('median_ticket_pct')}%; compare this to EV to see tail concentration.",
     ]
     if combined.get("mfe_vs_realized_gap_pct") is not None:
         notes.append(f"Average MFE left behind is {combined.get('mfe_vs_realized_gap_pct')}%.")
     if not changes:
-        notes.append("No config changes met sample-size thresholds.")
+        notes.append("No config proposals met analysis thresholds.")
     return notes

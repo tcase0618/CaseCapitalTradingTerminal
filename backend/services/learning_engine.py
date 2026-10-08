@@ -1,5 +1,7 @@
-"""Progressive Learning Engine — analyzes completed P&L records, adjusts
-signal weights based on real win rates. Runs weekly. Never adjusts on noise."""
+"""Analyze signal performance and record shadow weight proposals weekly.
+
+Learning cycles never promote proposals into active scanner weights.
+"""
 from __future__ import annotations
 import itertools
 import logging
@@ -211,23 +213,40 @@ async def refresh_combo_stats_live() -> int:
 
 
 async def run_learning_cycle() -> dict[str, Any]:
-    """Weekly cycle. Analyze EVERY scanned stock (live return basis), adjust
-    weights. Uses 30d returns when ≥10 trades available, else live returns
-    with ≥3 trades and reduced confidence weighting."""
+    """Append a SHADOW proposal report without writing active weights.
+
+    Sample thresholds qualify analysis only, never automatic promotion.
+    Combo statistics remain a reporting refresh; applied-weight history is
+    untouched. Seeding and manual reset are explicit operations outside this cycle.
+    """
     db = get_db()
-    await ensure_weights_exist()
-    await log_activity("Learning cycle started", "info")
+    await log_activity("SHADOW learning cycle started; active weights unchanged", "info")
+    now = datetime.now(timezone.utc).isoformat()
+    weight_rows = await db.learning_weights.find({}, {"_id": 0}).to_list(100)
+    active_snapshot = {row["weight_key"]: row["current_value"] for row in weight_rows}
 
     live_trades = await _collect_live_trades()
     perf_docs = await db.signal_performance.find(
         {"return_30d": {"$ne": None}}, {"_id": 0},
     ).to_list(5000)
 
-    if len(live_trades) < MIN_SAMPLES_LIVE:
+    if len(live_trades) < MIN_SAMPLES_LIVE and len(perf_docs) < MIN_SAMPLES:
         msg = (f"Learning skipped — only {len(live_trades)} scanned stocks "
                 f"(need {MIN_SAMPLES_LIVE}+)")
         await log_activity(msg, "warn")
-        return {"skipped": True, "reason": msg, "trades": len(live_trades)}
+        report = {
+            "run_at": now, "mode": "SHADOW", "applied": False,
+            "skipped": True, "reason": msg,
+            "trades_analyzed": len(live_trades),
+            "trades_30d": len(perf_docs), "trades_live": len(live_trades),
+            "weights_changed": {}, "proposed_changes": {},
+            "weights_snapshot": active_snapshot,
+            "proposed_weights_snapshot": dict(active_snapshot),
+            "signal_stats": {}, "overall_win_rate": None, "insights": [],
+        }
+        await db.learning_runs.insert_one(stamped(report))
+        return {**report, "trades": len(live_trades), "changes": 0,
+                "proposed_change_count": 0}
     # Per-signal performance: prefer 30d basis when available, fall back to live
     signal_stats: dict[str, dict | None] = {}
     for key in DEFAULT_WEIGHTS.keys():
@@ -305,17 +324,14 @@ async def run_learning_cycle() -> dict[str, Any]:
             upsert=True,
         )
 
-    # Adjust weights — live basis gets reduced confidence
-    weight_rows = await db.learning_weights.find({}, {"_id": 0}).to_list(100)
+    # Propose weights only; even metadata writes would mutate the active baseline.
     changes: dict[str, dict] = {}
-    now = datetime.now(timezone.utc).isoformat()
-    snapshot: dict[str, float] = {}
+    snapshot = dict(active_snapshot)
     for row in weight_rows:
         key = row["weight_key"]
         current = row["current_value"]
         wmin = row["min_value"]
         wmax = row["max_value"]
-        snapshot[key] = round(current, 2)
         stats = signal_stats.get(key)
         if not stats:
             continue
@@ -329,32 +345,16 @@ async def run_learning_cycle() -> dict[str, Any]:
         adjustment = wr_delta * max_adj * confidence
         new_value = max(wmin, min(wmax, current + adjustment))
         if abs(new_value - current) > 0.05:
-            await db.learning_weights.update_one(
-                {"weight_key": key},
-                {"$set": {
-                    "current_value": round(new_value, 2),
-                    "sample_count": stats["count"],
-                    "win_rate": stats["win_rate"],
-                    "avg_return": stats["avg_return"],
-                    "confidence": round(confidence, 2),
-                    "last_updated": now,
-                }},
-            )
-            # Append per-weight history row
-            await db.learning_weight_history.insert_one(stamped({
-                "weight_key": key,
-                "ts": now,
-                "old_value": round(current, 2),
-                "new_value": round(new_value, 2),
-                "win_rate": stats["win_rate"],
-                "sample_count": stats["count"],
-                "confidence": round(confidence, 2),
-            }))
             changes[key] = {
-                "old": round(current, 2),
+                "old": current,
                 "new": round(new_value, 2),
                 "delta": round(new_value - current, 2),
                 "pct": round((new_value - current) / current * 100, 1) if current else 0,
+                "basis": stats["basis"],
+                "sample_count": stats["count"],
+                "win_rate": stats["win_rate"],
+                "avg_return": stats["avg_return"],
+                "confidence": round(confidence, 2),
             }
             snapshot[key] = round(new_value, 2)
 
@@ -373,21 +373,28 @@ async def run_learning_cycle() -> dict[str, Any]:
 
     await db.learning_runs.insert_one(stamped({
         "run_at": now,
+        "mode": "SHADOW",
+        "applied": False,
         "trades_analyzed": len(docs_for_insights),
         "trades_30d": len(perf_docs),
         "trades_live": len(live_trades),
-        "weights_changed": changes,
-        "weights_snapshot": snapshot,
+        "weights_changed": {},
+        "weights_snapshot": active_snapshot,
+        "proposed_changes": changes,
+        "proposed_weights_snapshot": snapshot,
+        "signal_stats": signal_stats,
         "overall_win_rate": round(overall_wr, 3),
         "insights": insights,
     }))
     await log_activity(
-        f"Learning cycle complete — {len(docs_for_insights)} trades "
+        f"SHADOW learning cycle complete — {len(docs_for_insights)} trades "
         f"({len(perf_docs)} 30d + {len(live_trades)} live), "
-        f"{len(changes)} weights adjusted, WR={overall_wr:.1%}", "info",
+        f"{len(changes)} changes proposed, 0 applied, WR={overall_wr:.1%}", "info",
     )
 
-    return {"trades": len(docs_for_insights), "changes": len(changes),
+    return {"mode": "SHADOW", "applied": False,
+             "trades": len(docs_for_insights), "changes": 0,
+             "proposed_change_count": len(changes), "proposed_changes": changes,
              "win_rate": overall_wr, "insights": insights}
 
 
@@ -403,7 +410,7 @@ def _build_insights(signal_stats, combo_map, changes, docs) -> list[str]:
             )
         elif stats["win_rate"] < 0.40 and stats["count"] >= MIN_SAMPLES:
             insights.append(
-                f"🔴 {signal}: only {stats['win_rate']:.0%} win rate — weight reduced"
+                f"🔴 {signal}: only {stats['win_rate']:.0%} win rate — shadow review only"
             )
     valid_combos = [(k, v) for k, v in combo_map.items() if len(v) >= 3]
     if valid_combos:
@@ -420,7 +427,7 @@ def _build_insights(signal_stats, combo_map, changes, docs) -> list[str]:
         )
     for key, ch in changes.items():
         arrow = "📈" if ch["delta"] > 0 else "📉"
-        insights.append(f"{arrow} {key}: {ch['old']} → {ch['new']} ({ch['pct']:+.1f}%)")
+        insights.append(f"{arrow} SHADOW proposal {key}: {ch['old']} → {ch['new']} ({ch['pct']:+.1f}%), not applied")
     return insights
 
 

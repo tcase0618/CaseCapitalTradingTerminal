@@ -2410,11 +2410,18 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
 
 async def analytics(limit: int = 500) -> dict[str, Any]:
     """Read-only Public execution and protection coverage metrics."""
+    from .execution_costs import finite_number, measure_fill_costs
+
     db = get_db()
     rows = await db.tf_trades.find({"broker_base": BROKER_BASE}, {"_id": 0}).sort("submitted_at", -1).to_list(max(1, min(limit, 5000)))
     status_counts = Counter(str(row.get("fill_status") or row.get("status") or "UNKNOWN").upper() for row in rows)
     slippage_bps: list[float] = []
     arrival_mid_slippage_bps: list[float] = []
+    limit_improvement_bps: list[float] = []
+    gross_cost_usd: list[float] = []
+    net_cost_usd: list[float] = []
+    actual_fee_usd: list[float] = []
+    unknown_sides = 0
     estimated_fee_usd: list[float] = []
     by_strategy: Counter[str] = Counter()
     filled = 0
@@ -2422,20 +2429,41 @@ async def analytics(limit: int = 500) -> dict[str, Any]:
     for row in rows:
         strategy = str(row.get("strategy_id") or row.get("screener_id") or "UNATTRIBUTED")
         by_strategy[strategy] += 1
-        fill_price = _num(row.get("filled_avg_price"))
-        limit_price = _num(row.get("limit_price"))
-        if fill_price > 0 and limit_price > 0:
-            slippage_bps.append(round(((fill_price - limit_price) / limit_price) * 10000, 2))
-        arrival_mid = _num((row.get("execution_quote") or {}).get("mid"))
-        if fill_price > 0 and arrival_mid > 0:
-            arrival_mid_slippage_bps.append(round(((fill_price - arrival_mid) / arrival_mid) * 10000, 2))
-        preflight_fees = _num((row.get("public_preflight_economics") or {}).get("estimated_total_fees"), -1.0)
-        if preflight_fees >= 0:
+        quote = row.get("execution_quote")
+        costs = measure_fill_costs(
+            side=row.get("side"), fill_price=row.get("filled_avg_price"),
+            limit_price=row.get("limit_price"),
+            arrival_mid=quote.get("mid") if isinstance(quote, dict) else None,
+            filled_quantity=row.get("qty_total"),
+            actual_fees_usd=row.get("actual_fees_usd"),
+        )
+        unknown_sides += costs["side"] == "UNKNOWN"
+        for values, key in (
+            (slippage_bps, "limit_relative_cost_bps"),
+            (arrival_mid_slippage_bps, "arrival_mid_slippage_bps"),
+            (limit_improvement_bps, "limit_price_improvement_bps"),
+            (gross_cost_usd, "implementation_cost_gross_usd"),
+            (net_cost_usd, "implementation_cost_net_usd"),
+            (actual_fee_usd, "actual_fees_usd"),
+        ):
+            if costs[key] is not None:
+                values.append(costs[key])
+        preflight = row.get("public_preflight_economics")
+        preflight_fees = finite_number(preflight.get("estimated_total_fees")) if isinstance(preflight, dict) else None
+        if preflight_fees is not None:
             estimated_fee_usd.append(preflight_fees)
         if str(row.get("fill_status") or "").upper() in {"FILLED", "PARTIALLY_FILLED"} or _qty(row) > 0:
             filled += 1
             if row.get("protective_order_id") and row.get("protective_order_status") == "SUBMITTED":
                 protected += 1
+    def summary(values: list[float], *, usd: bool = False, improvement: bool = False) -> dict[str, Any]:
+        result = {"n": len(values), "avg": round(sum(values) / len(values), 4 if usd else 2) if values else None}
+        if usd:
+            result["total"] = round(sum(values), 4) if values else None
+        else:
+            result["worst"] = round(min(values) if improvement else max(values), 2) if values else None
+        return result
+
     return {
         "ok": True,
         "read_only": True,
@@ -2445,8 +2473,23 @@ async def analytics(limit: int = 500) -> dict[str, Any]:
         "filled_records": filled,
         "protected_filled_records": protected,
         "protection_coverage_pct": round(protected / filled * 100, 2) if filled else None,
-        "slippage_bps": {"n": len(slippage_bps), "avg": round(sum(slippage_bps) / len(slippage_bps), 2) if slippage_bps else None, "worst": max(slippage_bps) if slippage_bps else None},
-        "arrival_mid_slippage_bps": {"n": len(arrival_mid_slippage_bps), "avg": round(sum(arrival_mid_slippage_bps) / len(arrival_mid_slippage_bps), 2) if arrival_mid_slippage_bps else None, "worst": max(arrival_mid_slippage_bps) if arrival_mid_slippage_bps else None},
+        "slippage_bps": summary(slippage_bps),
+        "limit_relative_cost_bps": summary(slippage_bps),
+        "limit_price_improvement_bps": summary(limit_improvement_bps, improvement=True),
+        "arrival_mid_slippage_bps": summary(arrival_mid_slippage_bps),
+        "implementation_cost_gross_usd": summary(gross_cost_usd, usd=True),
+        "implementation_cost_net_usd": summary(net_cost_usd, usd=True),
+        "actual_fees_usd": summary(actual_fee_usd, usd=True),
+        "unknown_side_records": unknown_sides,
+        "cost_measurement": {
+            "slippage_bps": "deprecated_alias_of_side_signed_limit_relative_cost_bps_not_arrival_cost",
+            "cost_sign": "positive_is_adverse",
+            "limit_improvement_sign": "positive_is_favorable",
+            "fees": "actual_fees_usd_requires_explicit_paid_total; preflight_estimates_are_separate",
+            "quantity": "qty_total_executed_equity_shares_not_qty_remaining",
+            "net_cost": "gross_arrival_mid_cost_plus_actual_fees_no_additional_spread",
+            "aggregation": "equal_record_weight_bps; USD_totals_cover_only_available_records",
+        },
         "preflight_estimated_fees_usd": {"n": len(estimated_fee_usd), "total": round(sum(estimated_fee_usd), 4) if estimated_fee_usd else None, "avg": round(sum(estimated_fee_usd) / len(estimated_fee_usd), 4) if estimated_fee_usd else None},
         "by_strategy": dict(by_strategy),
     }

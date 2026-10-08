@@ -537,6 +537,12 @@ def evaluate_rows(
             "action": action,
             "pm_score": score,
             "score_breakdown": breakdown,
+            "scoring_version": "pm_points_v1",
+            "price_evidence": {
+                "source": row.get("price_source"),
+                "provider_timestamp": row.get("price_timestamp") or row.get("quote_time"),
+                "status": "PROVIDER_TIMESTAMP_PRESENT" if row.get("price_timestamp") or row.get("quote_time") else "UNVERIFIED_MARK",
+            },
             "price": price,
             "entry_low": row.get("entry_low"),
             "entry_high": row.get("entry_high"),
