@@ -1,16 +1,15 @@
 """Trade Floor Learning Engine — FORKED from the Signal Learning Engine
 at startup. After init, the two engines NEVER sync weights again.
 
-This engine learns EXCLUSIVELY from real Trade Floor executions:
-  • <5 closed trades  → pre-adjustment phase (no changes)
-  • 5-29 closed trades → signal-weight adjustment phase only
-  • 30+ closed trades  → full phase (weights + gates + risk tiers)
+Weekly learning records SHADOW proposals from Trade Floor executions.
+Sample-size phases qualify analysis only; they never authorize promotion.
 
 Owns its own collections:
   • tf_weights, tf_combo_stats, tf_recalibration_log, tf_risk_tiers
 The Signal Learning Engine and main scan NEVER read or write these.
 """
 from __future__ import annotations
+from copy import deepcopy
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -47,21 +46,18 @@ def _now() -> datetime:
 
 
 async def initialize_from_signal_engine() -> bool:
-    """One-time: snapshot the current Signal Learning Engine weights as
-    the Trade Floor Engine's baseline. Idempotent — if tf_weights already
-    seeded, no-op."""
+    """Seed an empty Trade Floor baseline once; existing or legacy weights win."""
     db = get_db()
-    existing = await db.tf_weights.find_one({"_id": "current"})
-    if existing:
+    # Legacy records also represent active state; never replace them at startup.
+    if await db.tf_weights.count_documents({}):
         return False
     from . import learning_engine as sle
     weights = await sle.get_weights()
-    await db.tf_weights.insert_one({
-        "_id": "current",
+    await db.tf_weights.update_one({"_id": "current"}, {"$setOnInsert": {
         "weights": weights,
         "inherited_from_signal_engine_at": _now().isoformat(),
         "adjusted_combos": [],
-    })
+    }}, upsert=True)
     # Seed initial risk tiers
     from .trade_floor import DEFAULT_RISK_TIERS
     serializable = {
@@ -196,6 +192,8 @@ async def status() -> dict[str, Any]:
         except Exception:
             pass
     return {
+        "mode": "SHADOW",
+        "applied": False,
         "phase": p,
         "closed_trades": n_closed,
         "combos_with_data": combo_count,
@@ -214,10 +212,7 @@ async def combo_stats() -> list[dict[str, Any]]:
 
 
 async def recalibrate() -> dict[str, Any]:
-    """Weekly recalibration based on closed trade outcomes.
-       <5 trades: no-op.
-       5-29: adjust signal weights for combos with data.
-       30+: also adjust execution gate thresholds + risk tiers."""
+    """Append weekly proposals; never mutate active weights or execution config."""
     db = get_db()
     n = await closed_trade_count()
     p = await phase()
@@ -225,9 +220,12 @@ async def recalibrate() -> dict[str, Any]:
         await db.tf_recalibration_log.insert_one(stamped({
             "ran_at": _now().isoformat(),
             "phase": p, "closed_trades": n,
-            "changes": [], "note": "below 5-trade threshold; no adjustments",
+            "mode": "SHADOW", "applied": False,
+            "changes": [], "proposed_changes": [],
+            "note": "below 5-trade threshold; no proposals",
         }))
-        return {"phase": p, "changes": 0}
+        return {"phase": p, "changes": 0, "mode": "SHADOW", "applied": False,
+                "proposed_change_count": 0}
 
     # Build combo stats from closed trades
     trades = await db.tf_trades.find(_trade_query(
@@ -265,9 +263,10 @@ async def recalibrate() -> dict[str, Any]:
             upsert=True,
         )
 
-    # Phase ≥5: adjust signal weights for combos that have real data
-    weights_doc = await db.tf_weights.find_one({"_id": "current"})
-    weights = weights_doc.get("weights") or {}
+    # Sample phases qualify proposals only; active documents remain untouched.
+    weights_doc = await db.tf_weights.find_one({"_id": "current"}) or {}
+    active_weights = deepcopy(weights_doc.get("weights") or {})
+    weights = deepcopy(active_weights)
     changes: list[dict[str, Any]] = []
     for combo, s in combos.items():
         if s["n"] < 3:
@@ -283,12 +282,11 @@ async def recalibrate() -> dict[str, Any]:
                 weights[sig] = round(new, 3)
                 changes.append({"signal": sig, "from": old, "to": weights[sig],
                                   "combo": list(combo)})
-    await db.tf_weights.update_one(
-        {"_id": "current"},
-        {"$set": {"weights": weights, "last_recalibrated_at": _now().isoformat()}},
-    )
+    proposals: dict[str, Any] = {
+        "weights": {"active": active_weights, "proposed": weights, "changes": changes},
+    }
 
-    # Phase ≥30: also adjust risk tiers
+    # Full sample phase: also propose risk tiers.
     if p == "full_adjustment":
         # If recent realized returns are positive, nudge risk tiers up 0.005
         # If negative, nudge down 0.005. Capped at original × 1.5 / × 0.5.
@@ -296,51 +294,46 @@ async def recalibrate() -> dict[str, Any]:
         delta = 0.005 if recent_avg > 0 else -0.005
         tiers_doc = await db.tf_risk_tiers.find_one({"_id": "current"})
         if tiers_doc and tiers_doc.get("tiers"):
-            tiers = tiers_doc["tiers"]
+            tiers = deepcopy(tiers_doc["tiers"])
             for inst in tiers:
                 for band, pct in list(tiers[inst].items()):
                     tiers[inst][band] = round(max(0.005, min(0.20, pct + delta)), 4)
-            await db.tf_risk_tiers.update_one(
-                {"_id": "current"},
-                {"$set": {"tiers": tiers, "last_adjusted_at": _now().isoformat()}},
-            )
+            proposals["risk_tiers"] = {"active": tiers_doc["tiers"], "proposed": tiers}
 
-    # Phase ≥5: evolve the stop engine coefficients based on observed outcomes
-    try:
-        await _recalibrate_stop_engine(trades)
-    except Exception as e:
-        logger.warning("recalibrate_stop_engine: %s", e)
-
-    # Phase ≥5: evolve entry-price logic (fill rate + outcome per signal/score tier)
-    try:
-        await _recalibrate_entry_price(trades)
-    except Exception as e:
-        logger.warning("recalibrate_entry_price: %s", e)
-
-    # Phase ≥5: evolve three-phase exit parameters per signal combo
-    try:
-        await _recalibrate_phase_engine()
-    except Exception as e:
-        logger.warning("recalibrate_phase_engine: %s", e)
+    proposal_errors = {}
+    for name, calculate, args in (
+        ("stop_engine", _propose_stop_engine, (trades,)),
+        ("entry_price", _propose_entry_price, (trades,)),
+        ("phase_engine", _propose_phase_engine, ()),
+    ):
+        try:
+            proposal = await calculate(*args)
+            if proposal is not None:
+                proposals[name] = proposal
+        except Exception as e:
+            logger.warning("SHADOW %s proposal: %s", name, e)
+            proposal_errors[name] = str(e)
 
     await db.tf_recalibration_log.insert_one(stamped({
         "ran_at": _now().isoformat(),
         "phase": p, "closed_trades": n,
-        "changes": changes[:50],
+        "mode": "SHADOW", "applied": False,
+        "changes": [], "proposed_changes": changes,
+        "proposals": proposals, "proposal_errors": proposal_errors,
         "combos_with_data": len(combos),
     }))
     await log_activity(
-        f"Trade Floor Engine recalibration · {p} · {len(changes)} weight changes", "info",
+        f"Trade Floor SHADOW recalibration · {p} · {len(changes)} weight proposals, 0 applied", "info",
     )
-    return {"phase": p, "changes": len(changes), "combos": len(combos)}
+    return {"phase": p, "changes": 0, "combos": len(combos),
+            "mode": "SHADOW", "applied": False,
+            "proposed_change_count": len(changes), "proposals": proposals,
+            "proposal_errors": proposal_errors}
 
 
 
-async def _recalibrate_stop_engine(trades: list[dict[str, Any]]) -> None:
-    """Compare calculated stop_pct vs lowest_price_reached vs realized_pct per
-    signal-tier/sector. Adjust the stop_engine coefficient table so future
-    stops are tighter where stops are rarely hit and outcomes are positive,
-    and wider where stops were prematurely hit on otherwise good setups.
+async def _propose_stop_engine(trades: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Propose stop coefficients from drawdown and realized returns; never write.
 
     The recalibration nudges each coefficient by ±0.005, clamped to its
     sensible range. Real movement requires ≥10 closed trades in the bucket;
@@ -405,21 +398,12 @@ async def _recalibrate_stop_engine(trades: list[dict[str, Any]]) -> None:
     if changes:
         coef["sector_delta"] = sector_delta
         coef["score_tier_delta"] = score_delta
-        await db.tf_stop_engine.update_one(
-            {"_id": "current"},
-            {"$set": {"coefficients": coef, "last_recalibrated_at": _now().isoformat()}},
-        )
-        await db.tf_recalibration_log.insert_one(stamped({
-            "ran_at": _now().isoformat(),
-            "subsystem": "stop_engine",
-            "changes": changes,
-            "buckets": len(buckets),
-        }))
+        return {"active": coef_doc.get("coefficients"), "proposed": coef,
+                "changes": changes, "buckets": len(buckets)}
 
 
-async def _recalibrate_entry_price(trades: list[dict[str, Any]]) -> None:
-    """Adjust the entry-price offset (vs current ask) per signal-combo/score-tier
-    based on observed fill rate AND outcome. Stored in tf_entry_engine."""
+async def _propose_entry_price(trades: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Propose entry offsets without writing tf_entry_engine."""
     db = get_db()
     by_bucket: dict[tuple, dict[str, Any]] = {}
     for t in trades:
@@ -458,22 +442,14 @@ async def _recalibrate_entry_price(trades: list[dict[str, Any]]) -> None:
             "avg_ret_pct": round(avg_ret, 2), "n": s["n"],
         }
     if offsets:
-        await db.tf_entry_engine.update_one(
-            {"_id": "current"},
-            {"$set": {"offsets_by_combo": offsets,
-                       "last_recalibrated_at": _now().isoformat()}},
-            upsert=True,
-        )
-        await db.tf_recalibration_log.insert_one(stamped({
-            "ran_at": _now().isoformat(),
-            "subsystem": "entry_price",
-            "buckets_with_offsets": sum(len(v) for v in offsets.values()),
-        }))
+        doc = await db.tf_entry_engine.find_one({"_id": "current"}) or {}
+        return {"active": doc.get("offsets_by_combo"), "proposed": offsets,
+                "buckets_with_offsets": sum(len(v) for v in offsets.values())}
 
 
 
-async def _recalibrate_phase_engine() -> None:
-    """Tune the three-phase exit parameters per signal combo, based on
+async def _propose_phase_engine() -> dict[str, Any] | None:
+    """Propose three-phase exit parameters per signal combo, based on
     actual phase outcomes (tf_phase_outcomes collection).
 
     Heuristics:
@@ -560,15 +536,5 @@ async def _recalibrate_phase_engine() -> None:
             params_by_combo[combo] = cur
 
     if changes:
-        await db.tf_phase_engine.update_one(
-            {"_id": "current"},
-            {"$set": {"params_by_combo": params_by_combo,
-                       "last_recalibrated_at": _now().isoformat()}},
-            upsert=True,
-        )
-        await db.tf_recalibration_log.insert_one(stamped({
-            "ran_at": _now().isoformat(),
-            "subsystem": "phase_engine",
-            "changes": changes,
-            "buckets": len(buckets),
-        }))
+        return {"active": doc.get("params_by_combo"), "proposed": params_by_combo,
+                "changes": changes, "buckets": len(buckets)}

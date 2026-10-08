@@ -460,7 +460,7 @@ async def test_public_execution_analytics_reports_slippage_protection_and_strate
 
         async def to_list(self, _limit):
             return [{
-                "broker_base": "public", "fill_status": "FILLED", "limit_price": 10,
+                "broker_base": "public", "side": "BUY", "fill_status": "FILLED", "limit_price": 10,
                 "filled_avg_price": 10.05, "qty_remaining": 1,
                 "protective_order_id": "stop-1", "protective_order_status": "SUBMITTED", "strategy_id": "lottery_gap",
                 "execution_quote": {"mid": 10.02},
@@ -478,6 +478,7 @@ async def test_public_execution_analytics_reports_slippage_protection_and_strate
     assert result["protection_coverage_pct"] == 100.0
     assert result["slippage_bps"]["avg"] == 50.0
     assert result["arrival_mid_slippage_bps"]["avg"] == 29.94
+    assert result["unknown_side_records"] == 0
     assert result["preflight_estimated_fees_usd"] == {"n": 1, "total": 0.03, "avg": 0.03}
     assert result["by_strategy"] == {"lottery_gap": 1}
 

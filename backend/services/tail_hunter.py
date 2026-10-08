@@ -154,8 +154,9 @@ def _has_oi_wall(chain: dict[str, Any] | None) -> bool:
         return False
 
 
-def _iv_rank(chain: dict[str, Any] | None, opts: dict[str, Any] | None = None) -> float:
-    return _num((chain or {}).get("iv_rank") if chain else (opts or {}).get("iv_rank"), 50.0)
+def _iv_rank(chain: dict[str, Any] | None, opts: dict[str, Any] | None = None) -> float | None:
+    rank = _num(chain.get("iv_rank") if chain is not None else (opts or {}).get("iv_rank"), None)
+    return rank if rank is not None and 0 <= rank <= 100 else None
 
 
 def _candidate_id(ticker: str, scan_finished_at: str | None, symbol: str) -> str:
@@ -243,8 +244,9 @@ def gate_check(
     reasons: list[str] = []
     if _has_dated_catalyst(row):
         reasons.append("dated catalyst inside 7-21 DTE window")
-    if _iv_rank(chain, opts) < TAIL_IV_RANK_MAX:
-        reasons.append("IV rank under 50")
+    iv_rank = _iv_rank(chain, opts)
+    if iv_rank is not None and iv_rank < TAIL_IV_RANK_MAX:
+        reasons.append(f"IV rank under {TAIL_IV_RANK_MAX:g}")
     if _has_squeeze_or_float(row, chain):
         reasons.append("squeeze/low-float/upper-OI-wall pressure")
     if _has_flow(row, opts):
@@ -335,7 +337,13 @@ async def build_tail_candidates(limit: int = 25, persist: bool = True) -> dict[s
             "data_provider": instrument.get("data_provider"),
             "data_quality": instrument.get("data_quality"),
             "data_feed": instrument.get("data_feed"),
-            "iv_rank": _iv_rank(chain, row.get("options") or {}),
+            "iv_rank": _iv_rank(chain),
+            "iv_label": (chain.get("iv_label") or "UNKNOWN") if _iv_rank(chain) is not None else "UNKNOWN",
+            "iv_evidence": "UNKNOWN" if _iv_rank(chain) is None else ("FAVORABLE" if _iv_rank(chain) < TAIL_IV_RANK_MAX else "NOT_FAVORABLE"),
+            "absolute_iv_label": chain.get("absolute_iv_label") or "UNKNOWN",
+            "iv_rank_history": chain.get("iv_rank_history"),
+            "rv_20": chain.get("rv_20"), "iv_rv": chain.get("iv_rv"),
+            "rv_history": chain.get("rv_history"),
             "tail_gate": {"passed": passed, "count": len(reasons), "reasons": reasons},
             "blocked_reasons": blocked,
             "manual_fire_ready": not blocked,

@@ -844,10 +844,15 @@ def _add_block(blocked: list[str], reason: str) -> None:
         blocked.append(reason)
 
 
+def _historical_iv_rank(value: Any) -> float | None:
+    rank = _safe_float(value, None)
+    return rank if rank is not None and 0 <= rank <= 100 else None
+
+
 def _legacy_strategy_lane(row: dict[str, Any], instrument: dict[str, Any]) -> dict[str, Any]:
     route = str(row.get("route") or "").upper()
     strategy = str(row.get("strategy") or "").upper()
-    iv_rank = _safe_float(row.get("iv_rank"), 50.0)
+    iv_rank = _historical_iv_rank(row.get("iv_rank"))
     dte = _safe_int(instrument.get("dte") or instrument.get("days_to_expiration"))
     if route not in {"OPTION", "BOTH"}:
         lane = "NO_OPTION_TRADE"
@@ -861,7 +866,7 @@ def _legacy_strategy_lane(row: dict[str, Any], instrument: dict[str, Any]) -> di
         lane = "EVENT_DEFINED_RISK"
         posture = "BINARY_EVENT"
         preferred = "debit_spread_or_small_single_leg"
-    elif iv_rank >= 70:
+    elif iv_rank is not None and iv_rank >= 70:
         lane = "HIGH_IV_SPREAD_OR_PASS"
         posture = "VOL_EXPENSIVE"
         preferred = "debit_spread"
@@ -878,8 +883,9 @@ def _legacy_strategy_lane(row: dict[str, Any], instrument: dict[str, Any]) -> di
         "risk_posture": posture,
         "preferred_structure": preferred,
         "iv_rank": iv_rank,
+        "iv_evidence": "UNKNOWN" if iv_rank is None else "AVAILABLE",
         "dte": dte or None,
-        "reasons": ["Lane inferred from cached candidate fields; refresh candidates for full lane evidence."],
+        "reasons": ["Lane inferred from cached candidate fields; refresh candidates for full lane evidence."] + (["Historical IV rank unavailable; no favorable IV evidence inferred."] if iv_rank is None else []),
     }
 
 
@@ -968,7 +974,9 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
     # relabels a data failure as an equity decision and hides the blocker.
     if (opts.get("strategy") == "AVOID_OPTIONS" and not options_intent) or pm_row.get("option_view") == "STOCK_ONLY":
         return "EQUITY", ["Options engine says avoid options or hold stock instead."]
-    iv_rank = float(opts.get("iv_rank") or 50)
+    iv_rank = _historical_iv_rank(opts.get("iv_rank"))
+    if iv_rank is None:
+        reasons.append("Historical IV rank unavailable; no favorable IV evidence inferred and no additional routing block applied.")
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
     strategy = str(opts.get("strategy") or "").upper()
@@ -982,12 +990,12 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
         return "EQUITY", ["PM requires a defined-risk spread, but no spread candidate was built."]
     if pm_row.get("option_view") == "STOCK_PREFERRED":
         reasons.append("PM prefers equity, but paper option scout is allowed if score/RR clear.")
-    if score >= 76 and rr >= 1.7 and iv_rank < 75:
-        return "BOTH", ["High score and clean option conditions allow both desks."]
-    if score >= OPTIONS_PM_MIN_SCORE and rr >= OPTIONS_PM_MIN_RR and (iv_rank < 80 or event_scout):
+    if score >= 76 and rr >= 1.7 and (iv_rank is None or iv_rank < 75):
+        return "BOTH", reasons + ["High PM score/RR support both desks; IV evidence is assessed separately."]
+    if score >= OPTIONS_PM_MIN_SCORE and rr >= OPTIONS_PM_MIN_RR and (iv_rank is None or iv_rank < 80 or event_scout):
         reasons.append("PM approves options as best expression for this setup.")
         return "OPTION", reasons
-    if action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank < 75 or event_scout):
+    if action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank is None or iv_rank < 75 or event_scout):
         reasons.append("Paper scout lane: small defined-risk option allowed for PM watchlist learning.")
         return "OPTION", reasons
     if options_intent and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR:
@@ -1009,12 +1017,12 @@ def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -
         return False
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
-    iv_rank = float(opts.get("iv_rank") or 50)
+    iv_rank = _historical_iv_rank(opts.get("iv_rank"))
     strategy = str(opts.get("strategy") or "").upper()
     event_scout = strategy in {"LONG_CALL_EVENT_SCOUT"}
-    if score >= OPTIONS_PM_MIN_SCORE and rr >= OPTIONS_PM_MIN_RR and (iv_rank < 80 or event_scout):
+    if score >= OPTIONS_PM_MIN_SCORE and rr >= OPTIONS_PM_MIN_RR and (iv_rank is None or iv_rank < 80 or event_scout):
         return True
-    return action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank < 75 or event_scout)
+    return action == "WATCH" and score >= OPTIONS_WATCH_MIN_SCORE and rr >= OPTIONS_WATCH_MIN_RR and (iv_rank is None or iv_rank < 75 or event_scout)
 
 
 def _risk_budget(route: str, action: str, score: float) -> float:
@@ -1089,11 +1097,13 @@ def _strategy_lane(pm_row: dict[str, Any], scan_row: dict[str, Any], opts: dict[
     signals = {str(s).upper() for s in _signals(scan_row)}
     strategy = str(opts.get("strategy") or "").upper()
     action = str(pm_row.get("action") or "").upper()
-    iv_rank = _safe_float(opts.get("iv_rank"), 50.0)
+    iv_rank = _historical_iv_rank(opts.get("iv_rank"))
     dte = _safe_int(instrument.get("dte") or instrument.get("days_to_expiration"))
     kind = instrument.get("kind") or "unknown"
     reasons: list[str] = []
 
+    if iv_rank is None:
+        reasons.append("Historical IV rank unavailable; no favorable IV evidence inferred.")
     if route not in {"OPTION", "BOTH"}:
         return {
             "lane": "NO_OPTION_TRADE",
@@ -1111,7 +1121,7 @@ def _strategy_lane(pm_row: dict[str, Any], scan_row: dict[str, Any], opts: dict[
         lane = "EVENT_DEFINED_RISK"
         posture = "BINARY_EVENT"
         preferred = "debit_spread_or_small_single_leg"
-    elif iv_rank >= 70:
+    elif iv_rank is not None and iv_rank >= 70:
         reasons.append("High IV makes outright premium expensive; prefer spread or pass.")
         lane = "HIGH_IV_SPREAD_OR_PASS"
         posture = "VOL_EXPENSIVE"
@@ -1139,6 +1149,7 @@ def _strategy_lane(pm_row: dict[str, Any], scan_row: dict[str, Any], opts: dict[
         "risk_posture": posture,
         "preferred_structure": preferred,
         "iv_rank": iv_rank,
+        "iv_evidence": "UNKNOWN" if iv_rank is None else "AVAILABLE",
         "dte": dte or None,
         "reasons": reasons,
     }
@@ -1396,8 +1407,12 @@ async def build_candidates(
             "strategy_lane": strategy_lane,
             "direction": opts.get("direction"),
             "strategy_reason": opts.get("strategy_reason") or opts.get("one_liner"),
-            "iv_rank": opts.get("iv_rank"),
-            "iv_label": opts.get("iv_label"),
+            "iv_rank": _historical_iv_rank(opts.get("iv_rank")),
+            "iv_label": (opts.get("iv_label") or "UNKNOWN") if _historical_iv_rank(opts.get("iv_rank")) is not None else "UNKNOWN",
+            "absolute_iv_label": opts.get("absolute_iv_label") or "UNKNOWN",
+            "iv_rank_history": opts.get("iv_rank_history"),
+            "rv_20": opts.get("rv_20"), "iv_rv": opts.get("iv_rv"),
+            "rv_history": opts.get("rv_history"),
             "data_provider": data_provider,
             "data_feed": opts.get("data_feed") or instrument.get("data_feed"),
             "data_quality": data_quality,

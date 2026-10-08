@@ -7,7 +7,7 @@ Public API:
 - get_options_data(ticker, catalyst_date)        — fetch chain + IV
 - find_best_contract(chain, direction, budget)   — pick a strike
 - select_strategy(stock, chain)                  — decision tree → label
-- calculate_iv_rank(ticker)                      — HV-based proxy
+- calculate_iv_rank(ticker)                      — observed historical ATM IV rank
 - build_spread(chain, direction, width)          — bull-call / bear-put math
 - detect_unusual_flow(ticker)                    — call/put volume vs OI
 - assess_iv_crush_risk(stock, chain)             — pre-catalyst safety
@@ -28,6 +28,7 @@ from typing import Any
 
 import httpx
 from .options_policy import get_policy
+from . import iv_history
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,31 @@ async def _alpaca_chain_page(client: httpx.AsyncClient, ticker: str, params: dic
     return r.json() or {}
 
 
+async def _historical_iv_metrics(ticker: str, calls: Any, spot: float, provider: str, feed: str) -> dict[str, Any]:
+    """Use a stable near-30-day ATM call series without changing contract selection."""
+    unknown = iv_history._result("NO_COMPARABLE_ATM_CONTRACT")
+    try:
+        today = datetime.now(timezone.utc).date()
+        candidates = []
+        for row in calls.to_dict("records"):
+            dte = (datetime.fromisoformat(str(row.get("expiration"))).date() - today).days
+            strike = _safe_float(row.get("strike"))
+            iv = _safe_float(row.get("impliedVolatility"))
+            if 21 <= dte <= 45 and strike > 0 and iv > 0 and spot > 0 and abs(strike / spot - 1) <= .05:
+                candidates.append((abs(dte - 30), abs(strike - spot), str(row.get("contractSymbol")), row))
+        if not candidates:
+            return {**unknown, **await iv_history.realized_iv_metrics(ticker, None)}
+        row = min(candidates, key=lambda item: item[:3])[3]
+        return await iv_history.observe_atm_iv(
+            ticker, row["impliedVolatility"], provider=provider, feed=feed,
+            expiration=str(row["expiration"]), strike=row["strike"], spot=spot,
+            contract_symbol=str(row["contractSymbol"]), quote_time=row.get("quoteTime"),
+        )
+    except Exception as exc:
+        logger.debug("Historical IV metrics unavailable for %s: %s", ticker, exc)
+        return unknown
+
+
 async def _fetch_alpaca_options_data(
     ticker: str,
     catalyst_date: str | None = None,
@@ -239,17 +265,7 @@ async def _fetch_alpaca_options_data(
         if len(valid_iv):
             idx = (valid_iv["strike"] - spot).abs().idxmin()
             atm_iv = _safe_float(valid_iv.loc[idx, "impliedVolatility"])
-        iv_rank = 50
-        iv_label = "FAIR"
-        if atm_iv and atm_iv > 0:
-            if atm_iv < 0.3:
-                iv_rank, iv_label = 25, "CHEAP"
-            elif atm_iv < 0.6:
-                iv_rank, iv_label = 50, "FAIR"
-            elif atm_iv < 0.9:
-                iv_rank, iv_label = 70, "ELEVATED"
-            else:
-                iv_rank, iv_label = 85, "EXPENSIVE"
+        historical_iv = await _historical_iv_metrics(ticker, calls, spot, "ALPACA_OPTIONS", ALPACA_OPTIONS_FEED)
         return {
             "ticker": ticker,
             "calls": calls,
@@ -261,8 +277,8 @@ async def _fetch_alpaca_options_data(
             "strike_window": {"gte": round(strike_lo, 2), "lte": round(strike_hi, 2)},
             "snapshot_count": len(rows),
             "atm_iv": atm_iv,
-            "iv_rank": iv_rank,
-            "iv_label": iv_label,
+            "absolute_iv_label": iv_history.absolute_iv_label(atm_iv),
+            **historical_iv,
             "data_provider": "ALPACA_OPTIONS",
             "data_feed": ALPACA_OPTIONS_FEED,
             "data_quality": "INDICATIVE" if ALPACA_OPTIONS_FEED == "indicative" else "EXECUTION_GRADE",
@@ -372,12 +388,14 @@ async def _fetch_public_options_data(
             return None
         valid = df[df["impliedVolatility"] > 0]
         atm_iv = _safe_float(valid.iloc[(valid["strike"] - spot).abs().argmin()]["impliedVolatility"]) if not valid.empty else None
+        historical_iv = await _historical_iv_metrics(ticker, calls, spot, "PUBLIC_OPTIONS", "public")
         return {
             "ticker": ticker.upper(), "calls": calls, "puts": puts, "price": spot,
             "expirations": expirations, "expiration": best_exp,
             "expiration_window": {"gte": target_lo.isoformat(), "lte": target_hi.isoformat()},
-            "snapshot_count": len(rows), "atm_iv": atm_iv, "iv_rank": 50,
-            "iv_label": "FAIR", "data_provider": "PUBLIC_OPTIONS", "data_feed": "public",
+            "snapshot_count": len(rows), "atm_iv": atm_iv,
+            "absolute_iv_label": iv_history.absolute_iv_label(atm_iv), **historical_iv,
+            "data_provider": "PUBLIC_OPTIONS", "data_feed": "public",
             "data_quality": "RESEARCH_LIVE", "execution_eligible": False,
         }
     except Exception as exc:
@@ -653,7 +671,7 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     risk_level = str((stock.get("risk") or {}).get("level", "MEDIUM")).upper()
     sq_score = (stock.get("squeeze") or {}).get("score") or 0
     days = (stock.get("time_target") or {}).get("days_remaining") or 30
-    iv_rank = (chain or {}).get("iv_rank", 50)
+    iv_rank = _safe_float((chain or {}).get("iv_rank"), None)
     score = _safe_float(stock.get("score") or stock.get("case_score") or stock.get("pm_score"))
     rr = _safe_float(stock.get("risk_reward") or stock.get("rr") or stock.get("riskReward"))
     signal_set = {str(s) for s in signals}
@@ -669,7 +687,8 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     has_bullish_anchor = any([is_insider, is_contract, is_congress, is_flow, is_squeeze, is_earnings])
 
     # Rule order matters.
-    if is_earnings and iv_rank > 80:
+    # Unknown rank is neutral for existing selection rules, not a new gate.
+    if is_earnings and iv_rank is not None and iv_rank > 80:
         if has_bullish_anchor and score >= 55 and rr >= 1.5:
             return {"strategy": "LONG_CALL_EVENT_SCOUT", "direction": "BULL",
                     "reason": "High-IV near-event setup is allowed only as a capped paper scout after Alpaca liquidity clears"}
@@ -682,30 +701,30 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
                 "reason": "Extreme setup needs stronger PM score before the Options Desk can scout it"}
     if is_bearish:
-        if iv_rank > 75 and score < 70:
+        if iv_rank is not None and iv_rank > 75 and score < 70:
             return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
                     "reason": "Bearish setup has expensive IV without enough score for a paper scout"}
         return {"strategy": "LONG_PUT", "direction": "BEAR",
                 "reason": "Bearish evidence detected - PM should express with puts only if liquidity clears"}
-    if sq_score > 75 and days < 14 and iv_rank < 75:
+    if sq_score > 75 and days < 14 and (iv_rank is None or iv_rank < 75):
         return {"strategy": "LONG_CALL", "direction": "BULL",
                 "reason": "High squeeze probability with a near catalyst - directional call candidate"}
-    if is_insider and sq_score > 50 and days > 30 and iv_rank < 65:
+    if is_insider and sq_score > 50 and days > 30 and (iv_rank is None or iv_rank < 65):
         return {"strategy": "LONG_CALL", "direction": "BULL",
-                "reason": "Insider accumulation with acceptable IV - directional call candidate"}
+                "reason": "Insider accumulation with acceptable IV - directional call candidate" if iv_rank is not None else "Insider accumulation - directional call candidate; historical IV evidence unavailable"}
     if is_congress and risk_level == "LOW":
         return {"strategy": "LONG_CALL", "direction": "BULL",
                 "reason": "High-conviction low-risk congressional setup - single-leg call only if liquidity clears"}
-    if score >= 78 and days >= 120 and iv_rank < 70:
+    if score >= 78 and days >= 120 and (iv_rank is None or iv_rank < 70):
         return {"strategy": "LEAPS_CALL_CANDIDATE", "direction": "BULL",
                 "reason": "High-score long-horizon setup - route to LEAPS sleeve for long-dated exposure"}
-    if has_bullish_anchor and score >= 58 and rr >= 1.3 and iv_rank < 80:
+    if has_bullish_anchor and score >= 58 and rr >= 1.3 and (iv_rank is None or iv_rank < 80):
         return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
-                "reason": "PM-grade bullish anchor with acceptable IV; small paper option scout if Alpaca liquidity clears"}
-    if has_bullish_anchor and score >= 48 and rr >= 1.25 and iv_rank < 70:
+                "reason": "PM-grade bullish anchor with acceptable IV; small paper option scout if Alpaca liquidity clears" if iv_rank is not None else "PM-grade bullish anchor; historical IV evidence unavailable; small paper option scout if Alpaca liquidity clears"}
+    if has_bullish_anchor and score >= 48 and rr >= 1.25 and (iv_rank is None or iv_rank < 70):
         return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
                 "reason": "Watchlist paper scout candidate; requires live contract and risk preflight"}
-    if is_contract and score >= 55 and days >= 14 and iv_rank < 75:
+    if is_contract and score >= 55 and days >= 14 and (iv_rank is None or iv_rank < 75):
         return {"strategy": "LONG_CALL_SCOUT", "direction": "BULL",
                 "reason": "Contract catalyst is option-eligible for a small scout after liquidity validation"}
     return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
@@ -715,23 +734,15 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
 async def calculate_iv_rank(ticker: str) -> dict[str, Any]:
     chain = await get_options_data(ticker)
     if not chain:
-        return {"iv_rank": None, "iv_label": "UNKNOWN", "atm_iv": None, "hv_30": None}
-    hv = None
-    try:
-        from . import pricer
-        closes = [float(value) for _, value in sorted((await pricer.get_history(ticker, days=260)).items()) if value]
-        if len(closes) >= 30:
-            returns = [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes)) if closes[i - 1] > 0]
-            if returns:
-                mean = sum(returns) / len(returns)
-                hv = (sum((value - mean) ** 2 for value in returns) / len(returns)) ** 0.5 * (252 ** 0.5)
-    except Exception:
-        pass
+        return {**iv_history._result("NO_CHAIN"), "absolute_iv_label": "UNKNOWN", "atm_iv": None, "hv_30": None}
     return {
         "iv_rank": chain.get("iv_rank"),
         "iv_label": chain.get("iv_label"),
+        "absolute_iv_label": chain.get("absolute_iv_label"),
+        "iv_rank_history": chain.get("iv_rank_history"),
         "atm_iv": chain.get("atm_iv"),
-        "hv_30": round(hv, 4) if hv else None,
+        "rv_20": chain.get("rv_20"), "iv_rv": chain.get("iv_rv"),
+        "rv_history": chain.get("rv_history"), "hv_30": chain.get("hv_30"),
     }
 
 
@@ -853,10 +864,13 @@ async def detect_unusual_flow(ticker: str, *, public_client: Any | None = None) 
 
 # ---------------- crush risk (Part 8) ----------------
 def assess_iv_crush_risk(stock: dict, chain: dict | None) -> dict:
-    iv_rank = (chain or {}).get("iv_rank", 50)
+    iv_rank = _safe_float((chain or {}).get("iv_rank"), None)
     days = (stock.get("time_target") or {}).get("days_remaining") or 30
     is_earnings = "upcoming_earnings" in (stock.get("signals") or [])
 
+    if iv_rank is None:
+        return {"crush_risk": "UNKNOWN",
+                "recommendation": "Historical ATM IV rank is unavailable; IV crush risk is unassessed."}
     if is_earnings and days < 7 and iv_rank > 65:
         return {"crush_risk": "SEVERE",
                 "recommendation": "Do not buy options. Buy stock directly or wait until after earnings."}
@@ -951,6 +965,10 @@ async def analyze_ticker(
             "data_quality": chain.get("data_quality"),
             "iv_rank": chain.get("iv_rank"),
             "iv_label": chain.get("iv_label"),
+            "absolute_iv_label": chain.get("absolute_iv_label"),
+            "iv_rank_history": chain.get("iv_rank_history"),
+            "rv_20": chain.get("rv_20"), "iv_rv": chain.get("iv_rv"),
+            "rv_history": chain.get("rv_history"),
             "atm_iv": chain.get("atm_iv"),
             "expiration": chain.get("expiration"),
             "spot": chain.get("price"),
