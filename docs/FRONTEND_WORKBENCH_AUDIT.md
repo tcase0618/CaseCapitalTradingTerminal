@@ -42,7 +42,7 @@ prefix escaping, full-book totals, complete-sync timestamp, responsive tables, r
 
 ## Verification And Limits
 
-25 frontend tests cover resource coalescing, failure retention, session isolation,
+26 frontend tests cover resource coalescing, failure backoff, session isolation,
 visibility polling, pagination/filtering, full-book totals, return units, source fallback,
 route inventory, and evidence display. Production build succeeds. Initial gzip JavaScript
 was approximately 422 kB; first split build was approximately 132 kB (69% smaller).
@@ -55,3 +55,10 @@ still have their own polling implementations. React Router browser behavior is c
 separately because CRA's Jest 27 resolver cannot resolve Router 7's subpath exports.
 Combined equity and paper-options market value is explicitly display-only, not live NAV.
 Cache timestamps measure successful retrieval, not the freshness of a market quote.
+
+Production smoke testing exposed backend read timeouts and very low VPS memory
+headroom (approximately 75 MB available out of 1.9 GB at observation). The display
+reader now bounds concurrency to four and backs off automatic failed refreshes
+for 30-120 seconds. Manual refresh can bypass backoff. This is not a backend
+health fix or a claim that all source data is loading correctly. Final artifact
+builds can run locally to avoid competing with the trading backend for VPS memory.
