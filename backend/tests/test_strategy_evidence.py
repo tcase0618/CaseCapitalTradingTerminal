@@ -58,6 +58,9 @@ async def test_refresh_persists_once_and_provider_outage_preserves_outcomes(monk
     assert db.strategy_evidence_outcomes.rows == saved
     assert third['scorecards'] == first['scorecards']
     assert third['provider_errors']
+    stored_report = await evidence.latest()
+    assert stored_report['asset_basis'] == 'UNDERLYING_EQUITY'
+    assert evidence.ASSET_LIMITATION in stored_report['limitations']
 
 
 @pytest.mark.asyncio
