@@ -220,3 +220,31 @@ every external broker/provider, daytime load, or unrun live integration test.
 
 A paid RAM upgrade was not performed: current measured headroom does not justify
 one yet. No VPS services were removed or OOM-inducing memory caps imposed.
+
+### Final observed checkpoint
+
+At 00:14 ET on October 8, the observation window since the first rollout had
+30 completed one-minute monitor jobs and zero max-instance skips. This count
+spans the two supervised application restarts, not 30 cycles on one PID.
+Backend service memory was approximately 281 MiB current and 287 MiB peak;
+available RAM was 1,328 MiB and used swap 36 MiB. This is early overnight evidence,
+not a guarantee of daytime or long-term behavior. Short vmstat samples showed
+zero ongoing swap-in/out after the change.
+
+The normal midnight cycle persisted its full-terminal report and finished in
+337.95 seconds (277.16 seconds in Core scan). Its remaining execution rejection
+was quote-spread validation, not resource availability; that check was not
+weakened. Scheduler completion alone was not used as proof of cycle persistence.
+
+All three existing PostgreSQL dumps and the historical journal archive were
+copied to encrypted off-host storage. DPAPI key recovery, GCM authentication,
+and equality with the original server SHA-256 were independently verified for
+each archive. The PostgreSQL restore test used the latest dump. The existing
+three recent on-VPS dump generations remain intact; no age-eligible backup
+pruning or market-data deletion was performed. Old frontend chunks also remain.
+
+The served index/main JavaScript/main CSS checksums match the retained build,
+and all 65 files referenced by its asset manifest exist. Both nginx and the
+backend, the resource timer, logrotate timer, and nightly backup timer remain
+active. The backup script is executable by its service user. The final checks
+do not place orders or imply every provider quote is actionable.
