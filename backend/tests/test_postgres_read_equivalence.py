@@ -72,5 +72,9 @@ async def test_real_postgres_reads_match_reference_and_release_pool(monkeypatch)
         # Cross the batch boundary and prove no duplicates or omitted records.
         await connection.executemany("insert into pg_temp.cc_collection_snapshots values('bulk',$1,$2::jsonb)", [(f"{i:04}", json.dumps({"id": i})) for i in range(101)])
         assert len(await store.PostgresCollection("bulk").find({}).to_list(None)) == 101
+        grouped = await store.PostgresCollection("bulk").aggregate([
+            {"$group": {"_id": "all", "n": {"$sum": 1}, "low": {"$min": "$id"}, "high": {"$max": "$id"}}},
+        ]).to_list(None)
+        assert grouped == [{"_id": "all", "n": 101, "low": 0, "high": 100}]
     finally:
         await connection.close()
