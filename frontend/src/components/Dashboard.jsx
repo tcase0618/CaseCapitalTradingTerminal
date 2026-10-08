@@ -172,7 +172,7 @@ export default function Dashboard() {
       const resource = displayResource(`${API}${path}`, interval);
       const cached = resource.getSnapshot();
       if (cached.data != null && mounted.current) setter(cached.data);
-      if (force || !cached.updatedAt || Date.now() - cached.updatedAt >= interval) await resource.refresh();
+      if (force || !cached.updatedAt || Date.now() - cached.updatedAt >= interval) await resource.refresh(force);
       const state = resource.getSnapshot();
       if (state.error) throw state.error;
       if (mounted.current) setter(state.data);
