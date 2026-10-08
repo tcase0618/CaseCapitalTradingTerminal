@@ -67,7 +67,7 @@ def _outbound_kind(text: str) -> str:
     upper = str(text or "").upper()
     if "CASE CAPITAL | SCAN REPORT" in upper:
         return "scan_report"
-    if "CASE CAPITAL | PORTFOLIO MONITOR FAILURE" in upper:
+    if "CASE CAPITAL | PORTFOLIO " in upper:
         return "ops_alert"
     if "CASE SCORE" in upper and ("PHARMA" in upper or "PDUFA" in upper or "BINARY FDA" in upper):
         return "pharma_alert"
@@ -829,6 +829,8 @@ async def handle_update(update: dict[str, Any]) -> None:
     if not text or not chat_id:
         return
     allowed_chat = str(os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not allowed_chat:
+        return
     if allowed_chat and chat_id != allowed_chat:
         await log_activity(
             f"Telegram cmd ignored from unauthorized chat {chat_id}: {text[:80]}",
@@ -1220,7 +1222,7 @@ async def handle_update(update: dict[str, Any]) -> None:
         latest = await scanner.latest_scan()
         if not latest or latest.get("started_at", "")[:10] != today_iso:
             await send_message("⏳ Running fresh scan...", chat_id=chat_id)
-            latest = await scanner.run_scan(triggered_by=f"telegram:{chat_id}")
+            latest = await scanner.run_scan(triggered_by=f"telegram:{chat_id}", auto_execute=False)
         results = latest.get("results", [])
         if cmd == "/calls":
             picks = [r for r in results
@@ -1389,7 +1391,7 @@ async def handle_update(update: dict[str, Any]) -> None:
 
     if cmd == "/scan":
         await send_message("⏳ Running full scan...", chat_id=chat_id)
-        scan = await scanner.run_scan(triggered_by=f"telegram:{chat_id}")
+        scan = await scanner.run_scan(triggered_by=f"telegram:{chat_id}", auto_execute=False)
         await dispatch_consolidated(scan, chat_id=chat_id)
         return
 

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import useDisplayResource, { displayResource } from "../hooks/useDisplayResource";
 import { FileText, Gavel, RefreshCw, Scale, ShieldAlert, ShieldCheck } from "lucide-react";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -24,61 +25,20 @@ export default function CaseCourtPage() {
   const [data, setData] = useState(null);
   const [selectedTicker, setSelectedTicker] = useState(null);
   const [selectedSession, setSelectedSession] = useState("");
-  const [sessions, setSessions] = useState([]);
-  const [record, setRecord] = useState(null);
   const [tab, setTab] = useState("DOCKET");
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-
-  const loadSessions = useCallback(async () => {
-    try {
-      const { data: payload } = await axios.get(`${API}/case_court/sessions`, { params: { limit: 16 }, timeout: 8000 });
-      const rows = payload.sessions || [];
-      setSessions(rows);
-      setSelectedSession(prev => prev || rows[0]?.session_id || "");
-    } catch {
-      setSessions([]);
-    }
-  }, []);
-
-  const loadRecord = useCallback(async () => {
-    try {
-      const { data: payload } = await axios.get(`${API}/case_court/record`, { params: { days: 30 }, timeout: 8000 });
-      setRecord(payload);
-    } catch {
-      setRecord(null);
-    }
-  }, []);
-
-  const load = useCallback(async (sessionId = selectedSession) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = { limit: 30 };
-      if (sessionId) params.session_id = sessionId;
-      const { data: payload } = await axios.get(`${API}/case_court/latest`, { params, timeout: 8000 });
-      setData(payload);
-      if (payload.session_id) setSelectedSession(payload.session_id);
-      const rows = payload.trials || [];
-      setSelectedTicker(prev => prev && rows.some(r => r.ticker === prev) ? prev : rows[0]?.ticker || null);
-    } catch (e) {
-      setError(e.message || "Case Court unavailable");
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedSession]);
-
-  useEffect(() => {
-    loadSessions();
-    loadRecord();
-  }, [loadSessions, loadRecord]);
-
-  useEffect(() => {
-    load(selectedSession);
-    const id = setInterval(load, 60000);
-    return () => clearInterval(id);
-  }, [load, selectedSession]);
+  const sessionRead = useDisplayResource(`${API}/case_court/sessions?limit=16`, 60000);
+  const latestRead = useDisplayResource(
+    `${API}/case_court/latest?limit=30${selectedSession ? `&session_id=${encodeURIComponent(selectedSession)}` : ""}`,
+    60000
+  );
+  const sessions = courtRows(sessionRead.data?.sessions);
+  const loading = latestRead.loading;
+  const readError = latestRead.error || sessionRead.error;
+  useEffect(() => { setData(latestRead.data); }, [latestRead.data]);
+  const loadSessions = () => sessionRead.refresh();
+  const loadRecord = () => displayResource(`${API}/case_court/record?days=30`, 300000).refresh(true);
 
   const refreshCourt = async () => {
     if (refreshing) return;
@@ -88,7 +48,7 @@ export default function CaseCourtPage() {
       const { data: payload } = await axios.post(`${API}/case_court/refresh`, null, { params: { limit: 30 }, timeout: 30000 });
       setData(payload);
       if (payload.session_id) setSelectedSession(payload.session_id);
-      const rows = payload.trials || [];
+      const rows = courtRows(payload?.trials);
       setSelectedTicker(prev => prev && rows.some(r => r.ticker === prev) ? prev : rows[0]?.ticker || null);
       await loadSessions();
       await loadRecord();
@@ -99,7 +59,7 @@ export default function CaseCourtPage() {
     }
   };
 
-  const trials = useMemo(() => data?.trials || [], [data]);
+  const trials = useMemo(() => courtRows(data?.trials), [data]);
   const summary = data?.summary || {};
   const selected = useMemo(
     () => trials.find(t => t.ticker === selectedTicker) || trials[0] || null,
@@ -115,8 +75,9 @@ export default function CaseCourtPage() {
         </button>
       }
     >
-      {error && <div style={errorBox}><ShieldAlert size={16} /> {error}</div>}
+      {(error || readError) && <div role="alert" style={errorBox}><ShieldAlert size={16} /> {error || `Court display unavailable: ${readError.message}. Last successful data retained where available.`}</div>}
 
+      <style>{courtResponsiveCss}</style>
       <DataConfidenceStrip
         title="COURT EVIDENCE CONFIDENCE"
         items={[
@@ -149,11 +110,10 @@ export default function CaseCourtPage() {
             value={selectedSession}
             onChange={e => {
               setSelectedSession(e.target.value);
-              load(e.target.value);
             }}
             style={selectStyle}
           >
-            {!sessions.length && <option value="">No persisted sessions</option>}
+            <option value="">LATEST SESSION</option>
             {sessions.map(s => (
               <option key={s.session_id} value={s.session_id}>
                 {shortDate(s.session_generated_at)} / {s.trials} cases
@@ -164,7 +124,7 @@ export default function CaseCourtPage() {
         <div style={sessionMeta}>
           <Mini label="Session" value={data?.session_id ? shortId(data.session_id) : "--"} color={accent2} />
           <Mini label="Source" value={data?.source || "--"} color={accent} />
-          <Mini label="Stale" value={data?.stale ? "YES" : "NO"} color={data?.stale ? "#fb7185" : "#4ade80"} />
+          <Mini label="Stale" value={!data ? "UNKNOWN" : data.stale ? "YES" : "NO"} color={!data || data.stale ? "#fb7185" : "#4ade80"} />
         </div>
       </div>
 
@@ -186,7 +146,7 @@ export default function CaseCourtPage() {
 
       {tab === "ADVISORY ALIGNMENT" && (
         <Card title="ADVISORY ALIGNMENT" accentColor={accent2}>
-          <ReadinessBoard summary={summary} trials={trials} record={record} />
+          <ReadinessBoard summary={summary} trials={trials} />
         </Card>
       )}
 
@@ -230,13 +190,13 @@ export default function CaseCourtPage() {
               </div>
 
               <Card title="EXPERT WITNESSES" accentColor={accent2}>
-                {selected ? <WitnessGrid rows={selected.witnesses || []} /> : <Empty loading={loading} />}
+                {selected ? <WitnessGrid rows={courtRows(selected.witnesses)} /> : <Empty loading={loading} />}
               </Card>
 
               <Card title="APPEAL TRIGGERS / FUTURE REVIEW" accentColor="#a78bfa">
                 {selected ? (
                   <div style={appealGrid}>
-                    {(selected.appeal_triggers || []).map((x, i) => <div key={`${x}-${i}`} style={appealItem}>{x}</div>)}
+                    {courtText(selected.appeal_triggers).map((x, i) => <div key={`${x}-${i}`} style={appealItem}>{x}</div>)}
                   </div>
                 ) : <Empty loading={loading} />}
               </Card>
@@ -271,14 +231,14 @@ function Ruling({ trial }) {
         <Mini label="Scan Age" value={trial.scan_age_hours == null ? "-" : `${trial.scan_age_hours}H`} color={trial.scan_age_hours > 26 ? "#f87171" : accent} />
         <Mini label="Decision Grade" value={trial.evidence_coverage?.decision_grade ? "YES" : "NO"} color={trial.evidence_coverage?.decision_grade ? "#4ade80" : "#fb7185"} />
       </div>
-      {!!(trial.judge?.affirmative_defense_classes || []).length && (
+      {!!courtText(trial.judge?.affirmative_defense_classes).length && (
         <div style={{ gridColumn: "1 / -1", ...noteBox }}>
-          Defense classes: {trial.judge.affirmative_defense_classes.join(" / ")}
+          Defense classes: {courtText(trial.judge.affirmative_defense_classes).join(" / ")}
         </div>
       )}
-      {!!(trial.judge?.dispositive_flags || []).length && (
+      {!!courtRows(trial.judge?.dispositive_flags).length && (
         <div style={{ gridColumn: "1 / -1", ...noteBox, borderColor: "rgba(251,113,133,.35)", color: "#fca5a5" }}>
-          Directed flags: {trial.judge.dispositive_flags.map(f => f.reason || f.label).join(" / ")}
+          Directed flags: {courtRows(trial.judge.dispositive_flags).map(f => f.reason || f.label).join(" / ")}
         </div>
       )}
     </div>
@@ -295,7 +255,7 @@ function LawyerCard({ title, side, color }) {
             <div style={{ color: labelLight, fontSize: 12, lineHeight: 1.45 }}>{side.opening_argument || side.opening_objection}</div>
           </div>
           <div style={{ display: "grid", gap: 9 }}>
-            {(side.points || []).map((p, i) => (
+            {courtRows(side.points).map((p, i) => (
               <div key={`${p.label}-${i}`} style={evidenceRow}>
                 <div>
                   <div style={{ color: labelLight, fontWeight: 800 }}>{p.label}</div>
@@ -304,7 +264,7 @@ function LawyerCard({ title, side, color }) {
                 <div style={{ color, fontWeight: 900 }}>+{p.weight}</div>
               </div>
             ))}
-            {!(side.points || []).length && <div style={metaLine}>No material evidence points.</div>}
+            {!courtRows(side.points).length && <div style={metaLine}>No material evidence points.</div>}
           </div>
         </div>
       ) : <Empty />}
@@ -336,7 +296,7 @@ function WitnessGrid({ rows }) {
 function CourtDocs({ trial, loading }) {
   if (!trial) return <Empty loading={loading} />;
   const docs = trial.court_docs || {};
-  const exhibits = trial.exhibits || [];
+  const exhibits = courtRows(trial.exhibits);
   const coverage = trial.evidence_coverage || {};
   return (
     <div style={{ display: "grid", gap: 18 }}>
@@ -363,12 +323,12 @@ function CourtDocs({ trial, loading }) {
 
       <Card title="MINI TRIALS" accentColor={accent2}>
         <div style={miniTrialGrid}>
-          {(trial.mini_trials || []).map(mt => (
+          {courtRows(trial.mini_trials).map(mt => (
             <div key={mt.name} style={miniTrialCard(postureColors[mt.verdict] || verdictColor(mt.verdict))}>
               <div style={smallLabel}>{labelPosture(mt.name)}</div>
               <div style={{ color: verdictColor(mt.verdict), fontWeight: 900, letterSpacing: "0.12em" }}>{labelPosture(mt.verdict)}</div>
               <div style={metaLine}>D {mt.defense_score} / P {mt.prosecution_score} / spread {signed(mt.spread)}</div>
-              {!!(mt.missing_required || []).length && <div style={missingLine}>Missing: {mt.missing_required.join(", ")}</div>}
+              {!!courtText(mt.missing_required).length && <div style={missingLine}>Missing: {courtText(mt.missing_required).join(", ")}</div>}
             </div>
           ))}
         </div>
@@ -386,9 +346,9 @@ function CourtDocs({ trial, loading }) {
                 </div>
                 <div style={{ color, marginTop: 8, fontSize: 12, letterSpacing: "0.12em", fontWeight: 900 }}>{ex.status}</div>
                 <div style={{ color: muted, lineHeight: 1.45, marginTop: 8, fontSize: 12 }}>{ex.detail}</div>
-                {!!(ex.claims || []).length && (
+                {!!courtRows(ex.claims).length && (
                   <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-                    {(ex.claims || []).filter(c => c.admissible !== false && Number(c.weight || 0) > 0).map((c, i) => (
+                    {courtRows(ex.claims).filter(c => c.admissible !== false && Number(c.weight || 0) > 0).map((c, i) => (
                       <div key={`${c.rule}-${i}`} style={claimRow(c.side)}>
                         <span>{c.side}</span>
                         <b>{c.weight}</b>
@@ -407,7 +367,7 @@ function CourtDocs({ trial, loading }) {
   );
 }
 
-function ReadinessBoard({ summary, trials, record }) {
+function ReadinessBoard({ summary, trials }) {
   const ready = trials.filter(t => t.judge?.advisory_alignment_ok);
   const holds = trials.filter(t => !t.judge?.advisory_alignment_ok);
   return (
@@ -425,7 +385,7 @@ function ReadinessBoard({ summary, trials, record }) {
         <Mini label="Cleaner Data" value={summary.requires_cleaner_data ?? 0} color="#fb7185" />
         <Mini label="Neutralized" value={summary.neutralized_exhibits ?? 0} color={muted} />
       </div>
-      <CourtRecord record={record} />
+      <CourtRecordDisplay />
       <div className="case-court-split-list" style={splitList}>
         <div>
           <div style={smallLabel}>READY DOCKET</div>
@@ -441,6 +401,17 @@ function ReadinessBoard({ summary, trials, record }) {
     </div>
   );
 }
+
+function CourtRecordDisplay() {
+  const read = useDisplayResource(`${API}/case_court/record?days=30`, 300000);
+  return <div>
+    {read.error && <div role="alert" style={errorBox}>Court record unavailable. Last successful record retained where available.</div>}
+    {read.loading ? <div style={metaLine}>Loading court record...</div> : <CourtRecord record={read.data} />}
+  </div>;
+}
+
+const courtRows = value => Array.isArray(value) ? value.filter(row => row && typeof row === "object" && !Array.isArray(row)) : [];
+const courtText = value => Array.isArray(value) ? value.filter(row => typeof row === "string" || typeof row === "number") : [];
 
 function CourtRecord({ record }) {
   const support = record?.by_posture?.COURT_SUPPORTS_PM || {};
@@ -462,7 +433,7 @@ function CourtRecord({ record }) {
       </div>
       <div style={recordPanel}>
         <div style={smallLabel}>RECENT GRADED CASES</div>
-        {(record?.rows || []).slice(0, 8).map(r => (
+        {courtRows(record?.rows).slice(0, 8).map(r => (
           <div key={`${r.case_id}-${r.horizon}`} style={compactRow}>
             ${r.ticker}
             <span style={{ color: r.win ? "#4ade80" : "#fb7185" }}>
@@ -470,7 +441,7 @@ function CourtRecord({ record }) {
             </span>
           </div>
         ))}
-        {!(record?.rows || []).length && <div style={metaLine}>No matured court records yet.</div>}
+        {!courtRows(record?.rows).length && <div style={metaLine}>No matured court records yet.</div>}
       </div>
     </div>
   );
@@ -605,7 +576,7 @@ const docket = { display: "grid", gap: 7, maxHeight: "calc(100vh - 310px)", minH
 const tickerStyle = { color: accent, fontWeight: 900, fontSize: 20, letterSpacing: "0.10em" };
 const metaLine = { color: muted, fontSize: 11, letterSpacing: "0.06em", marginTop: 4 };
 const postureText = { fontSize: 10, letterSpacing: "0.12em", fontWeight: 900, maxWidth: 140 };
-const lawyerGrid = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 };
+const lawyerGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: 18 };
 const evidenceRow = {
   border: hairline,
   background: "rgba(255,255,255,0.02)",
@@ -617,7 +588,7 @@ const evidenceRow = {
 };
 const rulingGrid = { display: "grid", gridTemplateColumns: "1fr", gap: 10, alignItems: "stretch" };
 const rulingMain = { border: hairline, background: cardBgHi, padding: 16, display: "flex", gap: 14, alignItems: "flex-start", minWidth: 0 };
-const rulingMetrics = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 };
+const rulingMetrics = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 130px), 1fr))", gap: 10 };
 const expressionBadge = {
   display: "inline-flex",
   maxWidth: "100%",
@@ -633,15 +604,15 @@ const expressionBadge = {
   overflowWrap: "anywhere",
 };
 const miniBox = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12 };
-const witnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
+const witnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 190px), 1fr))", gap: 10 };
 const witnessCard = { border: hairline, background: "rgba(255,255,255,0.02)", padding: 12, minHeight: 116 };
-const appealGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 };
+const appealGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 10 };
 const appealItem = { border: hairline, padding: 12, color: labelLight, background: "rgba(167,139,250,0.06)", lineHeight: 1.45 };
 const docHeader = { display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 14 };
 const noteBox = { border: hairline, background: "rgba(255,255,255,0.02)", color: labelLight, padding: 13, lineHeight: 1.5 };
-const coverageGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginTop: 14 };
-const miniTrialGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 };
-const exhibitGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 };
+const coverageGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 132px), 1fr))", gap: 10, marginTop: 14 };
+const miniTrialGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 190px), 1fr))", gap: 10 };
+const exhibitGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))", gap: 10 };
 const missingLine = { color: "#fb7185", fontSize: 11, lineHeight: 1.4, marginTop: 8 };
 const readinessGrid = { display: "grid", gap: 18 };
 const sectionH = { color: accent, fontSize: 24, letterSpacing: "0.08em", lineHeight: 1.15, margin: 0 };
@@ -710,3 +681,11 @@ function claimRow(side) {
     lineHeight: 1.35,
   };
 }
+const courtResponsiveCss = `
+  .case-court-layout > *, .case-court-main-panel { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    .case-court-layout, .case-court-command, .case-court-audit-strip,
+    .case-court-record-grid, .case-court-split-list { grid-template-columns: minmax(0, 1fr) !important; }
+    .case-court-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  }
+`;

@@ -10,6 +10,22 @@ import { DataConfidenceStrip, DataTableShell, SourceBadge } from "./Institutiona
 
 const { accent, accent2, dim, muted, labelLight, hairline, pageBg } = tokens;
 
+function finiteValue(value) {
+  if (value == null || typeof value === "boolean" || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function knownTotal(rows, field) {
+  if (!rows) return null;
+  const values = rows.map(row => finiteValue(row[field]));
+  return values.some(value => value == null) ? null : values.reduce((sum, value) => sum + value, 0);
+}
+
+function knownSum(...values) {
+  return values.some(value => value == null) ? null : values.reduce((sum, value) => sum + value, 0);
+}
+
 const scanCommands = [
   {
     id: "full_terminal",
@@ -41,16 +57,14 @@ const scanCommands = [
 ];
 
 function fmtMoney(v) {
-  if (v == null || v === "") return "--";
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "--";
+  const n = finiteValue(v);
+  if (n == null) return "--";
   return `$${Math.round(n).toLocaleString()}`;
 }
 
 function fmtMoney2(v) {
-  if (v == null || v === "") return "--";
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "--";
+  const n = finiteValue(v);
+  if (n == null) return "--";
   const sign = n > 0 ? "+" : n < 0 ? "-" : "";
   return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 }
@@ -89,7 +103,8 @@ function qualityForIntegration(i) {
 }
 
 function missionState(loading, ok, readyLabel, blockedLabel) {
-  if (loading || ok == null) return { value: "SYNCING", color: muted };
+  if (loading) return { value: "SYNCING", color: muted };
+  if (ok == null) return { value: "UNKNOWN", color: muted };
   return ok ? { value: readyLabel, color: "#4ade80" } : { value: blockedLabel, color: "#f87171" };
 }
 
@@ -222,12 +237,55 @@ export default function CommandCenterPage() {
   const [loadWarning, setLoadWarning] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [workspaceView, setWorkspaceView] = useState("overview");
+  const [displayRefreshing, setDisplayRefreshing] = useState(false);
   const refreshInFlight = useRef(false);
+  const refreshQueued = useRef(false);
   const mounted = useRef(false);
+  const displayReads = useMemo(() => [
+    ["/status", setStatus], ["/scan/latest", setScan],
+    ["/position_monitor/latest", setPositionMonitor], ["/portfolio_manager/latest", setPm],
+    ["/scan/funnel/today", setScanFunnel], ["/admin/integration_status", setAdmin],
+    ["/system/health", setHealth], ["/execution_gate/overview", setExecutionGate],
+    ["/trade_floor/positions", setTradeFloor], ["/admin/price_source", setPriceSource],
+    ["/activity?limit=12", data => setActivity(Array.isArray(data) ? data : [])],
+    ["/telegram/events?limit=12", data => setTelegramEvents(Array.isArray(data?.events) ? data.events : Array.isArray(data) ? data : [])],
+    ["/data_quality/overview", setQualityOverview],
+  ], []);
+  const launcherRef = useRef(null);
+  const runningRef = useRef(running);
+  runningRef.current = running;
+
+  useEffect(() => {
+    if (!launcherOpen) return;
+    const previousFocus = document.activeElement;
+    const panel = launcherRef.current;
+    panel?.focus();
+    const onKeyDown = event => {
+      if (event.key === "Escape" && !runningRef.current) setLauncherOpen(false);
+      if (event.key !== "Tab") return;
+      const controls = Array.from(panel?.querySelectorAll("button:not(:disabled)") || []);
+      if (!controls.length) { event.preventDefault(); panel?.focus(); return; }
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel)) {
+        event.preventDefault(); first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("keydown", onKeyDown); previousFocus?.focus(); };
+  }, [launcherOpen]);
 
   const refresh = useCallback(async (force = false) => {
-    if (refreshInFlight.current) return;
+    if (refreshInFlight.current) {
+      if (force) refreshQueued.current = true;
+      return;
+    }
     refreshInFlight.current = true;
+    if (mounted.current) setDisplayRefreshing(true);
+    const timestamps = [];
+    try {
     const read = (path, setter) => {
       const resource = displayResource(`${API}${path}`, 20000);
       const cached = resource.getSnapshot();
@@ -236,48 +294,56 @@ export default function CommandCenterPage() {
       return promise.then(() => {
         const state = resource.getSnapshot();
         if (state.error) throw state.error;
+        if (state.updatedAt) timestamps.push(state.updatedAt);
         if (mounted.current) setter(state.data);
       });
     };
-    const calls = [
-      read("/status", setStatus),
-      read("/scan/latest", setScan),
-      read("/position_monitor/latest", setPositionMonitor),
-      read("/portfolio_manager/latest", setPm),
-      read("/scan/funnel/today", setScanFunnel),
-      read("/admin/integration_status", setAdmin),
-      read("/system/health", setHealth),
-      read("/execution_gate/overview", setExecutionGate),
-      read("/trade_floor/positions", setTradeFloor),
-      read("/admin/price_source", setPriceSource),
-      read("/activity?limit=12", data => setActivity(data || [])),
-      read("/telegram/events?limit=12", data => setTelegramEvents(data?.events || data || [])),
-      read("/data_quality/overview", setQualityOverview),
-    ];
+    const calls = displayReads.map(([path, setter]) => read(path, setter));
     const results = await Promise.allSettled(calls);
     const failed = results.filter(result => result.status === "rejected").length;
     if (mounted.current) {
       setLoadWarning(failed ? `${failed} DATA REQUEST(S) FAILED - LAST LOADED VALUES MAY BE OUTDATED` : "");
-      if (!failed) setLastUpdated(Date.now());
+      if (!failed && timestamps.length === calls.length) setLastUpdated(Math.min(...timestamps));
       setInitialLoad(false);
     }
-    refreshInFlight.current = false;
-  }, []);
+    } finally {
+      refreshInFlight.current = false;
+      if (mounted.current) setDisplayRefreshing(false);
+      if (refreshQueued.current) {
+        refreshQueued.current = false;
+        if (mounted.current) refresh(true);
+      }
+    }
+  }, [displayReads]);
 
   useEffect(() => {
     mounted.current = true;
+    const unsubscribe = displayReads.map(([path, setter]) => {
+      const resource = displayResource(`${API}${path}`, 20000);
+      const applySnapshot = () => {
+        const state = resource.getSnapshot();
+        if (mounted.current && state.data != null) setter(state.data);
+      };
+      const off = resource.subscribe(applySnapshot, 20000);
+      applySnapshot();
+      return off;
+    });
     refresh();
     const visibleRefresh = () => { if (document.visibilityState !== "hidden") refresh(); };
     const id = setInterval(visibleRefresh, 20000);
     document.addEventListener("visibilitychange", visibleRefresh);
-    return () => { mounted.current = false; clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh); };
-  }, [refresh]);
+    return () => { mounted.current = false; unsubscribe.forEach(off => off()); clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh); };
+  }, [refresh, displayReads]);
 
   const livePositions = useMemo(
     () => buildCommandPositions(tradeFloor, positionMonitor),
     [tradeFloor, positionMonitor],
   );
   const portfolioLoaded = Array.isArray(positionMonitor?.equities?.positions) || Array.isArray(tradeFloor?.live_alpaca);
+  const portfolioTotals = useMemo(() => ({
+    marketValue: knownTotal(livePositions, "market_value"),
+    unrealizedPl: knownTotal(livePositions, "unrealized_pl"),
+  }), [livePositions]);
   const integrations = admin?.integrations || [];
   const pmSummary = pm?.summary || {};
   const account = health?.alpaca?.account || {};
@@ -288,7 +354,7 @@ export default function CommandCenterPage() {
   const gateColor = gateDecision === "PASS" ? "#4ade80" : gateDecision === "WATCH" ? "#fbbf24" : "#f87171";
   const topSignals = useMemo(() => {
     const rows = [...(scan?.results || [])];
-    rows.sort((a, b) => (b.signal_score || 0) - (a.signal_score || 0));
+    rows.sort((a, b) => (finiteValue(b.signal_score) ?? -Infinity) - (finiteValue(a.signal_score) ?? -Infinity));
     return rows.slice(0, 5);
   }, [scan]);
 
@@ -368,13 +434,13 @@ export default function CommandCenterPage() {
 
       <section className="workspace-overview" aria-label="Portfolio overview">
         <div><span>HELD POSITIONS</span><strong>{portfolioLoaded ? livePositions.length : "--"}</strong><small>Equities + paper options</small></div>
-        <div><span>MARKET VALUE</span><strong>{!portfolioLoaded ? "--" : fmtMoney2(livePositions.reduce((total, position) => total + Number(position.market_value || 0), 0)).replace("+", "")}</strong><small>Combined display, not deployable cash</small></div>
-        <div><span>UNREALIZED P/L</span><strong style={{ color: livePositions.reduce((total, position) => total + Number(position.unrealized_pl || 0), 0) < 0 ? "#f87171" : accent2 }}>{!portfolioLoaded ? "--" : fmtMoney2(livePositions.reduce((total, position) => total + Number(position.unrealized_pl || 0), 0))}</strong><small>Open positions only</small></div>
+        <div><span>MARKET VALUE</span><strong>{!portfolioLoaded ? "--" : fmtMoney2(portfolioTotals.marketValue).replace("+", "")}</strong><small>Combined display, not deployable cash</small></div>
+        <div><span>UNREALIZED P/L</span><strong style={{ color: portfolioTotals.unrealizedPl == null ? muted : portfolioTotals.unrealizedPl < 0 ? "#f87171" : accent2 }}>{!portfolioLoaded ? "--" : fmtMoney2(portfolioTotals.unrealizedPl)}</strong><small>Open positions only</small></div>
         <div><span>TODAY'S PM APPROVALS</span><strong>{scanFunnel?.counts?.pm_approved ?? "--"}</strong><small>Approvals are not broker fills</small></div>
       </section>
       <div className="workspace-section-toolbar">
         <div className="workspace-segmented" aria-label="Command Center view">{["overview", "operations"].map(view => <button key={view} type="button" aria-pressed={workspaceView === view} onClick={() => setWorkspaceView(view)}>{view === "overview" ? "Overview" : "Operations"}</button>)}</div>
-        <button type="button" className="workspace-icon-button" title="Reload displayed data" aria-label="Reload displayed data" onClick={() => refresh(true)}><RefreshCw size={15} /></button>
+        <button type="button" className="workspace-icon-button" title="Reload displayed data" aria-label="Reload displayed data" aria-busy={displayRefreshing} disabled={displayRefreshing} onClick={() => refresh(true)}><RefreshCw size={15} /></button>
       </div>
       <div className={`command-control-grid command-center-grid workspace-view-${workspaceView}`} style={commandGrid}>
         <OpsPanel title="SCAN FUNNEL" sub="TODAY" action={<button data-testid="backend-refresh-command-center" onClick={refreshBackend} disabled={backendRefreshing} style={tinyButton(accent2)}>{backendRefreshing ? "SYNC" : "REFRESH"}</button>}>
@@ -382,7 +448,7 @@ export default function CommandCenterPage() {
         </OpsPanel>
 
         <OpsPanel title="LIVE POSITIONS RISK HEAT" action={<Link to="/trade-floor" style={tinyLink}>RISK VIEW</Link>}>
-          <PositionHeat positions={livePositions} />
+          <PositionHeat positions={livePositions} loaded={portfolioLoaded} />
         </OpsPanel>
 
         <OpsPanel title="QUALITY MATRIX" live action={<Link to="/quality" style={tinyLink}>DETAILS</Link>}>
@@ -420,15 +486,15 @@ export default function CommandCenterPage() {
 
       {launcherOpen && (
         <div data-testid="launch-modal" style={modalBackdrop} onClick={() => !running && setLauncherOpen(false)}>
-          <div style={modalPanel} onClick={e => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div>
+          <div ref={launcherRef} role="dialog" aria-modal="true" aria-labelledby="command-launch-title" tabIndex={-1} style={modalPanel} onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ minWidth: 0 }}>
                 <div style={{ color: "#f87171", fontSize: 10, letterSpacing: "0.22em", fontWeight: 700 }}>GUARDED LAUNCH CONTROL</div>
-                <div style={{ color: labelLight, fontSize: 20, letterSpacing: "0.08em", marginTop: 5 }}>SELECT SCAN OR SYSTEM TRIGGER</div>
+                <div id="command-launch-title" style={{ color: labelLight, fontSize: 18, letterSpacing: 0, marginTop: 5 }}>SELECT SCAN OR SYSTEM TRIGGER</div>
               </div>
               <button onClick={() => !running && setLauncherOpen(false)} disabled={!!running} style={closeBtn}>CLOSE</button>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))", gap: 10 }}>
               {scanCommands.map(cmd => (
                 <CommandButton key={cmd.id} cmd={cmd} running={running} completed={completed} onRun={runCommand} large />
               ))}
@@ -443,7 +509,7 @@ export default function CommandCenterPage() {
 function OpsPanel({ title, sub, action, live = false, wide = false, children }) {
   const slug = String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
   return (
-    <section className={`command-panel command-panel-${slug}${wide ? " command-panel-wide" : ""}`} style={opsPanel}>
+    <section aria-label={title} className={`command-panel command-panel-${slug}${wide ? " command-panel-wide" : ""}`} style={opsPanel}>
       <div className="command-panel-header" style={opsHeader}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <span style={opsTitle}>{title}</span>
@@ -460,19 +526,22 @@ function OpsPanel({ title, sub, action, live = false, wide = false, children }) 
 }
 
 export function ScanFunnel({ scan, scanFunnel, pmSummary, gateDecision, livePositions }) {
-  if (!scanFunnel?.counts) return <div><div style={funnelStats}>{["SCANNED", "PM APPROVED", "GATED", "EXECUTED"].map(label => <FunnelStat key={label} label={label} value="--" color={muted} />)}</div><Empty text="Daily terminal funnel not loaded." /></div>;
+  if (!scanFunnel?.counts) return <div><div className="workspace-funnel-stats" style={funnelStats}>{["SCANNED", "PM APPROVED", "GATED", "EXECUTED"].map(label => <FunnelStat key={label} label={label} value="--" color={muted} />)}</div><Empty text="Daily terminal funnel not loaded." /></div>;
   const counts = scanFunnel?.counts || {};
-  const scanned = Number(counts.scanned ?? scan?.pre_filter_passed ?? scan?.results_count ?? scan?.results?.length ?? 0);
-  const accumulate = Number(pmSummary?.accumulate || 0);
-  const starter = Number(pmSummary?.starter || 0);
-  const watch = Number(counts.pm_watch ?? pmSummary?.watch ?? 0);
-  const rejected = Number(counts.pm_rejected ?? pmSummary?.reject ?? pmSummary?.rejected ?? 0);
-  const approved = Number(counts.pm_approved ?? pmSummary?.approved ?? pmSummary?.active_count ?? (accumulate + starter));
-  const reviewed = approved + watch + rejected;
-  const routed = Number(counts.routed ?? reviewed);
-  const unclassified = Number(counts.unclassified ?? Math.max(0, routed - reviewed));
-  const gated = counts.gated ?? "--";
-  const executed = counts.executed ?? "--";
+  // Daily counts must not borrow latest-snapshot PM or holdings statistics.
+  const count = key => {
+    const value = finiteValue(counts[key]);
+    return value != null && value >= 0 ? value : null;
+  };
+  const scanned = count("scanned");
+  const watch = count("pm_watch");
+  const rejected = count("pm_rejected");
+  const approved = count("pm_approved");
+  const reviewed = knownSum(approved, watch, rejected);
+  const routed = count("routed");
+  const unclassified = count("unclassified") ?? (routed != null && reviewed != null && routed >= reviewed ? routed - reviewed : null);
+  const gated = count("gated");
+  const executed = count("executed");
   const bars = [
     ["Approved", approved, "#4ade80"],
     ["Watch", watch, "#fbbf24"],
@@ -481,40 +550,40 @@ export function ScanFunnel({ scan, scanFunnel, pmSummary, gateDecision, livePosi
   ];
   return (
     <div>
-      <div style={funnelStats}>
+      <div className="workspace-funnel-stats" style={funnelStats}>
         <FunnelStat label="SCANNED" value={scanned} color={accent2} />
         <FunnelStat label="PM APPROVED" value={approved} color={accent2} />
         <FunnelStat label="GATED" value={gated} color={accent} />
         <FunnelStat label="EXECUTED" value={executed} color="#4ade80" />
       </div>
-      <div style={funnelWave}>
+      <div style={funnelWave} aria-hidden="true">
         {[8, 32, 62, 88].map((left, i) => <span key={left} style={{ ...funnelMarker, left: `${left}%`, background: i < 2 ? accent2 : i === 2 ? accent : "#4ade80" }} />)}
       </div>
       <div style={rejectionTitle}>PM OUTCOME BREAKDOWN</div>
       <div style={{ display: "grid", gap: 5 }}>
         {bars.map(([label, raw, color]) => {
-          const value = Math.round(Number(raw || 0));
-          const pct = routed ? value / routed * 100 : 0;
+          const value = raw;
+          const pct = value != null && routed > 0 ? value / routed * 100 : null;
           return <BarRow key={label} label={label} value={value} pct={pct} color={color} />;
         })}
       </div>
-      <div style={{ marginTop: 9, color: muted, fontSize: 8, letterSpacing: "0.08em", display: "flex", justifyContent: "space-between", gap: 8 }}>
+      <div style={{ marginTop: 9, color: muted, fontSize: 8, letterSpacing: 0, display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 8 }}>
         <span>FULL TERMINAL ROUTED</span>
-        <span style={{ color: accent2 }}>{routed} UNIQUE · {scanFunnel?.history_rows?.core || 0} CORE CYCLES</span>
+        <span style={{ color: accent2 }}>{routed ?? "--"} UNIQUE · {finiteValue(scanFunnel?.history_rows?.core) ?? "--"} CORE CYCLES</span>
       </div>
       <div style={{ marginTop: 6, color: muted, fontSize: 8, lineHeight: 1.7 }}>
         {Object.entries(scanFunnel?.families || {}).map(([family, value]) => `${family} ${value}`).join("  ·  ") || "STRATEGY HISTORY SYNCING"}
       </div>
-      <div style={totalRejected}>TOTAL PM REJECTED <span>{rejected} ({routed ? (rejected / routed * 100).toFixed(1) : "0.0"}%)</span></div>
+      <div style={totalRejected}>TOTAL PM REJECTED <span>{rejected ?? "--"} ({rejected != null && routed > 0 ? (rejected / routed * 100).toFixed(1) : "--"}%)</span></div>
     </div>
   );
 }
 
 function FunnelStat({ label, value, color }) {
   return (
-    <div>
+    <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
       <div style={tableHead}>{label}</div>
-      <div style={{ color, fontSize: 20, fontWeight: 900, marginTop: 6 }}>{value}</div>
+      <div style={{ color, fontSize: 20, fontWeight: 900, marginTop: 6 }}>{value ?? "--"}</div>
     </div>
   );
 }
@@ -523,26 +592,30 @@ function BarRow({ label, value, pct, color = "#f87171" }) {
   return (
     <div style={barRow}>
       <span style={{ color: labelLight }}>{label}</span>
-      <div style={barTrack}><span style={{ ...barFill, background: color, width: `${Math.min(100, pct)}%` }} /></div>
-      <span style={{ color: muted, textAlign: "right" }}>{value} ({pct.toFixed(1)}%)</span>
+      <div style={barTrack} aria-hidden="true"><span style={{ ...barFill, background: color, width: `${pct == null ? 0 : Math.max(0, Math.min(100, pct))}%` }} /></div>
+      <span style={{ color: muted, textAlign: "right", overflowWrap: "anywhere" }}>{value ?? "--"} ({pct == null ? "--" : pct.toFixed(1)}%)</span>
     </div>
   );
 }
 
-export function PositionHeat({ positions }) {
+export function PositionHeat({ positions = [], loaded = true }) {
   const [sort, setSort] = useState({ key: "risk", dir: "desc" });
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const sortedRows = useMemo(() => {
-    const rows = (positions || []).filter(position => `${position.symbol} ${position.contract_symbol || ""} ${position.instrument}`.toLowerCase().includes(query.trim().toLowerCase()));
+    const search = query.trim().toLowerCase();
+    const rows = (positions || []).filter(position => `${position.symbol} ${position.contract_symbol || ""} ${position.instrument}`.toLowerCase().includes(search));
     rows.sort((a, b) => comparePosition(a, b, sort.key, sort.dir));
     return rows;
   }, [positions, sort, query]);
   const lastPage = Math.max(0, Math.ceil(sortedRows.length / 12) - 1);
   const currentPage = Math.min(page, lastPage);
   const rows = sortedRows.slice(currentPage * 12, currentPage * 12 + 12);
-  const totalMv = (positions || []).reduce((s, p) => s + Number(p.market_value || 0), 0);
-  const totalPl = (positions || []).reduce((s, p) => s + Number(p.unrealized_pl || 0), 0);
+  const { totalMv, totalPl, optionCount } = useMemo(() => ({
+    totalMv: knownTotal(loaded ? positions : null, "market_value"),
+    totalPl: knownTotal(loaded ? positions : null, "unrealized_pl"),
+    optionCount: positions.filter(p => p.instrument === "OPTION").length,
+  }), [positions, loaded]);
   const exportRows = () => {
     const fields = ["symbol", "instrument", "qty", "market_value", "unrealized_pl", "current_stop", "dist_to_stop_pct"];
     const escape = value => `"${String(value ?? "").replace(/"/g, '""').replace(/^[=+@-]/, "'$&")}"`;
@@ -553,39 +626,34 @@ export function PositionHeat({ positions }) {
   };
   const setSortKey = (key) => {
     setSort(prev => ({ key, dir: prev.key === key && prev.dir === "desc" ? "asc" : "desc" }));
+    setPage(0);
   };
-  const SortHead = ({ id, children }) => (
-    <button onClick={() => setSortKey(id)} style={heatSortButton}>
-      {children}
-      <span style={{ color: sort.key === id ? accent2 : muted }}>{sort.key === id ? (sort.dir === "desc" ? "▼" : "▲") : ""}</span>
-    </button>
-  );
   return (
     <div style={tableWrap}>
       <div className="workspace-table-toolbar"><label><Search size={14} /><input aria-label="Filter holdings" placeholder="Filter holdings" value={query} onChange={event => { setQuery(event.target.value); setPage(0); }} /></label><span>{sortedRows.length} / {positions?.length || 0} positions</span><button type="button" className="workspace-icon-button" aria-label="Export filtered holdings" title="Export filtered holdings" onClick={exportRows}><Download size={15} /></button></div>
       <DataTableShell minWidth={620}>
       <div style={heatHeader}>
-        <SortHead id="symbol">SYMBOL</SortHead>
-        <SortHead id="qty">POS</SortHead>
-        <SortHead id="market_value">MKT VALUE</SortHead>
-        <SortHead id="unrealized_pl">UNREAL P/L</SortHead>
-        <SortHead id="distance">DIST / MARK</SortHead>
-        <SortHead id="risk">RISK</SortHead>
+        <SortHead id="symbol" sort={sort} onSort={setSortKey}>SYMBOL</SortHead>
+        <SortHead id="qty" sort={sort} onSort={setSortKey}>POS</SortHead>
+        <SortHead id="market_value" sort={sort} onSort={setSortKey}>MKT VALUE</SortHead>
+        <SortHead id="unrealized_pl" sort={sort} onSort={setSortKey}>UNREAL P/L</SortHead>
+        <SortHead id="distance" sort={sort} onSort={setSortKey}>DIST / MARK</SortHead>
+        <SortHead id="risk" sort={sort} onSort={setSortKey}>RISK</SortHead>
       </div>
       {rows.map(p => {
         const risk = riskLevel(p);
-        const pl = Number(p.unrealized_pl || 0);
+        const pl = finiteValue(p.unrealized_pl);
         const symbol = p.display_symbol || p.symbol || p.ticker;
         const routeSymbol = p.route_symbol || symbol;
         return (
           <Link key={`${p.instrument || "EQUITY"}-${p.contract_symbol || p.symbol || p.ticker}`} to={`/ticker/${routeSymbol}`} style={heatRow} title={p.contract_symbol || p.symbol || p.ticker}>
-            <span style={{ color: labelLight, fontWeight: 900, minWidth: 0 }}>
+            <span style={{ color: labelLight, fontWeight: 900, minWidth: 0, overflowWrap: "anywhere" }}>
               {symbol}
               <em style={heatKind}>{p.position_kind || "EQ"}</em>
             </span>
-            <span>{fmtQty(p.qty || p.quantity)}</span>
+            <span>{fmtQty(p.qty ?? p.quantity)}</span>
             <span>{fmtMoney2(p.market_value).replace("+", "")}</span>
-            <span style={{ color: pl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(pl)}</span>
+            <span style={{ color: pl == null ? muted : pl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(pl)}</span>
             <span title={p.current_stop ? `Stop $${Number(p.current_stop).toFixed(2)}` : "No stop ledger record"} style={{ color: stopDistanceColor(p) }}>{stopDistanceLabel(p)}</span>
             <span style={{ ...riskBadge, background: `${risk.color}cc`, color: "#06100b" }}>{risk.label}</span>
           </Link>
@@ -593,7 +661,7 @@ export function PositionHeat({ positions }) {
       })}
       {!rows.length && <Empty text={query ? "No matching positions." : "No positions loaded."} />}
       <div style={heatFooter}>
-        <span>FULL BOOK</span><span>{positions?.length || 0} POS</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span>{positions.filter(p => p.instrument === "OPTION").length} OPT</span><span>PORTFOLIO</span>
+        <span>FULL BOOK</span><span>{loaded ? positions.length : "--"} POS</span><span>{fmtMoney2(totalMv).replace("+", "")}</span><span style={{ color: totalPl == null ? muted : totalPl >= 0 ? "#4ade80" : "#f87171" }}>{fmtMoney2(totalPl)}</span><span>{loaded ? optionCount : "--"} OPT</span><span>PORTFOLIO</span>
       </div>
       </DataTableShell>
       {lastPage > 0 && <div className="workspace-pagination"><button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</button><span>{currentPage + 1} / {lastPage + 1}</span><button type="button" disabled={currentPage === lastPage} onClick={() => setPage(currentPage + 1)}>Next</button></div>}
@@ -601,9 +669,19 @@ export function PositionHeat({ positions }) {
   );
 }
 
+function SortHead({ id, children, sort, onSort }) {
+  return (
+    <button type="button" aria-label={`Sort by ${children}${sort.key === id ? `, ${sort.dir === "asc" ? "ascending" : "descending"}` : ""}`} onClick={() => onSort(id)} style={heatSortButton}>
+      {children}
+      <span aria-hidden="true" style={{ width: 8, flexShrink: 0, color: sort.key === id ? accent2 : muted }}>{sort.key === id ? (sort.dir === "desc" ? "▼" : "▲") : ""}</span>
+    </button>
+  );
+}
+
 function fmtQty(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "--";
+  const n = finiteValue(v);
+  if (n == null) return "--";
+  if (n === 0) return "0";
   if (Math.abs(n) >= 100) return n.toFixed(0);
   if (Math.abs(n) >= 10) return n.toFixed(2).replace(/\.00$/, "");
   return n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
@@ -628,15 +706,16 @@ function comparePosition(a, b, key, dir) {
   const mult = dir === "asc" ? 1 : -1;
   const value = (row) => {
     if (key === "symbol") return `${row.display_symbol || row.symbol || row.ticker || ""}-${row.position_kind || ""}`;
-    if (key === "qty") return Number(row.qty || row.quantity || 0);
-    if (key === "market_value") return Number(row.market_value || 0);
-    if (key === "unrealized_pl") return Number(row.unrealized_pl || 0);
+    if (key === "qty") return finiteValue(row.qty ?? row.quantity);
+    if (key === "market_value") return finiteValue(row.market_value);
+    if (key === "unrealized_pl") return finiteValue(row.unrealized_pl);
     if (key === "distance") return positionDistanceValue(row);
     if (key === "risk") return positionRiskRank(row);
     return 0;
   };
   const av = value(a);
   const bv = value(b);
+  if (av == null || bv == null) return av == null ? (bv == null ? 0 : 1) : -1;
   if (typeof av === "string" || typeof bv === "string") return String(av).localeCompare(String(bv)) * mult;
   return ((av || 0) - (bv || 0)) * mult;
 }
@@ -667,7 +746,7 @@ function QualityMatrix({ integrations, qualityOverview, priceSource }) {
       <div style={qualityScore}>OVERALL QUALITY SCORE <span>{score} / 100</span></div>
       <div style={{ ...rejectionTitle, marginTop: 9, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         PRICE SOURCE:
-        <SourceBadge source={priceSource?.provider || priceSource?.source || "CONFIG"} status="CONFIGURED" />
+        <SourceBadge source={priceSource?.provider || priceSource?.source || "--"} status={priceSource?.provider || priceSource?.source ? "CONFIGURED" : "UNKNOWN"} />
       </div>
     </div>
   );
@@ -690,36 +769,36 @@ function TelegramQueue({ events, completed }) {
   }));
   const rows = eventRows.slice(0, 9);
   return (
-    <div>
-      <div style={telegramHeader}><span>TIME</span><span>CHANNEL</span><span>MESSAGE PREVIEW</span><span>STATUS</span></div>
+    <DataTableShell minWidth={560}>
+      <div style={telegramHeader}><span>TIME (ET)</span><span>CHANNEL</span><span>MESSAGE PREVIEW</span><span>STATUS</span></div>
       {rows.map((r, i) => (
         <div key={`${r.time}-${i}`} style={telegramRow}>
           <span>{fmtTime(r.time)}</span>
           <span style={{ color: accent }}>#{String(r.channel || "").replace(/^#/, "")}</span>
-          <span style={{ color: labelLight, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.message}</span>
-          <span style={{ color: String(r.status).includes("FAIL") ? "#f87171" : "#4ade80", textAlign: "right" }}>{String(r.status).toUpperCase()}</span>
+          <span title={r.message} style={{ color: labelLight, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.message}</span>
+          <span style={{ color: String(r.status).includes("FAIL") ? "#f87171" : ["SENT", "DELIVERED", "COMPLETE"].includes(String(r.status).toUpperCase()) ? "#4ade80" : muted, textAlign: "right" }}>{String(r.status).toUpperCase()}</span>
         </div>
       ))}
       {!rows.length && <Empty text="No telegram dispatch rows." />}
-    </div>
+    </DataTableShell>
   );
 }
 
 function Tape({ rows, empty }) {
   return (
-    <div>
+    <DataTableShell minWidth={560}>
       <div style={eventHeader}><span>TIME (ET)</span><span>TYPE</span><span>SYMBOL</span><span>MESSAGE</span><span>STATUS</span></div>
       {rows.map((r, i) => (
         <div key={`${r.time}-${i}`} style={eventRow}>
           <span>{fmtTime(r.time)}</span>
           <span style={{ color: r.type === "ERROR" || r.status === "ALERT" ? "#f87171" : accent }}>{r.type}</span>
           <span style={{ color: labelLight }}>{r.symbol}</span>
-          <span style={{ color: labelLight, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.message}</span>
+          <span title={r.message} style={{ color: labelLight, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.message}</span>
           <span style={{ color: r.status === "ALERT" || r.status === "ERROR" ? "#f87171" : "#4ade80", textAlign: "right" }}>{r.status}</span>
         </div>
       ))}
       {!rows.length && <Empty text={empty} />}
-    </div>
+    </DataTableShell>
   );
 }
 
@@ -729,12 +808,12 @@ function GateConsole({ executionGate, gateDecision, gateColor }) {
       <div className="command-mini-grid command-mini-grid-4 command-gate-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
         <MiniMetric k="GATE" v={gateDecision} color={gateColor} />
         <MiniMetric k="TRUTH" v={executionGate?.truth_grade || "--"} color={gateColor} />
-        <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
-        <MiniMetric k="OPTIONS" v={executionGate?.truth?.execution?.options_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.options_execution_enabled ? "#4ade80" : muted} />
+        <MiniMetric k="EQUITY" v={executionGate?.truth?.execution?.equity_execution_enabled == null ? "--" : executionGate.truth.execution.equity_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.equity_execution_enabled ? "#4ade80" : muted} />
+        <MiniMetric k="OPTIONS" v={executionGate?.truth?.execution?.options_execution_enabled == null ? "--" : executionGate.truth.execution.options_execution_enabled ? "ON" : "OFF"} color={executionGate?.truth?.execution?.options_execution_enabled ? "#4ade80" : muted} />
       </div>
       <div className="command-mini-grid command-mini-grid-2" style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-        <GateList title="BLOCKERS" rows={executionGate?.blockers || []} color="#f87171" empty="No active blockers." />
-        <GateList title="WARNINGS" rows={executionGate?.warnings || []} color="#fbbf24" empty="No active warnings." />
+        <GateList title="BLOCKERS" rows={executionGate?.blockers || []} color="#f87171" empty={executionGate?.blockers ? "No active blockers." : "Blockers unavailable."} />
+        <GateList title="WARNINGS" rows={executionGate?.warnings || []} color="#fbbf24" empty={executionGate?.warnings ? "No active warnings." : "Warnings unavailable."} />
       </div>
     </div>
   );
@@ -744,19 +823,19 @@ function TopScanner({ rows }) {
   return !rows.length ? <Empty text="No latest scan rows. Run Full Signal Scan." /> : rows.map(r => (
     <Link key={r.ticker} to={`/ticker/${r.ticker}`} style={scannerRow}>
       <span style={{ color: accent, fontWeight: 900 }}>${r.ticker}</span>
-      <span style={{ color: "#fff" }}>{r.signal_score || 0}/10</span>
+      <span style={{ color: "#fff" }}>{finiteValue(r.signal_score) ?? "--"}/10</span>
       <span style={{ color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(r.signals || []).slice(0, 3).join(" / ")}</span>
     </Link>
   ));
 }
 
 function SystemState({ scannerState, pmState, tradeFloorState, account, pmSummary, health, backendRefresh }) {
-  const activeCount = Number(pmSummary.active_count ?? ((pmSummary.accumulate || 0) + (pmSummary.starter || 0)));
+  const activeCount = finiteValue(pmSummary.active_count) ?? knownSum(finiteValue(pmSummary.accumulate), finiteValue(pmSummary.starter));
   return (
     <div>
       <div className="command-mini-grid command-mini-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
         <MissionTile label="Scanner" value={scannerState.value} color={scannerState.color} detail="scan state" />
-        <MissionTile label="PM" value={pmState.value} color={pmState.color} detail={`${activeCount} active`} />
+        <MissionTile label="PM" value={pmState.value} color={pmState.color} detail={`${activeCount ?? "--"} active`} />
         <MissionTile label="Trade Floor" value={tradeFloorState.value} color={tradeFloorState.color} detail={health?.alpaca?.reason || "paper execution"} />
       </div>
       <div className="command-mini-grid command-mini-grid-4" style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
@@ -792,14 +871,14 @@ function MiniMetric({ k, v, color = labelLight }) {
   return (
     <div className="command-mini-metric" style={{ border: hairline, padding: "10px 12px", background: pageBg, minWidth: 0 }}>
       <div style={{ color: dim, fontSize: 8, letterSpacing: "0.14em" }}>{k}</div>
-      <div className="command-metric-value" style={{ color, fontSize: 14, marginTop: 6, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div>
+      <div className="command-metric-value" title={String(v ?? "--")} style={{ color, fontSize: 14, marginTop: 6, fontWeight: 700, overflowWrap: "anywhere" }}>{v}</div>
     </div>
   );
 }
 
 function GateList({ title, rows, color, empty }) {
   return (
-    <div style={{ border: hairline, background: pageBg, padding: "9px 10px", minHeight: 82 }}>
+    <div style={{ border: hairline, background: pageBg, padding: "9px 10px", minHeight: 82, minWidth: 0, overflowWrap: "anywhere" }}>
       <div style={{ color, fontSize: 8, letterSpacing: "0.14em", fontWeight: 800 }}>{title}</div>
       {!rows.length ? (
         <div style={{ color: muted, fontSize: 10, marginTop: 10 }}>{empty}</div>
@@ -819,6 +898,8 @@ function CommandButton({ cmd, running, completed, onRun, large = false }) {
     <button data-testid={`command-${cmd.id}`} onClick={() => onRun(cmd)} disabled={!!running}
       style={{
         position: "relative",
+        minWidth: 0,
+        overflowWrap: "anywhere",
         textAlign: "left",
         minHeight: large ? 76 : 58,
         background: isRunning ? "#f871711a" : "#050509",
@@ -869,17 +950,18 @@ const opsHeader = {
   borderBottom: "1px solid rgba(124,140,160,0.22)",
   padding: "7px 10px",
   display: "flex",
+  flexWrap: "wrap",
   alignItems: "center",
   justifyContent: "space-between",
   gap: 8,
 };
 
-const opsTitle = { color: labelLight, fontSize: 11, fontWeight: 900, letterSpacing: "0.16em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+const opsTitle = { color: labelLight, fontSize: 11, fontWeight: 900, letterSpacing: 0, overflowWrap: "anywhere" };
 const opsSub = { color: muted, fontSize: 9, letterSpacing: "0.12em", whiteSpace: "nowrap" };
 const opsBody = { padding: "9px 10px", minWidth: 0 };
 const livePill = { color: "#4ade80", fontSize: 9, letterSpacing: "0.10em", display: "inline-flex", alignItems: "center", gap: 5, fontWeight: 900 };
 const tableHead = { color: muted, fontSize: 8, letterSpacing: "0.13em", fontWeight: 900 };
-const funnelStats = { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 };
+const funnelStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 90px), 1fr))", gap: 8 };
 const funnelWave = {
   height: 62,
   margin: "8px 0 10px",
@@ -891,15 +973,15 @@ const funnelWave = {
 };
 const funnelMarker = { position: "absolute", top: 0, bottom: 0, width: 2, boxShadow: "0 0 10px currentColor", opacity: 0.85 };
 const rejectionTitle = { color: muted, fontSize: 9, letterSpacing: "0.12em", fontWeight: 900, margin: "8px 0" };
-const barRow = { display: "grid", gridTemplateColumns: "92px minmax(70px, 1fr) 78px", gap: 8, alignItems: "center", fontSize: 10 };
+const barRow = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)", gap: 8, alignItems: "center", fontSize: 10, overflowWrap: "anywhere" };
 const barTrack = { height: 7, background: "rgba(255,255,255,0.06)", overflow: "hidden" };
 const barFill = { display: "block", height: "100%", background: "linear-gradient(90deg, #f87171, rgba(248,113,113,0.45))" };
-const totalRejected = { borderTop: hairline, marginTop: 10, paddingTop: 10, color: "#f87171", fontSize: 10, fontWeight: 900, display: "flex", justifyContent: "space-between", letterSpacing: "0.08em" };
+const totalRejected = { borderTop: hairline, marginTop: 10, paddingTop: 10, color: "#f87171", fontSize: 10, fontWeight: 900, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "space-between", letterSpacing: 0 };
 const tableWrap = { minWidth: 0, overflowX: "auto", overflowY: "hidden" };
 const heatColumns = "minmax(70px, 0.9fr) minmax(48px, 0.55fr) minmax(78px, 0.85fr) minmax(82px, 0.85fr) minmax(86px, 0.95fr) minmax(62px, 0.7fr)";
 const heatHeader = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline, minWidth: 560 };
-const heatRow = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline, minWidth: 560 };
-const heatFooter = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8, minWidth: 560 };
+const heatRow = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, alignItems: "center", textDecoration: "none", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline, minWidth: 560, overflowWrap: "anywhere" };
+const heatFooter = { display: "grid", gridTemplateColumns: heatColumns, gap: 8, color: labelLight, fontSize: 10, fontWeight: 900, paddingTop: 8, minWidth: 560, overflowWrap: "anywhere" };
 const heatSortButton = { border: 0, background: "transparent", color: muted, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "flex-start", gap: 4, minWidth: 0, fontFamily: "JetBrains Mono", fontSize: 8, letterSpacing: "0.10em", fontWeight: 900, cursor: "pointer", textAlign: "left" };
 const heatKind = { display: "inline-flex", marginLeft: 5, color: accent2, fontStyle: "normal", fontSize: 7, letterSpacing: "0.08em", verticalAlign: "middle" };
 const riskBadge = { display: "inline-flex", justifyContent: "center", padding: "3px 8px", fontSize: 9, fontWeight: 900, letterSpacing: "0.08em" };
@@ -909,10 +991,10 @@ const qualityRow = { display: "grid", gridTemplateColumns: qualityColumns, gap: 
 const qualityCell = { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const qualityScore = { display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(74,222,128,0.28)", marginTop: 8, paddingTop: 8, color: "#8cc665", fontSize: 11, fontWeight: 900, letterSpacing: "0.10em" };
 const eventHeader = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const eventRow = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
+const eventRow = { display: "grid", gridTemplateColumns: "92px 72px 62px minmax(160px, 1fr) 64px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline, overflowWrap: "anywhere" };
 const telegramHeader = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, color: muted, fontSize: 8, letterSpacing: "0.10em", paddingBottom: 7, borderBottom: hairline };
-const telegramRow = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline };
-const scannerRow = { display: "grid", gridTemplateColumns: "70px 58px 1fr", gap: 8, padding: "7px 0", borderBottom: hairline, textDecoration: "none", fontSize: 11 };
+const telegramRow = { display: "grid", gridTemplateColumns: "92px 150px minmax(190px, 1fr) 72px", gap: 8, alignItems: "center", color: labelLight, fontSize: 10, padding: "6px 0", borderBottom: hairline, overflowWrap: "anywhere" };
+const scannerRow = { display: "grid", gridTemplateColumns: "minmax(0, 70px) minmax(0, 58px) minmax(0, 1fr)", gap: 8, padding: "7px 0", borderBottom: hairline, textDecoration: "none", fontSize: 11, overflowWrap: "anywhere" };
 
 const tinyLink = {
   color: accent2,
@@ -976,7 +1058,11 @@ const modalBackdrop = {
 };
 
 const modalPanel = {
-  width: "min(900px, 96vw)",
+  width: "min(900px, 100%)",
+  boxSizing: "border-box",
+  maxHeight: "calc(100dvh - 40px)",
+  overflowY: "auto",
+  overflowWrap: "anywhere",
   background: "linear-gradient(180deg, #120707 0%, #050509 100%)",
   border: "1px solid rgba(248,113,113,0.55)",
   boxShadow: "0 0 45px rgba(248,113,113,0.18)",

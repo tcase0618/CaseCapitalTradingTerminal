@@ -245,6 +245,13 @@ function useNewsStrip() {
   return { active: lane(active), discovery: lane(discovery) };
 }
 
+function NewsTapes() {
+  const news = useNewsStrip();
+  return <>{[["ACTIVE", news.active, accent2, 42], ["DISCOVERY", news.discovery, accent, 54]].map(([name, lane, color, speed]) => (
+    <GlobalNewsStrip key={name} label={name} items={lane.items} loading={lane.loading} cache={lane.cache} accentColor={color} speed={speed} />
+  ))}</>;
+}
+
 function useSafetyFrame() {
   const trading = useDisplayResource(`${API}/admin/trading_status`, 15000);
   const gate = useDisplayResource(`${API}/execution_gate/overview`, 15000);
@@ -444,7 +451,6 @@ export function CrtShell({ title, children, headerRight = null }) {
   const loc = useLocation();
   const nextMacro = useNextMacroEvent();
   const alerts = useLiveAlertCounts();
-  const newsStrip = useNewsStrip();
   const safety = useSafetyFrame();
   const [isMobile, setIsMobile] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -673,22 +679,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           <div className="terminal-sticky-bars" style={{ position: "sticky", top: 0, zIndex: 20 }}>
             <SystemBar safety={safety} />
             <ExecutionControlStrip safety={safety} />
-            <GlobalNewsStrip
-              label="ACTIVE"
-              items={newsStrip.active.items}
-              loading={newsStrip.active.loading}
-              cache={newsStrip.active.cache}
-              accentColor={accent2}
-              speed={42}
-            />
-            <GlobalNewsStrip
-              label="DISCOVERY"
-              items={newsStrip.discovery.items}
-              loading={newsStrip.discovery.loading}
-              cache={newsStrip.discovery.cache}
-              accentColor={accent}
-              speed={54}
-            />
+            {!focusMode && <NewsTapes />}
           </div>
 
           {/* Page header */}

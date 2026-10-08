@@ -2,6 +2,13 @@ import React from "react";
 import { renderToString } from "react-dom/server.node";
 import KronosPage from "./KronosPage";
 
+const mockDisplayByUrl = {};
+jest.mock("../hooks/useDisplayResource", () => ({
+  __esModule: true,
+  default: url => ({ data: mockDisplayByUrl[url], updatedAt: null, error: null }),
+  displayResource: url => ({ getSnapshot: () => ({ data: mockDisplayByUrl[url], updatedAt: null }), refresh: jest.fn() }),
+}));
+
 jest.mock("./CrtShell", () => ({ __esModule: true,
   tokens: { accent: "#ffffff", accent2: "#ffffff", dim: "#999999", muted: "#999999", labelLight: "#ffffff", hairline: "1px solid #333333", cardBg: "#111111" },
   default: ({ title, children }) => <div>{title}{children}</div>,
@@ -23,6 +30,7 @@ test("Kronos renders a populated backend position with the fixed-horizon contrac
     bear_pct: -1.2, bull_pct: 0.2, confidence: 45, kronos_score: 45, market_value: 100, unrealized_pct: -1.5, anchor_price: 100,
     target_at: "2026-10-08T20:00:00Z", horizons: [{ horizon: "NEXT FULL RTH BAR", forecast_pct: -0.7, cone_low_pct: -1.2, cone_high_pct: 0.2 }],
     tripwires: [], catalysts: [], probabilities: { up: 20, down: 60, flat: 20 }, exit_forecast: { research_only: true } }] };
+  mockDisplayByUrl[`${require("../config").API}/kronos/forecast`] = forecast;
   const spy = jest.spyOn(React, "useState").mockImplementation(initial => {
     stateNumber += 1;
     return [stateNumber === 10 ? forecast : typeof initial === "function" ? initial() : initial, jest.fn()];
@@ -37,5 +45,6 @@ test("Kronos renders a populated backend position with the fixed-horizon contrac
     expect(html).toContain("context, not the forecast model");
   } finally {
     spy.mockRestore();
+    Object.keys(mockDisplayByUrl).forEach(url => delete mockDisplayByUrl[url]);
   }
 });

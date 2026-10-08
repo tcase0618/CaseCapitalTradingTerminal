@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { Link, useNavigate } from "react-router-dom";
@@ -23,6 +23,8 @@ function tierColor(amt) {
 export default function ContractsPage() {
   const [contracts, setContracts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const requestRef = useRef(null);
   const [days, setDays] = useState(90);
   const [minAmount, setMinAmount] = useState(1_000_000);
   const [agency, setAgency] = useState("");
@@ -36,20 +38,26 @@ export default function ContractsPage() {
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams({ days, min_amount: minAmount });
       if (agency) params.append("agency", agency);
-      const r = await axios.get(`${API}/contracts?${params.toString()}`);
-      setContracts(r.data.contracts || []);
+      const r = await axios.get(`${API}/contracts?${params.toString()}`, { signal: controller.signal, timeout: 20000 });
+      if (controller.signal.aborted) return;
+      if (!Array.isArray(r.data?.contracts)) { setLoadError(true); return; }
+      setContracts(r.data.contracts.filter(row => row && typeof row === "object").map(row => ({ ...row, sub_awards: Array.isArray(row.sub_awards) ? row.sub_awards.filter(Boolean) : [] })));
     } catch {
-      setContracts([]);
+      if (!controller.signal.aborted) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [days, minAmount, agency]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { setContracts([]); load(); return () => requestRef.current?.abort(); }, [load]);
 
   const filtered = useMemo(() => {
     const query = textFilter.trim().toLowerCase();
@@ -110,6 +118,7 @@ export default function ContractsPage() {
 
   return (
     <CrtShell title="CONTRACTS - USASPENDING">
+      {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Contract source unavailable or malformed. Retained rows are from the last successful request, not a new empty scan.</div>}
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="CONTRACT VALUE" value={fmtMoney(summary.total)} sub={`LAST ${days}D`} color={accent} accentBar />
         <Stat label="PRIME AWARDS" value={filtered.length} sub="PUBLIC TICKERS" color={accent2} />

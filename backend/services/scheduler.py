@@ -119,7 +119,7 @@ async def stock_scan_market_day_now() -> tuple[bool, str]:
     return await _stock_scan_market_day_now()
 
 
-async def _daily_scan_job():
+async def _daily_scan_job(triggered_by: str = "scheduler"):
     try:
         market_day, reason = await _stock_scan_market_day_now()
         if not market_day:
@@ -139,7 +139,7 @@ async def _daily_scan_job():
                 pass
             return
         from . import terminal_cycle
-        result = await terminal_cycle.run_full_terminal_scan(triggered_by="scheduler")
+        result = await terminal_cycle.run_full_terminal_scan(triggered_by=triggered_by)
         await log_activity(
             "Scheduled full terminal cycle complete",
             "info",
@@ -484,6 +484,7 @@ def start_scheduler():
             _daily_scan_job,
             CronTrigger(day_of_week="mon-fri", hour=hr, minute=minute, timezone=ET),
             id=tag, replace_existing=True,
+            kwargs={"triggered_by": tag},
         )
     # v5.1 - auto-digest goes out 5 min after each scheduled scan
     # Grouped Telegram scan reports are dispatched by _daily_scan_job. There
@@ -840,11 +841,6 @@ def start_scheduler():
         prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
         if prior.get("active") and prior.get("incident") == incident:
             return
-        await db.bot_state.update_one(
-            {"_id": state_key},
-            {"$set": {"active": True, "incident": incident, "details": details, "updated_at": _now_iso()}},
-            upsert=True,
-        )
         coverage_only = all(item.get("stage") == "public_protection_coverage" for item in failures)
         title = "CASE CAPITAL | PORTFOLIO PROTECTION DEGRADED" if coverage_only else "CASE CAPITAL | PORTFOLIO MONITOR FAILURE"
         action = (
@@ -852,7 +848,7 @@ def start_scheduler():
             if coverage_only
             else "Action: monitor status requires review; no new risk is authorized by this alert."
         )
-        await telegram_service.send_message(
+        sent = await telegram_service.send_message(
             f"<b>{title}</b>\n"
             f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
             f"Stage: <b>{stage}</b>\n"
@@ -861,24 +857,32 @@ def start_scheduler():
             f"{action}",
             chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         )
+        if sent:
+            await db.bot_state.update_one(
+                {"_id": state_key},
+                {"$set": {"active": True, "incident": incident, "details": details, "updated_at": _now_iso()}},
+                upsert=True,
+            )
 
     async def _clear_position_monitor_failure(stage: str) -> None:
         state_key = f"position_monitor_alert:{stage}"
         db = get_db()
         prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
-        await db.bot_state.update_one(
-            {"_id": state_key},
-            {"$set": {"active": False, "recovered_at": _now_iso()}},
-            upsert=True,
-        )
         if prior.get("active") and os.environ.get("TELEGRAM_CHAT_ID"):
-            await telegram_service.send_message(
+            sent = await telegram_service.send_message(
                 f"<b>CASE CAPITAL | PORTFOLIO MONITOR RECOVERED</b>\n"
                 f"<code>{datetime.now(ET).strftime('%b %d %H:%M:%S ET')}</code>\n\n"
                 f"Stage: <b>{stage}</b>\n"
                 f"Recovered incident: <code>{prior.get('incident') or 'UNKNOWN'}</code>",
                 chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
             )
+            if not sent:
+                return
+        await db.bot_state.update_one(
+            {"_id": state_key},
+            {"$set": {"active": False, "recovered_at": _now_iso()}},
+            upsert=True,
+        )
     async def _position_monitor_with_snapshot():
         management: dict[str, dict] = {}
         try:

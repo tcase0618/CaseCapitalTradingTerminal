@@ -6,6 +6,8 @@ import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
 
 const { accent, dim, muted, labelLight, hairline } = tokens;
+const list = value => Array.isArray(value) ? value.filter(item => item != null) : [];
+const priceText = value => value != null && value !== "" && Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "—";
 
 export default function TickerPage() {
   const { ticker } = useParams();
@@ -18,33 +20,39 @@ export default function TickerPage() {
   const [dossierStatus, setDossierStatus] = useState("loading");
   const [accountant, setAccountant] = useState(null);
   const [accountantStatus, setAccountantStatus] = useState("loading");
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     if (!ticker) return undefined;
     const controller = new AbortController();
-    const request = (path) => axios.get(`${API}${path}`, { signal: controller.signal });
+    let active = true;
+    const request = (path) => axios.get(`${API}${path}`, { signal: controller.signal, timeout: 12000 }).then(response => {
+      if (!active) throw new axios.CanceledError("Ticker changed");
+      return response;
+    });
+    setLoadError(false);
     setData(null); setOpts(null); setFlow(null); setFreeData(null); setKronos(null);
     setPmDossier(null); setDossierStatus("loading"); setAccountant(null); setAccountantStatus("loading");
     request(`/ticker/${ticker}`).then(r => setData(r.data)).catch(error => {
-      if (error.name !== "CanceledError") setData({ ticker });
+      if (active && error.name !== "CanceledError") { setData({ ticker }); setLoadError(true); }
     });
     request(`/options/${ticker}`).then(r => setOpts(r.data.options)).catch(() => {});
     request(`/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
-    request(`/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => setFreeData(null));
-    request(`/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(error => setKronos({ error: error.message }));
+    request(`/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => { if (active) setFreeData(null); });
+    request(`/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(error => { if (active && error.name !== "CanceledError") setKronos({ error: error.message }); });
     request(`/pm/company/${ticker}?limit=12`).then(r => {
       setPmDossier(r.data);
       setDossierStatus("ready");
     }).catch(error => {
-      if (error.name !== "CanceledError") setDossierStatus("unavailable");
+      if (active && error.name !== "CanceledError") setDossierStatus("unavailable");
     });
     request(`/research/accountant/${ticker}`).then(r => {
       setAccountant(r.data);
       setAccountantStatus(r.data?.ok ? "ready" : "unavailable");
     }).catch(error => {
-      if (error.name !== "CanceledError") setAccountantStatus("unavailable");
+      if (active && error.name !== "CanceledError") setAccountantStatus("unavailable");
     });
-    return () => controller.abort();
+    return () => { active = false; controller.abort(); };
   }, [ticker]);
 
   if (!data) return (
@@ -70,7 +78,7 @@ export default function TickerPage() {
       headerRight={
         <div style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
           <span style={{ fontSize: 22, color: "#fff", fontWeight: 700, fontFamily: "Courier New" }}>
-            ${data.price ? data.price.toFixed(2) : "—"}
+            ${priceText(data.price)}
           </span>
           <span style={{
             fontSize: 14,
@@ -84,6 +92,7 @@ export default function TickerPage() {
           </span>
         </div>
       }>
+      {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Company data unavailable. Missing prices and signals are not zero results.</div>}
       <TradingViewMiniChart ticker={t} companyName={companyName} />
 
       <CompanyProfileCard profile={companyProfile} />
@@ -91,21 +100,21 @@ export default function TickerPage() {
       <AccountantResearchCard packet={accountant} status={accountantStatus} />
 
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
-        <Stat label="SIGNAL SCORE" value={`${data.signal_score || 0}/10`} color={accent} />
-        <Stat label="CASE SCORE" value={data.learning_score || 0} color={accent} sub="WEIGHTED" />
+        <Stat label="SIGNAL SCORE" value={data.signal_score == null ? "—" : `${data.signal_score}/10`} color={accent} />
+        <Stat label="CASE SCORE" value={data.learning_score ?? "—"} color={accent} sub="WEIGHTED" />
         <Stat label="RISK" value={risk.level || "—"}
               color={risk.level === "LOW" ? "#4ade80" : risk.level === "MEDIUM" ? accent
                      : risk.level === "HIGH" ? "#fb923c" : "#f87171"} />
         <Stat label="SQUEEZE" value={sq.score != null ? `${sq.score}/100` : "—"} sub={sq.band} />
-        <Stat label="TIMES FOUND" value={data.times_found || 1}
-              sub={data.first_found ? `FIRST ${data.first_found}` : "TODAY"} />
+        <Stat label="TIMES FOUND" value={data.times_found ?? "—"}
+              sub={data.first_found ? `FIRST ${data.first_found}` : "UNKNOWN"} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
         <div>
           <Card title="SIGNALS DETECTED">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {(data.signals || []).map((s) => (
+              {list(data.signals).map((s) => (
                 <span key={s} style={{
                   fontSize: 12, padding: "5px 11px", border: `0.5px solid rgba(200,168,75,0.35)`,
                   color: accent, background: "rgba(200,168,75,0.07)",
@@ -119,12 +128,12 @@ export default function TickerPage() {
           </Card>
 
           <Card title="PRICE TARGETS">
-            <Row k="ENTRY ZONE" v={`$${data.entry_low?.toFixed(2) || "—"} — $${data.entry_high?.toFixed(2) || "—"}`} />
-            <Row k="TARGET (BEAR)" v={`$${targets.target_low?.toFixed(2) || "—"}`} c="#f87171" />
-            <Row k="TARGET (BLENDED)" v={`$${targets.target_blended?.toFixed(2) || "—"}`} c={accent}
+            <Row k="ENTRY ZONE" v={`$${priceText(data.entry_low)} — $${priceText(data.entry_high)}`} />
+            <Row k="TARGET (BEAR)" v={`$${priceText(targets.target_low)}`} c="#f87171" />
+            <Row k="TARGET (BLENDED)" v={`$${priceText(targets.target_blended)}`} c={accent}
                  sub={targets.upside_blended != null ? `${targets.upside_blended >= 0 ? "+" : ""}${targets.upside_blended}%` : ""} />
-            <Row k="TARGET (BULL)" v={`$${targets.target_high?.toFixed(2) || "—"}`} c="#4ade80" />
-            <Row k="STOP LOSS" v={`$${data.stop_loss?.toFixed(2) || "—"}`} c="#f87171" />
+            <Row k="TARGET (BULL)" v={`$${priceText(targets.target_high)}`} c="#4ade80" />
+            <Row k="STOP LOSS" v={`$${priceText(data.stop_loss)}`} c="#f87171" />
             <Row k="CONVICTION" v={(data.conviction || "—").toUpperCase()} />
             <Row k="TIME HORIZON" v={(data.time_horizon || "—").toUpperCase()} />
             {tt.target_date && <Row k="TARGET DATE" v={tt.target_date} c={accent}
@@ -247,7 +256,7 @@ export default function TickerPage() {
 
 function PmDossierCard({ dossier, status }) {
   const profile = dossier?.profile;
-  const decisions = dossier?.decisions || [];
+  const decisions = list(dossier?.decisions);
   const action = profile?.latest_action || "UNREVIEWED";
   const actionColor = action === "ACCUMULATE" ? "#4ade80"
     : action === "STARTER" ? "#2dd4bf"
@@ -279,8 +288,8 @@ function PmDossierCard({ dossier, status }) {
             </div>
             <div>
               <div style={{ color: "#e5e7eb", fontSize: 13, lineHeight: 1.7 }}>{profile.latest_synopsis}</div>
-              {!!profile.latest_change_reasons?.length && <div style={{ marginTop: 10, color: labelLight, fontSize: 12 }}>WHY: {profile.latest_change_reasons.join(" | ")}</div>}
-              {!!profile.latest_strategy_lanes?.length && <div style={{ marginTop: 8, color: accent, fontSize: 11, letterSpacing: "0.08em" }}>LANES: {profile.latest_strategy_lanes.join(" · ")}</div>}
+              {!!list(profile.latest_change_reasons).length && <div style={{ marginTop: 10, color: labelLight, fontSize: 12 }}>WHY: {list(profile.latest_change_reasons).join(" | ")}</div>}
+              {!!list(profile.latest_strategy_lanes).length && <div style={{ marginTop: 8, color: accent, fontSize: 11, letterSpacing: "0.08em" }}>LANES: {list(profile.latest_strategy_lanes).join(" · ")}</div>}
             </div>
           </div>
           <div style={{ marginTop: 16, paddingTop: 12, borderTop: hairline }}>
@@ -289,13 +298,13 @@ function PmDossierCard({ dossier, status }) {
               <div key={decision.decision_id || index} style={{ display: "grid", gridTemplateColumns: "132px 112px 1fr", gap: 10, borderTop: index ? hairline : "none", padding: "8px 0", fontSize: 11 }}>
                 <span style={{ color: dim }}>{decision.decision_at ? String(decision.decision_at).replace("T", " ").slice(0, 16) : "—"}</span>
                 <span style={{ color: decision.action === "ACCUMULATE" ? "#4ade80" : decision.action === "REJECT" ? "#f87171" : accent, fontWeight: 800 }}>{decision.action || "WATCH"} {decision.pm_score != null ? Number(decision.pm_score).toFixed(1) : ""}</span>
-                <span style={{ color: labelLight }}>{(decision.reason_codes || []).join("; ") || "PM state recorded"}</span>
+                <span style={{ color: labelLight }}>{list(decision.reason_codes).join("; ") || "PM state recorded"}</span>
               </div>
             ))}
           </div>
           {!!dossier.prediction_markets?.length && <div style={{ marginTop: 16, paddingTop: 12, borderTop: hairline }}>
             <div style={{ fontSize: 10, color: dim, letterSpacing: "0.14em", marginBottom: 8 }}>// EXTERNAL PREDICTION MARKETS · RESEARCH ONLY</div>
-            {dossier.prediction_markets.slice(0, 3).map((item, index) => {
+            {list(dossier.prediction_markets).slice(0, 3).map((item, index) => {
               const binding = item.binding || {};
               const observation = item.latest_observation || {};
               return <div key={binding.binding_id || index} style={{ borderTop: index ? hairline : "none", padding: "8px 0", fontSize: 11 }}>
@@ -669,7 +678,7 @@ function FreeDataCard({ freeData }) {
   const fda = freeData?.openfda || {};
   const alpha = freeData?.alpha_vantage || {};
   const overview = alpha.overview || {};
-  const visibleSources = (freeData?.sources || []).filter(source => {
+  const visibleSources = list(freeData?.sources).filter(source => {
     const quality = source.quality || "";
     if (quality === "no_match" || quality === "optional") return false;
     if (source.key === "alpha_vantage" && !alpha.ok) return false;

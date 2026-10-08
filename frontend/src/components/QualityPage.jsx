@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
+import useDisplayResource from "../hooks/useDisplayResource";
 import { CalendarClock, RefreshCw, ShieldCheck, ShieldAlert, Zap, Wrench } from "lucide-react";
 import { API } from "../config";
 import { CrtShell } from "./CrtShell";
@@ -11,6 +12,12 @@ const muted = "#7b8190";
 const hairline = "0.5px solid rgba(255,255,255,0.08)";
 const bg = "#09090f";
 const panel = "#0d0d14";
+const isRecord = value => value != null && typeof value === "object" && !Array.isArray(value);
+const records = value => Array.isArray(value) ? value.filter(isRecord) : [];
+const texts = value => Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
+const text = value => typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) || isValidElement(value) ? value : "--";
+const columns = width => `repeat(auto-fit, minmax(min(${width}px, 100%), 1fr))`;
+const numeric = value => value == null || typeof value === "boolean" || String(value).trim() === "" ? null : Number.isFinite(Number(value)) ? Number(value) : null;
 
 function tone(status) {
   if (status === "LIVE") return "#4ade80";
@@ -22,7 +29,8 @@ function tone(status) {
 }
 
 function fmtAge(v) {
-  if (v == null) return "-";
+  v = numeric(v);
+  if (v == null || v < 0) return "-";
   if (v < 1) return `${Math.round(v * 60)}S`;
   if (v < 60) return `${Math.round(v)}M`;
   return `${(v / 60).toFixed(1)}H`;
@@ -38,27 +46,41 @@ export default function QualityPage() {
   const [remediating, setRemediating] = useState(false);
   const [watchdogRunning, setWatchdogRunning] = useState(false);
   const [repairing, setRepairing] = useState("");
+  const [displayError, setDisplayError] = useState("");
+  const mounted = useRef(false);
+  const pending = useRef(null);
+  const nextReadAt = useRef(0);
+  const schedulerDisplay = useDisplayResource(`${API}/scheduler/overview`, 30000);
+  const eventDisplay = useDisplayResource(`${API}/data_quality/events?limit=25`, 30000);
+  useEffect(() => { setScheduler(schedulerDisplay.data); }, [schedulerDisplay.data, schedulerDisplay.updatedAt]);
+  useEffect(() => { setEvents(records(eventDisplay.data?.events)); }, [eventDisplay.data, eventDisplay.updatedAt]);
 
   const load = useCallback(async () => {
+    if (!mounted.current || document.visibilityState === "hidden" || pending.current || Date.now() < nextReadAt.current) return;
+    nextReadAt.current = Date.now() + 30000;
+    const controller = new AbortController();
+    pending.current = controller;
     setLoading(true);
     try {
-      const [overview, schedulerRows, eventRows] = await Promise.all([
-        axios.get(`${API}/data_quality/overview`, { timeout: 14000 }).then(r => r.data),
-        axios.get(`${API}/scheduler/overview`, { timeout: 8000 }).then(r => r.data).catch(() => null),
-        axios.get(`${API}/data_quality/events`, { params: { limit: 25 }, timeout: 8000 }).then(r => r.data).catch(() => ({ events: [] })),
-      ]);
-      setData(overview);
-      setScheduler(schedulerRows);
-      setEvents(eventRows.events || []);
+      // This GET can repull execution evidence and record QC events. Keep its
+      // original cadence; do not place it in the shared display cache.
+      const response = await axios.get(`${API}/data_quality/overview`, { timeout: 14000, signal: controller.signal });
+      if (mounted.current && !controller.signal.aborted) { setData(response.data); setDisplayError(""); }
+    } catch (error) {
+      if (mounted.current && !controller.signal.aborted) setDisplayError("QC overview could not refresh. Last loaded values may be outdated.");
     } finally {
-      setLoading(false);
+      if (pending.current === controller) pending.current = null;
+      if (mounted.current && !controller.signal.aborted) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     load();
     const id = setInterval(load, 30000);
-    return () => clearInterval(id);
+    const visible = () => { if (document.visibilityState !== "hidden") load(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { mounted.current = false; pending.current?.abort(); pending.current = null; nextReadAt.current = 0; clearInterval(id); document.removeEventListener("visibilitychange", visible); };
   }, [load]);
 
   const repull = async () => {
@@ -119,14 +141,22 @@ export default function QualityPage() {
     }
   };
 
-  const checks = useMemo(() => data?.checks || [], [data]);
+  const checks = useMemo(() => records(data?.checks), [data]);
   const critical = checks.filter(c => c.critical);
-  const blockers = data?.trading_gate?.blockers || [];
+  const blockers = texts(data?.trading_gate?.blockers);
   const fallback = checks.filter(c => c.status === "FALLBACK");
-  const warnings = checks.filter(c => c.status === "WARN" || (c.warnings || []).length);
-  const gateOk = data?.trading_gate?.decision !== "BLOCK";
+  const warnings = checks.filter(c => c.status === "WARN" || texts(c.warnings).length);
+  const gateKnown = typeof data?.trading_gate?.decision === "string";
+  const gateOk = gateKnown && data.trading_gate.decision !== "BLOCK";
   const remediation = data?.remediation || {};
-  const attempts = remediation.attempts || [];
+  const attempts = records(remediation.attempts);
+  const malformed = [
+    ["checks", data, data?.checks], ["blockers", data, data?.trading_gate?.blockers, item => typeof item === "string"],
+    ["remediation attempts", data?.remediation, remediation.attempts],
+    ["scheduler rows", scheduler, scheduler?.rows], ["scheduler jobs", scheduler, scheduler?.jobs],
+    ["events", eventDisplay.data, eventDisplay.data?.events],
+    ...checks.map(row => ["source warnings", row.warnings, row.warnings, item => typeof item === "string"]),
+  ].filter(([, owner, list, valid = isRecord]) => owner != null && (!Array.isArray(list) || list.some(item => !valid(item)))).map(([name]) => name);
 
   const sourceRows = useMemo(() => [...checks].sort((a, b) => {
     if (a.blocks_trading !== b.blocks_trading) return a.blocks_trading ? -1 : 1;
@@ -150,6 +180,10 @@ export default function QualityPage() {
         </div>
       }
     >
+      {(displayError || schedulerDisplay.error || eventDisplay.error || malformed.length > 0) && <div role="status" className="workspace-data-warning" data-testid="quality-display-warning">
+        {displayError} {(schedulerDisplay.error || eventDisplay.error) && "Some scheduler/QC event data could not refresh. Last loaded values may be outdated."}
+        {malformed.length > 0 && ` Unavailable or malformed lists: ${malformed.join(", ")}.`}
+      </div>}
       <div style={tabs}>
         {["QC", "SCHEDULER"].map(k => (
           <button key={k} onClick={() => setTab(k)} style={{ ...tabBtn, ...(tab === k ? tabActive : {}) }}>
@@ -173,10 +207,10 @@ export default function QualityPage() {
           items={[
             { label: "Trading Gate", value: data?.trading_gate?.decision || "CHECKING" },
             { label: "Execution Score", value: data?.execution_score == null ? "--" : `${data.execution_score}`, color: data?.execution_score >= 100 ? "#4ade80" : data?.execution_score >= 65 ? "#fbbf24" : "#f87171" },
-            { label: "Critical Checks", value: `${critical.filter(c => c.status === "LIVE" || c.status === "PASS").length}/${critical.length || 0}`, color: critical.every(c => !c.blocks_trading) ? "#4ade80" : "#f87171" },
-            { label: "Fallbacks", value: fallback.length, color: fallback.length ? "#fbbf24" : "#4ade80", detail: "display-only tolerated" },
-            { label: "Warnings", value: warnings.length, color: warnings.length ? "#fbbf24" : "#4ade80" },
-            { label: "Auto Remediation", value: remediation.pending_count ? "PENDING" : "CLEAR", detail: shortStamp(remediation.last_run_at) },
+            { label: "Critical Checks", value: Array.isArray(data?.checks) ? `${critical.filter(c => c.status === "LIVE" || c.status === "PASS").length}/${critical.length}` : "--", color: !Array.isArray(data?.checks) ? muted : critical.every(c => !c.blocks_trading) ? "#4ade80" : "#f87171" },
+            { label: "Fallbacks", value: Array.isArray(data?.checks) ? fallback.length : "--", color: fallback.length ? "#fbbf24" : muted, detail: "display-only tolerated" },
+            { label: "Warnings", value: Array.isArray(data?.checks) ? warnings.length : "--", color: warnings.length ? "#fbbf24" : muted },
+            { label: "Auto Remediation", value: remediation.pending_count == null ? "UNAVAILABLE" : remediation.pending_count ? "PENDING" : "CLEAR", detail: shortStamp(remediation.last_run_at) },
           ]}
         />
 
@@ -193,11 +227,11 @@ export default function QualityPage() {
               {gateOk ? <ShieldCheck size={28} color={accent2} /> : <ShieldAlert size={28} color="#ef4444" />}
               <div>
                 <div style={gateLabel}>TRADING GATE</div>
-                <div style={{ ...gateValue, color: gateOk ? accent2 : "#ef4444" }}>{data?.trading_gate?.decision || "CHECKING"}</div>
+                <div style={{ ...gateValue, color: !gateKnown ? muted : gateOk ? accent2 : "#ef4444" }}>{text(data?.trading_gate?.decision)}</div>
               </div>
             </div>
-            <div style={gatePolicy}>{data?.trading_gate?.policy || "Loading QC policy..."}</div>
-            <div style={miniLine}><Zap size={13} /> Max gate delay: {data?.trading_gate?.max_gate_delay_ms || 1500}ms target</div>
+            <div style={gatePolicy}>{text(data?.trading_gate?.policy)}</div>
+            <div style={miniLine}><Zap size={13} /> Max gate delay: {data?.trading_gate?.max_gate_delay_ms ?? "--"}ms target</div>
           </div>
         </section>
 
@@ -205,9 +239,9 @@ export default function QualityPage() {
           <Metric label="EXECUTION SCORE" value={loading ? "--" : `${data?.execution_score ?? "--"}`} sub={data?.trading_gate?.decision || "GATE"} color={(data?.execution_score || 0) >= 100 ? "#4ade80" : "#fbbf24"} />
           <Metric label="DATA QUALITY" value={loading ? "--" : `${data?.data_score ?? data?.score ?? "--"}`} sub="ALL SOURCES" color={accent} />
           <Metric label="CRITICAL SCORE" value={loading ? "--" : `${data?.critical_score ?? "--"}`} sub={`${critical.length} CRITICAL`} color={accent2} />
-          <Metric label="BLOCKERS" value={blockers.length} sub="TRADING IMPACT" color={blockers.length ? "#ef4444" : "#4ade80"} />
-          <Metric label="WARNINGS" value={warnings.length} sub="REVIEW" color={warnings.length ? "#fbbf24" : "#4ade80"} />
-          <Metric label="FALLBACKS" value={fallback.length} sub="DISPLAY-ONLY RISK" color={fallback.length ? "#f59e0b" : "#4ade80"} />
+          <Metric label="BLOCKERS" value={Array.isArray(data?.trading_gate?.blockers) ? blockers.length : "--"} sub="TRADING IMPACT" color={blockers.length ? "#ef4444" : muted} />
+          <Metric label="WARNINGS" value={Array.isArray(data?.checks) ? warnings.length : "--"} sub="REVIEW" color={warnings.length ? "#fbbf24" : muted} />
+          <Metric label="FALLBACKS" value={Array.isArray(data?.checks) ? fallback.length : "--"} sub="DISPLAY-ONLY RISK" color={fallback.length ? "#f59e0b" : muted} />
         </section>
 
         <Card title="AUTO REMEDIATION">
@@ -218,11 +252,11 @@ export default function QualityPage() {
             </div>
             <div>
               <div style={metricLabel}>FIXED / CHECKED</div>
-              <div style={{ ...posValue, color: accent }}>{remediation.fixed_count ?? 0} / {remediation.attempts_count ?? 0}</div>
+              <div style={{ ...posValue, color: accent }}>{remediation.fixed_count ?? "--"} / {remediation.attempts_count ?? "--"}</div>
             </div>
             <div>
               <div style={metricLabel}>PENDING</div>
-              <div style={{ ...posValue, color: (remediation.pending_count || 0) ? "#fbbf24" : "#4ade80" }}>{remediation.pending_count ?? 0}</div>
+              <div style={{ ...posValue, color: (remediation.pending_count || 0) ? "#fbbf24" : muted }}>{remediation.pending_count ?? "--"}</div>
             </div>
           </div>
           <div style={rowStack}>
@@ -232,7 +266,7 @@ export default function QualityPage() {
                   <div style={qTitle}>{a.label || a.key}</div>
                   <div style={qDetail}>{a.action || "probe"} / {a.before_status || "-"} -> {a.after_status || "-"}</div>
                 </div>
-                <span style={{ ...badge, color: outcomeTone(a.outcome), borderColor: `${outcomeTone(a.outcome)}66`, background: `${outcomeTone(a.outcome)}12` }}>{(a.outcome || "-").toUpperCase()}</span>
+                <span style={{ ...badge, color: outcomeTone(a.outcome), borderColor: `${outcomeTone(a.outcome)}66`, background: `${outcomeTone(a.outcome)}12` }}>{String(text(a.outcome)).toUpperCase()}</span>
                 <div style={{ ...qDetail, fontSize: 11 }}>{a.detail || "-"}</div>
                 <div style={{ color: a.blocks_trading_after ? "#ef4444" : "#4ade80", fontSize: 11, fontWeight: 900 }}>
                   {a.blocks_trading_after ? "BLOCKS" : a.trading_impact || "NO BLOCK"}
@@ -278,8 +312,8 @@ export default function QualityPage() {
                     <Td color={tone(row.status)}>{row.score}</Td>
                     <Td>{fmtAge(row.age_minutes)}</Td>
                     <Td color={row.blocks_trading ? "#ef4444" : "#4ade80"}>{row.blocks_trading ? "BLOCK" : row.critical ? "CLEAR" : "DISPLAY"}</Td>
-                    <Td color={row.auto_fix === "none_needed" ? "#4ade80" : accent}>{(row.auto_fix || "-").replaceAll("_", " ").toUpperCase()}</Td>
-                    <Td muted>{[row.detail, ...(row.warnings || [])].filter(Boolean).join(" / ") || "-"}</Td>
+                    <Td color={row.auto_fix === "none_needed" ? "#4ade80" : accent}>{String(text(row.auto_fix)).replaceAll("_", " ").toUpperCase()}</Td>
+                    <Td muted>{[text(row.detail), ...texts(row.warnings)].filter(Boolean).join(" / ") || "-"}</Td>
                   </tr>
                 ))}
               </tbody>
@@ -289,12 +323,12 @@ export default function QualityPage() {
 
         <Card title="RECENT QC EVENTS">
           <div style={rowStack}>
-            {events.slice(0, 12).map((e, idx) => (
+            {records(events).slice(0, 12).map((e, idx) => (
               <div key={idx} style={eventRow}>
                 <span style={{ color: accent2 }}>{shortTime(e.created_at || e.generated_at)}</span>
-                <span>score {e.score ?? "-"}</span>
-                <span>critical {e.critical_score ?? "-"}</span>
-                <span style={{ color: (e.summary?.blockers || 0) ? "#ef4444" : "#4ade80" }}>{e.summary?.blockers || 0} blockers</span>
+                <span>score {text(e.score)}</span>
+                <span>critical {text(e.critical_score)}</span>
+                <span style={{ color: e.summary?.blockers ? "#ef4444" : muted }}>{text(e.summary?.blockers)} blockers</span>
                 <span style={{ color: muted }}>{e.force_refreshed ? "force refresh" : "passive check"}</span>
               </div>
             ))}
@@ -308,13 +342,13 @@ export default function QualityPage() {
 }
 
 function money(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "-";
+  const n = numeric(v);
+  if (n == null) return "-";
   return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
 }
 
 function shortTime(v) {
-  if (!v) return "-";
+  if (!v || !Number.isFinite(new Date(v).getTime())) return "-";
   try {
     return new Date(v).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" });
   } catch {
@@ -323,7 +357,7 @@ function shortTime(v) {
 }
 
 function shortStamp(v) {
-  if (!v) return "-";
+  if (!v || !Number.isFinite(new Date(v).getTime())) return "-";
   try {
     return new Date(v).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   } catch {
@@ -342,8 +376,8 @@ function Metric({ label, value, sub, color }) {
   return (
     <div style={metric}>
       <div style={metricLabel}>{label}</div>
-      <div style={{ ...metricValue, color }}>{value}</div>
-      <div style={metricSub}>{sub}</div>
+      <div style={{ ...metricValue, color }}>{text(value)}</div>
+      <div style={metricSub}>{text(sub)}</div>
     </div>
   );
 }
@@ -361,11 +395,11 @@ function QualityRow({ row }) {
   return (
     <div style={qrow}>
       <div>
-        <div style={qTitle}>{row.label}</div>
-        <div style={qDetail}>{row.source} / age {fmtAge(row.age_minutes)}</div>
+        <div style={qTitle}>{text(row.label)}</div>
+        <div style={qDetail}>{text(row.source)} / age {fmtAge(row.age_minutes)}</div>
       </div>
       <Badge status={row.status} />
-      <div style={{ ...qScore, color: tone(row.status) }}>{row.score}</div>
+      <div style={{ ...qScore, color: tone(row.status) }}>{text(row.score)}</div>
       <div style={{ color: row.blocks_trading ? "#ef4444" : "#4ade80", fontSize: 11, fontWeight: 800 }}>
         {row.blocks_trading ? "BLOCK" : "CLEAR"}
       </div>
@@ -374,14 +408,14 @@ function QualityRow({ row }) {
 }
 
 function Badge({ status }) {
-  return <span style={{ ...badge, color: tone(status), borderColor: `${tone(status)}66`, background: `${tone(status)}12` }}>{status || "-"}</span>;
+  return <span style={{ ...badge, color: tone(status), borderColor: `${tone(status)}66`, background: `${tone(status)}12` }}>{text(status)}</span>;
 }
 
 function PositionTile({ label, value, color = accent2 }) {
   return (
     <div style={posTile}>
       <div style={metricLabel}>{label}</div>
-      <div style={{ ...posValue, color }}>{value}</div>
+      <div style={{ ...posValue, color }}>{text(value)}</div>
     </div>
   );
 }
@@ -391,8 +425,8 @@ function Empty({ text }) {
 }
 
 function SchedulerPanel({ scheduler, loading, watchdogRunning, runWatchdog, repairing, repairSource }) {
-  const rows = scheduler?.rows || [];
-  const jobs = scheduler?.jobs || [];
+  const rows = records(scheduler?.rows);
+  const jobs = records(scheduler?.jobs);
   const summary = scheduler?.summary || {};
   const last = scheduler?.last_watchdog || {};
   const staleRows = rows.filter(r => r.stale);
@@ -401,10 +435,10 @@ function SchedulerPanel({ scheduler, loading, watchdogRunning, runWatchdog, repa
       <DataConfidenceStrip
         items={[
           { label: "Sources", value: loading ? "--" : summary.sources ?? rows.length },
-          { label: "Live", value: summary.live ?? 0, color: "#4ade80" },
-          { label: "Standby", value: summary.standby ?? 0, color: accent },
-          { label: "Stale", value: summary.stale ?? 0, color: (summary.stale || 0) ? "#fbbf24" : "#4ade80" },
-          { label: "Critical Stale", value: summary.critical_stale ?? 0, color: (summary.critical_stale || 0) ? "#ef4444" : "#4ade80" },
+          { label: "Live", value: summary.live ?? "--", color: "#4ade80" },
+          { label: "Standby", value: summary.standby ?? "--", color: accent },
+          { label: "Stale", value: summary.stale ?? "--", color: (summary.stale || 0) ? "#fbbf24" : muted },
+          { label: "Critical Stale", value: summary.critical_stale ?? "--", color: (summary.critical_stale || 0) ? "#ef4444" : muted },
           { label: "Runtime Jobs", value: summary.scheduled_jobs ?? jobs.length },
         ]}
       />
@@ -420,7 +454,7 @@ function SchedulerPanel({ scheduler, loading, watchdogRunning, runWatchdog, repa
             <div>
               <div style={gateLabel}>WATCHDOG</div>
               <div style={{ ...gateValue, color: (summary.critical_stale || 0) ? "#ef4444" : accent2 }}>
-                {(summary.critical_stale || 0) ? "REPAIR" : "ARMED"}
+                {summary.critical_stale == null ? "UNAVAILABLE" : summary.critical_stale ? "REPAIR" : "ARMED"}
               </div>
             </div>
             <button onClick={runWatchdog} disabled={watchdogRunning} style={secondaryButton}>
@@ -440,7 +474,7 @@ function SchedulerPanel({ scheduler, loading, watchdogRunning, runWatchdog, repa
           {staleRows.map(row => (
             <SchedulerRow key={row.key} row={row} repairing={repairing === row.key} repairSource={repairSource} />
           ))}
-          {!staleRows.length && <InstitutionalEmpty title="No stale scheduler sources." detail="Every declared source is fresh or correctly standing by." />}
+          {!staleRows.length && <InstitutionalEmpty title={Array.isArray(scheduler?.rows) ? "No stale scheduler sources returned." : "Scheduler sources unavailable."} detail="" />}
         </div>
       </Card>
 
@@ -512,7 +546,7 @@ function SchedulerRow({ row, repairing, repairSource }) {
 
 function Th({ children }) { return <th style={th}>{children}</th>; }
 function Td({ children, color, muted: isMuted, strong }) {
-  return <td style={{ ...td, color: color || (isMuted ? muted : "#cbd5e1"), fontWeight: strong ? 800 : 500 }}>{children}</td>;
+  return <td style={{ ...td, color: color || (isMuted ? muted : "#cbd5e1"), fontWeight: strong ? 800 : 500 }}>{text(children)}</td>;
 }
 
 const primaryButton = {
@@ -526,10 +560,10 @@ const secondaryButton = {
   background: "rgba(200,168,75,0.08)",
   color: accent,
 };
-const hero = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 440px)", gap: 18, alignItems: "stretch" };
+const hero = { display: "grid", gridTemplateColumns: columns(320), gap: 18, alignItems: "stretch" };
 const tabs = { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 };
 const tabBtn = { minHeight: 34, display: "inline-flex", alignItems: "center", gap: 8, padding: "0 13px", border: hairline, background: "rgba(255,255,255,0.02)", color: muted, fontSize: 11, fontWeight: 900, letterSpacing: "0.14em", cursor: "pointer" };
-const tabActive = { color: accent2, borderColor: "rgba(94,234,212,0.55)", background: "rgba(94,234,212,0.08)" };
+const tabActive = { color: accent2, border: "0.5px solid rgba(94,234,212,0.55)", background: "rgba(94,234,212,0.08)" };
 const eyebrow = { color: accent2, fontSize: 11, fontWeight: 900, letterSpacing: "0.18em", marginBottom: 12 };
 const h1 = { margin: 0, color: accent, fontSize: 36, letterSpacing: "0.08em", lineHeight: 1.08 };
 const sub = { color: muted, maxWidth: 760, lineHeight: 1.55, fontSize: 13 };
@@ -538,16 +572,16 @@ const gateLabel = { color: muted, fontSize: 10, letterSpacing: "0.16em", fontWei
 const gateValue = { fontSize: 30, letterSpacing: "0.12em", fontWeight: 900 };
 const gatePolicy = { color: "#a6adbb", fontSize: 12, lineHeight: 1.5 };
 const miniLine = { color: accent, fontSize: 11, display: "flex", alignItems: "center", gap: 8, letterSpacing: "0.08em" };
-const metricsGrid = { display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 12 };
+const metricsGrid = { display: "grid", gridTemplateColumns: columns(140), gap: 12 };
 const metric = { border: hairline, background: panel, padding: 14, minWidth: 0 };
 const metricLabel = { color: muted, fontSize: 10, letterSpacing: "0.16em", fontWeight: 800 };
 const metricValue = { fontSize: 27, fontWeight: 900, marginTop: 10, letterSpacing: "0.08em" };
 const metricSub = { color: "#5c6370", fontSize: 10, marginTop: 8, letterSpacing: "0.12em" };
-const gridTwo = { display: "grid", gridTemplateColumns: "minmax(0, 1.1fr) minmax(320px, 0.9fr)", gap: 18 };
+const gridTwo = { display: "grid", gridTemplateColumns: columns(320), gap: 18 };
 const card = { border: hairline, background: bg, padding: 18, minWidth: 0 };
 const cardTitle = { color: "#cbd5e1", fontWeight: 900, letterSpacing: "0.16em", fontSize: 12, marginBottom: 16 };
 const rowStack = { display: "grid", gap: 10 };
-const qrow = { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 100px 64px 72px", gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 };
+const qrow = { display: "grid", gridTemplateColumns: columns(100), gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12, overflowWrap: "anywhere" };
 const qTitle = { color: "#d1d5db", fontWeight: 900, letterSpacing: "0.08em", fontSize: 12 };
 const qDetail = { color: muted, fontSize: 10, marginTop: 6 };
 const qScore = { fontSize: 18, fontWeight: 900 };
@@ -557,9 +591,9 @@ const posTile = { border: hairline, padding: 13, background: "rgba(94,234,212,0.
 const posValue = { fontSize: 22, fontWeight: 900, marginTop: 8 };
 const table = { width: "100%", borderCollapse: "collapse", minWidth: 920 };
 const remediationHeader = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 14 };
-const fixRow = { display: "grid", gridTemplateColumns: "minmax(180px, 0.9fr) 170px minmax(260px, 1.4fr) 150px", gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 };
-const scheduleRepairRow = { display: "grid", gridTemplateColumns: "minmax(220px, 1fr) 110px 150px 130px", gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12 };
+const fixRow = { display: "grid", gridTemplateColumns: columns(180), gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12, overflowWrap: "anywhere" };
+const scheduleRepairRow = { display: "grid", gridTemplateColumns: columns(150), gap: 12, alignItems: "center", border: hairline, background: "rgba(255,255,255,0.015)", padding: 12, overflowWrap: "anywhere" };
 const miniButton = { minHeight: 34, border: `1px solid ${accent2}`, background: "rgba(94,234,212,0.06)", color: accent2, fontWeight: 900, letterSpacing: "0.12em", fontSize: 10, cursor: "pointer" };
 const th = { textAlign: "left", color: "#586174", fontSize: 10, letterSpacing: "0.16em", padding: "0 12px 12px", fontWeight: 900 };
 const td = { padding: "13px 12px", fontSize: 12, verticalAlign: "top" };
-const eventRow = { display: "grid", gridTemplateColumns: "110px 90px 110px 100px minmax(0, 1fr)", gap: 10, border: hairline, padding: 10, color: "#cbd5e1", fontSize: 11 };
+const eventRow = { display: "grid", gridTemplateColumns: columns(100), gap: 10, border: hairline, padding: 10, color: "#cbd5e1", fontSize: 11 };

@@ -805,7 +805,7 @@ async def get_history_range(ticker: str, from_iso: str, to_iso: str,
     return await _massive_range(ticker, from_iso, to_iso)
 
 
-async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
+async def get_close_on_date(ticker: str, date_iso: str, *, exact: bool = False) -> float | None:
     """Close on a specific date, or the nearest prior trading day.
     Uses Massive's grouped daily endpoint — one cached request covers
     every ticker on that date."""
@@ -818,7 +818,7 @@ async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
         return None
     # Walk back up to 7 calendar days to handle weekends/holidays
     if MASSIVE_KEY:
-        for offset in range(8):
+        for offset in range(1 if exact else 8):
             d = target - timedelta(days=offset)
             if d.weekday() >= 5:
                 continue
@@ -834,6 +834,8 @@ async def get_close_on_date(ticker: str, date_iso: str) -> float | None:
         return None
     if date_iso in closes:
         return closes[date_iso]
+    if exact:
+        return None
     sorted_d = sorted(closes.keys())
     leq = [d for d in sorted_d if d <= date_iso]
     if leq:

@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import useDisplayResource from "../hooks/useDisplayResource";
 import axios from "axios";
 import { API } from "../config";
 import { Link } from "react-router-dom";
@@ -15,27 +16,30 @@ const FORM_COLORS = {
 };
 
 export default function SECPage() {
-  const [filings, setFilings] = useState([]);
   const [form, setForm] = useState("");
   const [days, setDays] = useState(7);
   const [expanded, setExpanded] = useState(null);
   const [polling, setPolling] = useState(false);
   const [battleCards, setBattleCards] = useState({});
   const [battleLoading, setBattleLoading] = useState(null);
-
-  const load = () => {
-    const p = new URLSearchParams({ days });
-    if (form) p.append("form", form);
-    axios.get(`${API}/sec/filings?${p}`).then(r => setFilings(r.data.filings || [])).catch(() => setFilings([]));
-  };
-
-  useEffect(load, [form, days]);
+  const [pollError, setPollError] = useState("");
+  const battleRequest = useRef(null);
+  const p = new URLSearchParams({ days });
+  if (form) p.append("form", form);
+  const { data, error, loading, refresh: load } = useDisplayResource(`${API}/sec/filings?${p}`, 60000);
+  const filings = useMemo(() => objectRows(data?.filings), [data]);
+  const incomplete = data != null && (!Array.isArray(data.filings) || filings.length !== data.filings.length);
+  useEffect(() => { setExpanded(null); }, [form, days, data]);
+  useEffect(() => () => battleRequest.current?.abort(), []);
 
   const triggerPoll = async () => {
     setPolling(true);
+    setPollError("");
     try {
       await axios.post(`${API}/sec/poll`);
       load();
+    } catch {
+      setPollError("EDGAR poll failed. Filing display has not been refreshed.");
     } finally {
       setPolling(false);
     }
@@ -44,15 +48,18 @@ export default function SECPage() {
   const loadBattleCard = async (ticker) => {
     const t = String(ticker || "").toUpperCase();
     if (!t) return;
-    if (battleCards[t]) return;
+    if (battleCards[t] && !battleCards[t].error) return;
+    battleRequest.current?.abort();
+    const controller = new AbortController();
+    battleRequest.current = controller;
     setBattleLoading(t);
     try {
-      const r = await axios.get(`${API}/sec/battle_card/${t}`);
-      setBattleCards(prev => ({ ...prev, [t]: r.data }));
+      const r = await axios.get(`${API}/sec/battle_card/${encodeURIComponent(t)}`, { signal: controller.signal });
+      if (!controller.signal.aborted) setBattleCards(prev => ({ ...prev, [t]: r.data && typeof r.data === "object" && !Array.isArray(r.data) ? r.data : { error: "Battle card unavailable" } }));
     } catch {
-      setBattleCards(prev => ({ ...prev, [t]: { ticker: t, error: "Battle card unavailable" } }));
+      if (!controller.signal.aborted) setBattleCards(prev => ({ ...prev, [t]: { ticker: t, error: "Battle card unavailable" } }));
     } finally {
-      setBattleLoading(null);
+      if (!controller.signal.aborted) setBattleLoading(null);
     }
   };
 
@@ -62,7 +69,7 @@ export default function SECPage() {
     const byForm = filings.reduce((acc, f) => {
       acc[f.form || "Other"] = (acc[f.form || "Other"] || 0) + 1;
       return acc;
-    }, {});
+    }, Object.create(null));
     const top = [...filings].sort((a, b) =>
       (b.narrative_lock_score || 0) - (a.narrative_lock_score || 0) ||
       (b.significance || 0) - (a.significance || 0)
@@ -96,35 +103,36 @@ export default function SECPage() {
         </button>
       }
     >
+      {(loading || error || incomplete || pollError) && <div role={error || incomplete || pollError ? "alert" : "status"} style={{ color: "#fbbf24", marginBottom: 12 }}>{pollError || (error ? "SEC filings unavailable. Retained filings may be stale." : incomplete ? "SEC response is incomplete; only valid filings are shown." : "Loading SEC filings...")}</div>}
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label={`FILINGS - ${days}D`} value={filings.length} sub="PUBLIC TICKERS" color={accent} accentBar />
-        <Stat label="NARRATIVE LOCK" value={summary.locked} sub="HIGH ALIGNMENT" color="#fbbf24" />
-        <Stat label="ACTIVIST 13D" value={summary.activist} sub="CONTROL WATCH" color="#f87171" />
-        <Stat label="8-K MATERIAL" value={summary.material8k} sub="EVENT RISK" color={accent2} />
-        <Stat label="FORM 4" value={summary.form4} sub="INSIDER TAPE" color="#4ade80" />
+        <Stat label={`FILINGS - ${days}D`} value={Array.isArray(data?.filings) ? filings.length : "-"} sub="PUBLIC TICKERS" color={accent} accentBar />
+        <Stat label="NARRATIVE LOCK" value={Array.isArray(data?.filings) ? summary.locked : "-"} sub="HIGH ALIGNMENT" color="#fbbf24" />
+        <Stat label="ACTIVIST 13D" value={Array.isArray(data?.filings) ? summary.activist : "-"} sub="CONTROL WATCH" color="#f87171" />
+        <Stat label="8-K MATERIAL" value={Array.isArray(data?.filings) ? summary.material8k : "-"} sub="EVENT RISK" color={accent2} />
+        <Stat label="FORM 4" value={Array.isArray(data?.filings) ? summary.form4 : "-"} sub="INSIDER TAPE" color="#4ade80" />
         <Stat label="FRESHEST EDGAR" value={formatAge(summary.freshest?.ageHours)} sub="ACCEPTED AGE" color={freshnessColor(summary.freshest?.ageHours)} />
-        <Stat label="SEC SOURCE" value="LIVE" sub="EDGAR ATOM" color="#4ade80" />
+        <Stat label="SEC SOURCE" value={error ? "STALE" : loading ? "PENDING" : incomplete ? "PARTIAL" : "STORED"} sub="EDGAR ATOM" color={error || incomplete ? "#fbbf24" : labelLight} />
       </div>
 
       <div style={commandGrid}>
         <Card title="EDGAR COMMAND READ" accentColor={accent}>
           {summary.top ? (
-            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(220px, 0.45fr)", gap: 18 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 18 }}>
               <div>
                 <div style={eyebrow}>MOST ACTIONABLE FILING</div>
                 <Link to={`/ticker/${summary.top.ticker}`} style={tickerHero}>${summary.top.ticker}</Link>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
                   <span style={badge(FORM_COLORS[summary.top.form] || labelLight)}>{summary.top.form || "FILING"}</span>
-                  <span style={badge(summary.top.bias === "BULLISH" ? "#4ade80" : summary.top.bias === "BEARISH" ? "#f87171" : labelLight)}>{summary.top.bias || "NEUTRAL"}</span>
+                  <span style={badge(summary.top.bias === "BULLISH" ? "#4ade80" : summary.top.bias === "BEARISH" ? "#f87171" : labelLight)}>{summary.top.bias || "UNKNOWN"}</span>
                   {summary.top.narrative_lock_badge && <span style={badge("#fbbf24")}>NARRATIVE LOCK</span>}
                 </div>
                 <p style={heroCopy}>{summary.top.summary || summary.top.title || "Open the filing row for full EDGAR context."}</p>
               </div>
               <div style={miniPanel}>
                 <SmallLine k="Company" v={summary.top.company || "-"} />
-                <SmallLine k="Significance" v={`${summary.top.significance || 0}/100`} />
-                <SmallLine k="Tradability" v={`${summary.top.tradability_pct || 0}%`} />
-                <SmallLine k="Lock Score" v={`${summary.top.narrative_lock_score || 0}/100`} />
+                <SmallLine k="Significance" v={metric(summary.top.significance, "/100")} />
+                <SmallLine k="Tradability" v={metric(summary.top.tradability_pct, "%")} />
+                <SmallLine k="Lock Score" v={metric(summary.top.narrative_lock_score, "/100")} />
               </div>
             </div>
           ) : (
@@ -161,7 +169,7 @@ export default function SECPage() {
                 <span style={badge(FORM_COLORS[f.form] || labelLight)}>{f.form || "FILING"}</span>
                 <span style={{ color: freshnessColor(f.ageHours), fontWeight: 800 }}>{formatAge(f.ageHours)}</span>
                 <span style={{ color: labelLight }}>{f.company || f.title || "-"}</span>
-                <span style={{ color: f.significance >= 80 ? "#4ade80" : f.significance >= 65 ? "#fbbf24" : dim, textAlign: "right" }}>{f.significance || 0}</span>
+                <span style={{ color: f.significance >= 80 ? "#4ade80" : f.significance >= 65 ? "#fbbf24" : dim, textAlign: "right" }}>{metric(f.significance)}</span>
               </Link>
             )) : <div style={{ color: muted, padding: 10 }}>No urgent filings loaded.</div>}
           </div>
@@ -177,16 +185,16 @@ export default function SECPage() {
           <div style={biasStrip}>
             <span style={badge("#4ade80")}>{summary.bullish} BULLISH</span>
             <span style={badge("#f87171")}>{summary.bearish} BEARISH</span>
-            <span style={badge(labelLight)}>{filings.length - summary.bullish - summary.bearish} NEUTRAL</span>
+            <span style={badge(labelLight)}>{filings.length - summary.bullish - summary.bearish} OTHER / UNKNOWN</span>
           </div>
         </div>
       </Card>
 
       <Card title="FILINGS - SORTED BY SIGNIFICANCE">
         {!filings.length ? (
-          <div style={{ color: muted, padding: 20 }}>No filings loaded. Click POLL EDGAR.</div>
+          <div style={{ color: muted, padding: 20 }}>{loading || error || incomplete ? "Filing data unavailable." : "No stored filings match the filters."}</div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <div style={{ overflowX: "auto" }}><table style={{ width: "100%", minWidth: 680, borderCollapse: "collapse" }}>
             <thead>
               <tr>
                 <th style={th}>TICKER</th><th style={th}>FORM</th><th style={th}>COMPANY</th>
@@ -198,15 +206,15 @@ export default function SECPage() {
                 const open = expanded === i;
                 return (
                   <Fragment key={`${f.ticker}-${f.form}-${f.accepted_at || f.updated || i}`}>
-                    <tr className="row-hover" style={{ borderTop: hairline, cursor: "pointer" }} onClick={() => setExpanded(open ? null : i)} data-testid={`sec-${f.ticker}`}>
+                    <tr className="row-hover" tabIndex={0} aria-expanded={open} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(open ? null : i); } }} style={{ borderTop: hairline, cursor: "pointer" }} onClick={() => setExpanded(open ? null : i)} data-testid={`sec-${f.ticker}`}>
                       <td style={{ ...td, color: accent, fontWeight: 700 }}>${f.ticker}</td>
                       <td style={td}>
                         <span style={badge(FORM_COLORS[f.form] || labelLight)}>{f.form}</span>
                         {f.activist && <span style={{ marginLeft: 6, color: "#f87171", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em" }}>- {String(f.activist).toUpperCase()}</span>}
                       </td>
                       <td style={{ ...td, fontSize: 11 }}>{f.company}</td>
-                      <td style={{ ...td, color: muted }}>{f.filing_date || f.accepted_at?.slice(0, 10) || "-"}</td>
-                      <td style={{ ...td, color: f.significance >= 80 ? "#4ade80" : f.significance >= 65 ? "#fbbf24" : labelLight, fontWeight: 700 }}>{f.significance}</td>
+                      <td style={{ ...td, color: muted }}>{f.filing_date || (typeof f.accepted_at === "string" ? f.accepted_at.slice(0, 10) : "-")}</td>
+                      <td style={{ ...td, color: f.significance >= 80 ? "#4ade80" : f.significance >= 65 ? "#fbbf24" : labelLight, fontWeight: 700 }}>{metric(f.significance)}</td>
                       <td style={td}>{f.narrative_lock_badge ? <span style={badge("#fbbf24")}>LOCK {f.narrative_lock_score}</span> : <span style={{ color: dim }}>{f.narrative_lock_score}</span>}</td>
                       <td style={{ ...td, color: dim, textAlign: "right" }}>{open ? "v" : ">"}</td>
                     </tr>
@@ -217,22 +225,23 @@ export default function SECPage() {
                           <Row k="ACCEPTED" v={f.accepted_at || f.updated || "-"} />
                           <Row k="SUMMARY" v={f.summary} />
                           <Row k="BIAS" v={f.bias} color={f.bias === "BULLISH" ? "#4ade80" : f.bias === "BEARISH" ? "#f87171" : labelLight} />
-                          <Row k="TRADABILITY" v={`${f.tradability_pct || 0}%`} />
-                          <Row k="EXPECTED EFFECT" v={`${(f.expected_effect_pct || 0) >= 0 ? "+" : ""}${f.expected_effect_pct || 0}%`} />
-                          <Row k="NARRATIVE LOCK" v={`${f.narrative_lock_score || 0}/100`} />
-                          <Row k="CONCURRENT SIGNALS" v={(f.concurrent_signals || []).join(", ") || "none"} />
-                          <Row k="EDGAR LINK" v={<a href={f.link} target="_blank" rel="noreferrer" style={{ color: accent }}>{f.link}</a>} />
+                          <Row k="TRADABILITY" v={metric(f.tradability_pct, "%")} />
+                          <Row k="EXPECTED EFFECT" v={pct(f.expected_effect_pct)} />
+                          <Row k="NARRATIVE LOCK" v={metric(f.narrative_lock_score, "/100")} />
+                          <Row k="CONCURRENT SIGNALS" v={textRows(f.concurrent_signals).join(", ") || "-"} />
+                          <Row k="EDGAR LINK" v={safeLink(f.link) ? <a href={f.link} target="_blank" rel="noreferrer" style={{ color: accent }}>{f.link}</a> : "-"} />
                           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
                             <button
                               type="button"
+                              disabled={battleLoading === String(f.ticker || "").toUpperCase()}
                               onClick={() => loadBattleCard(f.ticker)}
                               style={buttonStyle("#fbbf24")}
                             >
-                              [ {battleLoading === f.ticker ? "LOADING..." : "SEC BATTLE CARD"} ]
+                              [ {battleLoading === String(f.ticker || "").toUpperCase() ? "LOADING..." : "SEC BATTLE CARD"} ]
                             </button>
                           </div>
-                          {battleCards[f.ticker] && (
-                            <SECBattleCard data={battleCards[f.ticker]} />
+                          {battleCards[String(f.ticker || "").toUpperCase()] && (
+                            <SECBattleCard data={battleCards[String(f.ticker || "").toUpperCase()]} />
                           )}
                         </td>
                       </tr>
@@ -241,7 +250,7 @@ export default function SECPage() {
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         )}
       </Card>
     </CrtShell>
@@ -283,8 +292,8 @@ function Select({ label, value, onChange, opts }) {
 function Row({ k, v, color }) {
   return (
     <div style={{ display: "flex", padding: "6px 0", borderBottom: hairline, fontSize: 11 }}>
-      <span style={{ color: dim, letterSpacing: "0.14em", flex: "0 0 200px" }}>{k}</span>
-      <span style={{ color: color || labelLight, flex: 1 }}>{v || "-"}</span>
+      <span style={{ color: dim, letterSpacing: "0.14em", flex: "0 0 35%" }}>{k}</span>
+      <span style={{ color: color || labelLight, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{v ?? "-"}</span>
     </div>
   );
 }
@@ -311,16 +320,18 @@ function SECBattleCard({ data }) {
   if (data.error) {
     return <div style={{ ...battleCard, color: "#f87171" }}>{data.error}</div>;
   }
-  const history = data.history || [];
+  const history = objectRows(data.history);
   const cluster = data.insider_cluster || {};
   const reaction = data.reaction_summary || {};
-  const risks = data.risk_language || [];
+  const risks = objectRows(data.risk_language);
   const edgar = data.edgartools || {};
   const entity = edgar.entity || {};
   const fundamentals = edgar.fundamentals || {};
-  const edgarFilings = edgar.latest_filings || [];
+  const edgarFilings = objectRows(edgar.latest_filings);
+  const partial = [data.history, data.risk_language, edgar.latest_filings].some(rows => !Array.isArray(rows) || objectRows(rows).length !== rows.length);
   return (
     <div style={battleCard}>
+      {partial && <div role="alert" style={{ color: "#fbbf24", marginBottom: 10 }}>Battle card is incomplete; missing sections are unavailable, not clean results.</div>}
       <div style={battleHeader}>
         <div>
           <div style={eyebrow}>FILING BATTLE CARD</div>
@@ -328,10 +339,10 @@ function SECBattleCard({ data }) {
           <div style={{ color: muted, fontSize: 12 }}>{data.company || "SEC issuer history"}</div>
         </div>
         <div style={battleStats}>
-          <MiniMetric label="FILINGS" value={data.filing_count || 0} color={labelLight} />
+          <MiniMetric label="FILINGS" value={metric(data.filing_count)} color={labelLight} />
           <MiniMetric label="AVG 1M" value={pct(reaction.avg_30d_pct)} color={reactionColor(reaction.avg_30d_pct)} />
-          <MiniMetric label="W/L" value={`${reaction.wins || 0}/${reaction.losses || 0}`} color="#fbbf24" />
-          <MiniMetric label="INSIDER CLUSTER" value={cluster.active ? "ACTIVE" : "QUIET"} color={cluster.active ? "#4ade80" : dim} />
+          <MiniMetric label="W/L" value={`${metric(reaction.wins)}/${metric(reaction.losses)}`} color="#fbbf24" />
+          <MiniMetric label="INSIDER CLUSTER" value={cluster.active == null ? "UNKNOWN" : cluster.active ? "ACTIVE" : "QUIET"} color={cluster.active ? "#4ade80" : dim} />
           <MiniMetric label="EDGARTOOLS" value={edgar.ok ? "LIVE" : "FALLBACK"} color={edgar.ok ? "#4ade80" : "#fbbf24"} />
         </div>
       </div>
@@ -353,14 +364,14 @@ function SECBattleCard({ data }) {
                     <td style={td}>{formatAccepted(h.accepted_at || h.filing_date)}</td>
                     <td style={td}><span style={badge(FORM_COLORS[h.form] || labelLight)}>{h.form || "-"}</span></td>
                     <td style={{ ...td, color: muted }}>{h.accession || "-"}</td>
-                    <td style={{ ...td, color: h.bias === "BULLISH" ? "#4ade80" : h.bias === "BEARISH" ? "#f87171" : labelLight }}>{h.bias || "NEUTRAL"}</td>
+                    <td style={{ ...td, color: h.bias === "BULLISH" ? "#4ade80" : h.bias === "BEARISH" ? "#f87171" : labelLight }}>{h.bias || "UNKNOWN"}</td>
                     <td style={{ ...td, color: reactionColor(r.reaction_pct), fontWeight: 900 }}>{pct(r.reaction_pct)}</td>
                     <td style={{ ...td, color: r.status === "complete" ? "#4ade80" : r.status === "pending" ? "#fbbf24" : muted }}>{r.label || r.status || "-"}</td>
                   </tr>
                 );
               })}
               {!history.length && (
-                <tr><td colSpan={6} style={{ ...td, color: muted }}>No company filing history stored yet.</td></tr>
+                <tr><td colSpan={6} style={{ ...td, color: muted }}>{Array.isArray(data.history) ? "No company filing history stored yet." : "Company filing history unavailable."}</td></tr>
               )}
             </tbody>
           </table>
@@ -379,7 +390,7 @@ function SECBattleCard({ data }) {
           <SmallLine k="TTM Revenue" v={compactMoney(fundamentals.ttm_revenue?.value)} />
           <SmallLine k="TTM Net Income" v={compactMoney(fundamentals.ttm_net_income?.value)} />
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-            {(entity.flags || []).slice(0, 6).map(flag => <span key={flag} style={badge(labelLight)}>{flag.toUpperCase()}</span>)}
+            {textRows(entity.flags).slice(0, 6).map(flag => <span key={flag} style={badge(labelLight)}>{flag.toUpperCase()}</span>)}
             {!edgar.ok && <span style={badge("#fbbf24")}>{(edgar.reason || "EDGARTOOLS UNAVAILABLE").slice(0, 42).toUpperCase()}</span>}
           </div>
 
@@ -399,11 +410,11 @@ function SECBattleCard({ data }) {
 
         <div style={battlePanel}>
           <div style={panelTitle}>// INSIDER CLUSTER</div>
-          <SmallLine k="Window" v={cluster.window || "10D"} />
-          <SmallLine k="Recent Form 4" v={cluster.recent_form4_count ?? 0} />
+          <SmallLine k="Window" v={cluster.window || "-"} />
+          <SmallLine k="Recent Form 4" v={metric(cluster.recent_form4_count)} />
           <SmallLine k="Read" v={cluster.read || "-"} />
           <div style={{ ...clusterBadge, color: cluster.active ? "#4ade80" : dim, borderColor: `${cluster.active ? "#4ade80" : dim}66` }}>
-            {cluster.active ? "CLUSTER DETECTED" : "NO ACTIVE CLUSTER"}
+            {cluster.active == null ? "CLUSTER UNKNOWN" : cluster.active ? "CLUSTER DETECTED" : "NO ACTIVE CLUSTER"}
           </div>
 
           <div style={{ ...panelTitle, marginTop: 18 }}>// RISK LANGUAGE SCANNER</div>
@@ -414,11 +425,11 @@ function SECBattleCard({ data }) {
                 <span style={{ color: muted }}>{r.filing_date || "-"}</span>
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-                {(r.terms || []).map(term => <span key={term} style={badge("#f87171")}>{term.toUpperCase()}</span>)}
+                {textRows(r.terms).map(term => <span key={term} style={badge("#f87171")}>{term.toUpperCase()}</span>)}
               </div>
             </div>
           )) : (
-            <div style={{ color: muted, fontSize: 12, lineHeight: 1.5 }}>No high-risk language matched in stored title/summary text. Full filing-text scan can be added next.</div>
+            <div style={{ color: muted, fontSize: 12, lineHeight: 1.5 }}>{Array.isArray(data.risk_language) ? "No high-risk language matched in stored title/summary text." : "Risk language data unavailable."}</div>
           )}
         </div>
       </div>
@@ -440,7 +451,7 @@ function filingAgeHours(filing, now) {
   if (!stamp) return null;
   const parsed = new Date(stamp).getTime();
   if (!Number.isFinite(parsed)) return null;
-  return Math.max(0, (now - parsed) / 36e5);
+  return parsed > now ? null : (now - parsed) / 36e5;
 }
 
 function formatAge(hours) {
@@ -458,13 +469,13 @@ function freshnessColor(hours) {
 }
 
 function pct(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  if (!validNumber(value)) return "-";
   const n = Number(value);
   return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 }
 
 function compactMoney(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  if (!validNumber(value)) return "-";
   const n = Number(value);
   const abs = Math.abs(n);
   if (abs >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
@@ -474,7 +485,7 @@ function compactMoney(value) {
 }
 
 function compactNumber(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  if (!validNumber(value)) return "-";
   const n = Number(value);
   const abs = Math.abs(n);
   if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
@@ -496,7 +507,7 @@ function formatAccepted(value) {
 }
 
 function reactionColor(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return muted;
+  if (!validNumber(value)) return muted;
   const n = Number(value);
   if (n >= 3) return "#4ade80";
   if (n <= -3) return "#f87171";
@@ -505,7 +516,7 @@ function reactionColor(value) {
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em", fontSize: 12 };
-const commandGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(300px, 0.75fr)", gap: 18 };
+const commandGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", gap: 18 };
 const eyebrow = { color: dim, fontSize: 9, letterSpacing: "0.18em", fontWeight: 800, marginBottom: 8 };
 const panelTitle = { color: labelLight, fontSize: 11, letterSpacing: "0.14em", marginBottom: 10, fontWeight: 700 };
 const tickerHero = { color: accent, fontSize: 42, fontWeight: 900, letterSpacing: "0.08em", textDecoration: "none" };
@@ -514,18 +525,18 @@ const miniPanel = { border: hairline, background: "rgba(255,255,255,0.018)", pad
 const biasStrip = { display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap", marginLeft: "auto" };
 const barTrack = { height: 5, background: "rgba(255,255,255,0.06)", marginTop: 7, overflow: "hidden" };
 const barFill = { height: "100%" };
-const freshnessGrid = { display: "grid", gridTemplateColumns: "minmax(0, 0.9fr) minmax(420px, 1.1fr)", gap: 18, alignItems: "stretch" };
+const freshnessGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18, alignItems: "stretch" };
 const freshnessPanel = { border: hairline, background: "rgba(74,222,128,0.025)", padding: 16, minWidth: 0, overflow: "hidden" };
-const urgentPanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, display: "grid", gap: 8 };
+const urgentPanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, display: "grid", gap: 8, overflowX: "auto" };
 const freshMetricGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 };
 const freshMetric = { border: hairline, background: "#020407cc", padding: "12px 13px", display: "grid", gap: 8, minWidth: 0 };
 const sourceLine = { marginTop: 14, borderTop: hairline, paddingTop: 12, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", color: dim, fontSize: 10, letterSpacing: "0.13em" };
 const urgentRow = { display: "grid", gridTemplateColumns: "70px 92px 54px minmax(0, 1fr) 42px", gap: 10, alignItems: "center", padding: "8px 0", borderTop: hairline, textDecoration: "none", fontSize: 11 };
 const battleCard = { marginTop: 18, border: `0.5px solid ${accent}55`, background: "rgba(0,0,0,0.28)", padding: 16 };
-const battleHeader = { display: "grid", gridTemplateColumns: "minmax(0, 0.9fr) minmax(360px, 1.1fr)", gap: 18, alignItems: "start", borderBottom: hairline, paddingBottom: 14, marginBottom: 14 };
+const battleHeader = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: 18, alignItems: "start", borderBottom: hairline, paddingBottom: 14, marginBottom: 14 };
 const battleStats = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))", gap: 8 };
-const battleGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(320px, 0.75fr)", gap: 16 };
-const battlePanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, minWidth: 0 };
+const battleGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: 16 };
+const battlePanel = { border: hairline, background: "rgba(255,255,255,0.018)", padding: 14, minWidth: 0, overflowX: "auto", overflowWrap: "anywhere" };
 const miniMetric = { border: hairline, background: "#020407cc", padding: "10px 11px", display: "grid", gap: 6, color: dim, fontSize: 9, letterSpacing: "0.12em" };
 const clusterBadge = { marginTop: 12, border: `0.5px solid ${dim}66`, padding: "9px 10px", fontWeight: 900, letterSpacing: "0.12em", fontSize: 10 };
 const riskHit = { borderTop: hairline, padding: "10px 0", color: labelLight, fontSize: 11 };
@@ -535,3 +546,9 @@ function badge(color) {
 function buttonStyle(color) {
   return { background: "transparent", border: `0.5px solid ${color}`, color, fontSize: 11, padding: "8px 16px", cursor: "pointer", letterSpacing: "0.14em", fontFamily: "JetBrains Mono", fontWeight: 700 };
 }
+
+function objectRows(value) { return Array.isArray(value) ? value.filter(row => row && typeof row === "object" && !Array.isArray(row)) : []; }
+function textRows(value) { return Array.isArray(value) ? value.filter(item => typeof item === "string") : []; }
+function validNumber(value) { return (typeof value === "number" || (typeof value === "string" && value.trim() !== "")) && Number.isFinite(Number(value)); }
+function metric(value, suffix = "") { return validNumber(value) ? `${value}${suffix}` : "-"; }
+function safeLink(value) { try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; } }

@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { DataConfidenceStrip } from "./Institutional";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
+const list = value => Array.isArray(value) ? value.filter(item => item != null) : [];
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em", fontSize: 12, verticalAlign: "top" };
@@ -25,26 +26,37 @@ export function TradeJournalView() {
   const [tab, setTab] = useState("CAPSULES");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const controllerRef = useRef(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    controllerRef.current?.abort();
+    const controller = new AbortController(); controllerRef.current = controller;
     setLoading(true);
     setError(null);
     try {
-      const r = await axios.get(`${API}/trade_journal/overview`);
-      setJournal(r.data);
-      const [orders, candidates] = await Promise.all([
-        axios.get(`${API}/options_desk/orders`).catch(() => ({ data: { orders: [] } })),
-        axios.get(`${API}/options_desk/candidates`).catch(() => ({ data: { candidates: [], summary: {} } })),
-      ]);
-      setOptionsJournal({ orders: orders.data.orders || [], candidates: candidates.data.candidates || [], summary: candidates.data.summary || {} });
+      const results = await Promise.allSettled(["/trade_journal/overview", "/options_desk/orders", "/options_desk/candidates"].map(path => axios.get(`${API}${path}`, { signal: controller.signal, timeout: 20000 })));
+      if (controller.signal.aborted) return;
+      if (results[0].status === "fulfilled") {
+        const payload = results[0].value.data || {};
+        const normalized = { ...payload };
+        for (const key of ["decision_time_capsules", "rejected_graveyard", "alternate_universe", "evidence_locker", "credible_data_sources", "rule_feedback", "trade_dna", "pain_map"]) normalized[key] = list(payload[key]);
+        normalized.decision_time_capsules = normalized.decision_time_capsules.map(row => ({ ...row, reasons: list(row.reasons), cautions: list(row.cautions) }));
+        setJournal(normalized);
+      }
+      if (results[1].status === "fulfilled" || results[2].status === "fulfilled") setOptionsJournal(previous => ({
+        orders: results[1].status === "fulfilled" ? list(results[1].value.data?.orders) : previous?.orders,
+        candidates: results[2].status === "fulfilled" ? list(results[2].value.data?.candidates) : previous?.candidates,
+        summary: results[2].status === "fulfilled" ? results[2].value.data?.summary || {} : previous?.summary,
+      }));
+      if (results.some(result => result.status === "rejected")) setError("Journal refresh incomplete. Available prior data is retained; missing sources are not empty results.");
     } catch (err) {
-      setError(err?.response?.data?.detail || err?.message || "Trade journal unavailable");
+      if (!controller.signal.aborted) setError(err?.response?.data?.detail || err?.message || "Trade journal unavailable");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); return () => controllerRef.current?.abort(); }, [load]);
 
   const summary = journal?.summary || {};
   const counts = journal?.source_counts || {};
@@ -92,10 +104,10 @@ export function TradeJournalView() {
           { label: "Source", value: "OPTIONS DESK", detail: "separate account records" },
           { label: "Mode", value: "APPEND", color: "#4ade80" },
         ] : [
-          { label: "PM Decisions", value: summary.decision_count || 0, color: accent },
-          { label: "Matured", value: summary.matured_outcomes || 0, color: accent2 },
-          { label: "Pending", value: summary.pending_outcomes || 0, color: "#fbbf24" },
-          { label: "Evidence Rows", value: journal?.evidence_locker?.length || 0 },
+          { label: "PM Decisions", value: summary.decision_count ?? "--", color: accent },
+          { label: "Matured", value: summary.matured_outcomes ?? "--", color: accent2 },
+          { label: "Pending", value: summary.pending_outcomes ?? "--", color: "#fbbf24" },
+          { label: "Evidence Rows", value: journal?.evidence_locker?.length ?? "--" },
           { label: "Mode", value: "APPEND", color: "#4ade80" },
         ]}
       />
@@ -113,12 +125,12 @@ export function TradeJournalView() {
       {instrument === "EQUITIES" && (
         <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="PM DECISIONS" value={summary.decision_count || 0} sub={`${summary.accepted_count || 0} ACCEPTED`} color={accent} accentBar />
-        <Stat label="REJECT/WATCH" value={summary.rejected_or_watch || 0} sub="FALSE-NEGATIVE WATCH" color="#fbbf24" />
-        <Stat label="MATURED" value={summary.matured_outcomes || 0} sub={`${summary.pending_outcomes || 0} PENDING`} color={accent2} />
-        <Stat label="TRADES" value={summary.actual_trades || 0} sub={`${summary.open_trades || 0} OPEN / ${summary.closed_trades || 0} CLOSED`} color={labelLight} />
-        <Stat label="MISSED WINNERS" value={summary.missed_winners || 0} sub="REJECTED +5%" color="#f87171" />
-        <Stat label="AVOIDED LOSERS" value={summary.avoided_losers || 0} sub="GOOD PASSES" color="#4ade80" />
+        <Stat label="PM DECISIONS" value={summary.decision_count ?? "--"} sub={`${summary.accepted_count ?? "--"} ACCEPTED`} color={accent} accentBar />
+        <Stat label="REJECT/WATCH" value={summary.rejected_or_watch ?? "--"} sub="FALSE-NEGATIVE WATCH" color="#fbbf24" />
+        <Stat label="MATURED" value={summary.matured_outcomes ?? "--"} sub={`${summary.pending_outcomes ?? "--"} PENDING`} color={accent2} />
+        <Stat label="TRADES" value={summary.actual_trades ?? "--"} sub={`${summary.open_trades ?? "--"} OPEN / ${summary.closed_trades ?? "--"} CLOSED`} color={labelLight} />
+        <Stat label="MISSED WINNERS" value={summary.missed_winners ?? "--"} sub="REJECTED +5%" color="#f87171" />
+        <Stat label="AVOIDED LOSERS" value={summary.avoided_losers ?? "--"} sub="GOOD PASSES" color="#4ade80" />
       </div>
 
       <Card title="DATA SOURCE LEDGER" accentColor={accent2}>
@@ -147,7 +159,7 @@ export function TradeJournalView() {
       </div>
 
       {!journal ? (
-        <Card title="LOADING"><div style={{ color: muted, padding: 20 }}>Loading journal...</div></Card>
+        <Card title={error ? "UNAVAILABLE" : "LOADING"}><div style={{ color: muted, padding: 20 }}>{error ? "Journal source unavailable." : "Loading journal..."}</div></Card>
       ) : (
         <>
           {tab === "CAPSULES" && <Capsules rows={journal.decision_time_capsules || []} />}
@@ -322,16 +334,16 @@ function Dna({ dna, pain }) {
 }
 
 function OptionsJournalView({ data }) {
-  const candidates = data?.candidates || [];
-  const orders = data?.orders || [];
+  const candidates = list(data?.candidates);
+  const orders = list(data?.orders);
   const summary = data?.summary || {};
   return (
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="OPTIONS CANDIDATES" value={summary.total || candidates.length || 0} sub={`${summary.ready || 0} READY`} color={accent} accentBar />
-        <Stat label="OPTION/BOTH" value={(summary.option || 0) + (summary.both || 0)} sub="PM ROUTED" color={accent2} />
-        <Stat label="ORDERS" value={orders.length} sub="PAPER DESK" color="#fbbf24" />
-        <Stat label="PASS/EQUITY" value={(summary.pass || 0) + (summary.equity || 0)} sub="NOT OPTIONS" color={labelLight} />
+        <Stat label="OPTIONS CANDIDATES" value={summary.total ?? data?.candidates?.length ?? "--"} sub={`${summary.ready ?? "--"} READY`} color={accent} accentBar />
+        <Stat label="OPTION/BOTH" value={summary.option != null && summary.both != null ? Number(summary.option) + Number(summary.both) : "--"} sub="PM ROUTED" color={accent2} />
+        <Stat label="ORDERS" value={data?.orders?.length ?? "--"} sub="PAPER DESK" color="#fbbf24" />
+        <Stat label="PASS/EQUITY" value={summary.pass != null && summary.equity != null ? Number(summary.pass) + Number(summary.equity) : "--"} sub="NOT OPTIONS" color={labelLight} />
       </div>
       <Card title="OPTIONS EXECUTION LEDGER">
         <DataTable minWidth={980}
@@ -346,7 +358,7 @@ function OptionsJournalView({ data }) {
             o.status || "--",
           ])}
         />
-        {!orders.length && <Empty text="No paper options orders logged yet." />}
+        {!orders.length && <Empty text={data?.orders == null ? "Options order source unavailable." : "No paper options orders logged yet."} />}
       </Card>
       <Card title="OPTIONS PM DECISION CAPSULES">
         <DataTable minWidth={1060}
@@ -362,7 +374,7 @@ function OptionsJournalView({ data }) {
             (c.blocked_reasons || c.route_reasons || ["Collect paper outcome data."])[0],
           ])}
         />
-        {!candidates.length && <Empty text="No options candidates recorded yet." />}
+        {!candidates.length && <Empty text={data?.candidates == null ? "Options candidate source unavailable." : "No options candidates recorded yet."} />}
       </Card>
     </>
   );
