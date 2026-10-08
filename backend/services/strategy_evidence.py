@@ -41,7 +41,8 @@ def target_close(observed_at: str, horizon: int) -> datetime | None:
         return None
     schedule = exchange(observed.year).schedule
     after = schedule.loc[observed.astimezone(ET).date().isoformat():]
-    closes = [r["close"].to_pydatetime() for _, r in after.iterrows()
+    # At most today's already-completed session can be excluded at this bound.
+    closes = [r["close"].to_pydatetime() for _, r in after.head(horizon + 1).iterrows()
               if r["close"].to_pydatetime() > observed]
     return closes[horizon - 1] if len(closes) >= horizon else None
 
@@ -111,7 +112,7 @@ def resolve(episode: dict, closes: dict, spy_closes: dict, now: datetime) -> dic
         return {**result, "status": "MISSING_EXACT_TARGET_CLOSE"}
     observed = parse_time(episode["observed_at"])
     prior = exchange(observed.year).schedule.loc[:observed.astimezone(ET).date().isoformat()]
-    completed = [day.date().isoformat() for day, r in prior.iterrows() if r["close"].to_pydatetime() <= observed]
+    completed = [day.date().isoformat() for day, r in prior.tail(2).iterrows() if r["close"].to_pydatetime() <= observed]
     spy_start = number(spy_closes.get(completed[-1])) if completed else None
     spy_end = number(spy_closes.get(episode["target_date"]))
     gross = (end / episode["entry_mark"] - 1) * 100
