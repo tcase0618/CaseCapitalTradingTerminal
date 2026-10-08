@@ -163,4 +163,3 @@ test("missing options capital is unavailable, never an invented 20000 balance", 
   expect(container.textContent).toContain("TOTAL FUND CAPITAL: --");
   expect(container.textContent).not.toContain("NaN");
 });
-

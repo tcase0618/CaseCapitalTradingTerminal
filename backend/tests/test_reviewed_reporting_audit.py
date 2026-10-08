@@ -143,5 +143,3 @@ async def test_stale_retry_scheduler_tag_reaches_terminal_cycle(monkeypatch):
     monkeypatch.setattr(scheduler, 'log_activity', log)
     await scheduler._daily_scan_job(triggered_by='stale_retry_scan_1030')
     assert calls == [{'triggered_by': 'stale_retry_scan_1030'}]
-
-
