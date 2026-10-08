@@ -149,7 +149,7 @@ export default function LearningPage() {
       <Card title="INSIGHTS — LAST CYCLE">
         {(!lastRun?.insights || lastRun.insights.length === 0) ? (
           <div style={{ color: muted, fontSize: 13, padding: "8px 0", letterSpacing: "0.05em" }}>
-            Run a learning cycle once you have 10+ trades with 30-day returns. Insights surface high-WR signals, weak signals, and the best signal combination.
+            Shadow proposals require completed outcomes. Descriptive signal results do not establish predictive edge; active weights remain unchanged.
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -257,7 +257,7 @@ export default function LearningPage() {
       </Card>
 
       {/* SIGNAL LIFETIME LEAGUE TABLE — every scanned stock counts as a trade */}
-      <Card title="SIGNAL LIFETIME PERFORMANCE — EVERY SCANNED STOCK COUNTS AS A TRADE">
+      <Card title="LEGACY SIGNAL OBSERVATIONS — NOT BROKER TRADES">
         {signalStats.length === 0 ? (
           <div style={{ color: muted, fontSize: 13 }}>No completed trades yet.</div>
         ) : (
