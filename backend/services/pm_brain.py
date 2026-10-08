@@ -91,6 +91,10 @@ def build_observation(row: dict[str, Any], *, cycle_id: str, observed_at: str, p
         "action": action,
         "pre_execution_action": row.get("pre_execution_action"),
         "pm_score": score,
+        "scoring_version": row.get("scoring_version"),
+        "score_breakdown": row.get("score_breakdown") or {},
+        "price_evidence": row.get("price_evidence") or {"status": "UNVERIFIED_MARK"},
+        "regime": row.get("regime"),
         "case_score": _num(row.get("case_score")),
         "strategy_confidence": _num(row.get("strategy_confidence")),
         "route": row.get("route") or row.get("preferred_route"),
@@ -157,6 +161,7 @@ async def record_pm_cycle(pm_payload: dict[str, Any], *, cycle_id: str, observed
         ticker = _ticker(row)
         prior = await db.pm_company_profiles.find_one({"ticker": ticker}, {"_id": 0})
         observation = build_observation(row, cycle_id=cycle_id, observed_at=observed_at, prior=prior)
+        observation["mode"] = pm_payload.get("mode") or "UNKNOWN"
         observation_id = f"pm-observation:{cycle_id}:{ticker}"
         decision_id = f"pm-decision:{cycle_id}:{ticker}"
         await db.pm_company_observations.update_one(

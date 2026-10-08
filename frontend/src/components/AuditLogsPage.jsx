@@ -1,52 +1,40 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import axios from "axios";
+import { useMemo, useState } from "react";
+import useDisplayResource from "../hooks/useDisplayResource";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
-const SOURCES = ["all", "system", "scanner", "trade_floor", "options_desk", "telegram"];
-const TYPES = ["all", "activity", "scan_complete", "equity_decision", "option_order", "option_fill", "option_exit", "risk_check", "telegram_report"];
+const SOURCES = ["all", "system", "scanner", "trade_floor", "options_desk", "telegram", "london_strategic_edge"];
+const TYPES = ["all", "activity", "scan_complete", "equity_decision", "option_order", "option_fill", "option_exit", "risk_check", "telegram_report", "provider_health"];
 const SEVERITY = { success: "#4ade80", info: accent2, warn: "#fbbf24", error: "#f87171" };
 
 export default function AuditLogsPage() {
-  const [data, setData] = useState(null);
   const [source, setSource] = useState("all");
   const [type, setType] = useState("all");
   const [ticker, setTicker] = useState("");
-  const [selected, setSelected] = useState(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    setBusy(true);
-    try {
-      const params = new URLSearchParams({ limit: "300", source, event_type: type });
-      if (ticker.trim()) params.set("ticker", ticker.trim().replace("$", "").toUpperCase());
-      const r = await axios.get(`${API}/audit_logs?${params.toString()}`);
-      setData(r.data);
-      setSelected(prev => prev && (r.data.events || []).find(e => e.ref_id === prev.ref_id) ? prev : (r.data.events || [])[0] || null);
-    } finally {
-      setBusy(false);
-    }
-  }, [source, type, ticker]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const events = data?.events || [];
+  const [selectedKey, setSelectedKey] = useState(null);
+  const params = new URLSearchParams({ limit: "300", source, event_type: type });
+  if (ticker.trim()) params.set("ticker", ticker.trim().replace(/\$/g, "").toUpperCase());
+  const { data, error, loading, refreshing: busy, refresh: load } = useDisplayResource(`${API}/audit_logs?${params}`, 60000);
+  const events = useMemo(() => Array.isArray(data?.events) ? data.events.filter(e => e && typeof e === "object" && !Array.isArray(e)) : [], [data]);
+  const selected = events.find((e, i) => eventKey(e, i) === selectedKey) || events[0] || null;
+  const incomplete = data != null && (!Array.isArray(data.events) || events.length !== data.events.length);
   const critical = events.filter(e => e.severity === "error" || e.severity === "warn").length;
   const executions = events.filter(e => ["equity_decision", "option_order", "option_fill", "option_exit"].includes(e.event_type)).length;
-  const sourceRows = useMemo(() => Object.entries(data?.source_counts || {}).sort((a, b) => b[1] - a[1]), [data]);
+  const sourceRows = useMemo(() => Object.entries(data?.source_counts || {}).filter(([, n]) => typeof n === "number" && Number.isFinite(n)).sort((a, b) => b[1] - a[1]), [data]);
 
   return (
     <CrtShell
       title="AUDIT LOGS"
       headerRight={<button onClick={load} disabled={busy} style={buttonStyle(accent)}>{busy ? "SYNCING" : "REFRESH"}</button>}
     >
+      {(loading || error || incomplete) && <div role={error || incomplete ? "alert" : "status"} style={{ color: error || incomplete ? "#fbbf24" : muted, marginBottom: 12 }}>{error ? "Audit logs unavailable. Retained events may be stale." : incomplete ? "Audit response is incomplete; only valid events are shown." : "Loading audit events..."}</div>}
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 18, flexWrap: "wrap" }}>
-        <Stat label="EVENTS" value={data?.count ?? "-"} sub="READ MODEL" color={accent} accentBar />
-        <Stat label="EXECUTION TRAIL" value={executions} sub="ORDERS/FILLS/EXITS" color={accent2} />
-        <Stat label="WARNINGS" value={critical} sub="WARN + ERROR" color={critical ? "#fbbf24" : "#4ade80"} />
-        <Stat label="SOURCES" value={sourceRows.length || 0} sub="SYSTEMS MERGED" color="#4ade80" />
+        <Stat label="EVENTS" value={typeof data?.count === "number" && Number.isFinite(data.count) ? data.count : "-"} sub="READ MODEL" color={accent} accentBar />
+        <Stat label="EXECUTION TRAIL" value={Array.isArray(data?.events) ? executions : "-"} sub="ORDERS/FILLS/EXITS" color={accent2} />
+        <Stat label="WARNINGS" value={Array.isArray(data?.events) ? critical : "-"} sub="WARN + ERROR" color={critical ? "#fbbf24" : labelLight} />
+        <Stat label="SOURCES" value={data?.source_counts ? sourceRows.length : "-"} sub="SYSTEMS MERGED" color="#4ade80" />
       </div>
 
       <Card title="FILTERS" accentColor={accent2}>
@@ -69,7 +57,7 @@ export default function AuditLogsPage() {
 
       <div style={mainGrid}>
         <Card title="EVENT STREAM" accentColor={accent}>
-          <EventTable events={events} selected={selected} onSelect={setSelected} />
+          <EventTable events={events} selected={selected} onSelect={e => setSelectedKey(eventKey(e, events.indexOf(e)))} unavailable={loading || error || incomplete} />
         </Card>
         <Card title="EVENT PAYLOAD" accentColor="#4ade80">
           <PayloadPanel event={selected} />
@@ -79,8 +67,12 @@ export default function AuditLogsPage() {
   );
 }
 
-function EventTable({ events, selected, onSelect }) {
-  if (!events.length) return <div style={{ color: muted, padding: 20 }}>No audit events match the current filters.</div>;
+function eventKey(e, i) {
+  return JSON.stringify([e.source, e.event_type, e.ref_id, e.ts, e.ref_id ? null : i]);
+}
+
+function EventTable({ events, selected, onSelect, unavailable }) {
+  if (!events.length) return <div style={{ color: muted, padding: 20 }}>{unavailable ? "Audit events not available." : "No audit events match the current filters."}</div>;
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", minWidth: 900, borderCollapse: "collapse" }}>
@@ -92,7 +84,7 @@ function EventTable({ events, selected, onSelect }) {
             const key = `${e.ts}-${e.source}-${e.event_type}-${e.ref_id || i}`;
             const active = selected === e;
             return (
-              <tr key={key} onClick={() => onSelect(e)} style={{ borderTop: hairline, cursor: "pointer", background: active ? "rgba(200,168,75,0.08)" : "transparent" }}>
+              <tr key={key} tabIndex={0} aria-selected={active} onKeyDown={ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onSelect(e); } }} onClick={() => onSelect(e)} style={{ borderTop: hairline, cursor: "pointer", background: active ? "rgba(200,168,75,0.08)" : "transparent" }}>
                 <td style={td}>{formatTime(e.ts)}</td>
                 <td style={{ ...td, color: sourceColor(e.source), fontWeight: 900 }}>{e.source}</td>
                 <td style={{ ...td, color: SEVERITY[e.severity] || labelLight }}>{e.event_type}</td>
@@ -120,7 +112,7 @@ function PayloadPanel({ event }) {
       <Row k="Ticker" v={event.ticker ? `$${event.ticker}` : "-"} />
       <Row k="Status" v={event.status || "-"} />
       <Row k="Summary" v={event.summary || "-"} />
-      <pre style={preStyle}>{JSON.stringify(event.payload || {}, null, 2)}</pre>
+      <pre style={preStyle}>{event.payload === undefined ? "Payload unavailable." : JSON.stringify(event.payload, null, 2)}</pre>
     </div>
   );
 }
@@ -138,13 +130,14 @@ function Row({ k, v }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "90px 1fr", gap: 12, padding: "7px 0", borderBottom: hairline, fontSize: 11 }}>
       <span style={{ color: dim, letterSpacing: "0.12em" }}>{k}</span>
-      <span style={{ color: labelLight }}>{v}</span>
+      <span style={{ color: labelLight, minWidth: 0, overflowWrap: "anywhere" }}>{v}</span>
     </div>
   );
 }
 
 function formatTime(value) {
   if (!value) return "-";
+  if (!Number.isFinite(new Date(value).getTime())) return "-";
   try {
     return new Date(value).toLocaleString("en-US", {
       timeZone: "America/New_York",
@@ -170,7 +163,7 @@ function buttonStyle(color) {
 
 const th = { padding: "10px 8px", fontSize: 10, color: dim, letterSpacing: "0.14em", fontWeight: 400, textAlign: "left" };
 const td = { padding: "10px 8px", color: labelLight, letterSpacing: "0.04em", fontSize: 12, verticalAlign: "top" };
-const filterGrid = { display: "grid", gridTemplateColumns: "180px 220px 140px", gap: 14 };
-const mainGrid = { display: "grid", gridTemplateColumns: "minmax(0, 1.45fr) minmax(380px, 0.55fr)", gap: 18, marginTop: 18 };
+const filterGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 180px), 1fr))", gap: 14 };
+const mainGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))", gap: 18, marginTop: 18 };
 const inputStyle = { background: "#050507", border: hairline, color: labelLight, padding: "9px 10px", fontFamily: "JetBrains Mono", fontSize: 11, outline: "none" };
-const preStyle = { marginTop: 14, padding: 12, maxHeight: 520, overflow: "auto", background: "#050507", border: hairline, color: muted, fontSize: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" };
+const preStyle = { marginTop: 14, padding: 12, maxHeight: 520, overflow: "auto", overflowWrap: "anywhere", background: "#050507", border: hairline, color: muted, fontSize: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" };

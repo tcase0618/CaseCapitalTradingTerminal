@@ -4,6 +4,7 @@ import { API } from "../config";
 import { CrtShell, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
+const list = value => Array.isArray(value) ? value.filter(Boolean) : [];
 
 const MAP_MODES = [
   { key: "live", label: "Live Intel" },
@@ -49,29 +50,32 @@ export default function GeoRiskPage() {
   const [showHoldings, setShowHoldings] = useState(true);
   const [tradeFloor, setTradeFloor] = useState(null);
   const [lseMacro, setLseMacro] = useState(null);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    const request = path => axios.get(`${API}${path}`, { signal: controller.signal, timeout: 20000 });
     setLoading(true);
-    axios.get(`${API}/georisk/live`).then(r => {
+    request("/georisk/live").then(r => {
       if (cancelled) return;
       const payload = r.data || {};
-      setData(payload);
+      setData({ ...payload, events: list(payload.events).map(event => ({ ...event, tickers: list(event.tickers), sectors: list(event.sectors) })), chokepoints: list(payload.chokepoints) });
       setSelected(null);
       setLoading(false);
     }).catch(() => {
-      if (!cancelled) setLoading(false);
+      if (!cancelled) { setLoading(false); setLoadError(true); }
     });
-    axios.get(`${API}/trade_floor/positions`).then(r => {
+    request("/trade_floor/positions").then(r => {
       if (!cancelled) setTradeFloor(r.data || null);
     }).catch(() => {});
-    axios.get(`${API}/data/lse/macro?limit=150`).then(r => {
+    request("/data/lse/macro?limit=150").then(r => {
       if (!cancelled) setLseMacro(r.data || null);
     }).catch(() => {});
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, []);
 
-  const events = useMemo(() => data?.events || [], [data]);
+  const events = useMemo(() => Array.isArray(data?.events) ? data.events.filter(row => row && typeof row === "object") : [], [data]);
   const holdings = useMemo(() => normalizeHoldings(tradeFloor), [tradeFloor]);
   const heldTickers = useMemo(() => new Set(holdings.map(h => h.ticker)), [holdings]);
 
@@ -93,7 +97,7 @@ export default function GeoRiskPage() {
     });
   }, [events, source, watchlist]);
   const filterEmpty = !loading && events.length > 0 && filteredEvents.length === 0;
-  const visibleEvents = filterEmpty ? events : filteredEvents;
+  const visibleEvents = filteredEvents;
 
   const severityCounts = useMemo(() => {
     const counts = { CRITICAL: 0, HIGH: 0, WATCH: 0, LOW: 0 };
@@ -128,6 +132,7 @@ export default function GeoRiskPage() {
 
   return (
     <CrtShell title="GEORISK COMMAND">
+      {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>GeoRisk source unavailable. No verified event count is available.</div>}
       <div style={heroHeader}>
         <div>
           <div style={eyebrow}>GLOBAL CATALYST MAP</div>
@@ -173,7 +178,7 @@ export default function GeoRiskPage() {
       </div>
       {filterEmpty && (
         <div style={filterNotice}>
-          CURRENT FILTERS RETURNED 0 EVENTS. SHOWING ALL LIVE GEORISK NEWS.
+          CURRENT FILTERS RETURNED 0 EVENTS. RESET FILTERS TO SEE OTHER NEWS.
           <button
             type="button"
             onClick={() => { setSource("all"); setWatchlist("all"); }}
@@ -481,13 +486,13 @@ function InteractiveMap({ events, selected, onSelect, chokepoints, holdings, hel
 }
 
 function normalizeHoldings(tradeFloor) {
-  const live = (tradeFloor?.live_alpaca || []).map(p => ({
+  const live = list(tradeFloor?.live_alpaca).map(p => ({
     ticker: String(p.symbol || p.ticker || "").toUpperCase(),
     status: "LIVE",
     qty: p.qty,
     market_value: p.market_value,
   }));
-  const db = (tradeFloor?.db_positions || []).map(p => ({
+  const db = list(tradeFloor?.db_positions).map(p => ({
     ticker: String(p.ticker || p.symbol || "").toUpperCase(),
     status: p.status || p.fill_status || "DB",
     qty: p.qty_total || p.qty,

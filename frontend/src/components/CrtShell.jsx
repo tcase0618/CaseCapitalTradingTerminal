@@ -2,8 +2,11 @@
 // Refined Bloomberg terminal aesthetic: corner brackets, live system bar,
 // status dots, micro-animations.
 import { Link, useLocation } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
+import useDisplayResource from "../hooks/useDisplayResource";
+import { prefetchPage } from "../lib/pageRegistry";
+import WorkspaceSearch from "./WorkspaceSearch";
 import { API } from "../config";
 import {
   Activity,
@@ -23,6 +26,11 @@ import {
   Pill,
   Radar,
   RefreshCw,
+  Search,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Eye,
+  EyeOff,
   Video,
 } from "lucide-react";
 import terminalLogo from "../assets/case-terminal-logo.png";
@@ -107,7 +115,7 @@ function getEtParts(date = new Date()) {
   return Object.fromEntries(parts.map(p => [p.type, p.value]));
 }
 
-// US market hours: 9:30 - 16:00 ET. Uses the IANA timezone so DST cannot drift.
+// Clock windows only; broker calendars determine holiday/symbol eligibility.
 function getMarketStatus() {
   const et = getEtParts();
   const hour = Number(et.hour === "24" ? 0 : et.hour);
@@ -115,7 +123,8 @@ function getMarketStatus() {
   const minutes = hour * 60 + minute;
   const openMin = 9 * 60 + 30;
   const closeMin = 16 * 60;
-  if (et.weekday === "Sun" || et.weekday === "Sat") return { state: "CLOSED", color: "#6b7280" };
+  if (et.weekday === "Sat" || (et.weekday === "Sun" && minutes < 1200) || (et.weekday === "Fri" && minutes >= 1200)) return { state: "WEEKEND", color: "#6b7280" };
+  if (minutes < 240 || minutes >= 1200) return { state: "OVERNIGHT", color: accent2 };
   if (minutes < openMin) return { state: "PRE-MARKET", color: "#fb923c" };
   if (minutes < closeMin) return { state: "LIVE", color: "#4ade80" };
   return { state: "POST", color: "#fb923c" };
@@ -124,7 +133,9 @@ function getMarketStatus() {
 // Compute precise days/hours/minutes until the event timestamp.
 function timeUntilEvent(event) {
   try {
-    const target = event?.datetime_et ? new Date(event.datetime_et) : new Date(`${event?.date}T${event?.time_et || "09:30"}:00-04:00`);
+    if (!event?.datetime_et || !/(Z|[+-]\d{2}:?\d{2})$/.test(event.datetime_et)) return null;
+    const target = new Date(event.datetime_et);
+    if (!Number.isFinite(target.getTime())) return null;
     const diffMs = target - new Date();
     if (diffMs <= 0) return null;
     const days = Math.floor(diffMs / 86400000);
@@ -139,21 +150,8 @@ function timeUntilEvent(event) {
 }
 
 function useNextMacroEvent() {
-  const [next, setNext] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const { data: d } = await axios.get(`${API}/v32/macro`, { params: { days_ahead: 14 } });
-        const ev = d.next_event || (d.events || []).find(e => e.days_until >= 0);
-        if (!cancelled) setNext(ev || null);
-      } catch {}
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000); // refresh every 5 min
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-  return next;
+  const { data, error } = useDisplayResource(`${API}/v32/macro?days_ahead=14`, 300000);
+  return error ? null : data?.next_event || data?.events?.find(event => event.days_until >= 0) || null;
 }
 
 function useClock() {
@@ -165,7 +163,7 @@ function useClock() {
   return now;
 }
 
-function SystemBar() {
+function SystemBar({ safety = {} }) {
   const now = useClock();
   const market = getMarketStatus();
   const nextMacro = useNextMacroEvent();
@@ -191,7 +189,7 @@ function SystemBar() {
     }}>
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <span className={`dot dot-${market.color === "#4ade80" ? "green" : market.color === "#fb923c" ? "amber" : "red"} pulse-dot`} />
-        <span style={{ color: market.color, fontWeight: 700 }}>NYSE · {market.state}</span>
+        <span title="Clock-based session window; exchange holidays and symbol eligibility are broker-dependent" style={{ color: market.color, fontWeight: 700 }}>ET WINDOW · {market.state}</span>
       </span>
       <span style={{ color: dim }}>│</span>
       <span className="num" style={{ color: labelLight }}>{dateStr}</span>
@@ -214,126 +212,59 @@ function SystemBar() {
           <span className="num" style={{ color: macroColor, fontWeight: 700 }}>{countdown}</span>
         </span>
       ) : (
-        <span style={{ color: muted }}>🌐 NO MACRO IN WINDOW</span>
+        <span style={{ color: muted }}>MACRO --</span>
       )}
       <span style={{ marginLeft: "auto", display: "flex", gap: 14 }}>
-        <span><span className="dot dot-green" /> <span style={{ marginLeft: 6 }}>FEED</span></span>
-        <span><span className="dot dot-teal" /> <span style={{ marginLeft: 6 }}>LEARNING</span></span>
-        <span><span className="dot dot-amber" /> <span style={{ marginLeft: 6 }}>BOT</span></span>
+        <span style={{ color: safety.error ? "#fbbf24" : muted }}>{safety.error ? "DISPLAY DEGRADED" : safety.updatedAt ? `SYNC ${new Date(safety.updatedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" })} ET` : "CONNECTING"}</span>
       </span>
     </div>
   );
 }
 
 function useLiveAlertCounts() {
-  const [counts, setCounts] = useState({ dh: 0, xf: 0, locks: 0, lottery_hot: 0 });
-  useEffect(() => {
-    let cancelled = false;
-        const load = async () => {
-      try {
-        const [dh, xf, conv, lot] = await Promise.all([
-          axios.get(`${API}/v32/dark_horse`, { params: { days: 2 } }).then(r => r.data).catch(() => []),
-          axios.get(`${API}/v32/x_factor`, { params: { days: 2 } }).then(r => r.data).catch(() => []),
-          axios.get(`${API}/v32/conviction`).then(r => r.data).catch(() => ({})),
-          axios.get(`${API}/v32/lottery/current`).then(r => r.data).catch(() => ({})),
-        ]);
-        if (cancelled) return;
-        const hot = (lot.picks || []).filter(p => p.tier === "JACKPOT" || p.tier === "HOT").length;
-        setCounts({
-          dh: (dh || []).length,
-          xf: (xf || []).length,
-          locks: ((conv && conv.narrative_locks_14d) || []).length,
-          lottery_hot: hot,
-        });
-      } catch {}
-    };
-    load();
-    const id = setInterval(load, 60 * 1000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-  return counts;
+  const dh = useDisplayResource(`${API}/v32/dark_horse?days=2`, 60000);
+  const xf = useDisplayResource(`${API}/v32/x_factor?days=2`, 60000);
+  const conv = useDisplayResource(`${API}/v32/conviction`, 60000);
+  const lot = useDisplayResource(`${API}/v32/lottery/current`, 60000);
+  return {
+    dh: dh.error || !Array.isArray(dh.data) ? null : dh.data.length,
+    xf: xf.error || !Array.isArray(xf.data) ? null : xf.data.length,
+    locks: conv.error || !conv.data ? null : (conv.data.narrative_locks_14d || []).length,
+    lottery_hot: lot.error || !lot.data ? null : (lot.data.picks || []).filter(p => p.tier === "JACKPOT" || p.tier === "HOT").length,
+  };
 }
 
 function useNewsStrip() {
-  const [state, setState] = useState({
-    active: { items: [], loading: true, cache: "SYNC" },
-    discovery: { items: [], loading: true, cache: "SYNC" },
+  const active = useDisplayResource(`${API}/news_intel/latest?limit=18&lane=active`, 120000);
+  const discovery = useDisplayResource(`${API}/news_intel/latest?limit=18&lane=discovery`, 120000);
+  const lane = resource => ({
+    items: resource.data?.articles?.slice(0, 14) || [],
+    loading: resource.loading,
+    cache: resource.error ? "DOWN" : resource.data?.cache || (resource.data ? "LOADED" : "SYNC"),
   });
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const [active, discovery] = await Promise.all([
-          axios.get(`${API}/news_intel/latest`, {
-            params: { limit: 18, lane: "active" },
-            timeout: 7000,
-          }).then(res => res.data).catch(() => null),
-          axios.get(`${API}/news_intel/latest`, {
-            params: { limit: 18, lane: "discovery" },
-            timeout: 7000,
-          }).then(res => res.data).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setState({
-          active: {
-            items: Array.isArray(active?.articles) ? active.articles.slice(0, 14) : [],
-            loading: false,
-            cache: active?.cache || (active ? "LIVE" : "DOWN"),
-          },
-          discovery: {
-            items: Array.isArray(discovery?.articles) ? discovery.articles.slice(0, 14) : [],
-            loading: false,
-            cache: discovery?.cache || (discovery ? "LIVE" : "DOWN"),
-          },
-        });
-      } catch {
-        if (!cancelled) {
-          setState({
-            active: { items: [], loading: false, cache: "DOWN" },
-            discovery: { items: [], loading: false, cache: "DOWN" },
-          });
-        }
-      }
-    };
-    load();
-    const id = setInterval(load, 2 * 60 * 1000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-  return state;
+  return { active: lane(active), discovery: lane(discovery) };
+}
+
+function NewsTapes() {
+  const news = useNewsStrip();
+  return <>{[["ACTIVE", news.active, accent2, 42], ["DISCOVERY", news.discovery, accent, 54]].map(([name, lane, color, speed]) => (
+    <GlobalNewsStrip key={name} label={name} items={lane.items} loading={lane.loading} cache={lane.cache} accentColor={color} speed={speed} />
+  ))}</>;
 }
 
 function useSafetyFrame() {
-  const [state, setState] = useState({
-    trading: null,
-    gate: null,
-    regime: null,
-    loading: true,
-  });
-
-  const load = async () => {
-    const [trading, gate, regime] = await Promise.all([
-      axios.get(`${API}/admin/trading_status`, { timeout: 5000 }).then(res => res.data).catch(() => null),
-      axios.get(`${API}/execution_gate/overview`, { timeout: 12000 }).then(res => res.data).catch(() => null),
-      axios.get(`${API}/trade_floor/regime`, { timeout: 8000 }).then(res => res.data).catch(() => null),
-    ]);
-    setState({ trading, gate, regime, loading: false });
+  const trading = useDisplayResource(`${API}/admin/trading_status`, 15000);
+  const gate = useDisplayResource(`${API}/execution_gate/overview`, 15000);
+  const regime = useDisplayResource(`${API}/trade_floor/regime`, 15000);
+  return {
+    trading: trading.error ? null : trading.data,
+    gate: gate.error ? null : gate.data,
+    regime: regime.error ? null : regime.data,
+    loading: trading.loading || gate.loading || regime.loading,
+    error: trading.error || gate.error || regime.error,
+    updatedAt: trading.updatedAt && gate.updatedAt && regime.updatedAt ? Math.min(trading.updatedAt, gate.updatedAt, regime.updatedAt) : null,
+    refresh: async () => { await trading.refresh(); await gate.refresh(); await regime.refresh(); },
   };
-
-  useEffect(() => {
-    let cancelled = false;
-    const guardedLoad = async () => {
-      try {
-        await load();
-      } catch {
-        if (!cancelled) setState(prev => ({ ...prev, loading: false }));
-      }
-    };
-    guardedLoad();
-    const id = setInterval(guardedLoad, 15000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  return { ...state, refresh: load };
 }
 
 function ExecutionControlStrip({ safety }) {
@@ -356,13 +287,13 @@ function ExecutionControlStrip({ safety }) {
     : "--";
 
   const halt = async () => {
-    if (!window.confirm("Halt all new paper-trading execution?")) return;
+    if (!window.confirm("Halt new execution for configured live and paper workflows?")) return;
     await axios.post(`${API}/admin/halt`, null, { params: { reason: "operator_shell_halt" } });
     await safety.refresh();
   };
 
   const resume = async () => {
-    if (!window.confirm("Resume paper-trading execution?")) return;
+    if (!window.confirm("Resume execution for configured live and paper workflows?")) return;
     await axios.post(`${API}/admin/resume`, null, { params: { reason: "operator_shell_resume" } });
     await safety.refresh();
   };
@@ -520,10 +451,13 @@ export function CrtShell({ title, children, headerRight = null }) {
   const loc = useLocation();
   const nextMacro = useNextMacroEvent();
   const alerts = useLiveAlertCounts();
-  const newsStrip = useNewsStrip();
   const safety = useSafetyFrame();
   const [isMobile, setIsMobile] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [compactNav, setCompactNav] = useState(() => localStorage.getItem("cc-compact-nav") === "true");
+  const [focusMode, setFocusMode] = useState(() => localStorage.getItem("cc-focus-mode") === "true");
+  const closeSearch = useCallback(() => setSearchOpen(false), []);
   const activeNav = NAV.find(n => loc.pathname === n.to || (n.to !== "/" && loc.pathname.startsWith(n.to))) || NAV.find(n => n.to === "/");
   const market = getMarketStatus();
   useEffect(() => {
@@ -534,16 +468,25 @@ export function CrtShell({ title, children, headerRight = null }) {
   }, []);
   // Close drawer on route change
   useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
+  useEffect(() => {
+    const shortcut = event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setSearchOpen(value => !value); }
+      if (event.key === "Escape") setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, []);
   return (
     <>
       <div className="crt-vignette" />
       <div className="scanline-overlay" />
       <div className="crt-grain" />
-      <div className="terminal-frame" style={{
+      <WorkspaceSearch open={searchOpen} onClose={closeSearch} />
+      <div className={`terminal-frame${focusMode ? " terminal-focus-mode" : ""}${compactNav && !isMobile ? " terminal-compact-nav" : ""}`} style={{
         height: "100vh", overflow: "hidden",
         background: pageBg, color: "#e5e7eb",
         display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "248px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : compactNav ? "72px minmax(0, 1fr)" : "224px minmax(0, 1fr)",
         fontFamily: "JetBrains Mono, Courier New, monospace",
         position: "relative", zIndex: 1,
       }}>
@@ -557,7 +500,7 @@ export function CrtShell({ title, children, headerRight = null }) {
               }} />
         )}
         {/* ── Sidebar ── */}
-        <aside className="terminal-sidebar" style={{
+        <aside className="terminal-sidebar" aria-hidden={isMobile && !drawerOpen ? true : undefined} inert={isMobile && !drawerOpen} style={{
           background: `linear-gradient(180deg, rgba(14,17,24,0.98) 0%, rgba(5,7,11,0.99) 100%)`,
           borderRight: hairline,
           padding: "18px 14px 18px 16px",
@@ -570,6 +513,10 @@ export function CrtShell({ title, children, headerRight = null }) {
           zIndex: 100,
           boxShadow: isMobile && drawerOpen ? "6px 0 30px rgba(0,0,0,0.6)" : "none",
         }}>
+          <div className="workspace-nav-tools">
+            <button type="button" title="Find workspace or company (Ctrl+K)" aria-label="Find workspace or company" onClick={() => setSearchOpen(true)}><Search size={16} /><span>Find workspace</span></button>
+            {!isMobile && <button type="button" title={compactNav ? "Expand navigation" : "Collapse navigation"} aria-label={compactNav ? "Expand navigation" : "Collapse navigation"} onClick={() => setCompactNav(value => { localStorage.setItem("cc-compact-nav", String(!value)); return !value; })}>{compactNav ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>}
+          </div>
           {/* Brand block */}
           <Link to="/" style={{ textDecoration: "none" }}>
             <div className="corner-brackets terminal-brand-card" style={{
@@ -610,8 +557,8 @@ export function CrtShell({ title, children, headerRight = null }) {
             </div>
           </Link>
 
-          {/* Live alerts micro-panel */}
-          <div style={{
+          {/* Discovery counters */}
+          <div className="sidebar-alerts" style={{
             padding: "10px 10px",
             border: hairline,
             background: "rgba(255,255,255,0.012)",
@@ -621,7 +568,7 @@ export function CrtShell({ title, children, headerRight = null }) {
               display: "flex", alignItems: "center", gap: 6, fontWeight: 700,
             }}>
               <span className="dot dot-green pulse-dot" />
-              {"// LIVE ALERTS"}
+              {"// DISCOVERY ALERTS"}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               <AlertChip icon="DH" label="DARK HORSE" count={alerts.dh} color="#fb923c" to="/intel" />
@@ -632,13 +579,13 @@ export function CrtShell({ title, children, headerRight = null }) {
           </div>
 
           {/* Navigation — grouped */}
-          <nav style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <nav aria-label="Workspaces" style={{ display: "flex", flexDirection: "column", gap: 1 }}>
             {["CORE", "TRADE FLOOR", "ANALYSIS", "SYSTEM"].map((group, gi) => {
               const groupItems = NAV.filter(n => n.group === group);
               if (groupItems.length === 0) return null;
               return (
                 <div key={group} style={{ marginBottom: 6 }}>
-                  <div style={{
+                  <div className="nav-group-heading" style={{
                     fontSize: 8, color: dim, letterSpacing: "0.22em",
                     marginBottom: 4, marginTop: gi === 0 ? 0 : 6,
                     paddingLeft: 4, fontWeight: 700,
@@ -653,8 +600,11 @@ export function CrtShell({ title, children, headerRight = null }) {
                     const hue = n.color || accent;
                     return (
                       <Link key={n.to} to={n.to}
+                        title={n.label}
+                        aria-current={isActive ? "page" : undefined}
+                        onFocus={() => prefetchPage(n.to)}
                         data-testid={`nav-${n.label.toLowerCase().replace(' ', '-')}`}
-                        className={`fade-in fade-in-${(gi+i+1) % 5 + 1}`}
+                        className="workspace-nav-link"
                         style={{
                           display: "flex", alignItems: "center", gap: 10,
                           padding: "7px 10px",
@@ -669,6 +619,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                           boxShadow: isActive ? `inset 0 0 14px ${hue}14` : "none",
                         }}
                         onMouseEnter={e => {
+                          prefetchPage(n.to);
                           if (!isActive) {
                             e.currentTarget.style.background = "rgba(255,255,255,0.025)";
                             e.currentTarget.style.color = "#e5e7eb";
@@ -687,7 +638,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                           textShadow: isActive ? `0 0 6px ${hue}` : "none",
                         }}>{isActive ? "▸" : n.icon}</span>
                         <NavLogo item={n} active={isActive} />
-                        <span style={{ flex: 1 }}>{n.label}</span>
+                        <span className="workspace-nav-label" style={{ flex: 1 }}>{n.label}</span>
                         {isActive && <span className="blink" style={{ color: hue, fontSize: 8 }}>●</span>}
                       </Link>
                     );
@@ -698,25 +649,23 @@ export function CrtShell({ title, children, headerRight = null }) {
           </nav>
 
           {/* Status block */}
-          <div style={{ borderTop: hairline, paddingTop: 12 }}>
+          <div className="sidebar-system-health" style={{ borderTop: hairline, paddingTop: 12 }}>
             <div style={{
               fontSize: 8, color: dim, letterSpacing: "0.22em", marginBottom: 6,
               paddingLeft: 4, fontWeight: 700,
             }}>{"// SYSTEM HEALTH"}</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10 }}>
-              <StatusRow label="ENGINE" color="#4ade80" />
-              <StatusRow label="LEARN" color={accent2} />
-              <StatusRow label="BOT" color={accent} />
-              <StatusRow label="FEED" color="#4ade80" />
+              <StatusRow label={safety.error ? "DISPLAY DEGRADED" : safety.loading ? "CONNECTING" : "STATUS LOADED"} color={safety.error ? "#fbbf24" : muted} />
+              <StatusRow label={`GATE: ${safety.gate?.decision || "UNKNOWN"}`} color={["PASS", "ALLOW"].includes(safety.gate?.decision) ? "#4ade80" : muted} />
             </div>
           </div>
 
           {/* Footer */}
-          <div style={{
+          <div className="sidebar-footer" style={{
             marginTop: "auto", fontSize: 8, color: dim, letterSpacing: "0.14em",
             paddingTop: 10, borderTop: hairline,
           }}>
-            <div>BUILD 3.2.0 · STABLE</div>
+            <div>CASE CAPITAL WORKSPACE</div>
             <div style={{ marginTop: 3, color: muted }}>@CaseCapitalTerminalQuant</div>
             <div style={{ marginTop: 6, color: accent2, opacity: 0.6 }}>
               {"// THE MARKET NEVER SLEEPS"}
@@ -728,24 +677,9 @@ export function CrtShell({ title, children, headerRight = null }) {
         <main className="terminal-main" style={{ overflowY: "auto", height: "100vh", display: "flex", flexDirection: "column" }}>
           {/* Sticky system bar */}
           <div className="terminal-sticky-bars" style={{ position: "sticky", top: 0, zIndex: 20 }}>
-            <SystemBar />
+            <SystemBar safety={safety} />
             <ExecutionControlStrip safety={safety} />
-            <GlobalNewsStrip
-              label="ACTIVE"
-              items={newsStrip.active.items}
-              loading={newsStrip.active.loading}
-              cache={newsStrip.active.cache}
-              accentColor={accent2}
-              speed={42}
-            />
-            <GlobalNewsStrip
-              label="DISCOVERY"
-              items={newsStrip.discovery.items}
-              loading={newsStrip.discovery.loading}
-              cache={newsStrip.discovery.cache}
-              accentColor={accent}
-              speed={54}
-            />
+            {!focusMode && <NewsTapes />}
           </div>
 
           {/* Page header */}
@@ -796,6 +730,8 @@ export function CrtShell({ title, children, headerRight = null }) {
               </div>
             </div>
             <div className="terminal-page-actions fade-in fade-in-1" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button type="button" className="workspace-icon-button" title="Find workspace or company (Ctrl+K)" aria-label="Search workspaces" onClick={() => setSearchOpen(true)}><Search size={16} /></button>
+              <button type="button" className="workspace-icon-button" title={focusMode ? "Show news tapes" : "Focus view"} aria-label={focusMode ? "Show news tapes" : "Focus view"} aria-pressed={focusMode} onClick={() => setFocusMode(value => { localStorage.setItem("cc-focus-mode", String(!value)); return !value; })}>{focusMode ? <EyeOff size={16} /> : <Eye size={16} />}</button>
               <button
                 data-testid="global-refresh-tab"
                 title="Refresh this terminal page"
@@ -816,7 +752,6 @@ export function CrtShell({ title, children, headerRight = null }) {
                   fontWeight: 800,
                 }}>
                 <RefreshCw size={13} strokeWidth={2} />
-                REFRESH
               </button>
               {headerRight}
             </div>
@@ -833,7 +768,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           <TabMotionStrip pathname={loc.pathname} title={title} />
 
           {/* Page body */}
-          <div className="terminal-page-body fade-in fade-in-2" style={{ padding: isMobile ? "14px 12px" : "24px 32px 32px", flex: 1 }}>
+          <div className="terminal-page-body" id="workspace-content" style={{ padding: isMobile ? "14px 12px" : "20px 24px 32px", flex: 1, minWidth: 0 }}>
             {children}
           </div>
         </main>
@@ -872,8 +807,8 @@ function MobileCommandDeck({ title, activeNav, market, safety, alerts }) {
       <div className="mobile-command-grid">
         <MobileStatusPill label="Gate" value={gate} color={qcColor} />
         <MobileStatusPill label="Trading" value={trading} color={trading === "LIVE" ? "#4ade80" : trading === "HALT" ? "#f87171" : muted} />
-        <MobileStatusPill label="X-Factors" value={alerts.xf ?? 0} color={accent2} />
-        <MobileStatusPill label="Lottery" value={alerts.lottery_hot ?? 0} color={accent} />
+        <MobileStatusPill label="X-Factors" value={alerts.xf ?? "--"} color={accent2} />
+        <MobileStatusPill label="Lottery" value={alerts.lottery_hot ?? "--"} color={accent} />
       </div>
     </section>
   );
@@ -1237,7 +1172,6 @@ function StatusRow({ label, color }) {
     }}>
       <span className="dot pulse-dot" style={{ background: color, boxShadow: `0 0 6px ${color}66` }} />
       <span style={{ flex: 1 }}>{label}</span>
-      <span style={{ color: muted, fontSize: 8 }}>OK</span>
     </div>
   );
 }
@@ -1274,7 +1208,7 @@ function AlertChip({ icon, label, count, color, to }) {
         color: count > 0 ? color : muted,
         textShadow: count > 0 ? `0 0 6px ${color}80` : "none",
         minWidth: 16, textAlign: "right",
-      }}>{count}</span>
+      }}>{count ?? "--"}</span>
     </Link>
   );
 }

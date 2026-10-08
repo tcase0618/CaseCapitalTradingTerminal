@@ -64,6 +64,8 @@ export default class TerminalErrorBoundary extends React.Component {
 
 const styles = {
   root: {
+    boxSizing: "border-box",
+    width: "100%",
     minHeight: "100vh",
     display: "grid",
     placeItems: "center",
@@ -73,7 +75,10 @@ const styles = {
     padding: 24,
   },
   panel: {
-    width: "min(680px, 94vw)",
+    boxSizing: "border-box",
+    width: "min(680px, 100%)",
+    minWidth: 0,
+    overflowWrap: "anywhere",
     border: `1px solid ${danger}66`,
     background: card,
     boxShadow: "0 24px 90px rgba(0,0,0,0.55)",

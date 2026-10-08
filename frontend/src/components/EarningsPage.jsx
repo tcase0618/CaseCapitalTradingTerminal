@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -19,9 +19,9 @@ const pricingColor = (s) =>
         : muted;
 
 const stratColor = (s) =>
-  s?.includes("CALL") ? "#4ade80"
-    : s?.includes("PUT") ? "#f87171"
-      : s?.includes("WAIT") || s?.includes("NO TRADE") ? muted
+  typeof s !== "string" ? muted : s.includes("CALL") ? "#4ade80"
+    : s.includes("PUT") ? "#f87171"
+      : s.includes("WAIT") || s.includes("NO TRADE") ? muted
         : accent;
 
 const toneColor = (s) =>
@@ -43,50 +43,63 @@ export default function EarningsPage() {
   const [routing, setRouting] = useState(false);
   const [routeStatus, setRouteStatus] = useState("");
   const [lseHealth, setLseHealth] = useState(null);
+  const [error, setError] = useState("");
+  const weekRef = useRef(weekOffset);
+  weekRef.current = weekOffset;
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
-    axios.get(`${API}/v32/earnings_week`, { params: { week_offset: weekOffset } }).then(r => {
+    setData(null);
+    setSelected(null);
+    setError("");
+    setDispatchStatus("");
+    setRouteStatus("");
+    // This GET may persist/enrich snapshots. Keep the existing week-change cadence.
+    axios.get(`${API}/v32/earnings_week`, { params: { week_offset: weekOffset }, signal: controller.signal }).then(r => {
       if (!cancelled) {
-        setData(r.data);
+        if (!r.data || typeof r.data !== "object" || Array.isArray(r.data)) setError("Earnings response unavailable.");
+        else setData(r.data);
         setLoading(false);
       }
     }).catch(() => {
-      if (!cancelled) setLoading(false);
+      if (!cancelled) { setLoading(false); setError("Earnings unavailable for the selected week."); }
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [weekOffset]);
 
   useEffect(() => {
     let cancelled = false;
-    axios.get(`${API}/data/lse/health`).then(r => {
+    const controller = new AbortController();
+    axios.get(`${API}/data/lse/health`, { signal: controller.signal }).then(r => {
       if (!cancelled) setLseHealth(r.data);
     }).catch(() => {
-      if (!cancelled) setLseHealth({ ok: false });
+      if (!cancelled) setLseHealth({ unavailable: true });
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, []);
 
-  const byDay = useMemo(() => data?.by_day || {}, [data]);
+  const byDay = useMemo(() => Object.fromEntries(DAYS.map(day => [day, objectRows(data?.by_day?.[day])])), [data]);
   const allRows = useMemo(() => Object.values(byDay).flat(), [byDay]);
-  const total = data?.total || 0;
+  const total = validNumber(data?.total) ? Number(data.total) : null;
+  const incomplete = data != null && (!data.by_day || typeof data.by_day !== "object" || Array.isArray(data.by_day) || DAYS.some(day => data.by_day[day] != null && (!Array.isArray(data.by_day[day]) || objectRows(data.by_day[day]).length !== data.by_day[day].length)) || !validNumber(data.total) || !Array.isArray(data.earnings_divergences) || objectRows(data.earnings_divergences).length !== data.earnings_divergences.length);
   const sourceCounts = data?.calendar_source_counts || {};
   const sourceSummary = Object.entries(sourceCounts)
     .filter(([, count]) => Number(count) > 0)
     .map(([source, count]) => `${shortSource(source)} ${count}`)
     .join(" | ");
-  const sourceSummaryWithLse = [lseHealth?.ok ? "LSE LIVE" : "LSE DEGRADED", sourceSummary].filter(Boolean).join(" | ");
+  const sourceSummaryWithLse = [lseHealth?.ok === true ? "LSE LIVE" : lseHealth?.ok === false ? "LSE DEGRADED" : "LSE UNVERIFIED", sourceSummary].filter(Boolean).join(" | ");
   const tradeable = allRows.filter(r => r.earnings_setup_rating === "TRADEABLE").length;
   const avoid = allRows.filter(r => r.earnings_setup_rating === "AVOID").length;
   const underpriced = allRows.filter(r => r.options_pricing_signal === "OPTIONS UNDERPRICED").length;
   const caseMatches = allRows.filter(r => r.axiom_match).length;
-  const divergences = data?.earnings_divergences || [];
+  const divergences = objectRows(data?.earnings_divergences);
   const topSetups = [...allRows]
     .sort((a, b) => (b.earnings_setup_score || 0) - (a.earnings_setup_score || 0))
     .slice(0, 5);
   const avoidZone = allRows
-    .filter(r => (r.avoid_flags || []).length || r.earnings_setup_rating === "AVOID")
+    .filter(r => textRows(r.avoid_flags).length || r.earnings_setup_rating === "AVOID")
     .sort((a, b) => (a.earnings_setup_score || 0) - (b.earnings_setup_score || 0))
     .slice(0, 6);
   const postPrint = allRows
@@ -97,9 +110,9 @@ export default function EarningsPage() {
     setDispatchStatus("");
     try {
       const res = await axios.post(`${API}/v32/earnings_divergences/dispatch`, null, { params: { week_offset: weekOffset } });
-      setDispatchStatus(res.data?.ok ? `SENT ${res.data.divergence_count || 0}` : "SEND FAILED");
+      if (weekRef.current === weekOffset) setDispatchStatus(res.data?.ok ? `SENT ${res.data.divergence_count ?? "-"}` : "SEND FAILED");
     } catch {
-      setDispatchStatus("SEND FAILED");
+      if (weekRef.current === weekOffset) setDispatchStatus("SEND FAILED");
     } finally {
       setDispatching(false);
     }
@@ -110,9 +123,9 @@ export default function EarningsPage() {
     setRouteStatus("");
     try {
       const res = await axios.post(`${API}/v32/earnings_pm/route`, null, { params: { week_offset: weekOffset, min_score: 58 } });
-      setRouteStatus(res.data?.ok ? `PM ROUTED ${res.data.routed || 0}` : "PM ROUTE FAILED");
+      if (weekRef.current === weekOffset) setRouteStatus(res.data?.ok ? `PM ROUTED ${res.data.routed ?? "-"}` : "PM ROUTE FAILED");
     } catch {
-      setRouteStatus("PM ROUTE FAILED");
+      if (weekRef.current === weekOffset) setRouteStatus("PM ROUTE FAILED");
     } finally {
       setRouting(false);
     }
@@ -121,6 +134,8 @@ export default function EarningsPage() {
   return (
     <CrtShell title="EARNINGS WAR ROOM">
       <div className="earnings-war-room">
+      <style>{`.earnings-war-room button { overflow-wrap: anywhere; } .earnings-battle-panel { overflow-wrap: anywhere; } @media (max-width: 600px) { .earnings-battle-panel > div { grid-template-columns: minmax(0, 1fr) !important; } }`}</style>
+      {(error || incomplete || data?.refresh_error) && <div role="alert" style={{ color: "#fbbf24", marginBottom: 12 }}>{error || data?.refresh_error || "Earnings response is incomplete; only available rows are shown."}</div>}
       <div style={weekNav}>
         <button style={weekButton} onClick={() => setWeekOffset(v => v - 1)}>{"<"} PRIOR WEEK</button>
         <div style={{ textAlign: "center" }}>
@@ -129,7 +144,7 @@ export default function EarningsPage() {
             {data?.week_of || "-"} TO {data?.week_end || "-"}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={weekButton} onClick={routeToPm} disabled={routing}>
             {routing ? "ROUTING..." : "ROUTE TO PM"}
           </button>
@@ -139,19 +154,19 @@ export default function EarningsPage() {
       </div>
 
       <div className="earnings-stat-strip" style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="WEEK OF" value={data?.week_of?.slice(5) || "-"} sub={data?.week_end?.slice(5) || ""} accentBar />
-        <Stat label="ENRICHED PRINTS" value={total} sub={data?.calendar_limited ? `${data.raw_calendar_total} RAW` : "FULL BOARD"} color={accent} />
-        <Stat label="TRADEABLE" value={tradeable} color="#4ade80" />
-        <Stat label="AVOID ZONE" value={avoid} color="#f87171" />
-        <Stat label="UNDERPRICED IV" value={underpriced} color={accent2} />
-        <Stat label="CASE MATCHES" value={caseMatches} color={accent2} />
-        <Stat label="DIVERGENCES" value={data?.earnings_divergence_count || 0} color="#fb923c" />
+        <Stat label="WEEK OF" value={typeof data?.week_of === "string" ? data.week_of.slice(5) : "-"} sub={typeof data?.week_end === "string" ? data.week_end.slice(5) : ""} accentBar />
+        <Stat label="ENRICHED PRINTS" value={total ?? "-"} sub={data?.calendar_limited ? `${data.raw_calendar_total ?? "-"} RAW` : data ? "REPORTED BOARD" : "PENDING"} color={accent} />
+        <Stat label="TRADEABLE" value={data ? tradeable : "-"} color="#4ade80" />
+        <Stat label="AVOID ZONE" value={data ? avoid : "-"} color="#f87171" />
+        <Stat label="UNDERPRICED IV" value={data ? underpriced : "-"} color={accent2} />
+        <Stat label="CASE MATCHES" value={data ? caseMatches : "-"} color={accent2} />
+        <Stat label="DIVERGENCES" value={validNumber(data?.earnings_divergence_count) ? data.earnings_divergence_count : "-"} color="#fb923c" />
       </div>
 
       <div style={sourceStrip}>
         <span>SOURCES: {sourceSummaryWithLse || "NO LIVE SOURCE ROWS"}</span>
         <span>CACHE: {data?.cache_status || "PENDING"}{data?.cache_age_minutes != null ? ` | ${data.cache_age_minutes}M OLD` : ""}</span>
-        <span>PM: {routeStatus || "ADVISORY READY"}</span>
+        <span>PM: {routeStatus || "NOT ROUTED"}</span>
       </div>
 
       {loading && (
@@ -160,12 +175,12 @@ export default function EarningsPage() {
         </div>
       )}
 
-      {!loading && total === 0 && (
+      {!loading && !error && !incomplete && !data?.refresh_error && total === 0 && (
         <Card title="NO EARNINGS THIS WEEK">
           <div style={{ color: muted, padding: 20 }}>
             No reporting tickers found for the current Monday-Friday window.
             <div style={{ marginTop: 12, color: dim, fontSize: 12 }}>
-              Source checks: {sourceSummary || "Yahoo/Nasdaq/Alpha Vantage returned no rows for this week."}
+              Source checks: {sourceSummary || "No source counts reported."}
             </div>
           </div>
         </Card>
@@ -186,7 +201,7 @@ export default function EarningsPage() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", marginTop: 8 }}>
                   <div>
                     <div style={{ color: accent, fontSize: 28, fontWeight: 900 }}>${r.ticker}</div>
-                    <div style={{ color: muted, fontSize: 10 }}>{(r.sector || "-").slice(0, 26)}</div>
+                    <div style={{ color: muted, fontSize: 10 }}>{typeof r.sector === "string" ? r.sector.slice(0, 26) : "-"}</div>
                   </div>
                   <div style={{ color: ratingColor(r.earnings_setup_rating), fontSize: 32, fontWeight: 900 }}>
                     {fmt0(r.earnings_setup_score)}
@@ -213,7 +228,7 @@ export default function EarningsPage() {
               <div style={{ color: dim, fontSize: 10, letterSpacing: "0.16em", marginBottom: 8 }}>
                 {day} | {rows.length} REPORTING
               </div>
-              <div className="earnings-table-wrap" style={{ width: "100%" }}>
+              <div className="earnings-table-wrap" style={{ width: "100%", overflowX: "auto" }}>
                 <table className="earnings-table" style={earningsTable}>
                   <thead>
                     <tr style={{ color: dim, letterSpacing: "0.08em", textAlign: "left" }}>
@@ -275,7 +290,7 @@ export default function EarningsPage() {
             </div>
             {dispatchStatus && <div style={{ color: dispatchStatus.includes("FAILED") ? "#f87171" : "#4ade80", fontSize: 11, marginBottom: 8 }}>{dispatchStatus}</div>}
             {divergences.length === 0 ? (
-              <div style={{ color: muted, fontSize: 13 }}>No active divergences in this selected week.</div>
+              <div style={{ color: muted, fontSize: 13 }}>{!Array.isArray(data?.earnings_divergences) || loading || error ? "Divergence data unavailable." : "No active divergences in this selected week."}</div>
             ) : divergences.map(r => {
               const div = r.earnings_divergence || {};
               return (
@@ -299,12 +314,12 @@ export default function EarningsPage() {
 
           <Card title="AVOID ZONE">
             {avoidZone.length === 0 ? (
-              <div style={{ color: muted, fontSize: 13 }}>No hard avoid flags in the current week.</div>
+              <div style={{ color: muted, fontSize: 13 }}>{!data || incomplete ? "Avoid flags unavailable." : "No hard avoid flags in the current week."}</div>
             ) : avoidZone.map(r => (
               <button key={`${r.ticker}-avoid`} onClick={() => setSelected(r)} style={sideRow}>
                 <div>
                   <div style={{ color: accent, fontWeight: 900 }}>${r.ticker}</div>
-                  <div style={{ color: muted, fontSize: 11 }}>{(r.avoid_flags || ["Low setup score"])[0]}</div>
+                  <div style={{ color: muted, fontSize: 11 }}>{textRows(r.avoid_flags)[0] || "No flag detail reported"}</div>
                 </div>
                 <div style={{ color: ratingColor(r.earnings_setup_rating), fontWeight: 900 }}>{fmt0(r.earnings_setup_score)}</div>
               </button>
@@ -314,7 +329,7 @@ export default function EarningsPage() {
           <Card title="POST-EARNINGS TRACKER">
             {postPrint.length === 0 ? (
               <div style={{ color: muted, fontSize: 13 }}>
-                No completed earnings events in this selected week yet. Flip to a prior week once earnings season is underway.
+                {data && !incomplete ? "No past-dated earnings events in this selected week." : "Post-earnings data unavailable."}
               </div>
             ) : postPrint.map(r => (
               <button key={`${r.ticker}-post`} onClick={() => setSelected(r)} style={postRow}>
@@ -353,12 +368,32 @@ function shortSource(source) {
 }
 
 function BattleCard({ row, onClose }) {
+  const panelRef = useRef(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const previous = document.activeElement;
+    const panel = panelRef.current;
+    panel?.focus();
+    const onKey = e => {
+      if (e.key === "Escape") { e.preventDefault(); closeRef.current(); }
+      if (e.key === "Tab") {
+        const buttons = panel?.querySelectorAll("button, a[href], [tabindex='0']");
+        const first = buttons?.[0];
+        const last = buttons?.[buttons.length - 1];
+        if (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) { e.preventDefault(); last?.focus(); }
+        else if (!e.shiftKey && (document.activeElement === last || document.activeElement === panel)) { e.preventDefault(); first?.focus(); }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("keydown", onKey); previous?.focus(); };
+  }, []);
   const card = row.battle_card || {};
   const synopsis = card.earnings_call_synopsis || {};
   const divergence = row.earnings_divergence || card.divergence || {};
   return (
     <div className="earnings-battle-overlay" style={modalOverlay} onClick={onClose}>
-      <div className="earnings-battle-panel" style={modalPanel} onClick={(e) => e.stopPropagation()}>
+      <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`Earnings battle card ${row.ticker || ""}`} className="earnings-battle-panel" style={modalPanel} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start" }}>
           <div>
             <div style={{ color: dim, fontSize: 11, letterSpacing: "0.16em" }}>
@@ -378,8 +413,8 @@ function BattleCard({ row, onClose }) {
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 18 }}>
-          <Panel title="BULL CASE" items={card.bull_case || []} color="#4ade80" />
-          <Panel title="BEAR CASE" items={card.bear_case || []} color="#f87171" />
+          <Panel title="BULL CASE" items={textRows(card.bull_case)} color="#4ade80" />
+          <Panel title="BEAR CASE" items={textRows(card.bear_case)} color="#f87171" />
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 18 }}>
@@ -407,16 +442,16 @@ function BattleCard({ row, onClose }) {
         {divergence?.label && (
           <div style={{ marginTop: 18 }}>
             <InfoBlock
-              title={`DIVERGENCE RADAR | ${divergence.severity || "LOW"}`}
+              title={`DIVERGENCE RADAR | ${divergence.severity || "UNKNOWN"}`}
               text={`${divergence.label}: ${divergence.read || ""}`}
               sub={divergence.action}
             />
           </div>
         )}
 
-        {(row.avoid_flags || []).length > 0 && (
+        {textRows(row.avoid_flags).length > 0 && (
           <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {row.avoid_flags.map(flag => (
+            {textRows(row.avoid_flags).map(flag => (
               <span key={flag} style={flagPill}>{flag}</span>
             ))}
           </div>
@@ -430,7 +465,8 @@ function Panel({ title, items, color }) {
   return (
     <div style={{ border: `0.5px solid ${color}55`, padding: 12, background: "rgba(255,255,255,0.025)" }}>
       <div style={{ color, fontSize: 11, fontWeight: 900, letterSpacing: "0.14em", marginBottom: 8 }}>{title}</div>
-      {(items || []).map(item => (
+      {!items.length && <div style={{ color: muted, fontSize: 12 }}>No case details reported.</div>}
+      {textRows(items).map(item => (
         <div key={item} style={{ color: labelLight, fontSize: 12, lineHeight: 1.6, marginBottom: 6 }}>{item}</div>
       ))}
     </div>
@@ -449,7 +485,7 @@ function InfoBlock({ title, text, sub }) {
 
 function MiniMetric({ label, value, color = labelLight }) {
   return (
-    <div style={{ border: hairline, padding: "8px 9px", minHeight: 50, background: "rgba(255,255,255,0.025)" }}>
+    <div style={{ border: hairline, padding: "8px 9px", minHeight: 50, minWidth: 0, overflowWrap: "anywhere", background: "rgba(255,255,255,0.025)" }}>
       <div style={{ color: dim, fontSize: 9, letterSpacing: "0.12em" }}>{label}</div>
       <div style={{ color, fontSize: 15, fontWeight: 900, marginTop: 5, lineHeight: 1.2 }}>{value == null ? "-" : value}</div>
     </div>
@@ -477,6 +513,7 @@ const td = {
 };
 const earningsTable = {
   width: "100%",
+  minWidth: 720,
   tableLayout: "fixed",
   borderCollapse: "collapse",
   fontSize: 11,
@@ -539,7 +576,7 @@ const telegramButton = {
 };
 const belowBoardGrid = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))",
   gap: 20,
   alignItems: "start",
 };
@@ -615,17 +652,20 @@ const flagPill = {
 };
 
 function fmt0(v) {
+  if (!validNumber(v)) return "-";
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(0) : "-";
 }
 
 function pct(v) {
+  if (!validNumber(v)) return "-";
   const n = Number(v);
   if (!Number.isFinite(n)) return "-";
   return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
 }
 
 function pctColor(v) {
+  if (!validNumber(v)) return muted;
   const n = Number(v);
   if (!Number.isFinite(n)) return muted;
   return n >= 0 ? "#4ade80" : "#f87171";
@@ -654,7 +694,7 @@ function shortIv(s) {
 }
 
 function shortStrategy(s) {
-  if (!s) return "-";
+  if (typeof s !== "string" || !s) return "-";
   if (s.includes("LONG CALL")) return "LONG CALL";
   if (s.includes("CALL DEBIT")) return "CALL SPRD";
   if (s.includes("PUT DEBIT")) return "PUT SPRD";
@@ -671,3 +711,7 @@ function isPastDate(iso) {
   const d = new Date(`${iso}T00:00:00`);
   return d < today;
 }
+
+function objectRows(value) { return Array.isArray(value) ? value.filter(row => row && typeof row === "object" && !Array.isArray(row)) : []; }
+function textRows(value) { return Array.isArray(value) ? value.filter(item => typeof item === "string") : []; }
+function validNumber(value) { return (typeof value === "number" || (typeof value === "string" && value.trim() !== "")) && Number.isFinite(Number(value)); }

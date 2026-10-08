@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
+import { displayResource } from "../hooks/useDisplayResource";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
 
@@ -33,20 +34,26 @@ function cleanTicker(ticker) {
 }
 
 function asArray(payload, key) {
-  if (Array.isArray(payload)) return payload;
-  if (payload && Array.isArray(payload[key])) return payload[key];
+  if (Array.isArray(payload)) return payload.filter(item => item != null);
+  if (payload && Array.isArray(payload[key])) return payload[key].filter(item => item != null);
   return [];
 }
 
+const finite = value => value == null || typeof value === "boolean" || String(value).trim() === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+const feedCount = (payload, key) => Array.isArray(payload) ? asArray(payload).length : Array.isArray(payload?.[key]) ? asArray(payload, key).length : null;
+
+// Only inspected DB/catalog reads are cached. No polling of plan/provider GETs.
+const sharedFeeds = new Set(["conviction", "darkHorse", "xFactor", "discoveries", "scan", "sec", "freeCatalog"]);
+
 function num(value, digits = 0) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "-";
+  const n = finite(value);
+  if (n == null) return "-";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
 function money(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "-";
+  const n = finite(value);
+  if (n == null) return "-";
   if (Math.abs(n) >= 1000000000) return `$${(n / 1000000000).toFixed(1)}B`;
   if (Math.abs(n) >= 1000000) return `$${(n / 1000000).toFixed(1)}M`;
   if (Math.abs(n) >= 1000) return `$${(n / 1000).toFixed(1)}K`;
@@ -61,8 +68,8 @@ function shortDate(value) {
 }
 
 function percent(value, digits = 1) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "-";
+  const n = finite(value);
+  if (n == null) return "-";
   return `${n.toFixed(digits)}%`;
 }
 
@@ -111,7 +118,7 @@ function addUnique(list, value) {
 function scoreRow(row) {
   let score = 0;
   row.sourceSet.forEach(source => { score += SOURCE_WEIGHTS[source] || 5; });
-  if (row.pmScore != null) score += Math.min(18, Number(row.pmScore) / 5);
+  if (finite(row.pmScore) != null) score += Math.min(18, finite(row.pmScore) / 5);
   if (row.tradeFloor) score += 12;
   if (row.signals.length >= 4) score += 8;
   if (row.catalysts.length >= 2) score += 7;
@@ -150,11 +157,20 @@ export default function IntelPage() {
   const [loading, setLoading] = useState(true);
   const [lane, setLane] = useState("all");
   const [lanesOpen, setLanesOpen] = useState(false);
+  const [laneLimit, setLaneLimit] = useState(24);
   const [selected, setSelected] = useState(null);
   const [watching, setWatching] = useState(null);
   const [lastError, setLastError] = useState("");
+  const [failedFeeds, setFailedFeeds] = useState([]);
+  const mounted = useRef(false);
+  const refreshController = useRef(null);
+  const refreshing = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
+    if (refreshing.current && !refreshController.current?.signal.aborted) return;
+    refreshing.current = true;
+    const controller = new AbortController();
+    refreshController.current = controller;
     setLoading(true);
     setLastError("");
     const endpoints = {
@@ -178,7 +194,17 @@ export default function IntelPage() {
     };
 
     const entries = await Promise.allSettled(
-      Object.entries(endpoints).map(async ([key, path]) => [key, (await axios.get(`${API}${path}`)).data])
+      Object.entries(endpoints).map(async ([key, path]) => {
+        try {
+          if (!sharedFeeds.has(key)) return [key, (await axios.get(`${API}${path}`, { timeout: 15000, signal: controller.signal })).data];
+          const resource = displayResource(`${API}${path}`, 60000);
+          const cached = resource.getSnapshot();
+          if (force || cached.updatedAt == null || Date.now() - cached.updatedAt >= 60000) await resource.refresh(force);
+          const state = resource.getSnapshot();
+          if (state.error) throw state.error;
+          return [key, state.data];
+        } catch (error) { throw { key, error }; }
+      })
     );
 
     const next = {};
@@ -187,16 +213,29 @@ export default function IntelPage() {
       if (result.status === "fulfilled") {
         next[result.value[0]] = result.value[1];
       } else {
-        failed.push(result.reason?.config?.url || "endpoint");
+        failed.push(result.reason?.key || "endpoint");
       }
     });
 
-    if (failed.length) setLastError(`${failed.length} intel feeds degraded`);
-    setPayloads(next);
+    if (refreshController.current === controller) refreshing.current = false;
+    if (!mounted.current || controller.signal.aborted) return;
+    if (failed.length) setLastError(`${failed.length} intel feeds degraded; retained values may be stale`);
+    setFailedFeeds(failed);
+    setPayloads(previous => ({ ...previous, ...next }));
     setLoading(false);
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    mounted.current = true;
+    const initialRead = () => {
+      if (document.visibilityState === "hidden") return;
+      document.removeEventListener("visibilitychange", initialRead);
+      refresh();
+    };
+    initialRead();
+    if (document.visibilityState === "hidden") document.addEventListener("visibilitychange", initialRead);
+    return () => { mounted.current = false; refreshController.current?.abort(); document.removeEventListener("visibilitychange", initialRead); };
+  }, [refresh]);
 
   const intel = useMemo(() => {
     const data = payloads || {};
@@ -211,7 +250,7 @@ export default function IntelPage() {
       row.sector = item.sector || row.sector;
       row.thesis = item.thesis || row.thesis;
       row.updatedAt = data.scan?.finished_at || data.scan?.created_at || row.updatedAt;
-      (item.signals || []).forEach(signal => addUnique(row.signals, signal));
+      asArray(item.signals).forEach(signal => addUnique(row.signals, signal));
       if (item.catalyst_date) addUnique(row.catalysts, `Catalyst ${item.catalyst_date}`);
       if (item.targets?.upside_blended != null) addUnique(row.reasons, `${percent(item.targets.upside_blended)} blended upside`);
       if (item.options?.strategy_name) addUnique(row.reasons, item.options.strategy_name);
@@ -224,7 +263,7 @@ export default function IntelPage() {
       addSource(row, "CONVICTION", `conviction ${item.conviction_score ?? "-"}`);
       row.price = item.price ?? row.price;
       row.thesis = item.thesis || row.thesis;
-      (item.components || []).forEach(component => addUnique(row.signals, component));
+      asArray(item.components).forEach(component => addUnique(row.signals, component));
       if (item.narrative_lock) addUnique(row.catalysts, "Narrative lock");
     });
 
@@ -259,8 +298,8 @@ export default function IntelPage() {
     asArray(data.discoveries, "discoveries").forEach(item => {
       const row = ensure(map, item.ticker);
       if (!row) return;
-      addSource(row, "DISCOVERY", (item.sources || []).join(", ") || "outside universe");
-      addUnique(row.catalysts, `Discovered via ${(item.sources || ["feed"]).join(", ")}`);
+      addSource(row, "DISCOVERY", asArray(item.sources).join(", ") || "outside universe");
+      addUnique(row.catalysts, `Discovered via ${asArray(item.sources).join(", ") || "feed"}`);
       row.updatedAt = item.discovered_at || item.created_at || row.updatedAt;
     });
 
@@ -294,9 +333,9 @@ export default function IntelPage() {
       row.rr = item.risk_reward ?? row.rr;
       row.price = item.price ?? row.price;
       row.sector = item.sector || row.sector;
-      (item.signals || []).forEach(signal => addUnique(row.signals, signal));
-      (item.reasons || []).forEach(reason => addUnique(row.reasons, reason));
-      (item.cautions || []).forEach(caution => addUnique(row.cautions, caution));
+      asArray(item.signals).forEach(signal => addUnique(row.signals, signal));
+      asArray(item.reasons).forEach(reason => addUnique(row.reasons, reason));
+      asArray(item.cautions).forEach(caution => addUnique(row.cautions, caution));
     });
 
     asArray(data.tradeFloor, "db_positions").forEach(item => {
@@ -334,6 +373,7 @@ export default function IntelPage() {
   }, [intel, lane]);
 
   const top = intel[0] || null;
+  const fusionLoaded = [[payloads?.scan, "results"], [payloads?.pm, "recommendations"], [payloads?.tradeFloor, "db_positions"], [payloads?.conviction, "top3"], [payloads?.darkHorse, "alerts"], [payloads?.xFactor, "alerts"], [payloads?.discoveries, "discoveries"], [payloads?.sec, "filings"], [payloads?.contracts, "contracts"]].some(([payload, key]) => feedCount(payload, key) != null);
   const macroEvents = asArray(payloads?.macro, "events");
   const imminent = asArray(payloads?.macro, "imminent_warnings");
   const pmSummary = payloads?.pm?.summary || {};
@@ -341,11 +381,12 @@ export default function IntelPage() {
   const activePositions = asArray(payloads?.tradeFloor, "db_positions");
   const xFactorTape = asArray(payloads?.xFactor, "alerts");
   const xDiscoveries = asArray(payloads?.discoveries, "discoveries");
-  const darkPoolTape = asArray(payloads?.darkHorse, "alerts")
+  const { darkPoolTape, darkPoolSummary } = useMemo(() => {
+    const tape = asArray(payloads?.darkHorse, "alerts")
     .map(item => ({
       ...item,
       ticker: cleanTicker(item.ticker),
-      notional_proxy: Number(item.block_volume || 0) * Number(item.close || item.price || 0),
+      notional_proxy: finite(item.block_volume) != null && finite(item.close ?? item.price) != null ? finite(item.block_volume) * finite(item.close ?? item.price) : null,
     }))
     .filter(item => item.ticker)
     .sort((a, b) =>
@@ -353,36 +394,36 @@ export default function IntelPage() {
       || Number(b.off_exchange_pct || 0) - Number(a.off_exchange_pct || 0)
       || Number(b.notional_proxy || 0) - Number(a.notional_proxy || 0)
     );
-  const darkPoolSummary = {
-    prints: darkPoolTape.length,
-    totalVolume: darkPoolTape.reduce((sum, item) => sum + Number(item.block_volume || 0), 0),
-    totalNotional: darkPoolTape.reduce((sum, item) => sum + Number(item.notional_proxy || 0), 0),
-    maxAdv: Math.max(0, ...darkPoolTape.map(item => Number(item.block_pct_of_adv || 0))),
-    avgOffExchange: darkPoolTape.length
-      ? darkPoolTape.reduce((sum, item) => sum + Number(item.off_exchange_pct || 0), 0) / darkPoolTape.length
-      : 0,
-  };
+    const total = key => feedCount(payloads?.darkHorse, "alerts") == null || tape.some(item => finite(item[key]) == null) ? null : tape.reduce((sum, item) => sum + finite(item[key]), 0);
+    return { darkPoolTape: tape, darkPoolSummary: {
+      prints: feedCount(payloads?.darkHorse, "alerts") == null ? null : tape.length,
+      totalVolume: total("block_volume"),
+      totalNotional: total("notional_proxy"),
+      maxAdv: !tape.length || tape.some(item => finite(item.block_pct_of_adv) == null) ? null : Math.max(...tape.map(item => finite(item.block_pct_of_adv))),
+      avgOffExchange: tape.length && total("off_exchange_pct") != null ? total("off_exchange_pct") / tape.length : null,
+    } };
+  }, [payloads?.darkHorse]);
   const newsIntel = payloads?.newsIntel || {};
-  const newsTape = asArray(newsIntel, "articles").sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  const newsTape = useMemo(() => asArray(payloads?.newsIntel, "articles").sort((a, b) => (finite(b.score) ?? -Infinity) - (finite(a.score) ?? -Infinity)), [payloads?.newsIntel]);
   const georiskEvents = asArray(payloads?.georisk, "events");
   const freeSources = asArray(payloads?.freeCatalog, "sources");
   const macroSeries = [
-    { key: "VIX", label: "VOL", source: payloads?.fredVix, risk: Number(payloads?.fredVix?.value) >= 20 },
-    { key: "10Y", label: "RATES", source: payloads?.fredTenYear, risk: Number(payloads?.fredTenYear?.value) >= 4.75 },
-    { key: "HY", label: "CREDIT", source: payloads?.fredHighYield, risk: Number(payloads?.fredHighYield?.value) >= 3.5 },
+    { key: "VIX", label: "VOL", source: payloads?.fredVix, risk: finite(payloads?.fredVix?.value) == null ? null : Number(payloads.fredVix.value) >= 20 },
+    { key: "10Y", label: "RATES", source: payloads?.fredTenYear, risk: finite(payloads?.fredTenYear?.value) == null ? null : Number(payloads.fredTenYear.value) >= 4.75 },
+    { key: "HY", label: "CREDIT", source: payloads?.fredHighYield, risk: finite(payloads?.fredHighYield?.value) == null ? null : Number(payloads.fredHighYield.value) >= 3.5 },
   ];
   const sourceCoverage = [
-    { label: "Scanner", ok: Boolean(payloads?.scan), count: payloads?.scan?.results?.length || 0 },
-    { label: "PM", ok: Boolean(payloads?.pm), count: payloads?.pm?.recommendations?.length || 0 },
-    { label: "Trade Floor", ok: Boolean(payloads?.tradeFloor), count: activePositions.length },
-    { label: "SEC", ok: Boolean(payloads?.sec), count: payloads?.sec?.filings?.length || 0 },
-    { label: "Contracts", ok: Boolean(payloads?.contracts), count: payloads?.contracts?.contracts?.length || 0 },
-    { label: "X Factor", ok: Boolean(payloads?.xFactor), count: xFactorTape.length },
-    { label: "GeoRisk", ok: Boolean(payloads?.georisk), count: georiskEvents.length },
-    { label: "Newswire", ok: Boolean(newsIntel?.ok), count: newsTape.length },
-    { label: "LSE", ok: Boolean(payloads?.lseMacro?.provider), count: (payloads?.lseMacro?.economic_calendar || []).length + (payloads?.lseMacro?.bond_yields || []).length },
-    { label: "FRED", ok: macroSeries.some(item => item.source?.ok), count: macroSeries.filter(item => item.source?.ok).length },
-  ];
+    { key: "scan", label: "Scanner", count: feedCount(payloads?.scan, "results") },
+    { key: "pm", label: "PM", count: feedCount(payloads?.pm, "recommendations") },
+    { key: "tradeFloor", label: "Trade Floor", count: feedCount(payloads?.tradeFloor, "db_positions") },
+    { key: "sec", label: "SEC", count: feedCount(payloads?.sec, "filings") },
+    { key: "contracts", label: "Contracts", count: feedCount(payloads?.contracts, "contracts") },
+    { key: "xFactor", label: "X Factor", count: feedCount(payloads?.xFactor, "alerts") },
+    { key: "georisk", label: "GeoRisk", count: feedCount(payloads?.georisk, "events") },
+    { key: "newsIntel", label: "Newswire", count: feedCount(payloads?.newsIntel, "articles") },
+    { key: "lseMacro", label: "LSE", count: Array.isArray(payloads?.lseMacro?.economic_calendar) && Array.isArray(payloads?.lseMacro?.bond_yields) ? asArray(payloads.lseMacro.economic_calendar).length + asArray(payloads.lseMacro.bond_yields).length : null },
+    { key: "fred", label: "FRED", count: macroSeries.some(item => item.source) ? macroSeries.filter(item => item.source?.ok && finite(item.source.value) != null).length : null },
+  ].map(source => ({ ...source, ok: source.count != null && !failedFeeds.includes(source.key), stale: failedFeeds.includes(source.key) }));
   const criticalGeo = georiskEvents.filter(event => ["CRITICAL", "HIGH"].includes(event.severity)).slice(0, 6);
   const freeConfigured = freeSources.filter(source => source.configured).length;
   const freeApiNeeded = freeSources.filter(source => !source.configured && String(source.cost || "").toLowerCase().includes("key"));
@@ -412,22 +453,23 @@ export default function IntelPage() {
     <CrtShell
       title="INTEL FEED"
       headerRight={
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", minWidth: 0 }}>
           {lastError && <span style={pill("#fb923c")}>{lastError}</span>}
-          <button onClick={refresh} disabled={loading} style={buttonStyle(accent)}>
+          <button onClick={() => refresh(true)} disabled={loading} aria-busy={loading} style={buttonStyle(accent)}>
             {loading ? "SYNCING" : "REFRESH"}
           </button>
         </div>
       }
     >
+      <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
-        <Stat label="STACKED NAMES" value={intel.length} sub="UNIFIED FEED" color={accent} accentBar />
-        <Stat label="ACT NOW" value={intel.filter(row => row.lane === "ACT NOW").length} sub="PM OR LIVE" color="#4ade80" />
-        <Stat label="PM ALIGNED" value={intel.filter(row => row.sourceSet.has("PM")).length} sub={pmSummary.mode || "AUTO"} color={accent2} />
-        <Stat label="TRADE FLOOR" value={activePositions.length} sub="ACTIVE POSITIONS" color="#a78bfa" />
-        <Stat label="CATALYSTS" value={catalystTape.length} sub="SEC / CONTRACT / TAPE" color="#fb923c" />
-        <Stat label="DARK POOL" value={darkPoolSummary.prints} sub="FINRA PROXY PRINTS" color={darkPoolSummary.prints ? "#f59e0b" : muted} />
-        <Stat label="MACRO WARNINGS" value={imminent.length} sub="<48H" color={imminent.length ? "#f87171" : muted} />
+        <Stat label="STACKED NAMES" value={fusionLoaded ? intel.length : "-"} sub="UNIFIED FEED" color={accent} accentBar />
+        <Stat label="ACT NOW" value={fusionLoaded ? intel.filter(row => row.lane === "ACT NOW").length : "-"} sub="PM OR LIVE" color="#4ade80" />
+        <Stat label="PM ALIGNED" value={feedCount(payloads?.pm, "recommendations") == null ? "-" : intel.filter(row => row.sourceSet.has("PM")).length} sub={pmSummary.mode || "UNKNOWN"} color={accent2} />
+        <Stat label="TRADE FLOOR" value={feedCount(payloads?.tradeFloor, "db_positions") ?? "-"} sub="ACTIVE POSITIONS" color="#a78bfa" />
+        <Stat label="CATALYSTS" value={fusionLoaded ? catalystTape.length : "-"} sub="SEC / CONTRACT / TAPE" color="#fb923c" />
+        <Stat label="DARK POOL" value={darkPoolSummary.prints ?? "-"} sub="FINRA PROXY PRINTS" color={darkPoolSummary.prints ? "#f59e0b" : muted} />
+        <Stat label="MACRO WARNINGS" value={feedCount(payloads?.macro, "imminent_warnings") ?? "-"} sub="<48H" color={imminent.length ? "#f87171" : muted} />
       </div>
 
       <section style={commandDeck}>
@@ -459,9 +501,9 @@ export default function IntelPage() {
           <div style={eyebrow}>MARKET WEATHER</div>
           <div style={macroGrid}>
             {macroSeries.map(item => (
-              <div key={item.key} style={weatherTile(item.risk)}>
+              <div key={item.key} style={weatherTile(item.source?.ok ? item.risk : null)}>
                 <div style={{ color: dim, fontSize: 9, letterSpacing: "0.16em" }}>{item.label}</div>
-                <div style={{ color: item.risk ? "#fb923c" : "#4ade80", fontSize: 22, fontWeight: 900, marginTop: 6 }}>
+                <div style={{ color: !item.source?.ok || item.risk == null ? muted : item.risk ? "#fb923c" : "#4ade80", fontSize: 22, fontWeight: 900, marginTop: 6 }}>
                   {item.source?.ok ? num(item.source.value, item.key === "VIX" ? 2 : 2) : "-"}
                 </div>
                 <div style={{ color: muted, fontSize: 9, marginTop: 4 }}>{item.source?.date || "no print"}</div>
@@ -471,20 +513,20 @@ export default function IntelPage() {
           <BriefLine label="PM MODE" value={pmSummary.mode || payloads?.pm?.mode || "-"} color={accent2} />
           <BriefLine label="EQUITY BASIS" value={money(pmSummary.equity_basis)} color={accent} />
           <BriefLine label="LATEST SCAN" value={shortDate(scanFinished)} />
-          <BriefLine label="NEXT MACRO" value={macroEvents[0]?.tag || "none"} color={macroEvents[0]?.is_imminent ? "#fb923c" : labelLight} />
+          <BriefLine label="NEXT MACRO" value={macroEvents[0]?.tag || (feedCount(payloads?.macro, "events") == null ? "unavailable" : "none")} color={macroEvents[0]?.is_imminent ? "#fb923c" : labelLight} />
         </div>
       </section>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 0.55fr)", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="SOURCE FUSION MATRIX" accentColor="#4ade80">
           <div style={matrixGrid}>
             {sourceCoverage.map(source => (
               <div key={source.label} style={matrixCell(source.ok)}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                   <span style={{ color: source.ok ? labelLight : muted, fontSize: 10, letterSpacing: "0.12em" }}>{source.label}</span>
-                  <span style={{ color: source.ok ? "#4ade80" : "#f87171", fontSize: 10 }}>{source.ok ? "LIVE" : "DOWN"}</span>
+                  <span style={{ color: source.ok ? "#4ade80" : muted, fontSize: 10 }}>{source.stale ? "STALE" : source.ok ? "LOADED" : "UNKNOWN"}</span>
                 </div>
-                <div style={{ color: source.ok ? accent : muted, fontSize: 24, fontWeight: 900, marginTop: 8 }}>{source.count}</div>
+                <div style={{ color: source.ok ? accent : muted, fontSize: 24, fontWeight: 900, marginTop: 8 }}>{source.count ?? "-"}</div>
                 <PulseBar value={Math.min(100, source.count * 8)} color={source.ok ? "#4ade80" : "#f87171"} />
               </div>
             ))}
@@ -492,9 +534,9 @@ export default function IntelPage() {
         </Card>
 
         <Card title="FREE DATA UPLINK" accentColor="#93c5fd">
-          <BriefLine label="CONFIGURED" value={`${freeConfigured}/${freeSources.length || "-"}`} color="#4ade80" />
-          <BriefLine label="API KEYS NEEDED" value={freeApiNeeded.length} color={freeApiNeeded.length ? "#fb923c" : "#4ade80"} />
-          <BriefLine label="OFFICIAL SOURCES" value={freeSources.filter(source => source.official).length || "-"} color={accent} />
+          <BriefLine label="CONFIGURED" value={feedCount(payloads?.freeCatalog, "sources") == null ? "-/-" : `${freeConfigured}/${freeSources.length}`} color="#4ade80" />
+          <BriefLine label="API KEYS NEEDED" value={feedCount(payloads?.freeCatalog, "sources") == null ? "-" : freeApiNeeded.length} color={freeApiNeeded.length ? "#fb923c" : muted} />
+          <BriefLine label="OFFICIAL SOURCES" value={feedCount(payloads?.freeCatalog, "sources") == null ? "-" : freeSources.filter(source => source.official).length} color={accent} />
           <div style={{ display: "grid", gap: 7, marginTop: 12 }}>
             {freeSources.slice(0, 6).map(source => (
               <div key={source.key} style={{ display: "flex", justifyContent: "space-between", gap: 10, borderTop: hairline, paddingTop: 7 }}>
@@ -516,7 +558,7 @@ export default function IntelPage() {
           </div>
           <select
             value={lane}
-            onChange={(event) => setLane(event.target.value)}
+            onChange={(event) => { setLane(event.target.value); setLaneLimit(24); }}
             style={laneSelect}
             aria-label="Select intel action lane"
           >
@@ -535,20 +577,20 @@ export default function IntelPage() {
           <span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em", whiteSpace: "nowrap" }}>
             {visibleIntel.length} VISIBLE
           </span>
-          <button onClick={() => setLanesOpen(value => !value)} style={buttonStyle(lanesOpen ? "#f87171" : accent2)}>
+          <button aria-expanded={lanesOpen} aria-controls="intel-action-lanes" onClick={() => setLanesOpen(value => !value)} style={buttonStyle(lanesOpen ? "#f87171" : accent2)}>
             {lanesOpen ? "HIDE" : "EXPAND"}
           </button>
         </div>
 
         {lanesOpen && (
-          <div style={laneBody}>
+          <div id="intel-action-lanes" style={laneBody}>
             {loading && !payloads ? (
               <EmptyState text="Syncing all intel sources..." />
             ) : visibleIntel.length === 0 ? (
               <EmptyState text="No names match this lane yet." />
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 12 }}>
-                {visibleIntel.slice(0, 24).map(row => (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 330px), 1fr))", gap: 12 }}>
+                {visibleIntel.slice(0, laneLimit).map(row => (
                   <IntelCard
                     key={row.ticker}
                     row={row}
@@ -560,6 +602,7 @@ export default function IntelPage() {
                 ))}
               </div>
             )}
+            {visibleIntel.length > laneLimit && <button type="button" onClick={() => setLaneLimit(limit => limit + 24)} style={buttonStyle(accent2)}>SHOW MORE ({visibleIntel.length - laneLimit})</button>}
           </div>
         )}
       </section>
@@ -571,7 +614,7 @@ export default function IntelPage() {
         accentColor="#22d3ee"
         action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{xFactorTape.length} ALERTS / {xDiscoveries.length} DISCOVERIES</span>}
       >
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 250px), 1fr))", gap: 14 }}>
           <div style={{ display: "grid", gap: 8 }}>
             {xFactorTape.length === 0 ? (
               <EmptyState text="No X Factor alerts in the current 14 day window." />
@@ -587,7 +630,7 @@ export default function IntelPage() {
                   key={`${item.ticker}-${item.discovered_at || item.created_at}`}
                   to={`/ticker/${cleanTicker(item.ticker)}`}
                   style={previewChip(45)}
-                  title={(item.sources || []).join(", ")}
+                  title={asArray(item.sources).join(", ")}
                 >
                   ${cleanTicker(item.ticker)}
                 </Link>
@@ -601,7 +644,7 @@ export default function IntelPage() {
       <Card
         title="INSTITUTIONAL NEWSWIRE - FREE RSS EVENT TAPE"
         accentColor="#93c5fd"
-        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{newsIntel?.live_source_count || 0}/{newsIntel?.source_count || 0} SOURCES / {newsIntel?.cache || "LIVE"}</span>}
+        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{num(newsIntel?.live_source_count)}/{num(newsIntel?.source_count)} SOURCES / {newsIntel?.cache || "UNKNOWN"}</span>}
       >
         <div style={newsWireGrid}>
           <div style={newsWireCommand}>
@@ -613,10 +656,10 @@ export default function IntelPage() {
               Free RSS newswire fused against the current scan, PM, and trade-floor universe. It flags urgent language, maps tickers, and labels bullish/bearish tone without using Claude.
             </p>
             <div style={newsWireMetrics}>
-              <MiniMetric label="URGENT" value={newsIntel?.summary?.urgent ?? 0} color={(newsIntel?.summary?.urgent || 0) ? "#f87171" : "#4ade80"} />
-              <MiniMetric label="MAPPED" value={newsIntel?.summary?.ticker_mapped ?? 0} color={accent2} />
-              <MiniMetric label="BULL" value={newsIntel?.summary?.bullish ?? 0} color="#4ade80" />
-              <MiniMetric label="BEAR" value={newsIntel?.summary?.bearish ?? 0} color="#f87171" />
+              <MiniMetric label="URGENT" value={num(newsIntel?.summary?.urgent)} color={newsIntel?.summary?.urgent ? "#f87171" : muted} />
+              <MiniMetric label="MAPPED" value={num(newsIntel?.summary?.ticker_mapped)} color={accent2} />
+              <MiniMetric label="BULL" value={num(newsIntel?.summary?.bullish)} color="#4ade80" />
+              <MiniMetric label="BEAR" value={num(newsIntel?.summary?.bearish)} color="#f87171" />
             </div>
             {!!newsIntel?.failed_source_count && (
               <div style={{ ...pill("#fb923c"), marginTop: 12 }}>
@@ -639,7 +682,7 @@ export default function IntelPage() {
       <Card
         title="DARK POOL TAPE - FINRA OFF-EXCHANGE PROXY"
         accentColor="#f59e0b"
-        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{darkPoolSummary.prints} QUALIFIED PRINTS / 14D</span>}
+        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{darkPoolSummary.prints ?? "-"} QUALIFIED PRINTS / 14D</span>}
       >
         <div style={darkPoolGrid}>
           <div style={darkPoolCommand}>
@@ -688,7 +731,7 @@ export default function IntelPage() {
       <Card
         title="GEORISK SPILLOVER WATCH"
         accentColor="#fb923c"
-        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{payloads?.georisk?.cache_status || "LIVE"} / {georiskEvents.length} EVENTS</span>}
+        action={<span style={{ color: muted, fontSize: 10, letterSpacing: "0.12em" }}>{payloads?.georisk?.cache_status || "UNKNOWN"} / {feedCount(payloads?.georisk, "events") ?? "-"} EVENTS</span>}
       >
         <div style={geoGrid}>
           <div style={geoHero}>
@@ -714,8 +757,8 @@ export default function IntelPage() {
                 </div>
                 <div style={{ color: labelLight, lineHeight: 1.4 }}>{event.title}</div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-                  {(event.sectors || []).slice(0, 4).map(sector => <span key={sector} style={pill("#fb923c")}>{sector}</span>)}
-                  {(event.tickers || []).slice(0, 5).map(ticker => (
+                  {asArray(event.sectors).slice(0, 4).map(sector => <span key={sector} style={pill("#fb923c")}>{String(sector)}</span>)}
+                  {asArray(event.tickers).slice(0, 5).map(ticker => (
                     <Link key={ticker} to={`/ticker/${cleanTicker(ticker)}`} style={previewChip(60)}>${cleanTicker(ticker)}</Link>
                   ))}
                 </div>
@@ -727,7 +770,7 @@ export default function IntelPage() {
         </div>
       </section>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.1fr) minmax(300px, 0.9fr)", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", gap: 18 }}>
         <Card title="CATALYST TAPE" accentColor="#fb923c">
           <div style={{ display: "grid", gap: 8 }}>
             {catalystTape.length === 0 ? <EmptyState text="No catalyst tape is loaded." /> : catalystTape.map((item, idx) => (
@@ -742,9 +785,9 @@ export default function IntelPage() {
 
         <Card title="MACRO AND FEED HEALTH" accentColor="#a78bfa">
           <div style={{ display: "grid", gap: 10 }}>
-            <BriefLine label="FRED" value={payloads?.macro?.fred_available === false ? "DEGRADED" : "ONLINE"} color={payloads?.macro?.fred_available === false ? "#fb923c" : "#4ade80"} />
-            <BriefLine label="SCAN ROWS" value={num(payloads?.scan?.results?.length || 0)} color={accent} />
-            <BriefLine label="CLAUDE CALLS" value={num(payloads?.scan?.claude_calls_made || 0)} color={payloads?.scan?.claude_calls_made ? "#fb923c" : "#4ade80"} />
+            <BriefLine label="FRED" value={payloads?.macro?.fred_available == null ? "UNKNOWN" : payloads.macro.fred_available ? "ONLINE" : "DEGRADED"} color={payloads?.macro?.fred_available == null ? muted : payloads.macro.fred_available ? "#4ade80" : "#fb923c"} />
+            <BriefLine label="SCAN ROWS" value={num(feedCount(payloads?.scan, "results"))} color={accent} />
+            <BriefLine label="CLAUDE CALLS" value={num(payloads?.scan?.claude_calls_made)} color={payloads?.scan?.claude_calls_made ? "#fb923c" : muted} />
             <BriefLine label="PM RISK" value={money(pmSummary.planned_risk)} color="#f87171" />
             <div style={{ borderTop: hairline, paddingTop: 10 }}>
               <div style={eyebrow}>UPCOMING MACRO</div>
@@ -757,6 +800,7 @@ export default function IntelPage() {
             </div>
           </div>
         </Card>
+      </div>
       </div>
     </CrtShell>
   );
@@ -787,11 +831,11 @@ function IntelCard({ row, selected, onSelect, onWatch, watching }) {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-        <MiniMetric label="PRICE" value={row.price ? `$${num(row.price, 2)}` : "-"} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 80px), 1fr))", gap: 8 }}>
+        <MiniMetric label="PRICE" value={finite(row.price) != null ? `$${num(row.price, 2)}` : "-"} />
         <MiniMetric label="PM" value={row.pmAction || "-"} color={row.pmAction === "ACCUMULATE" ? "#4ade80" : accent} />
-        <MiniMetric label="RR" value={row.rr ? num(row.rr, 2) : "-"} color={row.rr >= 2 ? "#4ade80" : labelLight} />
-        <MiniMetric label="ALLOC" value={row.allocation ? money(row.allocation) : "-"} />
+        <MiniMetric label="RR" value={num(row.rr, 2)} color={row.rr >= 2 ? "#4ade80" : labelLight} />
+        <MiniMetric label="ALLOC" value={money(row.allocation)} />
       </div>
 
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -803,7 +847,7 @@ function IntelCard({ row, selected, onSelect, onWatch, watching }) {
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: "auto", flexWrap: "wrap" }}>
-        <button onClick={onSelect} style={buttonStyle(selected ? "#f87171" : accent2)}>
+        <button aria-expanded={selected} onClick={onSelect} style={buttonStyle(selected ? "#f87171" : accent2)}>
           {selected ? "CLOSE STACK" : "OPEN STACK"}
         </button>
         <button onClick={onWatch} disabled={watching} style={buttonStyle(accent)}>
@@ -849,7 +893,7 @@ function XFactorRow({ alert }) {
           {trendRatio != null && <span style={pill("#4ade80")}>{trendRatio}X SPIKE</span>}
         </div>
         <div style={{ color: labelLight, fontSize: 11, lineHeight: 1.45 }}>
-          {(alert.triggers || []).map(item => `${item.platform || "FEED"}:${item.type || "signal"}`).join(" / ") || "Retail tape alert"}
+          {asArray(alert.triggers).map(item => `${item.platform || "FEED"}:${item.type || "signal"}`).join(" / ") || "Retail tape alert"}
         </div>
       </div>
       <div style={xfMetricWrap}>
@@ -889,7 +933,7 @@ function NewsWireRow({ item }) {
   return (
     <div style={newsRow}>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={scoreBadge(item.score || 0)}>{item.score || 0}</span>
+        <span style={scoreBadge(finite(item.score))}>{num(item.score)}</span>
         <span style={pill(laneColor)}>{item.intel_lane || "MARKET"}</span>
         <span style={pill(biasColor)}>{item.bias || "NEUTRAL"}</span>
         <span style={{ color: muted, fontSize: 10, letterSpacing: "0.1em" }}>{item.source || "RSS"} / {fmtNewsAge(item.age_minutes)}</span>
@@ -899,12 +943,12 @@ function NewsWireRow({ item }) {
       </a>
       {item.summary && <div style={newsSummary}>{item.summary}</div>}
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
-        {(item.tickers || []).slice(0, 8).map(ticker => (
+        {asArray(item.tickers).slice(0, 8).map(ticker => (
           <Link key={ticker} to={`/ticker/${cleanTicker(ticker)}`} style={previewChip(item.score || 50)}>
             ${cleanTicker(ticker)}
           </Link>
         ))}
-        {(item.urgency_terms || []).slice(0, 5).map(term => <span key={term} style={pill("#fb923c")}>{String(term).toUpperCase()}</span>)}
+        {asArray(item.urgency_terms).slice(0, 5).map(term => <span key={term} style={pill("#fb923c")}>{String(term).toUpperCase()}</span>)}
       </div>
     </div>
   );
@@ -914,7 +958,7 @@ function MiniMetric({ label, value, color = labelLight }) {
   return (
     <div style={{ border: hairline, padding: "8px 7px", background: "rgba(255,255,255,0.015)", minWidth: 0 }}>
       <div style={{ color: dim, fontSize: 8, letterSpacing: "0.16em" }}>{label}</div>
-      <div style={{ color, fontSize: 12, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <div title={String(value ?? "-")} style={{ color, fontSize: 12, marginTop: 5, overflowWrap: "anywhere" }}>
         {value}
       </div>
     </div>
@@ -939,8 +983,8 @@ function StackList({ label, items, color = labelLight }) {
 }
 
 function fmtNewsAge(minutes) {
-  const n = Number(minutes);
-  if (!Number.isFinite(n)) return "NO TIME";
+  const n = finite(minutes);
+  if (n == null) return "NO TIME";
   if (n < 60) return `${Math.round(n)}M AGO`;
   if (n < 1440) return `${Math.round(n / 60)}H AGO`;
   return `${Math.round(n / 1440)}D AGO`;
@@ -957,9 +1001,9 @@ function BriefLine({ label, value, color = labelLight }) {
 
 function PulseBar({ value, color }) {
   return (
-    <div style={{ height: 4, background: "rgba(255,255,255,0.06)", marginTop: 10, overflow: "hidden" }}>
+    <div aria-hidden="true" style={{ height: 4, background: "rgba(255,255,255,0.06)", marginTop: 10, overflow: "hidden" }}>
       <div style={{
-        width: `${Math.max(6, Math.min(100, Number(value) || 0))}%`,
+        width: `${Math.max(0, Math.min(100, finite(value) ?? 0))}%`,
         height: "100%",
         background: color,
         boxShadow: `0 0 10px ${color}66`,
@@ -986,7 +1030,7 @@ function Td({ children, color = labelLight, muted: isMuted = false, strong = fal
 
 const commandDeck = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1.35fr) minmax(310px, 0.65fr)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 310px), 1fr))",
   gap: 18,
   marginBottom: 22,
 };
@@ -1026,13 +1070,13 @@ const radarPanel = {
 
 const macroGrid = {
   display: "grid",
-  gridTemplateColumns: "repeat(3, 1fr)",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
   gap: 8,
   marginBottom: 12,
 };
 
 function weatherTile(risk) {
-  const color = risk ? "#fb923c" : "#4ade80";
+  const color = risk == null ? muted : risk ? "#fb923c" : "#4ade80";
   return {
     border: `0.5px solid ${color}44`,
     background: `${color}0d`,
@@ -1043,7 +1087,7 @@ function weatherTile(risk) {
 
 const matrixGrid = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))",
   gap: 10,
 };
 
@@ -1070,13 +1114,13 @@ const mosaicStack = {
 
 const darkPoolGrid = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
   gap: 14,
 };
 
 const newsWireGrid = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
   gap: 14,
 };
 
@@ -1141,11 +1185,13 @@ const darkPoolTableWrap = {
   border: hairline,
   background: "rgba(255,255,255,0.012)",
   overflowX: "auto",
+  minWidth: 0,
+  maxWidth: "100%",
 };
 
 const geoGrid = {
   display: "grid",
-  gridTemplateColumns: "minmax(250px, 0.6fr) minmax(0, 1.4fr)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 250px), 1fr))",
   gap: 14,
 };
 
@@ -1200,6 +1246,8 @@ const eyebrow = {
 
 const tapeRow = {
   display: "flex",
+  flexWrap: "wrap",
+  minWidth: 0,
   alignItems: "center",
   gap: 10,
   border: hairline,
@@ -1219,9 +1267,10 @@ const xfRow = {
 
 const xfMetricWrap = {
   display: "grid",
-  gridTemplateColumns: "repeat(4, minmax(74px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 74px), 1fr))",
   gap: 7,
-  minWidth: 330,
+  width: "100%",
+  minWidth: 0,
 };
 
 const discoveryPanel = {
@@ -1235,6 +1284,7 @@ function tickerLink(size) {
   return {
     color: accent,
     fontSize: size,
+    overflowWrap: "anywhere",
     fontWeight: 800,
     letterSpacing: "0.08em",
     textDecoration: "none",
@@ -1267,7 +1317,8 @@ function previewChip(score) {
     letterSpacing: "0.1em",
     fontWeight: 800,
     textDecoration: "none",
-    whiteSpace: "nowrap",
+    whiteSpace: "normal",
+    overflowWrap: "anywhere",
   };
 }
 
@@ -1281,7 +1332,8 @@ function pill(color) {
     fontSize: 9,
     letterSpacing: "0.12em",
     fontWeight: 700,
-    whiteSpace: "nowrap",
+    whiteSpace: "normal",
+    overflowWrap: "anywhere",
   };
 }
 
@@ -1319,7 +1371,7 @@ const laneBar = {
 
 const lanePreview = {
   flex: 1,
-  minWidth: 260,
+  minWidth: "min(100%, 260px)",
   display: "flex",
   alignItems: "center",
   gap: 7,
@@ -1332,7 +1384,8 @@ const laneBody = {
 };
 
 const laneSelect = {
-  minWidth: 230,
+  minWidth: "min(100%, 230px)",
+  maxWidth: "100%",
   background: `${accent}10`,
   border: `0.5px solid ${accent}88`,
   color: accent,
@@ -1342,5 +1395,4 @@ const laneSelect = {
   fontSize: 11,
   letterSpacing: "0.12em",
   fontWeight: 800,
-  outline: "none",
 };

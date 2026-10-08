@@ -2660,6 +2660,42 @@ async def portfolio_manager_backtest(
     )
 
 
+@api.get("/research/strategy-evidence")
+async def strategy_evidence_latest():
+    from services import strategy_evidence
+    return await strategy_evidence.latest()
+
+
+@api.post("/research/strategy-evidence/refresh")
+async def strategy_evidence_refresh(limit: int = 5000, lookback_days: int = 90, max_symbols: int = 120):
+    from services import strategy_evidence
+    return await strategy_evidence.refresh(limit=limit, lookback_days=lookback_days, max_symbols=max_symbols)
+
+
+@api.get("/research/experiments")
+async def research_experiments():
+    from services import research_trials
+    return await research_trials.latest()
+
+
+@api.post("/research/path-replay")
+async def research_path_replay(payload: dict):
+    from services.research_path_service import run_requested
+    try:
+        return run_requested(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@api.post("/research/experiments")
+async def research_experiment_register(payload: dict):
+    from services import research_trials
+    try:
+        return await research_trials.register(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @api.get("/portfolio_manager/options/latest")
 async def portfolio_manager_options_latest():
     from services import options_desk

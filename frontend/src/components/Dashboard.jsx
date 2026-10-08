@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { displayResource } from "../hooks/useDisplayResource";
 import { API } from "../config";
 import { toast } from "sonner";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { CrtShell, SystemBar, tokens as crtTokens } from "./CrtShell";
 
 const cls = (...x) => x.filter(Boolean).join(" ");
@@ -102,22 +104,28 @@ function formatETDate(t) {
   return t.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "2-digit", year: "numeric", timeZone: "America/New_York" }).toUpperCase();
 }
 
-function nextScanCountdown(now) {
-  // Next 8:00 AM America/New_York
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-  });
-  const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
-  const todayET = new Date(`${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`);
-  const target = new Date(todayET);
-  target.setHours(8, 0, 0, 0);
-  if (todayET.getTime() >= target.getTime()) target.setDate(target.getDate() + 1);
-  let diff = Math.max(0, Math.floor((target.getTime() - todayET.getTime()) / 1000));
+// IDs from scheduler.STOCK_SCAN_CADENCE_ET; never infer times from cron text.
+const CORE_SCAN_JOB_IDS = new Set([
+  "midnight_scan", "morning_scan", "ten_am_scan", "stale_retry_scan_1030",
+  "midday_scan", "afternoon_scan", "evening_scan",
+]);
+
+export function nextScanCountdown(now, scheduler) {
+  if (!Array.isArray(scheduler?.jobs)) return "UNAVAILABLE";
+  const times = scheduler.jobs.filter(job => CORE_SCAN_JOB_IDS.has(job?.id) && !job.pending)
+    .map(job => typeof job.next_run_time === "string" && /(?:Z|[+-]\d{2}:\d{2})$/i.test(job.next_run_time)
+      ? Date.parse(job.next_run_time) : NaN)
+    .filter(time => Number.isFinite(time) && time > now.getTime());
+  if (!times.length) return "UNAVAILABLE";
+  let diff = Math.floor((Math.min(...times) - now.getTime()) / 1000);
   const hh = Math.floor(diff / 3600); diff -= hh * 3600;
   const mm = Math.floor(diff / 60);   diff -= mm * 60;
   return `${_padZ(hh)}:${_padZ(mm)}:${_padZ(diff)}`;
+}
+
+function ScannerCountdown({ scheduler }) {
+  const now = useClock();
+  return <span data-testid="next-scan-countdown" style={{ fontSize: 9, color: accent, fontFamily: "Courier New" }}>NEXT SCAN {nextScanCountdown(now, scheduler)}</span>;
 }
 
 const accent = "#c8a84b";
@@ -130,6 +138,7 @@ const hairline = "0.5px solid rgba(255,255,255,0.06)";
 const hairlineLight = "0.5px solid rgba(255,255,255,0.04)";
 
 export default function Dashboard() {
+  const [scheduler, setScheduler] = useState(null);
   const [status, setStatus] = useState(null);
   const [scan, setScan] = useState(null);
   const [activity, setActivity] = useState([]);
@@ -156,41 +165,99 @@ export default function Dashboard() {
   const [openPanel, setOpenPanel] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const t = useClock();
+  const mounted = useRef(false);
+  const displayGeneration = useRef(0);
+  const refreshInFlight = useRef(null);
+  const forceRefreshQueued = useRef(false);
+  const [displayError, setDisplayError] = useState("");
+  const displayReads = useMemo(() => [
+      ["/status", setStatus, 15000], ["/scan/latest", setScan, 15000],
+      ["/activity?limit=20", data => setActivity(Array.isArray(data) ? data : []), 15000], ["/watchlist", data => setWatchlist(Array.isArray(data) ? data : []), 15000], ["/alerts", data => setAlerts(Array.isArray(data) ? data : []), 15000],
+      ["/contracts?days=90&min_amount=1000000", data => setContracts(data.contracts || []), 300000],
+      ["/congress/recent?days=30", data => setCongress(Array.isArray(data) ? data : []), 300000], ["/squeeze/leaderboard/top?limit=10", data => setSqueezeLb(Array.isArray(data) ? data : []), 60000],
+      ["/fy/status", setFyStatus, 300000], ["/scan/preview", setPreview, 60000], ["/scan/tabs", setScanTabs, 15000],
+      ["/scan/replay_calendar?days=90", setReplayCalendar, 60000],
+      ["/scheduler/overview", setScheduler, 15000],
+    ], []);
+  const refresh = useCallback((force = false) => {
+    if (!mounted.current || (!force && document.visibilityState === "hidden")) return Promise.resolve();
+    if (refreshInFlight.current) {
+      if (force) forceRefreshQueued.current = true;
+      return refreshInFlight.current;
+    }
+    const generation = displayGeneration.current;
+    const current = () => mounted.current && displayGeneration.current === generation;
+    const request = Promise.allSettled(displayReads.map(async ([path, setter, interval]) => {
+      const resource = displayResource(`${API}${path}`, interval);
+      const cached = resource.getSnapshot();
+      if (cached.data != null && current()) setter(cached.data);
+      if (force || !cached.updatedAt || Date.now() - cached.updatedAt >= interval) await resource.refresh(force);
+      const state = resource.getSnapshot();
+      if (state.error) {
+        if (path === "/scheduler/overview" && current()) setScheduler(null);
+        throw state.error;
+      }
+      if (current() && state.data != null) setter(state.data);
+    })).then(results => {
+      if (current()) setDisplayError(results.some(result => result.status === "rejected") ? "Some scanner data could not refresh. Last loaded values may be outdated." : "");
+    }).finally(() => {
+      if (refreshInFlight.current !== request) return;
+      refreshInFlight.current = null;
+      if (current() && forceRefreshQueued.current) {
+        forceRefreshQueued.current = false;
+        refresh(true);
+      }
+    });
+    refreshInFlight.current = request;
+    return request;
+  }, [displayReads]);
 
-  const refresh = useCallback(async () => {
-    // Independent fetches — one slow/failing endpoint shouldn't blank the dashboard
-    axios.get(`${API}/status`).then(r => setStatus(r.data)).catch(e => console.error("status:", e));
-    axios.get(`${API}/scan/latest`).then(r => setScan(r.data)).catch(e => console.error("scan:", e));
-    axios.get(`${API}/activity?limit=20`).then(r => setActivity(r.data)).catch(e => console.error("activity:", e));
-    axios.get(`${API}/watchlist`).then(r => setWatchlist(r.data)).catch(e => console.error("wl:", e));
-    axios.get(`${API}/alerts`).then(r => setAlerts(r.data)).catch(e => console.error("alerts:", e));
-    axios.get(`${API}/contracts?days=90&min_amount=1000000`)
-      .then(r => setContracts(r.data.contracts || []))
-      .catch(e => console.error("contracts:", e));
-    axios.get(`${API}/congress/recent?days=30`).then(r => setCongress(r.data)).catch(e => console.error("congress:", e));
-    axios.get(`${API}/squeeze/leaderboard/top?limit=10`).then(r => setSqueezeLb(r.data)).catch(e => console.error("squeeze:", e));
-    axios.get(`${API}/fy/status`).then(r => setFyStatus(r.data)).catch(e => console.error("fy:", e));
-    axios.get(`${API}/scan/preview`).then(r => setPreview(r.data)).catch(e => console.error("preview:", e));
-    axios.get(`${API}/scan/tabs`).then(r => setScanTabs(r.data)).catch(e => console.error("scan-tabs:", e));
-    axios.get(`${API}/scan/replay_calendar?days=90`).then(r => setReplayCalendar(r.data)).catch(e => console.error("replay-calendar:", e));
-  }, []);
-
-  useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id); }, [refresh]);
+  useEffect(() => {
+    mounted.current = true;
+    displayGeneration.current += 1;
+    // Keep display subscriptions alive only while this page owns them.
+    const generation = displayGeneration.current;
+    const unsubscribe = displayReads.map(([path, setter, interval]) => {
+      const resource = displayResource(`${API}${path}`, interval);
+      const applySnapshot = () => {
+        const state = resource.getSnapshot();
+        if (mounted.current && displayGeneration.current === generation && state.data != null) setter(state.data);
+      };
+      const off = resource.subscribe(applySnapshot, interval);
+      applySnapshot();
+      return off;
+    });
+    refresh();
+    const visibleRefresh = () => { if (document.visibilityState !== "hidden") refresh(); };
+    const id = setInterval(visibleRefresh, 15000);
+    document.addEventListener("visibilitychange", visibleRefresh);
+    return () => {
+      mounted.current = false; displayGeneration.current += 1;
+      refreshInFlight.current = null; forceRefreshQueued.current = false;
+      unsubscribe.forEach(off => off());
+      clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh);
+    };
+  }, [refresh, displayReads]);
 
   useEffect(() => {
     if (!selected) {
       setKronosCard(null);
+      setKronosLoading(false);
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    setKronosCard(null);
     setKronosLoading(true);
-    axios.get(`${API}/kronos/battle_card/${selected}`)
-      .then(r => { if (!cancelled) setKronosCard(r.data); })
-      .catch(e => { if (!cancelled) setKronosCard({ error: e.message }); })
+    axios.get(`${API}/kronos/battle_card/${encodeURIComponent(selected)}`, { signal: controller.signal, timeout: 12000 })
+      .then(r => { if (!cancelled) setKronosCard({ ticker: selected, data: r.data }); })
+      .catch(e => { if (!cancelled) setKronosCard({ ticker: selected, data: { error: e.message } }); })
       .finally(() => { if (!cancelled) setKronosLoading(false); });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [selected]);
+
+  const selectedKronosCard = kronosCard?.ticker === selected ? kronosCard.data : null;
+  const selectedKronosLoading = kronosLoading || Boolean(selected && kronosCard?.ticker !== selected);
 
   const runScan = async () => {
     setScanning(true);
@@ -199,7 +266,7 @@ export default function Dashboard() {
       const { data } = await axios.post(`${API}/scan/run`);
       setScan(data);
       toast(`SCAN COMPLETE — ${data.results?.length || 0} TARGETS`);
-      refresh();
+      refresh(true);
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "request failed";
       toast(`SCAN FAILED - ${detail}`);
@@ -223,15 +290,15 @@ export default function Dashboard() {
 
   const addWatch = async () => {
     if (!tInput.trim()) return;
-    try { await axios.post(`${API}/watchlist`, { ticker: tInput.trim() }); setTInput(""); refresh(); } catch {}
+    try { await axios.post(`${API}/watchlist`, { ticker: tInput.trim() }); setTInput(""); refresh(true); } catch {}
   };
-  const removeWatch = async (t) => { await axios.delete(`${API}/watchlist/${t}`); refresh(); };
+  const removeWatch = async (t) => { await axios.delete(`${API}/watchlist/${t}`); refresh(true); };
   const addAlert = async () => {
     if (!aTicker.trim() || !aPrice) return;
     try { await axios.post(`${API}/alerts`, { ticker: aTicker.trim(), target_price: parseFloat(aPrice) });
-          setATicker(""); setAPrice(""); refresh(); } catch {}
+          setATicker(""); setAPrice(""); refresh(true); } catch {}
   };
-  const removeAlert = async (t) => { await axios.delete(`${API}/alerts/${t}`); refresh(); };
+  const removeAlert = async (t) => { await axios.delete(`${API}/alerts/${t}`); refresh(true); };
 
   const results = useMemo(() => {
     const r = [...((scan && scan.results) || [])];
@@ -304,8 +371,9 @@ export default function Dashboard() {
           {scanning ? "SCANNING..." : "[ RUN SCAN ]"}
         </button>
       }>
+      {displayError && <div role="status" className="workspace-data-warning">{displayError}</div>}
       {/* === MAIN === */}
-      <div style={{ marginLeft: -30, marginRight: -30, marginTop: -22 }}>
+      <div style={{ minWidth: 0 }}>
         {/* Metrics */}
         <div className="fade-in" style={{
           background: `linear-gradient(180deg, ${cardBg} 0%, ${pageBg} 200%)`,
@@ -402,27 +470,29 @@ export default function Dashboard() {
 
           <ScannerSubTabs
             active={scannerView}
-            onChange={setScannerView}
+            onChange={view => { setScannerView(view); setSelected(null); }}
             counts={scannerTabCounts}
             ledgerSummary={scanTabs?.ledger?.summary || scan?.candidate_ledger?.summary || {}}
           />
 
-          <ScannerNewStockGraphic
+          {scannerView !== "court" && <ScannerNewStockGraphic
             view={scannerView}
             stat={scannerNewStats[scannerView] || { count: 0, tickers: [], total: scannerTabCounts[scannerView] || 0 }}
-          />
+          />}
 
           {scannerView === "calendar" && <ScannerSnapshotCalendar data={replayCalendar} />}
 
           {scannerView !== "core" && scannerView !== "calendar" && (
             <ScannerSubtabPanel
+              key={scannerView}
               view={scannerView}
+              loaded={scanTabs != null || (scannerView === "docket" && scan?.candidate_ledger != null)}
               rows={scannerTabRows[scannerView] || []}
               errors={scanTabs?.errors || {}}
               selected={selected}
               onSelect={setSelected}
-              kronosCard={kronosCard}
-              kronosLoading={kronosLoading}
+              kronosCard={selectedKronosCard}
+              kronosLoading={selectedKronosLoading}
             />
           )}
 
@@ -576,7 +646,7 @@ export default function Dashboard() {
                 </div>
                 {isSel && (
                   <div style={{ gridColumn: "1 / -1", borderTop: hairlineLight, background: "#08080d", padding: "14px 18px 18px" }}>
-                    <ScannerKronosBattleCard loading={kronosLoading} payload={kronosCard} fallbackRow={r} />
+                    <ScannerKronosBattleCard loading={selectedKronosLoading} payload={selectedKronosCard} fallbackRow={r} />
                   </div>
                 )}
               </div>
@@ -698,17 +768,17 @@ export default function Dashboard() {
           {/* Footer */}
           <div style={{
             background: pageBg, borderTop: hairlineLight, padding: "8px 20px",
-            display: "flex", alignItems: "center", justifyContent: "space-between",
+            display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10,
           }}>
-            <div style={{ display: "flex", gap: 20, fontSize: 8, color: dim, letterSpacing: "0.06em" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 20, fontSize: 8, color: dim, letterSpacing: "0.06em" }}>
               <span>SCANS {scan?.results?.length || 0}</span>
               <span>CACHE {cacheRate}%</span>
               <span>MODEL CLAUDE-HAIKU-4-5</span>
               <span>VERSION 3.1.0</span>
             </div>
             <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.04)", margin: "0 20px" }} />
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 9, color: accent, fontFamily: "Courier New" }}>NEXT SCAN {nextScanCountdown(t)}</span>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+              <ScannerCountdown scheduler={scheduler} />
               <button data-testid="dispatch-button" onClick={dispatch} disabled={dispatching}
                 style={{
                   background: dispatching ? "rgba(200,168,75,0.1)" : "transparent",
@@ -798,10 +868,10 @@ function ScannerSnapshotCalendar({ data }) {
       </div>
       {!data ? <div style={{ color: muted, padding: 24, textAlign: "center" }}>LOADING SNAPSHOT CALENDAR...</div> : (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 9, letterSpacing: "0.08em", marginBottom: 6 }}>
+          <div className="workspace-calendar-weekdays" style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5, color: dim, fontSize: 9, letterSpacing: "0.08em", marginBottom: 6 }}>
             {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map(day => <span key={day}>{day}</span>)}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 }}>
+          <div className="workspace-calendar-grid" style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 5 }}>
             {cells.map(cell => {
               const day = cell.day;
               const active = Boolean(day);
@@ -846,11 +916,11 @@ function ScannerSubTabs({ active, onChange, counts, ledgerSummary }) {
   ];
   return (
     <div style={scannerTabsWrap}>
-      <div style={scannerTabs}>
+      <div className="workspace-scanner-tabs" style={scannerTabs}>
         {tabs.map(([key, label]) => (
           <button key={key} onClick={() => onChange(key)} style={scannerTabBtn(active === key)}>
             <span>{label}</span>
-            <b>{counts[key] || 0}</b>
+            <b>{key === "court" && !counts[key] ? "--" : counts[key] || 0}</b>
           </button>
         ))}
       </div>
@@ -861,24 +931,32 @@ function ScannerSubTabs({ active, onChange, counts, ledgerSummary }) {
   );
 }
 
-function ScannerSubtabPanel({ view, rows, errors, selected, onSelect, kronosCard, kronosLoading }) {
+export function ScannerSubtabPanel({ view, rows, errors, selected, onSelect, kronosCard, kronosLoading, loaded = true }) {
+  const [page, setPage] = useState(0);
+  useEffect(() => { setPage(0); }, [view]);
+  const lastPage = Math.max(0, Math.ceil(rows.length / 80) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const offset = currentPage * 80;
   const error = errors?.[view === "court" ? "case_court" : view];
   return (
     <div style={scannerPanel}>
       <div style={scannerPanelHead}>
         <span>{view === "docket" ? "UNIFIED CANDIDATE LEDGER" : `${view.toUpperCase()} SCAN VIEW`}</span>
-        <small>{error ? `DEGRADED: ${error}` : "LIVE ROUTING VIEW"}</small>
+        <small>{error ? `DEGRADED: ${error}` : !loaded ? "UNAVAILABLE" : view === "court" && !rows.length ? "NOT PROVIDED" : "STORED SNAPSHOT"}</small>
       </div>
       {!rows.length ? (
-        <div style={scannerEmpty}>NO ROWS LOADED FOR THIS SCAN FAMILY</div>
+        <div style={scannerEmpty}>
+          {view === "court" ? <>CASE COURT IS NOT PROVIDED BY THE SCANNER SNAPSHOT. <Link to="/case-court" style={{ color: accent }}>OPEN CASE COURT</Link></>
+            : !loaded ? "SCAN SNAPSHOT UNAVAILABLE" : "NO ROWS IN STORED SNAPSHOT FOR THIS SCAN FAMILY"}
+        </div>
       ) : (
         <div style={scannerCompactRows}>
-          {rows.slice(0, 80).map((row, idx) => (
+          {rows.slice(offset, offset + 80).map((row, idx) => (
             <ScannerFamilyRow
               key={`${view}-${row.candidate_id || row.ticker || row.symbol || "row"}-${idx}`}
               view={view}
               row={row}
-              idx={idx}
+              idx={offset + idx}
               selected={selected}
               onSelect={onSelect}
               kronosCard={kronosCard}
@@ -887,6 +965,11 @@ function ScannerSubtabPanel({ view, rows, errors, selected, onSelect, kronosCard
           ))}
         </div>
       )}
+      {rows.length > 80 && <div aria-label="Scanner results pagination" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 12, padding: "10px 20px", color: muted, fontSize: 10 }}>
+        <span>{offset + 1}-{Math.min(offset + 80, rows.length)} OF {rows.length}</span>
+        <button aria-label="Previous scanner results" title="Previous scanner results" disabled={currentPage === 0} onClick={() => { setPage(currentPage - 1); onSelect?.(null); }} style={{ ...scannerBattleTab, color: accent, cursor: currentPage === 0 ? "default" : "pointer" }}><ChevronLeft size={14} aria-hidden="true" /></button>
+        <button aria-label="Next scanner results" title="Next scanner results" disabled={currentPage === lastPage} onClick={() => { setPage(currentPage + 1); onSelect?.(null); }} style={{ ...scannerBattleTab, color: accent, cursor: currentPage === lastPage ? "default" : "pointer" }}><ChevronRight size={14} aria-hidden="true" /></button>
+      </div>}
     </div>
   );
 }
@@ -1041,7 +1124,7 @@ function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kron
       onClick={() => onSelect?.(isSel ? null : m.ticker)}
       style={{
         display: "grid",
-        gridTemplateColumns: "56px 1fr 130px",
+        gridTemplateColumns: "56px minmax(0, 1fr) minmax(0, 130px)",
         borderBottom: hairlineLight,
         cursor: "pointer",
         background: isSel ? "#0f0f15" : "transparent",
@@ -1160,7 +1243,7 @@ function ScannerFamilyRow({ view, row, idx, selected, onSelect, kronosCard, kron
         )}
       </div>
 
-      <div style={{ padding: "14px 16px 14px 8px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+      <div style={{ padding: "14px 16px 14px 8px", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, minWidth: 0, overflowWrap: "anywhere" }}>
         <div style={{ fontSize: 24, fontWeight: 700, color: targetColor, fontFamily: "Courier New", letterSpacing: "0.02em", textAlign: "right" }}>
           {m.target ? fmtPrice(m.target) : m.action.toUpperCase()}
         </div>
@@ -1242,13 +1325,13 @@ function ScannerKronosBattleCard({ loading, payload, fallbackRow }) {
   return (
     <div style={scannerKronosBox}>
       <div style={scannerKronosHeader}>
-        <div>
+        <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           <div style={scannerBattleLabel}>KRONOS FORECAST BOX</div>
           <div style={{ color: accent, fontSize: 18, fontWeight: 900, letterSpacing: "0.08em" }}>
             ${card.ticker || fallbackRow?.ticker} / {card.forecast_bias || "UNKNOWN"}
           </div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(82px, 1fr))", gap: 8, minWidth: 280 }}>
+        <div data-testid="scanner-kronos-summary" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, minWidth: 0, flex: "1 1 280px" }}>
           <ScannerMini label="SCORE" value={card.kronos_score ?? "-"} color={accent} />
           <ScannerMini label="CONF" value={card.confidence == null ? "-" : `${card.confidence}%`} color="#5eead4" />
           <ScannerMini label="PM" value={card.pm_action || "UNMAPPED"} color={card.aligned_with_pm ? "#4ade80" : "#fbbf24"} />
@@ -1265,7 +1348,7 @@ function ScannerKronosBattleCard({ loading, payload, fallbackRow }) {
         />
       </div>
 
-      <div style={scannerBattleGrid}>
+      <div data-testid="scanner-battle-grid" style={scannerBattleGrid}>
       <div style={scannerBattlePanel}>
         <div style={scannerBattleLabel}>ATTRIBUTION</div>
         {(card.attribution || []).map(a => (
@@ -1422,7 +1505,7 @@ const scannerBattleTab = {
 
 const scannerBattleGrid = {
   display: "grid",
-  gridTemplateColumns: "minmax(230px, 1fr) minmax(190px, 0.75fr) minmax(230px, 1fr)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(230px, 100%), 1fr))",
   gap: 12,
 };
 
@@ -1464,7 +1547,7 @@ const scannerLedgerLine = {
 
 const scannerNewGraphic = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(190px, 100%), 1fr))",
   gap: 16,
   alignItems: "center",
   padding: "12px 20px",
@@ -1558,6 +1641,7 @@ const scannerPanel = {
 
 const scannerPanelHead = {
   display: "flex",
+  flexWrap: "wrap",
   justifyContent: "space-between",
   gap: 16,
   padding: "12px 20px",
@@ -1575,7 +1659,7 @@ const scannerCompactRows = {
 
 const scannerCompactRow = {
   display: "grid",
-  gridTemplateColumns: "42px minmax(180px, 1fr) minmax(180px, 0.9fr) 150px",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(180px, 100%), 1fr))",
   alignItems: "center",
   gap: 14,
   padding: "10px 20px",
@@ -1641,6 +1725,7 @@ const scannerKronosBox = {
 
 const scannerKronosHeader = {
   display: "flex",
+  flexWrap: "wrap",
   justifyContent: "space-between",
   alignItems: "start",
   gap: 14,
@@ -1649,7 +1734,7 @@ const scannerKronosHeader = {
 
 const scannerConeGrid = {
   display: "grid",
-  gridTemplateColumns: "1fr 1fr",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(260px, 100%), 1fr))",
   gap: 12,
   marginBottom: 12,
 };
@@ -1694,6 +1779,7 @@ const scannerConeBase = {
 
 const scannerConeLabels = {
   display: "flex",
+  flexWrap: "wrap",
   justifyContent: "space-between",
   gap: 8,
   color: muted,
@@ -1706,6 +1792,7 @@ const scannerBattlePanel = {
   background: "rgba(255,255,255,0.018)",
   padding: 12,
   minWidth: 0,
+  overflowWrap: "anywhere",
 };
 
 const scannerBattleLabel = {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import useDisplayResource from "../hooks/useDisplayResource";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
@@ -30,38 +31,46 @@ export default function OptionsDeskPage() {
   const [message, setMessage] = useState("");
   const [loadWarning, setLoadWarning] = useState("");
 
-  const load = useCallback(async () => {
-    const [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet, tailSet, expectancySet] = await Promise.all([
-      axios.get(`${API}/options_desk/account`).catch(e => ({ data: { ok: false, reason: e.message } })),
-      axios.get(`${API}/options_desk/candidates`).catch(() => ({ data: null })),
-      axios.get(`${API}/options_desk/positions`).catch(() => ({ data: { positions: [] } })),
-      axios.get(`${API}/options_desk/orders`).catch(() => ({ data: { orders: [] } })),
-      axios.get(`${API}/options_desk/risk`).catch(() => ({ data: null })),
-      axios.get(`${API}/options_desk/trades?sync_live=false`).catch(() => ({ data: { trades: [] } })),
-      axios.get(`${API}/options_desk/leaps`).catch(() => ({ data: null })),
-      axios.get(`${API}/options_desk/tail`).catch(() => ({ data: null })),
-      axios.get(`${API}/options_desk/expectancy`).catch(() => ({ data: null })),
-    ]);
-    setAccount(acct.data);
-    setCandidates(cand.data);
-    setPositions(pos.data);
-    setOrders(ord.data);
-    setRisk(riskCheck.data);
-    setTrades(tradeSet.data);
-    setLeaps(leapsSet.data);
-    setTail(tailSet.data);
-    setExpectancy(expectancySet.data);
-    const failed = [acct, cand, pos, ord, riskCheck, tradeSet, leapsSet, tailSet, expectancySet]
-      .filter(result => result?.data?.error || result?.data == null).length;
-    setLoadWarning(failed ? `${failed} OPTIONS DATA REQUEST(S) FAILED - VALUES MAY BE INCOMPLETE` : "");
-  }, []);
+  const riskRead = useDisplayResource(`${API}/options_desk/risk`, 60000);
+  const tradesRead = useDisplayResource(`${API}/options_desk/trades?sync_live=false`, 60000);
+  const refreshRisk = riskRead.refresh;
+  const refreshTrades = tradesRead.refresh;
+  useEffect(() => { if (riskRead.data != null) setRisk(riskRead.data); }, [riskRead.data]);
+  useEffect(() => { if (tradesRead.data != null) setTrades(tradesRead.data); }, [tradesRead.data]);
 
-  useEffect(() => { load(); }, [load]);
+  // Candidates and expectancy GETs can persist backend state; do not poll them.
+  const load = useCallback(async (signal) => {
+    const reads = [
+      ["account", setAccount], ["candidates", setCandidates], ["positions", setPositions],
+      ["orders", setOrders], ["leaps", setLeaps], ["tail", setTail], ["expectancy", setExpectancy],
+    ];
+    const results = await Promise.allSettled(reads.map(([path]) =>
+      axios.get(`${API}/options_desk/${path}`, { signal, timeout: 20000 })
+    ));
+    if (signal?.aborted) return;
+    const failed = [];
+    results.forEach((result, i) => {
+      const [path, setValue] = reads[i];
+      if (result.status === "rejected" || result.value?.data == null || result.value.data.error) {
+        failed.push(path);
+      } else {
+        setValue(result.value.data);
+      }
+    });
+    setLoadWarning(failed.length ? `Display unavailable: ${failed.join(", ")}. Last successful data retained where available.` : "");
+    if (!signal) await Promise.all([refreshRisk(), refreshTrades()]);
+  }, [refreshRisk, refreshTrades]);
 
-  const rows = candidates?.candidates || [];
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+
+  const rows = deskRowsOnly(candidates?.candidates);
   const deskRows = rows.filter(r => r.route !== "EQUITY");
   const readyRows = deskRows.filter(r => r.manual_fire_ready);
-  const selectedTicket = selected && selected.route !== "EQUITY" ? selected : readyRows[0] || deskRows[0];
+  const selectedTicket = deskRows.find(row => selected && row.candidate_id === selected.candidate_id) || readyRows[0] || deskRows[0];
   const acct = account?.account || {};
   const deskSummary = {
     total: deskRows.length,
@@ -71,34 +80,34 @@ export default function OptionsDeskPage() {
     ready: readyRows.length,
   };
   const dataPolicy = candidates?.options_data_policy || {};
-  const openPositions = positions?.positions || [];
-  const tailRows = tail?.candidates || [];
+  const openPositions = deskRowsOnly(positions?.positions);
+  const tailRows = deskRowsOnly(tail?.candidates);
   const tailReady = tailRows.filter(r => r.manual_fire_ready);
-  const selectedOpenPosition = selectedPosition || openPositions[0] || null;
+  const selectedOpenPosition = openPositions.find(row => selectedPosition && row.symbol === selectedPosition.symbol) || openPositions[0] || null;
   const tradeBySymbol = useMemo(() => {
     const map = {};
-    (trades?.trades || []).forEach(t => { if (t.symbol) map[t.symbol] = t; });
+    deskRowsOnly(trades?.trades).forEach(t => { if (t.symbol) map[t.symbol] = t; });
     return map;
   }, [trades]);
   const riskBySymbol = useMemo(() => {
     const map = {};
-    (risk?.checks || []).forEach(c => { if (c.symbol) map[c.symbol] = c; });
+    deskRowsOnly(risk?.checks).forEach(c => { if (c.symbol) map[c.symbol] = c; });
     return map;
   }, [risk]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     const ticker = selectedTicket?.ticker;
-    if (!ticker) {
+    if (!ticker || activeView !== "DESK") {
       setLseContext(null);
-      return () => { cancelled = true; };
+      return () => controller.abort();
     }
     setLseContext({ loading: true, ticker });
     Promise.all([
-      axios.get(`${API}/data/lse/options/${ticker}?limit=24&max_dte=90`).catch(e => ({ data: { error: e.message, rows: [] } })),
-      axios.get(`${API}/data/lse/options_flow?underlying=${ticker}&limit=24&max_dte=90`).catch(e => ({ data: { error: e.message, rows: [] } })),
+      axios.get(`${API}/data/lse/options/${encodeURIComponent(ticker)}?limit=24&max_dte=90`, { signal: controller.signal, timeout: 12000 }).catch(e => ({ data: { error: e.message, rows: [] } })),
+      axios.get(`${API}/data/lse/options_flow?underlying=${encodeURIComponent(ticker)}&limit=24&max_dte=90`, { signal: controller.signal, timeout: 12000 }).catch(e => ({ data: { error: e.message, rows: [] } })),
     ]).then(([chain, flowSet]) => {
-      if (!cancelled) {
+      if (!controller.signal.aborted) {
         setLseContext({
           loading: false,
           ticker,
@@ -107,8 +116,8 @@ export default function OptionsDeskPage() {
         });
       }
     });
-    return () => { cancelled = true; };
-  }, [selectedTicket?.ticker]);
+    return () => controller.abort();
+  }, [selectedTicket?.ticker, activeView]);
 
   const refresh = async () => {
     setBusy(true);
@@ -116,7 +125,7 @@ export default function OptionsDeskPage() {
     try {
       const r = await axios.post(`${API}/options_desk/candidates/refresh`);
       setCandidates(r.data);
-      setSelected(((r.data.candidates || []).filter(row => row.route !== "EQUITY"))[0] || null);
+      setSelected((deskRowsOnly(r.data?.candidates).filter(row => row.route !== "EQUITY"))[0] || null);
       setMessage("OPTIONS CANDIDATES REFRESHED");
     } catch (err) {
       setMessage(`OPTIONS REFRESH FAILED: ${err?.response?.data?.detail || err?.message || "UNKNOWN ERROR"}`);
@@ -170,7 +179,7 @@ export default function OptionsDeskPage() {
     try {
       const r = await axios.post(`${API}/options_desk/tail/refresh`);
       setTail(r.data);
-      setSelectedTail((r.data.candidates || [])[0] || null);
+      setSelectedTail(deskRowsOnly(r.data?.candidates)[0] || null);
       setMessage(`TAIL HUNTER REFRESHED: ${r.data.summary?.ready || 0} READY`);
     } finally {
       setBusy(false);
@@ -199,6 +208,7 @@ export default function OptionsDeskPage() {
           <button onClick={syncDesk} disabled={busy} style={buttonStyle(accent2)}>SYNC DESK</button>
         </div>
       }>
+      <style>{optionsResponsiveCss}</style>
       <div style={notice}>
         SEPARATE PAPER OPTIONS ACCOUNT. PM ROUTES THE EXPRESSION. EQUITY TRADE FLOOR IS NOT CONNECTED TO THIS DESK.
       </div>
@@ -213,7 +223,7 @@ export default function OptionsDeskPage() {
 
       <div className="options-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(10, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
         <Stat label="DESK STATUS" value={account?.ok ? "ARMED" : "DISABLED"} sub={account?.reason || "OPTIONS PAPER"} color={account?.ok ? "#4ade80" : "#f87171"} accentBar />
-        <Stat label="EQUITY BASIS" value={`$${Number(candidates?.options_equity_basis || 20000).toLocaleString()}`} sub="OPTIONS PM" color={accent} />
+        <Stat label="EQUITY BASIS" value={money(candidates?.options_equity_basis)} sub="OPTIONS PM" color={accent} />
         <Stat label="BUYING POWER" value={acct.buying_power ? `$${Number(acct.buying_power).toFixed(0)}` : "-"} sub={acct.status || "NO ACCOUNT"} color={accent2} />
         <Stat label="READY" value={deskSummary.ready || 0} sub={`${deskSummary.total || 0} DESK CANDIDATES`} color="#4ade80" />
         <Stat label="OPTION/BOTH" value={(deskSummary.option || 0) + (deskSummary.both || 0)} sub="PM ROUTED" color="#fbbf24" />
@@ -221,7 +231,7 @@ export default function OptionsDeskPage() {
         <Stat label="LIVE DATA" value={`${dataPolicy.alpaca_refreshes_used ?? 0}/${dataPolicy.alpaca_refresh_limit ?? 18}`} sub="SCORE-FIRST ALPACA" color={accent2} />
         <Stat label="TAIL READY" value={`${tailReady.length}/${tailRows.length}`} sub={`${tail?.status?.active_tail ?? 0} ACTIVE`} color={tailReady.length ? "#4ade80" : "#fbbf24"} />
         <Stat label="HARD STOP" value="-25%" sub={`${risk?.positions_checked || 0} OPEN CHECKED`} color="#f87171" />
-        <Stat label="THETA WATCH" value={(risk?.checks || []).filter(c => c.theta_status === "WATCH").length} sub="DECAY FLAGS" color="#fbbf24" />
+        <Stat label="THETA WATCH" value={deskRowsOnly(risk?.checks).filter(c => c.theta_status === "WATCH").length} sub="DECAY FLAGS" color="#fbbf24" />
       </div>
 
       <div style={dataPolicyBox}>
@@ -241,7 +251,8 @@ export default function OptionsDeskPage() {
       />
 
       {message && <div style={messageBox}>{message}</div>}
-      {loadWarning && <div style={{ ...messageBox, borderColor: "#f87171", color: "#f87171" }}>{loadWarning}</div>}
+      {(riskRead.error || tradesRead.error) && <div role="alert" style={messageBox}>Display unavailable: {[riskRead.error && "risk", tradesRead.error && "trades"].filter(Boolean).join(", ")}. Last successful data retained where available.</div>}
+      {loadWarning && <div role="alert" style={{ ...messageBox, borderColor: "#f87171", color: "#f87171" }}>{loadWarning}</div>}
       {candidates?.scan_finished_at && <div style={{ ...dataPolicyBox, color: new Date(candidates.scan_finished_at).getTime() < Date.now() - 15 * 60 * 1000 ? "#f87171" : muted }}>
         SOURCE SCAN: {new Date(candidates.scan_finished_at).toLocaleString()} | {new Date(candidates.scan_finished_at).getTime() < Date.now() - 15 * 60 * 1000 ? "STALE - REFRESH REQUIRED" : "CURRENT"}
       </div>}
@@ -254,6 +265,8 @@ export default function OptionsDeskPage() {
             const r = await axios.post(`${API}/options_desk/leaps/refresh`);
             setLeaps(r.data);
             setMessage("LEAPS SLEEVE REFRESHED");
+          } catch (e) {
+            setMessage(e.response?.data?.detail || e.message);
           } finally {
             setBusy(false);
           }
@@ -262,7 +275,7 @@ export default function OptionsDeskPage() {
         <TailHunterPanel
           data={tail}
           busy={busy}
-          selected={selectedTail || tailReady[0] || tailRows[0]}
+          selected={tailRows.find(row => selectedTail && row.candidate_id === selectedTail.candidate_id) || tailReady[0] || tailRows[0]}
           onSelect={setSelectedTail}
           onRefresh={refreshTail}
           onExecute={executeTail}
@@ -270,7 +283,7 @@ export default function OptionsDeskPage() {
       ) : (
       <>
 
-      <div style={deskGrid}>
+      <div className="options-owned-grid" style={deskGrid}>
         <Card title="PM ROUTING BOARD" accentColor={accent}>
           <RouteBars summary={deskSummary} />
           <CandidateTable rows={deskRows} selected={selectedTicket} onSelect={setSelected} />
@@ -283,7 +296,7 @@ export default function OptionsDeskPage() {
         </Card>
       </div>
 
-      <div style={deskGrid}>
+      <div className="options-owned-grid" style={deskGrid}>
         <Card title="OPEN OPTION POSITIONS" accentColor={accent2}>
           <OpenPositionsTable
             positions={openPositions}
@@ -301,12 +314,12 @@ export default function OptionsDeskPage() {
         </Card>
       </div>
 
-      <div style={deskGrid}>
+      <div className="options-owned-grid" style={deskGrid}>
         <Card title="OPTIONS ORDERS" accentColor={accent}>
           <SimpleTable
             empty="No options orders."
             head={["SYMBOL", "SIDE", "QTY", "TYPE", "STATUS"]}
-            rows={(orders?.orders || []).slice(0, 12).map(o => [
+            rows={deskRowsOnly(orders?.orders).slice(0, 12).map(o => [
               o.symbol,
               o.side,
               o.qty,
@@ -319,7 +332,7 @@ export default function OptionsDeskPage() {
           <SimpleTable
             empty="No synced option fills yet."
             head={["SYMBOL", "STATUS", "ENTRY", "CURRENT", "P/L"]}
-            rows={(trades?.trades || []).slice(0, 10).map(t => [
+            rows={deskRowsOnly(trades?.trades).slice(0, 10).map(t => [
               t.symbol,
               t.status,
               money(t.entry_premium),
@@ -334,7 +347,7 @@ export default function OptionsDeskPage() {
         <SimpleTable
           empty="No open option contracts checked yet."
           head={["SYMBOL", "ENTRY", "CURRENT", "P/L %", "THETA", "FLOOR", "STATUS"]}
-          rows={(risk?.checks || []).map(c => [
+          rows={deskRowsOnly(risk?.checks).map(c => [
             c.symbol,
             money(c.entry_premium),
             money(c.current_premium),
@@ -352,8 +365,8 @@ export default function OptionsDeskPage() {
 }
 
 function LeapsSleeve({ data, onRefresh, busy }) {
-  const holdings = data?.holdings || [];
-  const candidates = data?.candidates || [];
+  const holdings = deskRowsOnly(data?.holdings);
+  const candidates = deskRowsOnly(data?.candidates);
   const summary = data?.summary || {};
   return (
     <div>
@@ -366,7 +379,7 @@ function LeapsSleeve({ data, onRefresh, busy }) {
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
         <button onClick={onRefresh} disabled={busy} style={buttonStyle(accent2)}>{busy ? "REFRESHING" : "REFRESH LEAPS"}</button>
       </div>
-      <div style={deskGrid}>
+      <div className="options-owned-grid" style={deskGrid}>
         <Card title="BOUGHT LEAPS - STRATEGY STATE" accentColor={accent}>
           <SimpleTable
             empty="No bought LEAPS detected in the options account."
@@ -408,7 +421,7 @@ function LeapsSleeve({ data, onRefresh, busy }) {
 }
 
 function TailHunterPanel({ data, busy, selected, onSelect, onRefresh, onExecute }) {
-  const candidates = data?.candidates || [];
+  const candidates = deskRowsOnly(data?.candidates);
   const ready = candidates.filter(c => c.manual_fire_ready);
   const status = data?.status || {};
   const policy = data?.policy || {};
@@ -425,7 +438,7 @@ function TailHunterPanel({ data, busy, selected, onSelect, onRefresh, onExecute 
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
         <button onClick={onRefresh} disabled={busy} style={buttonStyle(accent2)}>{busy ? "REFRESHING" : "REFRESH TAIL"}</button>
       </div>
-      <div style={deskGrid}>
+      <div className="options-owned-grid" style={deskGrid}>
         <Card title="TAIL HUNTER QUEUE" accentColor="#fbbf24">
           <SimpleTable
             empty="No Tail Hunter candidates. Run a fresh options sweep after a scan."
@@ -458,10 +471,10 @@ function TailHunterPanel({ data, busy, selected, onSelect, onRefresh, onExecute 
               <PlanRow k="Exit" v="+100% sells half, then 40% wide trail" color="#4ade80" />
               <PlanRow k="Hard Stop" v="NONE - premium is capped at birth" color="#f87171" />
               <div style={{ borderTop: hairline, marginTop: 12, paddingTop: 12 }}>
-                {(active.tail_gate?.reasons || []).map((reason, i) => (
+                {deskText(active.tail_gate?.reasons).map((reason, i) => (
                   <div key={i} style={{ color: labelLight, fontSize: 11, lineHeight: 1.55 }}>+ {reason}</div>
                 ))}
-                {(active.blocked_reasons || []).map((reason, i) => (
+                {deskText(active.blocked_reasons).map((reason, i) => (
                   <div key={`b-${i}`} style={{ color: "#f87171", fontSize: 11, lineHeight: 1.55 }}>BLOCK: {reason}</div>
                 ))}
               </div>
@@ -495,7 +508,11 @@ function TailHunterPanel({ data, busy, selected, onSelect, onRefresh, onExecute 
 
 function LeapsCone({ item }) {
   const k = item?.kronos_1y || {};
-  const low = Number(k.cone_low_pct || 0);
+  const values = [k.cone_low_pct, k.expected_contract_1y_pct, k.cone_high_pct];
+  if (values.some(value => value == null || value === "" || !Number.isFinite(Number(value)))) {
+    return <div style={{ color: muted, padding: 20 }}>1Y cone unavailable.</div>;
+  }
+  const low = Number(k.cone_low_pct);
   const expected = Number(k.expected_contract_1y_pct || 0);
   const high = Number(k.cone_high_pct || 0);
   const min = Math.min(low, expected, high, -100);
@@ -586,7 +603,7 @@ function CandidateTable({ rows, selected, onSelect }) {
               <td style={td}>{num(r.pm_score, 1)}</td>
               <td style={td}>{num(r.risk_reward, 2)}</td>
               <td style={{ ...td, color: r.data_provider === "ALPACA_OPTIONS" ? accent2 : "#fbbf24", fontWeight: 800 }}>
-                {(r.data_provider || r.instrument?.data_provider || "UNKNOWN").replace("_OPTIONS", "")}
+                {String(r.data_provider || r.instrument?.data_provider || "UNKNOWN").replace("_OPTIONS", "")}
                 <br /><span style={{ color: muted }}>{r.data_quality || r.instrument?.data_quality || "-"}</span>
               </td>
               <td style={{ ...td, color: r.manual_fire_ready ? "#4ade80" : "#f87171" }}>{r.manual_fire_ready ? "YES" : "NO"}</td>
@@ -602,7 +619,7 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
   if (!ticket) return <div style={{ color: muted, padding: 20 }}>Select a candidate.</div>;
   const instrument = ticket.instrument || {};
   const exit = ticket.exit_policy || {};
-  const blocks = ticket.blocked_reasons || [];
+  const blocks = deskText(ticket.blocked_reasons);
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, borderBottom: hairline, paddingBottom: 12, marginBottom: 12 }}>
@@ -630,9 +647,9 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
       <PlanRow k="Exit" v={exit.policy ? "NO TP / RATCHET" : "-"} color="#4ade80" />
       <PlanRow k="Initial Floor" v={exit.initial_stop_pct != null ? `${exit.initial_stop_pct}%` : "-"} color="#f87171" />
       <PlanRow k="Locked Floor" v={exit.locked_floor_pct != null ? `${exit.locked_floor_pct}%` : "-"} color={accent} />
-      {exit.tiers?.length > 0 && (
+      {deskRowsOnly(exit.tiers).length > 0 && (
         <div style={ratchetGrid}>
-          {exit.tiers.map(t => (
+          {deskRowsOnly(exit.tiers).map(t => (
             <div key={`${t.trigger_gain_pct}-${t.locked_gain_pct}`} style={ratchetTier}>
               <span>+{t.trigger_gain_pct}%</span>
               <strong>+{t.locked_gain_pct}%</strong>
@@ -641,9 +658,9 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
         </div>
       )}
       <div style={{ color: muted, fontSize: 12, lineHeight: 1.6, marginTop: 12 }}>{ticket.strategy_reason || "No thesis text."}</div>
-      {(ticket.strategy_lane?.reasons || []).length > 0 && (
+      {deskText(ticket.strategy_lane?.reasons).length > 0 && (
         <div style={{ color: labelLight, fontSize: 11, lineHeight: 1.55, marginTop: 10, borderTop: hairline, paddingTop: 10 }}>
-          {ticket.strategy_lane.reasons.map((reason, i) => <div key={i}>{reason}</div>)}
+          {deskText(ticket.strategy_lane.reasons).map((reason, i) => <div key={i}>{reason}</div>)}
         </div>
       )}
       <div style={{ marginTop: 12 }}>
@@ -657,8 +674,8 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
 }
 
 function LseOptionsIntel({ context, ticket }) {
-  const chainRows = Array.isArray(context?.chain?.rows) ? context.chain.rows : [];
-  const flowRows = Array.isArray(context?.flow?.rows) ? context.flow.rows : [];
+  const chainRows = deskRowsOnly(context?.chain?.rows);
+  const flowRows = deskRowsOnly(context?.flow?.rows);
   const sample = bestLseOptionRow(chainRows, ticket);
   if (context?.loading) {
     return <PlanRow k="LSE Options" v="SYNCING..." color={accent2} />;
@@ -761,9 +778,9 @@ function PositionProfileCard({ position, trade, risk }) {
       <PlanRow k="Floor Premium" v={money(exit.floor_premium)} color={accent} />
       <PlanRow k="Peak Premium" v={money(exit.peak_premium)} color="#4ade80" />
       <PlanRow k="Next Tier" v={nextTier ? `+${nextTier.trigger_gain_pct}% -> +${nextTier.locked_gain_pct}%` : "MAX LOCK"} color="#fbbf24" />
-      {exit.tiers?.length > 0 && (
+      {deskRowsOnly(exit.tiers).length > 0 && (
         <div style={ratchetGrid}>
-          {exit.tiers.map(t => (
+          {deskRowsOnly(exit.tiers).map(t => (
             <div key={`${symbol}-${t.trigger_gain_pct}`} style={{ ...ratchetTier, background: Number(exit.peak_gain_pct || 0) >= Number(t.trigger_gain_pct) ? "rgba(74,222,128,0.13)" : "rgba(255,255,255,0.025)" }}>
               <span>+{t.trigger_gain_pct}%</span>
               <strong>+{t.locked_gain_pct}%</strong>
@@ -824,35 +841,35 @@ function optionStrike(symbol) {
 
 function nextRatchetTier(exit) {
   const peak = Number(exit?.peak_gain_pct || 0);
-  return (exit?.tiers || []).find(t => Number(t.trigger_gain_pct) > peak);
+  return deskRowsOnly(exit?.tiers).find(t => Number(t.trigger_gain_pct) > peak);
 }
 
 function PlanRow({ k, v, color = labelLight }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, borderBottom: hairline, padding: "7px 0", fontSize: 11 }}>
       <span style={{ color: dim, letterSpacing: "0.14em" }}>{k}</span>
-      <span style={{ color, textAlign: "right" }}>{v}</span>
+      <span style={{ color, textAlign: "right", minWidth: 0, overflowWrap: "anywhere" }}>{v}</span>
     </div>
   );
 }
 
 function num(v, d = 1) {
-  const n = Number(v);
+  const n = v == null || v === "" ? NaN : Number(v);
   return Number.isFinite(n) ? n.toFixed(d) : "-";
 }
 
 function money(v) {
-  const n = Number(v);
+  const n = v == null || v === "" ? NaN : Number(v);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "-";
 }
 
 function fmtExpectancy(row) {
-  const n = Number(row?.expectancy_pct);
+  const n = row?.expectancy_pct == null || row.expectancy_pct === "" ? NaN : Number(row.expectancy_pct);
   return Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(1)}%` : "-";
 }
 
 function expectancyColor(row) {
-  const n = Number(row?.expectancy_pct);
+  const n = row?.expectancy_pct == null || row.expectancy_pct === "" ? NaN : Number(row.expectancy_pct);
   if (!Number.isFinite(n)) return muted;
   return n > 0 ? "#4ade80" : n < 0 ? "#f87171" : "#fbbf24";
 }
@@ -878,3 +895,15 @@ const ratchetTier = { border: hairline, background: "rgba(74,222,128,0.06)", pad
 const coneTrack = { position: "relative", height: 34, border: hairline, background: "rgba(255,255,255,0.04)", margin: "18px 0 8px", overflow: "hidden" };
 const coneBand = { position: "absolute", top: 10, bottom: 10, background: "rgba(94,234,212,0.20)", borderLeft: `1px solid ${accent2}`, borderRight: `1px solid ${accent2}` };
 const coneMarker = { position: "absolute", top: 4, bottom: 4, width: 3, boxShadow: "0 0 12px currentColor" };
+const deskRowsOnly = value => Array.isArray(value) ? value.filter(row => row && typeof row === "object" && !Array.isArray(row)) : [];
+const deskText = value => Array.isArray(value) ? value.filter(row => typeof row === "string" || typeof row === "number") : [];
+const optionsResponsiveCss = `
+  .options-owned-grid > * { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 1000px) {
+    .options-owned-grid { grid-template-columns: minmax(0, 1fr) !important; }
+    .options-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  }
+  @media (max-width: 540px) {
+    .options-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  }
+`;
