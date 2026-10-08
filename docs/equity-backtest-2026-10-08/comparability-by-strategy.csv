@@ -1,0 +1,12 @@
+assessed_records,broad_flagged_records,cache_assessed_unflagged,cache_current_session_completion_unverified,cache_flagged_names,cache_no_exact_cache_session,cache_outside_spy_session_grid,cache_severe_ratio_flag,flagged_names,flagged_unique_tickers,public_assessed_unflagged,public_current_session_completion_unverified,public_flagged_names,public_outside_spy_session_grid,public_public_pending_failed_or_no_exact_session,public_severe_ratio_flag,strategy_id,total_records,unflagged_sensitivity_records,unresolved_records
+8400,1,7530,106,PDEX,4659,68,1,PDEX,1,2890,106,,68,9300,,CORE,12364,8399,3964
+2877,0,2870,139,,10,73,,,0,565,139,,73,2315,,earnings_calendar,3092,2877,215
+2966,1,2965,67,PDEX,2,36,1,PDEX,1,828,67,,36,2140,,earnings_core_overlap,3071,2965,105
+16,0,16,,,,,,,0,12,,,,4,,lottery_catalyst_runner,16,16,0
+295,30,263,,BENF|CTNT|DCX|DLXY|GCDT|GRML|IMCC|IPDN|MEDS|MGN|NCT|RETO|SDEV|SSM|TRUG|VRME|WHLR,10,,30,BENF|CTNT|DCX|DLXY|GCDT|GRML|IMCC|IPDN|MEDS|MGN|NCT|RETO|SDEV|SSM|TRUG|VRME|WHLR,17,42,,BENF,,260,1,lottery_day2_continuation,303,265,8
+547,10,534,28,CNXU|IPW|JAGX|OPTT,69,27,10,CNXU|IPW|JAGX|OPTT,4,63,28,,27,550,,lottery_dilution_read,668,537,121
+2300,5,2256,137,ETHA|ZCSH,137,60,5,ETHA|ZCSH,2,437,137,,60,1961,,options_breakout_call,2595,2295,295
+31,0,31,,,,,,,0,5,,,,26,,options_event_defined_risk,31,31,0
+196,0,194,7,,28,,,,0,53,7,,,169,,options_leaps_trend,229,196,33
+4202,44,4130,266,AXTX|ETHA|LITZ|NBIZ|QBTX|SMU,530,160,44,AXTX|ETHA|LITZ|NBIZ|QBTX|SMU,6,768,266,AXTX,160,3924,12,options_tactical_momentum_call,5130,4158,928
+308,0,308,13,,,8,,,0,40,13,,8,268,,pharma_calendar,329,308,21
