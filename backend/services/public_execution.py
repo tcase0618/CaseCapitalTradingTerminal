@@ -2315,6 +2315,11 @@ async def _emergency_retry_ready(client, trade: dict[str, Any], bid: float) -> b
         if await _retire_terminal_emergency_order(trade, order):
             return True
         status = str(order.get("status") or order.get("orderStatus") or "").upper()
+        if trade.get("emergency_exit_status") == "SUBMIT_UNKNOWN" and status in {"NEW", "OPEN", "SUBMITTED", "PENDING", "ACCEPTED", "PARTIALLY_FILLED"}:
+            await get_db().tf_trades.update_one(
+                {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                {"$set": {"emergency_exit_status": status}})
+            trade["emergency_exit_status"] = status
         submitted_at = trade.get("emergency_exit_submitted_at")
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(submitted_at)).astimezone(timezone.utc)).total_seconds() if submitted_at else 0
         stale_limit = bid > 0 and _num(trade.get("emergency_exit_limit")) > bid and age >= 60
@@ -2325,7 +2330,55 @@ async def _emergency_retry_ready(client, trade: dict[str, Any], bid: float) -> b
             return await _retire_terminal_emergency_order(trade, await client.get_order(str(order_id)))
     except Exception:
         logger.warning("Emergency exit status unresolved for %s; retaining reservation", _symbol(trade))
+        if trade.get("emergency_exit_status") == "SUBMIT_UNKNOWN":
+            await _replay_unknown_emergency_request(client, trade)
     return False
+
+
+async def _replay_unknown_emergency_request(client, trade: dict[str, Any]) -> None:
+    """Replay the immutable request with Public's documented deduplication ID.
+
+    https://public.com/api/docs/resources/order-placement/place-order requires
+    identical properties when replaying an ambiguous placement. Never release
+    this reservation or generate a new order ID from a not-found response.
+    """
+    request = trade.get("emergency_exit_request")
+    if not isinstance(request, dict) or request.get("side") != "SELL":
+        return
+    current_account = getattr(getattr(client, "cfg", None), "account_id", None)
+    if request.get("account_id") and request["account_id"] != current_account:
+        return
+    client_id = request.get("client_order_id")
+    if not client_id or str(uuid.uuid5(uuid.NAMESPACE_URL, f"case-capital:public:{client_id}")) != str(trade.get("emergency_exit_order_id")):
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        submitted = datetime.fromisoformat(str(trade["emergency_exit_submitted_at"])).astimezone(timezone.utc)
+        last = datetime.fromisoformat(str(trade.get("emergency_exit_replayed_at") or submitted.isoformat())).astimezone(timezone.utc)
+        if (now - last).total_seconds() < 60 or now.astimezone(ET).date() != submitted.astimezone(ET).date():
+            return
+        portfolio = await client.portfolio()
+        held = next((p for p in _positions(portfolio) if _symbol(p) == request.get("symbol")), {})
+        if abs(_qty(held) - _num(request.get("quantity"))) > 1e-8 or _qty(held) <= 0:
+            return
+        await get_db().tf_trades.update_one(
+            {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+            {"$set": {"emergency_exit_replayed_at": now.isoformat()}})
+        # Same ID AND same price, quantity, session and expiry. Broker-side
+        # deduplication also protects concurrent identical replay attempts.
+        result = await client.submit_equity_order(**dict(request))
+        order = result.get("order") or {}
+        order_id = order.get("orderId") or order.get("id")
+        if not order_id:
+            raise RuntimeError("Ambiguous exit replay has no order id")
+        update = {"emergency_exit_order_id": order_id, "emergency_exit_status": "SUBMITTED",
+                  "emergency_exit_submitted_at": now.isoformat(), "emergency_exit_replayed_at": now.isoformat()}
+        await get_db().tf_trades.update_one(
+            {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE}, {"$set": update})
+        trade.update(update)
+        await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "identical_request_replay": True})
+    except Exception:
+        logger.warning("Identical emergency request replay unresolved for %s", _symbol(trade))
 
 
 async def _record_exit_attempt_blocked(ticker: str, reason: str) -> None:
@@ -2372,6 +2425,9 @@ async def process_protective_exits() -> dict[str, Any]:
             current = _num((exit_quote or {}).get("bid"))
             if trade.get("emergency_exit_order_id") and not await _emergency_retry_ready(client, trade, current):
                 deferred.append({"ticker": ticker, "reason": "emergency_exit_order_active_or_unverified"})
+                if trade.get("emergency_exit_status") == "SUBMIT_UNKNOWN":
+                    errors.append({"ticker": ticker, "reason": "emergency_exit_submission_unresolved"})
+                    await _record_exit_attempt_blocked(ticker, "emergency_exit_submission_unresolved")
                 continue
             quantity = _qty(trade)
             if stop > 0 and quantity > 0 and not exit_quote:
@@ -2404,26 +2460,25 @@ async def process_protective_exits() -> dict[str, Any]:
                 # Persist the deterministic broker id before submission so a
                 # crash or timeout cannot open a second sell reservation.
                 expected_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"case-capital:public:{client_id}"))
+                request = {"symbol": ticker, "side": "SELL", "quantity": quantity,
+                           "limit_price": _num(exit_quote.get("limit_price")), "time_in_force": "DAY",
+                           "session": str(order_shape["session"]), "client_order_id": client_id}
+                account_id = getattr(getattr(client, "cfg", None), "account_id", None)
+                if account_id:
+                    request["account_id"] = account_id
                 await db.tf_trades.update_one(
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                     {"$set": {"emergency_exit_order_id": expected_id, "emergency_exit_status": "SUBMIT_UNKNOWN",
                               "emergency_exit_submitted_at": datetime.now(timezone.utc).isoformat(),
                               "emergency_exit_order_qty": quantity, "emergency_exit_filled_qty": 0.0,
+                              "emergency_exit_request": request, "emergency_exit_replayed_at": None,
                               "emergency_exit_limit": _num(exit_quote.get("limit_price"))}})
                 # A conditional order is rejected by the current broker
                 # routing profile. Submit a plainly labelled, fresh-quote
                 # limit close instead; it can still remain unfilled, which is
                 # why the position stays reconciled until broker confirmation.
                 exit_limit = _num(exit_quote.get("limit_price"))
-                result = await client.submit_equity_order(
-                    symbol=ticker,
-                    side="SELL",
-                    quantity=quantity,
-                    limit_price=exit_limit,
-                    time_in_force="DAY",
-                    session=str(order_shape["session"]),
-                    client_order_id=client_id,
-                )
+                result = await client.submit_equity_order(**request)
                 order = result.get("order") or {}
                 order_id = order.get("orderId") or order.get("id")
                 if not order_id:
@@ -2484,6 +2539,8 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
 
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         if trade.get("emergency_exit_order_id") and not await _emergency_retry_ready(client, trade, 0.0):
+            if trade.get("emergency_exit_status") == "SUBMIT_UNKNOWN":
+                await _record_exit_attempt_blocked(symbol, "emergency_exit_submission_unresolved")
             return {"submitted": False, "ticker": symbol, "reason": "public_exit_order_already_active"}
         portfolio = await client.portfolio()
         broker_position = next((row for row in _positions(portfolio) if _symbol(row) == symbol), None)
@@ -2530,20 +2587,19 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
             return {"submitted": False, "ticker": symbol, "reason": claim.get("reason") or "duplicate_execution_intent"}
         try:
             expected_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"case-capital:public:{client_id}"))
+            request = {"symbol": symbol, "side": "SELL", "quantity": quantity,
+                       "limit_price": exit_limit, "time_in_force": "DAY",
+                       "session": str(order_shape["session"]), "client_order_id": client_id}
+            account_id = getattr(getattr(client, "cfg", None), "account_id", None)
+            if account_id:
+                request["account_id"] = account_id
             await db.tf_trades.update_one(
                 {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                 {"$set": {"emergency_exit_order_id": expected_id, "emergency_exit_status": "SUBMIT_UNKNOWN",
                           "emergency_exit_submitted_at": datetime.now(timezone.utc).isoformat(),
+                          "emergency_exit_request": request, "emergency_exit_replayed_at": None,
                           "emergency_exit_order_qty": quantity, "emergency_exit_filled_qty": 0.0}})
-            result = await client.submit_equity_order(
-                symbol=symbol,
-                side="SELL",
-                quantity=quantity,
-                limit_price=exit_limit,
-                time_in_force="DAY",
-                session=str(order_shape["session"]),
-                client_order_id=client_id,
-            )
+            result = await client.submit_equity_order(**request)
             order = result.get("order") or {}
             order_id = order.get("orderId") or order.get("id")
             if not order_id:
