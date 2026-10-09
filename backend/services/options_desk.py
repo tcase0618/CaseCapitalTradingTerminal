@@ -2022,7 +2022,97 @@ async def close(symbol: str, qty: int | None = None, *, emergency: bool = False)
     if qty:
         payload["qty"] = str(int(qty))
     async with httpx.AsyncClient(timeout=15.0, headers=_options_headers()) as client:
-        r = await client.post(f"{_options_trade_base()}/v2/orders", json=payload)
+        from . import execution_safety
+        base = _options_trade_base()
+        # Prove open-order coverage independently from bounded history. A
+        # busy account's old fills must not hide a working protective sell.
+        open_response = await client.get(f"{base}/v2/orders", params={"status": "open", "limit": 500, "nested": "true"})
+        if open_response.status_code != 200:
+            return {"ok": False, "reason": "option_close_orders_unavailable"}
+        open_orders = open_response.json()
+        if not isinstance(open_orders, list) or len(open_orders) >= 500:
+            return {"ok": False, "reason": "option_close_orders_incomplete"}
+        response = await client.get(f"{base}/v2/orders", params={"status": "all", "limit": 500, "nested": "true"})
+        if response.status_code != 200:
+            return {"ok": False, "reason": "option_close_orders_unavailable"}
+        history = response.json()
+        if not isinstance(history, list):
+            return {"ok": False, "reason": "option_close_orders_incomplete"}
+        if any(not isinstance(order, dict) or not order.get("id") for order in [*history, *open_orders]):
+            return {"ok": False, "reason": "option_close_order_schema_unverified"}
+        by_id = {order.get("id"): order for order in history}
+        by_id.update({order.get("id"): order for order in open_orders})
+        history = list(by_id.values())
+        terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
+        matching = []
+        for parent in history:
+            for order in [parent, *(parent.get("legs") or [])]:
+                if str(order.get("symbol") or "").upper() == symbol.upper() and str(order.get("side") or "").lower() == "sell":
+                    matching.append((order, parent))
+        working = [(order, parent) for order, parent in matching if str(order.get("status") or "").lower() not in terminal]
+        if len(working) > 1:
+            return {"ok": False, "reason": "multiple_option_close_orders_require_reconciliation"}
+        if working:
+            order, parent = working[0]
+            try:
+                submitted = datetime.fromisoformat(str(order.get("submitted_at") or parent.get("submitted_at")).replace("Z", "+00:00"))
+                age = (datetime.now(timezone.utc) - submitted.astimezone(timezone.utc)).total_seconds()
+            except (ValueError, TypeError):
+                age = 0
+            stale = emergency and age >= 60 and _safe_float(order.get("limit_price")) > _safe_float(pricing["limit_price"])
+            if not stale or parent.get("legs"):
+                return {"ok": True, "already_working": True, "order": parent, "account_route": route}
+            order_id = order.get("id")
+            if not order_id:
+                return {"ok": False, "reason": "option_close_working_order_id_missing"}
+            canceled = await client.delete(f"{base}/v2/orders/{order_id}")
+            if canceled.status_code not in {200, 204}:
+                return {"ok": False, "reason": "option_close_cancel_not_accepted"}
+            confirmed = await client.get(f"{base}/v2/orders/{order_id}")
+            if confirmed.status_code != 200 or str(confirmed.json().get("status") or "").lower() not in terminal:
+                return {"ok": False, "reason": "option_close_cancel_unconfirmed"}
+            order.update(confirmed.json())
+        # Refresh holdings AFTER terminal cancellation to handle racing fills.
+        position_response = await client.get(f"{base}/v2/positions/{symbol}")
+        if position_response.status_code == 404:
+            return {"ok": False, "reason": "option_close_no_broker_holding"}
+        if position_response.status_code != 200:
+            return {"ok": False, "reason": "option_close_position_unavailable"}
+        position = position_response.json()
+        held = _safe_float(position.get("qty"))
+        if held <= 0 or held != int(held) or (qty is not None and qty <= 0):
+            return {"ok": False, "reason": "option_close_requires_long_whole_contracts"}
+        payload["qty"] = str(min(int(held), int(qty)) if qty is not None else int(held))
+        closed_ids = sorted(str(order.get("id")) for order, _ in matching if str(order.get("status") or "").lower() in terminal)
+        client_id = execution_safety.stable_client_order_id("options_close", symbol, ",".join(closed_ids), prefix="cc-exit")
+        payload["client_order_id"] = client_id
+        active_intents = await get_db().execution_intents.find(
+            {"scope": "options_exit", "symbol": symbol, "status": {"$in": ["claimed", "submit_unknown", "submitted"]}}, {"_id": 0}).to_list(500)
+        if len(active_intents) >= 500:
+            return {"ok": False, "reason": "option_close_reservations_incomplete"}
+        for intent in active_intents:
+            matched = next((order for order, _ in matching
+                            if order.get("client_order_id") == intent.get("client_order_id")
+                            or (order.get("id") and order.get("id") == (intent.get("details") or {}).get("order_id"))), None)
+            if not matched or str(matched.get("status") or "").lower() not in terminal:
+                return {"ok": False, "reason": "option_close_reservation_active_or_unknown"}
+            await execution_safety.mark_execution_intent(intent.get("client_order_id"), "terminal", {"order_id": matched.get("id")})
+        claim = await execution_safety.claim_execution_intent(
+            scope="options_exit", client_order_id=client_id, symbol=symbol, side="sell",
+            metadata={"source": "options_close", "terminal_sell_ids": closed_ids})
+        if not claim.get("ok"):
+            return {"ok": False, "reason": "option_close_reservation_active_or_unknown"}
+        # A crash/timeout must never make this intent reclaimable by TTL.
+        await execution_safety.mark_execution_intent(client_id, "submit_unknown")
+        try:
+            r = await client.post(f"{base}/v2/orders", json=payload)
+        except Exception:
+            return {"ok": False, "reason": "option_close_submission_unknown", "client_order_id": client_id}
+        if r.status_code in {200, 201}:
+            order = r.json()
+            if not order.get("id"):
+                return {"ok": False, "reason": "option_close_submission_unknown", "client_order_id": client_id}
+            await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order["id"]})
     if r.status_code not in (200, 201):
         return {
             "ok": False,
