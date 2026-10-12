@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from . import execution_safety, portfolio_manager, public_api, public_execution, safety
+from . import portfolio_manager, public_api, public_execution
 from .db import get_db, stamped
 
 BROKER_BASE = "public"
@@ -223,13 +223,13 @@ async def _reconcile_intents(client: Any) -> dict[str, Any]:
     """Advance existing sell intents; only a confirmed fill can unlock a buy."""
     db = get_db()
     rows = await db.pm_rebalance_intents.find(
-        {"broker_base": BROKER_BASE, "status": {"$in": ["SELL_SUBMITTED", "SELL_FILLED", "BUY_WAITING"]}},
+        {"broker_base": BROKER_BASE, "status": {"$in": ["SELL_UNKNOWN", "SELL_SUBMITTED", "SELL_FILLED", "BUY_WAITING"]}},
         {"_id": 0},
     ).to_list(100)
     result = {"checked": len(rows), "sell_filled": 0, "replacement_submitted": [], "errors": []}
     for intent in rows:
         status = str(intent.get("status") or "")
-        if status == "SELL_SUBMITTED":
+        if status in {"SELL_UNKNOWN", "SELL_SUBMITTED"}:
             try:
                 order = await client.get_order(str(intent.get("sell_order_id")))
             except Exception as exc:
@@ -244,6 +244,8 @@ async def _reconcile_intents(client: Any) -> dict[str, Any]:
                     result["sell_filled"] += 1
             elif broker_status in {"CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
                 update.update({"status": "SELL_TERMINAL", "terminal_reason": f"sell_{broker_status.lower()}"})
+            elif broker_status in {"NEW", "OPEN", "SUBMITTED", "PENDING", "ACCEPTED", "PARTIALLY_FILLED"}:
+                update["status"] = "SELL_SUBMITTED"
             await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": update})
             continue
         if status not in {"SELL_FILLED", "BUY_WAITING"}:
@@ -265,6 +267,32 @@ async def _reconcile_intents(client: Any) -> dict[str, Any]:
             result["replacement_submitted"].append(submitted[0])
         else:
             await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "BUY_WAITING", "buy_last_rejection": (buy.get("rejected") or [])[:3], "last_checked_at": datetime.now(timezone.utc).isoformat()}})
+    return result
+
+
+async def _submit_rebalance_exit(intent: dict[str, Any]) -> dict[str, Any]:
+    """Use the monitored exit ledger instead of a second sell authority.
+
+    Persisting the rotation record can fail after placement. The trade ledger
+    retains the original request/order reservation in that case, including
+    ambiguous outcomes; a later pass can reconnect only this exact rotation.
+    """
+    reason = f"pm_rebalance:{intent['intent_id']}"
+    result = await public_execution.submit_exit_to_cash(intent['sell_ticker'], reason=reason)
+    trade = await get_db().tf_trades.find_one(
+        {"broker_base": BROKER_BASE, "status": "OPEN", "emergency_exit_reason": reason}, {"_id": 0})
+    if trade and trade.get("emergency_exit_order_id"):
+        update = {
+            "status": "SELL_UNKNOWN" if trade.get("emergency_exit_status") == "SUBMIT_UNKNOWN" else "SELL_SUBMITTED",
+            "sell_order_id": trade["emergency_exit_order_id"],
+            "sell_client_order_id": (trade.get("emergency_exit_request") or {}).get("client_order_id"),
+            "sell_quantity_submitted": trade.get("emergency_exit_order_qty"),
+            "sell_submitted_at": trade.get("emergency_exit_submitted_at"),
+            "sell_limit_price": trade.get("emergency_exit_limit"),
+            "sell_ledger_client_order_id": trade.get("client_order_id"),
+        }
+        await get_db().pm_rebalance_intents.update_one({"intent_id": intent['intent_id']}, {"$set": update})
+        intent.update(update)
     return result
 
 
@@ -303,34 +331,10 @@ async def run_rebalance_cycle() -> dict[str, Any]:
             if intent.get("status") != "PLANNED":
                 skipped.append({"ticker": ticker, "reason": f"intent_{str(intent.get('status')).lower()}"})
                 continue
-            quote_rows = public_execution._quotes(await client.quotes([ticker]))
-            quote = next((row for row in quote_rows if _ticker(row) == ticker), quote_rows[0] if quote_rows else {})
-            sell_quote, quote_reason = public_execution._execution_quote(quote, side="SELL")
-            price = _num((sell_quote or {}).get("limit_price"))
-            fresh, age = safety.quote_is_fresh({"ts": public_execution._execution_quote_timestamp(quote)})
-            if not fresh or price <= 0 or not sell_quote:
-                skipped.append({"ticker": ticker, "reason": quote_reason or "rebalance_quote_stale_or_unverifiable", "age_seconds": age})
-                continue
-            order_shape, shape_note = public_execution._exit_order_shape(action["quantity"])
-            if not order_shape:
-                skipped.append({"ticker": ticker, "reason": shape_note or "public_rebalance_exit_shape_unavailable"})
-                continue
-            sell_quantity = _num(order_shape.get("quantity"))
-            client_id = execution_safety.stable_client_order_id("public_rebalance_sell", intent.get("intent_id"), ticker, sell_quantity, round(price, 4), prefix="public")
-            claim = await execution_safety.claim_execution_intent(scope="public_equity_rebalance_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"intent_id": intent.get("intent_id"), "reason": action["reason"]})
-            if not claim.get("ok"):
-                skipped.append({"ticker": ticker, "reason": claim.get("reason") or "duplicate_execution_intent"})
-                continue
-            try:
-                result = await client.submit_equity_order(symbol=ticker, side="SELL", quantity=sell_quantity, limit_price=price, time_in_force="DAY", session=str(order_shape["session"]), client_order_id=client_id)
-                order = result.get("order") or {}
-                order_id = order.get("orderId") or order.get("id")
-                if not order_id:
-                    raise RuntimeError("Public rebalance sell response missing order id")
-                await db.pm_rebalance_intents.update_one({"intent_id": intent.get("intent_id")}, {"$set": {"status": "SELL_SUBMITTED", "sell_order_id": order_id, "sell_client_order_id": client_id, "sell_limit_price": price, "sell_execution_quote": sell_quote, "sell_quantity_submitted": sell_quantity, "sell_session": order_shape["session"], "sell_shape_note": shape_note, "sell_preflight": result.get("preflight"), "sell_submitted_at": datetime.now(timezone.utc).isoformat()}})
-                await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id, "broker": BROKER_BASE})
-                submitted.append({"ticker": ticker, "order_id": order_id, "replacement": action["replacement"], "reason": action["reason"]})
-            except Exception as exc:
-                await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})
-                skipped.append({"ticker": ticker, "reason": "public_rebalance_sell_failed", "detail": str(exc)[:220]})
+            result = await _submit_rebalance_exit(intent)
+            if result.get("submitted"):
+                submitted.append({"ticker": ticker, "order_id": result["order_id"],
+                                  "replacement": action["replacement"], "reason": action["reason"]})
+            else:
+                skipped.append({"ticker": ticker, "reason": result.get("reason") or "public_rebalance_sell_blocked"})
     return {"skipped": False, "plan": plan, "reconciled": reconciled, "submitted": submitted, "skipped_actions": skipped}

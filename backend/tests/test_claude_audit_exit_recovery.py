@@ -38,7 +38,7 @@ class MemoryCollection:
 def exit_case(monkeypatch):
     trade = dict(ticker='TEST', broker_base='public', status='OPEN', fill_status='FILLED',
                  client_order_id='entry-test', qty_remaining=1.5, current_stop=10)
-    db = SimpleNamespace(tf_trades=MemoryCollection([trade]), execution_intents=MemoryCollection(), ll_tickets=MemoryCollection())
+    db = SimpleNamespace(tf_trades=MemoryCollection([trade]), execution_intents=MemoryCollection(), ll_tickets=MemoryCollection(), pm_rebalance_intents=MemoryCollection())
     alerts = []
 
     class Client:

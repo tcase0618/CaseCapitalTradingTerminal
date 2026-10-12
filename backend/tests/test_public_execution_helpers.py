@@ -57,6 +57,9 @@ async def test_automatic_public_stop_exit_uses_broker_quantity_and_session(monke
 
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
     monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
+    async def no_unlinked_rotation(_trade):
+        return False
+    monkeypatch.setattr(public_execution, "_unlinked_rebalance_exit", no_unlinked_rotation)
     monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: Client())
     monkeypatch.setattr(public_execution, "_public_session_now", lambda *_args: session)
     monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", claim)
@@ -596,6 +599,9 @@ async def test_explicit_public_exit_uses_fresh_broker_quantity_and_reconciliatio
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
     monkeypatch.setattr(public_execution, "get_db", lambda: SimpleNamespace(tf_trades=Trades()))
     monkeypatch.setattr(public_execution.public_api, "PublicAPIClient", lambda **_kwargs: client)
+    async def no_unlinked_rotation(_trade):
+        return False
+    monkeypatch.setattr(public_execution, "_unlinked_rebalance_exit", no_unlinked_rotation)
     monkeypatch.setattr(public_execution.execution_safety, "claim_execution_intent", claim)
     monkeypatch.setattr(public_execution.execution_safety, "mark_execution_intent", marked)
     monkeypatch.setattr(public_execution, "_public_session_now", lambda *_args: "CORE")

@@ -2322,7 +2322,11 @@ async def _emergency_retry_ready(client, trade: dict[str, Any], bid: float) -> b
             trade["emergency_exit_status"] = status
         submitted_at = trade.get("emergency_exit_submitted_at")
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(submitted_at)).astimezone(timezone.utc)).total_seconds() if submitted_at else 0
-        stale_limit = bid > 0 and _num(trade.get("emergency_exit_limit")) > bid and age >= 60
+        rebalance_breach = (
+            str(trade.get("emergency_exit_reason") or "").startswith("pm_rebalance:")
+            and 0 < bid <= _num(trade.get("pm_active_stop") or trade.get("current_stop"))
+        )
+        stale_limit = bid > 0 and _num(trade.get("emergency_exit_limit")) > bid and (age >= 60 or rebalance_breach)
         if status == "PARTIALLY_FILLED" or (status in {"NEW", "OPEN", "SUBMITTED", "PENDING", "ACCEPTED"} and stale_limit):
             # Cancellation acknowledgement alone may precede cancellation or
             # a racing fill. Poll again before permitting a replacement.
@@ -2391,6 +2395,22 @@ async def _record_exit_attempt_blocked(ticker: str, reason: str) -> None:
         logger.exception("Unable to record blocked protective exit for %s", ticker)
 
 
+async def _unlinked_rebalance_exit(trade: dict[str, Any]) -> bool:
+    """Legacy rotations have no shared reservation; never infer they vanished.
+
+    New rotations write the monitored ledger before placement. Existing rows
+    require explicit reconciliation rather than guessing account/order binding.
+    """
+    rows = await get_db().pm_rebalance_intents.find(
+        {"broker_base": BROKER_BASE, "sell_ticker": _symbol(trade),
+         "status": {"$in": ["SELL_UNKNOWN", "SELL_SUBMITTED"]}}, {"_id": 0}).to_list(500)
+    if len(rows) >= 500:
+        return True
+    tracked = {str(trade.get("emergency_exit_order_id") or "")}
+    tracked.update(str(row.get("order_id") or "") for row in trade.get("emergency_exit_history") or [])
+    return any(not row.get("sell_order_id") or str(row["sell_order_id"]) not in tracked for row in rows)
+
+
 async def process_protective_exits() -> dict[str, Any]:
     """Emergency fresh-quote limit exit after a monitored stop breach.
 
@@ -2437,6 +2457,15 @@ async def process_protective_exits() -> dict[str, Any]:
                 errors.append({"ticker": ticker, "reason": "exit_quote_unavailable"})
                 continue
             if stop <= 0 or current <= 0 or not exit_quote or quantity <= 0 or current > stop:
+                continue
+            try:
+                unlinked = await _unlinked_rebalance_exit(trade)
+            except Exception:
+                unlinked = True
+            if unlinked:
+                reason = "unlinked_rebalance_exit_requires_reconciliation"
+                errors.append({"ticker": ticker, "reason": reason})
+                await _record_exit_attempt_blocked(ticker, reason)
                 continue
             if broker_positions is None:
                 broker_positions = {
@@ -2536,6 +2565,13 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
         return {"submitted": False, "ticker": symbol, "reason": "public_open_trade_ledger_missing"}
     if trade.get("public_phase_order_id"):
         return {"submitted": False, "ticker": symbol, "reason": "public_exit_order_already_active"}
+    try:
+        unlinked = await _unlinked_rebalance_exit(trade)
+    except Exception:
+        unlinked = True
+    if unlinked:
+        await _record_exit_attempt_blocked(symbol, "unlinked_rebalance_exit_requires_reconciliation")
+        return {"submitted": False, "ticker": symbol, "reason": "unlinked_rebalance_exit_requires_reconciliation"}
 
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         if trade.get("emergency_exit_order_id") and not await _emergency_retry_ready(client, trade, 0.0):
@@ -2598,6 +2634,8 @@ async def submit_exit_to_cash(ticker: str, *, reason: str = "pm_or_operator_exit
                 {"$set": {"emergency_exit_order_id": expected_id, "emergency_exit_status": "SUBMIT_UNKNOWN",
                           "emergency_exit_submitted_at": datetime.now(timezone.utc).isoformat(),
                           "emergency_exit_request": request, "emergency_exit_replayed_at": None,
+                          "emergency_exit_reason": reason,
+                          "emergency_exit_limit": exit_limit,
                           "emergency_exit_order_qty": quantity, "emergency_exit_filled_qty": 0.0}})
             result = await client.submit_equity_order(**request)
             order = result.get("order") or {}
