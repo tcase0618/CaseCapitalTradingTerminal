@@ -2,7 +2,7 @@
 // Refined Bloomberg terminal aesthetic: corner brackets, live system bar,
 // status dots, micro-animations.
 import { Link, useLocation } from "react-router-dom";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import useDisplayResource from "../hooks/useDisplayResource";
 import { prefetchPage } from "../lib/pageRegistry";
@@ -32,6 +32,7 @@ import {
   Eye,
   EyeOff,
   Video,
+  X,
 } from "lucide-react";
 import terminalLogo from "../assets/case-terminal-logo.png";
 
@@ -45,6 +46,14 @@ const cardBgHi = "#12151d";
 const pageBg = "#05070b";
 const hairline = "1px solid rgba(198,207,224,0.08)";
 const hairlineAccent = "1px solid rgba(215,189,104,0.22)";
+
+function readPreference(key) {
+  try { return localStorage.getItem(key) === "true"; } catch { return false; }
+}
+
+function savePreference(key, value) {
+  try { localStorage.setItem(key, String(value)); } catch { /* Preferences remain usable without storage. */ }
+}
 
 const NAV = [
   { to: "/portfolio-manager", label: "PORTFOLIO MGR", icon: "PM", group: "TRADE FLOOR" },
@@ -229,8 +238,8 @@ function useLiveAlertCounts() {
   return {
     dh: dh.error || !Array.isArray(dh.data) ? null : dh.data.length,
     xf: xf.error || !Array.isArray(xf.data) ? null : xf.data.length,
-    locks: conv.error || !conv.data ? null : (conv.data.narrative_locks_14d || []).length,
-    lottery_hot: lot.error || !lot.data ? null : (lot.data.picks || []).filter(p => p.tier === "JACKPOT" || p.tier === "HOT").length,
+    locks: conv.error || !Array.isArray(conv.data?.narrative_locks_14d) ? null : conv.data.narrative_locks_14d.length,
+    lottery_hot: lot.error || !Array.isArray(lot.data?.picks) ? null : lot.data.picks.filter(p => p.tier === "JACKPOT" || p.tier === "HOT").length,
   };
 }
 
@@ -392,7 +401,7 @@ function GlobalNewsStrip({ label = "NEWSWIRE", items, loading, cache, accentColo
           </div>
         ) : (
           <span style={{ color: loading ? accent : muted, fontSize: 10, letterSpacing: "0.12em" }}>
-            {loading ? `SYNCING ${label}...` : "NO MAPPED HEADLINES ON THE TAPE"}
+            {cache === "DOWN" ? `${label} UNAVAILABLE` : loading ? `SYNCING ${label}...` : "NO MAPPED HEADLINES ON THE TAPE"}
           </span>
         )}
       </div>
@@ -403,7 +412,7 @@ function GlobalNewsStrip({ label = "NEWSWIRE", items, loading, cache, accentColo
         letterSpacing: "0.16em",
         fontWeight: 900,
       }}>
-        {cache || "LIVE"}
+        {cache || "UNKNOWN"}
       </div>
       <style>{`
         @keyframes case-newswire-scroll {
@@ -452,13 +461,15 @@ export function CrtShell({ title, children, headerRight = null }) {
   const nextMacro = useNextMacroEvent();
   const alerts = useLiveAlertCounts();
   const safety = useSafetyFrame();
-  const [isMobile, setIsMobile] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [compactNav, setCompactNav] = useState(() => localStorage.getItem("cc-compact-nav") === "true");
-  const [focusMode, setFocusMode] = useState(() => localStorage.getItem("cc-focus-mode") === "true");
+  const [compactNav, setCompactNav] = useState(() => readPreference("cc-compact-nav"));
+  const [focusMode, setFocusMode] = useState(() => readPreference("cc-focus-mode"));
+  const sidebar = useRef(null);
   const closeSearch = useCallback(() => setSearchOpen(false), []);
-  const activeNav = NAV.find(n => loc.pathname === n.to || (n.to !== "/" && loc.pathname.startsWith(n.to))) || NAV.find(n => n.to === "/");
+  const activeNav = NAV.find(n => loc.pathname === n.to || (n.to !== "/" && loc.pathname.startsWith(`${n.to}/`)))
+    || (loc.pathname.startsWith("/ticker/") ? { label: "COMPANY PROFILE", color: accent2, Icon: BriefcaseBusiness } : { label: "WORKSPACE", color: accent });
   const market = getMarketStatus();
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth <= 768);
@@ -469,6 +480,25 @@ export function CrtShell({ title, children, headerRight = null }) {
   // Close drawer on route change
   useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
   useEffect(() => {
+    if (!isMobile || !drawerOpen || searchOpen) return;
+    const previous = document.activeElement;
+    const controls = () => sidebar.current?.querySelectorAll('a[href], button:not(:disabled)');
+    controls()?.[0]?.focus();
+    const trap = event => {
+      if (event.key !== "Tab") return;
+      const items = controls();
+      if (!items?.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", trap);
+    return () => {
+      document.removeEventListener("keydown", trap);
+      if (previous?.isConnected) previous.focus?.();
+    };
+  }, [isMobile, drawerOpen, searchOpen]);
+  useEffect(() => {
     const shortcut = event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setSearchOpen(value => !value); }
       if (event.key === "Escape") setDrawerOpen(false);
@@ -478,6 +508,7 @@ export function CrtShell({ title, children, headerRight = null }) {
   }, []);
   return (
     <>
+      <a className="terminal-skip-link" href="#workspace-content" onClick={() => document.getElementById("workspace-content")?.focus()}>Skip to workspace</a>
       <div className="crt-vignette" />
       <div className="scanline-overlay" />
       <div className="crt-grain" />
@@ -500,7 +531,7 @@ export function CrtShell({ title, children, headerRight = null }) {
               }} />
         )}
         {/* ── Sidebar ── */}
-        <aside className="terminal-sidebar" aria-hidden={isMobile && !drawerOpen ? true : undefined} inert={isMobile && !drawerOpen} style={{
+        <aside ref={sidebar} id="terminal-navigation" className="terminal-sidebar" role={isMobile && drawerOpen ? "dialog" : undefined} aria-modal={isMobile && drawerOpen ? true : undefined} aria-label="Terminal navigation" aria-hidden={isMobile && !drawerOpen ? true : undefined} inert={isMobile && !drawerOpen} style={{
           background: `linear-gradient(180deg, rgba(14,17,24,0.98) 0%, rgba(5,7,11,0.99) 100%)`,
           borderRight: hairline,
           padding: "18px 14px 18px 16px",
@@ -514,8 +545,9 @@ export function CrtShell({ title, children, headerRight = null }) {
           boxShadow: isMobile && drawerOpen ? "6px 0 30px rgba(0,0,0,0.6)" : "none",
         }}>
           <div className="workspace-nav-tools">
+            {isMobile && <button type="button" title="Close navigation" aria-label="Close navigation" onClick={() => setDrawerOpen(false)}><X size={16} /></button>}
             <button type="button" title="Find workspace or company (Ctrl+K)" aria-label="Find workspace or company" onClick={() => setSearchOpen(true)}><Search size={16} /><span>Find workspace</span></button>
-            {!isMobile && <button type="button" title={compactNav ? "Expand navigation" : "Collapse navigation"} aria-label={compactNav ? "Expand navigation" : "Collapse navigation"} onClick={() => setCompactNav(value => { localStorage.setItem("cc-compact-nav", String(!value)); return !value; })}>{compactNav ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>}
+            {!isMobile && <button type="button" title={compactNav ? "Expand navigation" : "Collapse navigation"} aria-label={compactNav ? "Expand navigation" : "Collapse navigation"} aria-expanded={!compactNav} aria-controls="terminal-navigation" onClick={() => setCompactNav(value => { savePreference("cc-compact-nav", !value); return !value; })}>{compactNav ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>}
           </div>
           {/* Brand block */}
           <Link to="/" style={{ textDecoration: "none" }}>
@@ -596,11 +628,12 @@ export function CrtShell({ title, children, headerRight = null }) {
                   </div>
                   {groupItems.map((n, i) => {
                     const isActive = loc.pathname === n.to ||
-                      (n.to !== "/" && loc.pathname.startsWith(n.to));
+                      (n.to !== "/" && loc.pathname.startsWith(`${n.to}/`));
                     const hue = n.color || accent;
                     return (
                       <Link key={n.to} to={n.to}
                         title={n.label}
+                        aria-label={n.label}
                         aria-current={isActive ? "page" : undefined}
                         onFocus={() => prefetchPage(n.to)}
                         data-testid={`nav-${n.label.toLowerCase().replace(' ', '-')}`}
@@ -674,7 +707,7 @@ export function CrtShell({ title, children, headerRight = null }) {
         </aside>
 
         {/* ── Main column ── */}
-        <main className="terminal-main" style={{ overflowY: "auto", height: "100vh", display: "flex", flexDirection: "column" }}>
+        <main className="terminal-main" inert={isMobile && drawerOpen} style={{ overflowY: "auto", height: "100vh", display: "flex", flexDirection: "column" }}>
           {/* Sticky system bar */}
           <div className="terminal-sticky-bars" style={{ position: "sticky", top: 0, zIndex: 20 }}>
             <SystemBar safety={safety} />
@@ -696,6 +729,8 @@ export function CrtShell({ title, children, headerRight = null }) {
                 data-testid="mobile-menu-toggle"
                 onClick={() => setDrawerOpen(v => !v)}
                 aria-label="Toggle nav"
+                aria-expanded={drawerOpen}
+                aria-controls="terminal-navigation"
                 style={{
                   background: "transparent", border: `0.5px solid ${accent}66`,
                   color: accent, padding: "8px 10px", cursor: "pointer",
@@ -731,9 +766,11 @@ export function CrtShell({ title, children, headerRight = null }) {
             </div>
             <div className="terminal-page-actions fade-in fade-in-1" style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button type="button" className="workspace-icon-button" title="Find workspace or company (Ctrl+K)" aria-label="Search workspaces" onClick={() => setSearchOpen(true)}><Search size={16} /></button>
-              <button type="button" className="workspace-icon-button" title={focusMode ? "Show news tapes" : "Focus view"} aria-label={focusMode ? "Show news tapes" : "Focus view"} aria-pressed={focusMode} onClick={() => setFocusMode(value => { localStorage.setItem("cc-focus-mode", String(!value)); return !value; })}>{focusMode ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+              <button type="button" className="workspace-icon-button" title={focusMode ? "Show news tapes" : "Focus view"} aria-label={focusMode ? "Show news tapes" : "Focus view"} aria-pressed={focusMode} onClick={() => setFocusMode(value => { savePreference("cc-focus-mode", !value); return !value; })}>{focusMode ? <EyeOff size={16} /> : <Eye size={16} />}</button>
               <button
                 data-testid="global-refresh-tab"
+                type="button"
+                aria-label="Refresh this terminal page"
                 title="Refresh this terminal page"
                 onClick={() => window.location.reload()}
                 style={{
@@ -768,7 +805,7 @@ export function CrtShell({ title, children, headerRight = null }) {
           <TabMotionStrip pathname={loc.pathname} title={title} />
 
           {/* Page body */}
-          <div className="terminal-page-body" id="workspace-content" style={{ padding: isMobile ? "14px 12px" : "20px 24px 32px", flex: 1, minWidth: 0 }}>
+          <div className="terminal-page-body" id="workspace-content" tabIndex={-1} style={{ padding: isMobile ? "14px 12px" : "20px 24px 32px", flex: 1, minWidth: 0 }}>
             {children}
           </div>
         </main>
@@ -776,6 +813,7 @@ export function CrtShell({ title, children, headerRight = null }) {
         {isMobile && (
           <MobileBottomDock
             pathname={loc.pathname}
+            drawerOpen={drawerOpen}
             openMenu={() => setDrawerOpen(true)}
           />
         )}
@@ -786,7 +824,7 @@ export function CrtShell({ title, children, headerRight = null }) {
 
 function MobileCommandDeck({ title, activeNav, market, safety, alerts }) {
   const gate = String(safety.gate?.decision || "SYNC").toUpperCase();
-  const trading = safety.trading?.trading_enabled === true ? "LIVE" : safety.trading?.trading_enabled === false ? "HALT" : "SYNC";
+  const trading = safety.trading?.trading_enabled === true ? "ENABLED" : safety.trading?.trading_enabled === false ? "HALT" : "SYNC";
   const qcColor = gate === "PASS" || gate === "ALLOW" ? "#4ade80" : gate === "WATCH" ? "#fbbf24" : "#f87171";
   const ActiveIcon = activeNav?.Icon || Activity;
   return (
@@ -823,7 +861,7 @@ function MobileStatusPill({ label, value, color }) {
   );
 }
 
-function MobileBottomDock({ pathname, openMenu }) {
+function MobileBottomDock({ pathname, openMenu, drawerOpen }) {
   const items = [
     { to: "/", label: "Command", Icon: CommandCapIcon, match: p => p === "/" },
     { to: "/scanner", label: "Scan", Icon: Radar },
@@ -831,18 +869,18 @@ function MobileBottomDock({ pathname, openMenu }) {
     { to: "/options-desk", label: "Options", Icon: LampDesk },
   ];
   return (
-    <nav className="mobile-bottom-dock" aria-label="Mobile primary navigation">
+    <nav className="mobile-bottom-dock" aria-label="Mobile primary navigation" inert={drawerOpen}>
       {items.map(item => {
         const active = item.match ? item.match(pathname) : pathname.startsWith(item.to);
         const Icon = item.Icon;
         return (
-          <Link key={item.to} to={item.to} className={`mobile-dock-item ${active ? "active" : ""}`}>
+          <Link key={item.to} to={item.to} aria-current={active ? "page" : undefined} className={`mobile-dock-item ${active ? "active" : ""}`}>
             <Icon size={18} strokeWidth={1.9} />
             <span>{item.label}</span>
           </Link>
         );
       })}
-      <button type="button" className="mobile-dock-item mobile-dock-menu" onClick={openMenu}>
+      <button type="button" className="mobile-dock-item mobile-dock-menu" aria-expanded={drawerOpen} aria-controls="terminal-navigation" onClick={openMenu}>
         <Cog size={18} strokeWidth={1.9} />
         <span>More</span>
       </button>

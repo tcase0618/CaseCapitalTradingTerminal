@@ -51,6 +51,7 @@ export default function GeoRiskPage() {
   const [tradeFloor, setTradeFloor] = useState(null);
   const [lseMacro, setLseMacro] = useState(null);
   const [loadError, setLoadError] = useState(false);
+  const [overlayStatus, setOverlayStatus] = useState({ holdings: "loading", macro: "loading" });
 
   useEffect(() => {
     let cancelled = false;
@@ -60,6 +61,7 @@ export default function GeoRiskPage() {
     request("/georisk/live").then(r => {
       if (cancelled) return;
       const payload = r.data || {};
+      if (!Array.isArray(payload.events)) { setLoading(false); setLoadError(true); return; }
       setData({ ...payload, events: list(payload.events).map(event => ({ ...event, tickers: list(event.tickers), sectors: list(event.sectors) })), chokepoints: list(payload.chokepoints) });
       setSelected(null);
       setLoading(false);
@@ -67,11 +69,11 @@ export default function GeoRiskPage() {
       if (!cancelled) { setLoading(false); setLoadError(true); }
     });
     request("/trade_floor/positions").then(r => {
-      if (!cancelled) setTradeFloor(r.data || null);
-    }).catch(() => {});
+      if (!cancelled) { setTradeFloor(r.data || null); setOverlayStatus(previous => ({ ...previous, holdings: r.data ? "loaded" : "unavailable" })); }
+    }).catch(() => { if (!cancelled) setOverlayStatus(previous => ({ ...previous, holdings: "unavailable" })); });
     request("/data/lse/macro?limit=150").then(r => {
-      if (!cancelled) setLseMacro(r.data || null);
-    }).catch(() => {});
+      if (!cancelled) { setLseMacro(r.data || null); setOverlayStatus(previous => ({ ...previous, macro: r.data ? "loaded" : "unavailable" })); }
+    }).catch(() => { if (!cancelled) setOverlayStatus(previous => ({ ...previous, macro: "unavailable" })); });
     return () => { cancelled = true; controller.abort(); };
   }, []);
 
@@ -168,14 +170,15 @@ export default function GeoRiskPage() {
       />
 
       <div style={statsBar}>
-        <Stat label="PINNED EVENTS" value={loading ? "..." : visibleEvents.length} color={accent} accentBar />
-        <Stat label="CRITICAL" value={severityCounts.CRITICAL} color="#ef4444" />
-        <Stat label="HIGH" value={severityCounts.HIGH} color="#fb923c" />
-        <Stat label="WATCH" value={severityCounts.WATCH} color="#facc15" />
-        <Stat label="LSE MACRO" value={(lseMacro?.economic_calendar || []).length} sub={(lseMacro?.bond_yields || []).length ? `${lseMacro.bond_yields.length} YIELD ROWS` : "CROSS-ASSET"} color={lseMacro?.provider ? "#38bdf8" : muted} />
-        <Stat label="HOT ROUTE" value={hotChokepoint?.active_events ? hotChokepoint.name : "CLEAR"} sub={hotChokepoint?.active_events ? `${hotChokepoint.active_events} EVENTS` : "NO ACTIVE MATCH"} color={accent2} />
+        <Stat label="PINNED EVENTS" value={loading ? "..." : loadError ? "--" : visibleEvents.length} color={accent} accentBar />
+        <Stat label="CRITICAL" value={loadError || loading ? "--" : severityCounts.CRITICAL} color="#ef4444" />
+        <Stat label="HIGH" value={loadError || loading ? "--" : severityCounts.HIGH} color="#fb923c" />
+        <Stat label="WATCH" value={loadError || loading ? "--" : severityCounts.WATCH} color="#facc15" />
+        <Stat label="LSE MACRO" value={overlayStatus.macro === "loaded" && Array.isArray(lseMacro?.economic_calendar) ? lseMacro.economic_calendar.length : "--"} sub={overlayStatus.macro === "loaded" ? "CROSS-ASSET" : overlayStatus.macro.toUpperCase()} color={lseMacro?.provider ? "#38bdf8" : muted} />
+        <Stat label="HOT ROUTE" value={loadError || loading ? "UNAVAILABLE" : hotChokepoint?.active_events ? hotChokepoint.name : "NO REPORTED MATCH"} sub={loadError || loading ? "SOURCE UNVERIFIED" : hotChokepoint?.active_events ? `${hotChokepoint.active_events} EVENTS` : "REPORTED EVENTS ONLY"} color={accent2} />
         <Stat label="CACHE" value={data?.cache_status || "-"} sub={data?.cache_age_minutes != null ? `${data.cache_age_minutes}M OLD` : ""} color={accent2} />
       </div>
+      {overlayStatus.holdings !== "loaded" && <div role="status" className="workspace-data-warning">Holdings overlay {overlayStatus.holdings}. Portfolio exposure is unverified.</div>}
       {filterEmpty && (
         <div style={filterNotice}>
           CURRENT FILTERS RETURNED 0 EVENTS. RESET FILTERS TO SEE OTHER NEWS.

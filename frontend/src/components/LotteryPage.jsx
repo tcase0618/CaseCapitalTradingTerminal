@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -117,8 +117,8 @@ export default function LotteryPage() {
     }
   };
 
-  const candidates = list(board?.candidates);
-  const tickets = list(board?.tickets).map(row => ({ ...row, ladder: list(row.ladder) }));
+  const candidates = useMemo(() => list(board?.candidates), [board]);
+  const tickets = useMemo(() => list(board?.tickets).map(row => ({ ...row, ladder: list(row.ladder) })), [board]);
   const grades = board?.jackpot_board || {};
   const truth = board?.truth_board || {};
   const truthCombined = truth?.combined || {};
@@ -213,7 +213,7 @@ export default function LotteryPage() {
       <div style={tabs}>
         {[
           ["candidates", "CANDIDATE BOARD"],
-          ["tickets", "LIVE TICKETS"],
+          ["tickets", "OPEN PAPER TICKETS"],
           ["truth", "TRUTH BOARD"],
           ["learning", "LEARNING ENGINE"],
           ["variants", "VARIANT BOOK"],
@@ -240,7 +240,7 @@ export default function LotteryPage() {
       )}
 
       {tab === "tickets" && (
-        <Card title={`LIVE TICKETS - ${tickets.length}`}>
+        <Card title={`OPEN PAPER TICKETS - ${ticketsAvailable ? tickets.length : "UNAVAILABLE"}`}>
           <div style={ticketGrid}>
             {tickets.map(t => <TicketCard key={t.ticket_id} ticket={t} onSettle={() => settleTicket(t)} />)}
             {!tickets.length && <Empty text={ticketsAvailable ? "No open Lottery League tickets returned." : "Ticket board unavailable."} />}
@@ -612,7 +612,7 @@ const gateBox = { border: hairline, background: pageBg, padding: 14, display: "f
 const statStrip = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 140px), 1fr))", background: cardBg, border: hairline, marginBottom: 14 };
 const leagueGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", gap: 14, alignItems: "start" };
 const bannerGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 140px), 1fr))", gap: 10 };
-const topTicket = { display: "flex", justifyContent: "space-between", gap: 14, marginTop: 14, paddingTop: 14, borderTop: hairline };
+const topTicket = { display: "flex", flexWrap: "wrap", overflowWrap: "anywhere", justifyContent: "space-between", gap: 14, marginTop: 14, paddingTop: 14, borderTop: hairline };
 const tabs = { display: "flex", flexWrap: "wrap", gap: 6, margin: "14px 0" };
 const candidateGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 310px), 1fr))", gap: 12 };
 const ticketGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 330px), 1fr))", gap: 12 };
@@ -628,8 +628,8 @@ const scoreRow = { display: "grid", gridTemplateColumns: "82px 1fr 34px", gap: 8
 const barTrack = { height: 6, background: "rgba(255,255,255,0.07)", overflow: "hidden" };
 const barFill = { display: "block", height: "100%", background: "linear-gradient(90deg, #5eead4, #d7bd68)" };
 const microGrid = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7, marginTop: 10 };
-const infoBox = { border: hairline, background: "rgba(255,255,255,0.015)", padding: "8px 9px", minWidth: 0 };
-const proofBox = { border: hairline, background: "rgba(255,255,255,0.015)", padding: 10 };
+const infoBox = { border: hairline, background: "rgba(255,255,255,0.015)", padding: "8px 9px", minWidth: 0, overflowWrap: "anywhere" };
+const proofBox = { border: hairline, background: "rgba(255,255,255,0.015)", padding: 10, minWidth: 0, overflowWrap: "anywhere" };
 const penaltyLine = { color: "#f87171", borderTop: hairline, marginTop: 10, paddingTop: 9, fontSize: 10, lineHeight: 1.35 };
 const ticketCard = { border: "1px solid rgba(94,234,212,0.22)", background: "linear-gradient(180deg, rgba(8,16,20,0.94), rgba(5,7,11,0.98))", padding: 14 };
 const candidateHead = { display: "flex", justifyContent: "space-between", gap: 10, minWidth: 0 };
@@ -637,11 +637,11 @@ const ladder = { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 7,
 const variantCard = { border: hairline, background: pageBg, padding: 14, minHeight: 170 };
 const methodCard = { border: hairline, background: pageBg, padding: 14, minHeight: 140 };
 const haircutLine = { marginTop: 10, paddingTop: 10, borderTop: hairline, color: accent, fontSize: 10, letterSpacing: "0.12em", fontWeight: 900 };
-const tableWrap = { overflowX: "auto", border: hairline, background: pageBg };
+const tableWrap = { minWidth: 0, maxWidth: "100%", overflowX: "auto", border: hairline, background: pageBg };
 const truthTable = { width: "100%", borderCollapse: "collapse", minWidth: 820, color: labelLight, fontSize: 11, letterSpacing: "0.06em" };
 const learningNote = { color: muted, fontSize: 12, lineHeight: 1.55, margin: "12px 0" };
 const learnRow = { color: muted, fontSize: 11, lineHeight: 1.45, margin: "10px 0 0" };
-const toastBox = { position: "fixed", right: 22, bottom: 22, zIndex: 1000, border: "1px solid", background: "#030306e6", padding: "11px 16px", fontSize: 11, letterSpacing: "0.10em", fontFamily: "JetBrains Mono", fontWeight: 900, maxWidth: 440 };
+const toastBox = { position: "fixed", right: 22, bottom: 22, zIndex: 1000, border: "1px solid", background: "#030306e6", padding: "11px 16px", fontSize: 11, letterSpacing: "0.10em", fontFamily: "JetBrains Mono", fontWeight: 900, maxWidth: "min(440px, calc(100vw - 44px))", overflowWrap: "anywhere" };
 
 function candidateCard(color) {
   return { border: `1px solid ${color}44`, background: "linear-gradient(180deg, rgba(8,16,20,0.95), rgba(4,5,9,0.99))", padding: 14, boxShadow: `inset 0 1px rgba(255,255,255,0.035), 0 0 16px ${color}14` };

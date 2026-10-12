@@ -19,7 +19,7 @@ export default function TFEnginePage() {
   const statusRead = useDisplayResource(`${API}/trade_floor/engine/status`, 60000);
   const combosRead = useDisplayResource(`${API}/trade_floor/engine/combos`, 60000);
   const status = record(statusRead.data) ? statusRead.data : null;
-  const combos = Array.isArray(combosRead.data?.combos) ? combosRead.data.combos.filter(row => record(row) && Array.isArray(row.combo)).map(row => ({ ...row, combo: row.combo.filter(x => typeof x === "string") })) : [];
+  const combos = useMemo(() => Array.isArray(combosRead.data?.combos) ? combosRead.data.combos.filter(row => record(row) && Array.isArray(row.combo)).map(row => ({ ...row, combo: row.combo.filter(x => typeof x === "string") })) : [], [combosRead.data]);
   const [busy, setBusy] = useState(false);
   const [recalError, setRecalError] = useState("");
 

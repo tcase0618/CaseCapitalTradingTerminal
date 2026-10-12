@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { RefreshCw } from "lucide-react";
 import { API } from "../config";
 import { tokens } from "./CrtShell";
 
@@ -12,20 +13,28 @@ export default function StrategyEvidencePanel() {
   const [report, setReport] = useState(null);
   const [error, setError] = useState(false);
   const [horizon, setHorizon] = useState(5);
+  const [revision, setRevision] = useState(0);
+  const [query, setQuery] = useState("");
+  const [mode, setMode] = useState("");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
+    setLoading(true);
+    setError(false);
     axios.get(`${API}/research/strategy-evidence`, { signal: controller.signal, timeout: 12000 }).then(({ data }) => {
       if (!cancelled) {
         if (!data || typeof data.ok !== "boolean") setError(true);
         else setReport(data);
       }
-    }).catch(() => { if (!cancelled) setError(true); });
+    }).catch(() => { if (!cancelled) setError(true); }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; controller.abort(); };
-  }, []);
+  }, [revision]);
 
-  const rows = Array.isArray(report?.scorecards) ? report.scorecards.filter(row => row && row.horizon_sessions === horizon) : [];
+  const scorecards = Array.isArray(report?.scorecards) ? report.scorecards.filter(row => row && typeof row === "object") : [];
+  const modes = [...new Set(scorecards.map(row => row.mode).filter(value => typeof value === "string" && value))].sort();
+  const rows = scorecards.filter(row => row.horizon_sessions === horizon && String(row.strategy_id || "").toLowerCase().includes(query.trim().toLowerCase()) && (!mode || row.mode === mode));
   const generated = report?.generated_at ? new Date(report.generated_at) : null;
   const timestamp = generated && Number.isFinite(generated.getTime()) ? generated.toISOString() : "--";
 
@@ -33,6 +42,7 @@ export default function StrategyEvidencePanel() {
     <section aria-label="Strategy research evidence" style={{ minWidth: 0, maxWidth: "100%", marginBottom: 20, color: labelLight, fontSize: 12, overflowWrap: "anywhere" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, padding: "10px 0", borderBottom: hairline }}>
         <h2 style={{ margin: 0, fontSize: 13, color: accent }}>STRATEGY EVIDENCE / RESEARCH ONLY</h2>
+        <button type="button" disabled={loading} aria-label="Reload saved strategy evidence" title="Reload saved strategy evidence" onClick={() => setRevision(value => value + 1)} className="workspace-icon-button"><RefreshCw size={14} /></button>
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           HORIZON
           <select aria-label="Evidence horizon" value={horizon} onChange={event => setHorizon(Number(event.target.value))}
@@ -42,6 +52,12 @@ export default function StrategyEvidencePanel() {
         </label>
       </div>
       <p style={{ color: muted }}>SAVED REPORT: {timestamp} | OBSERVATIONS: {number(report?.observations)}</p>
+      <div className="workspace-table-toolbar">
+        <input aria-label="Filter evidence strategies" placeholder="Filter strategies" value={query} onChange={event => setQuery(event.target.value)} />
+        <select aria-label="Evidence mode" value={mode} onChange={event => setMode(event.target.value)}>
+          <option value="">All modes</option>{modes.map(value => <option key={value} value={value}>{value}</option>)}
+        </select>
+      </div>
       {error ? <p role="alert">Saved strategy evidence unavailable.</p> : !report ? <p role="status">Loading saved strategy evidence...</p> : (
         <>
           {!report.ok && <p role="alert">Saved report is incomplete or unavailable; evidence is not verified.</p>}

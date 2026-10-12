@@ -33,8 +33,8 @@ export default function PortfolioManagerPage() {
   const [optionsBacktest, setOptionsBacktest] = useState(null);
   const [optionsPlan, setOptionsPlan] = useState(null);
   const [optionsAccount, setOptionsAccount] = useState(null);
-  const [optionsPositions, setOptionsPositions] = useState([]);
-  const [optionsOrders, setOptionsOrders] = useState([]);
+  const [optionsPositions, setOptionsPositions] = useState(null);
+  const [optionsOrders, setOptionsOrders] = useState(null);
   const [plCalendar, setPlCalendar] = useState(null);
   const [plCalendarLoading, setPlCalendarLoading] = useState(false);
   const today = useMemo(() => new Date(), []);
@@ -186,8 +186,8 @@ export default function PortfolioManagerPage() {
     ]).then(([accountRes, positionsRes, ordersRes]) => {
       if (cancelled) return;
       setOptionsAccount(accountRes.data);
-      if (positionsRes.data) setOptionsPositions(pmRows(positionsRes.data.positions));
-      if (ordersRes.data) setOptionsOrders(pmRows(ordersRes.data.orders));
+      if (Array.isArray(positionsRes.data?.positions)) setOptionsPositions(pmRows(positionsRes.data.positions));
+      if (Array.isArray(ordersRes.data?.orders)) setOptionsOrders(pmRows(ordersRes.data.orders));
     });
     return () => { cancelled = true; };
   }, [readGet]);
@@ -300,8 +300,8 @@ export default function PortfolioManagerPage() {
           ]).then(([planRes, accountRes, positionsRes, ordersRes]) => {
             if (planRes.data) setOptionsPlan(planRes.data);
             setOptionsAccount(accountRes.data);
-            if (positionsRes.data) setOptionsPositions(pmRows(positionsRes.data.positions));
-            if (ordersRes.data) setOptionsOrders(pmRows(ordersRes.data.orders));
+            if (Array.isArray(positionsRes.data?.positions)) setOptionsPositions(pmRows(positionsRes.data.positions));
+            if (Array.isArray(ordersRes.data?.orders)) setOptionsOrders(pmRows(ordersRes.data.orders));
           });
         }}
       />}
@@ -362,10 +362,10 @@ function FundHubView({
   const equityBasis = pmNumber(summary.equity_basis);
   const optionEquity = pmNumber(optionAccount.equity ?? optionsPlan?.options_equity_basis);
   const totalCapital = equityBasis + optionEquity;
-  const plannedEquityRisk = Number(summary.planned_risk || 0);
-  const optionReadyRisk = pmRows(optionsPlan?.candidates)
+  const plannedEquityRisk = pmNumber(summary.planned_risk);
+  const optionReadyRisk = Array.isArray(optionsPlan?.candidates) ? pmRows(optionsPlan.candidates)
     .filter(c => c.manual_fire_ready)
-    .reduce((acc, c) => acc + Number(c.risk_budget || 0), 0);
+    .reduce((acc, c) => acc + pmNumber(c.risk_budget), 0) : NaN;
   const totalSummary = {
     equityBasis,
     optionEquity,
@@ -451,7 +451,8 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
   const weeks = pmWeekSummary(cells);
   return (
     <div style={{ display: "grid", gap: 18 }}>
-      <Card title="PM P/L CALENDAR" accentColor={accent}>
+      <Card title="PM PROXY OBSERVATION CALENDAR" accentColor={accent}>
+        <div role="note" style={{ color: muted, fontSize: 11, marginBottom: 12 }}>Signal equity averages and theoretical options observations; not realized fund P/L or daily account returns.</div>
         <div style={calendarShellHeader}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <select value={month} onChange={e => setMonth(Number(e.target.value))} style={selectStyle}>
@@ -465,16 +466,16 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
           <button onClick={() => { setMonth(new Date().getMonth() + 1); setYear(new Date().getFullYear()); }} style={calendarMonthButton}>THIS MONTH</button>
         </div>
         <div style={calendarHeroStats}>
-          <div style={calendarHeroTile(pctColor(summary.avg))}><span>Month Avg</span><strong>{fmtPct(summary.avg)}</strong><small>{monthRows.length} trading days</small></div>
-          <div style={calendarHeroTile("#4ade80")}><span>Green Days</span><strong>{summary.green}</strong><small>positive fund days</small></div>
-          <div style={calendarHeroTile("#f87171")}><span>Red Days</span><strong>{summary.red}</strong><small>negative fund days</small></div>
+          <div style={calendarHeroTile(pctColor(summary.avg))}><span>Observation Avg</span><strong>{fmtPct(summary.avg)}</strong><small>{monthRows.length} observed dates</small></div>
+          <div style={calendarHeroTile("#4ade80")}><span>Positive Observations</span><strong>{summary.green}</strong><small>not profitable fund days</small></div>
+          <div style={calendarHeroTile("#f87171")}><span>Negative Observations</span><strong>{summary.red}</strong><small>not losing fund days</small></div>
           <div style={calendarHeroTile(summary.spyWins >= summary.spyLosses ? "#4ade80" : "#f87171")}><span>Vs SPY</span><strong>{summary.spyWins}/{summary.spyLosses}</strong><small>{summary.spyWinRate}% win rate</small></div>
-          <div style={calendarHeroTile(pctColor(summary.relativeAvg))}><span>Return Diff</span><strong>{fmtPct(summary.relativeAvg)}</strong><small>fund minus SPY</small></div>
+          <div style={calendarHeroTile(pctColor(summary.relativeAvg))}><span>Proxy Diff</span><strong>{fmtPct(summary.relativeAvg)}</strong><small>observation minus SPY</small></div>
           <div style={calendarHeroTile("#a78bfa")}><span>Range</span><strong>{fmtPct(summary.best)}</strong><small>worst {fmtPct(summary.worst)}</small></div>
         </div>
         <div className="pm-owned-calendar" style={calendarBoard}>
-          <div style={{ minWidth: 0 }}>
-            <div style={calendarWeekHeader}>
+          <div className="pm-owned-calendar-viewport" style={{ minWidth: 0, overflowX: "auto" }}>
+            <div className="pm-owned-calendar-weekdays" style={calendarWeekHeader}>
               {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => <span key={d}>{d}</span>)}
             </div>
             <div className="pm-owned-calendar-days" style={calendarGrid}>
@@ -507,9 +508,9 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
           <div style={pmDetailGrid}>
             <div>
               <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 12, flexWrap: "wrap" }}>
-                <Stat label="TOTAL FUND" value={fmtPct(selected.terminal_total_pct)} sub="equities + options" color={pctColor(selected.terminal_total_pct)} accentBar />
-                <Stat label="EQUITIES" value={fmtPct(selected.stock_gain_pct)} sub={`${selected.stock_positions || 0} tracked`} color={pctColor(selected.stock_gain_pct)} />
-                <Stat label="OPTIONS" value={fmtPct(selected.options_gain_pct)} sub={`${selected.options_positions || 0} tracked`} color={pctColor(selected.options_gain_pct)} />
+                <Stat label="COMBINED PROXY" value={fmtPct(selected.terminal_total_pct)} sub="not fund P/L" color={pctColor(selected.terminal_total_pct)} accentBar />
+                <Stat label="EQUITY SIGNAL AVG" value={fmtPct(selected.stock_gain_pct)} sub={`${selected.stock_positions ?? "-"} tracked`} color={pctColor(selected.stock_gain_pct)} />
+                <Stat label="THEORETICAL OPTIONS" value={fmtPct(selected.options_gain_pct)} sub={`${selected.options_positions ?? "-"} tracked`} color={pctColor(selected.options_gain_pct)} />
                 <Stat label="VS SPY" value={fmtPct(selected.relative_pct)} sub={`SPY ${fmtPct(selected.spy_return_pct)}`} color={pctColor(selected.relative_pct)} />
               </div>
               <PlanRow k="SOURCE" v={data?.source || "performance curve"} color={accent2} />
@@ -523,14 +524,14 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
                   <YAxis stroke={dim} tick={{ fill: muted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `${v}%`} />
                   <Tooltip contentStyle={{ background: "#050509", border: hairline, color: labelLight, fontSize: 11 }} formatter={(v, name) => [`${Number(v).toFixed(2)}%`, name]} />
                   <ReferenceLine y={0} stroke={dim} strokeDasharray="3 3" />
-                  <Line type="monotone" dataKey="terminal" name="total fund" stroke={accent} strokeWidth={3} dot />
+                  <Line type="monotone" dataKey="terminal" name="combined proxy" stroke={accent} strokeWidth={3} dot />
                   <Line type="monotone" dataKey="spy" name="SPY" stroke={accent2} strokeWidth={2} strokeDasharray="5 5" dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           </div>
         ) : (
-          <div style={{ color: muted, padding: 20 }}>Select a calendar day to inspect fund P/L.</div>
+          <div style={{ color: muted, padding: 20 }}>No selected proxy observation.</div>
         )}
       </Card>
     </div>
@@ -539,8 +540,8 @@ function PMCalendarView({ data, loading, month, year, selected, setSelected, set
 
 function TotalFundView({ data }) {
   const optionSummary = data.optionSummary || {};
-  const equityRisk = Number(data.plannedEquityRisk || 0);
-  const optionRisk = Number(data.optionReadyRisk || 0);
+  const equityRisk = pmNumber(data.plannedEquityRisk);
+  const optionRisk = pmNumber(data.optionReadyRisk);
   const totalRisk = equityRisk + optionRisk;
   const totalCapital = data.totalCapital;
   const riskPct = totalCapital > 0 ? (totalRisk / totalCapital) * 100 : NaN;
@@ -551,9 +552,9 @@ function TotalFundView({ data }) {
         <Stat label="TOTAL FUND CAPITAL" value={pmMoney(totalCapital)} sub="EQUITIES + OPTIONS" color={accent} accentBar />
         <Stat label="EQUITIES FUND" value={pmMoney(data.equityBasis)} sub={`${data.summary?.accumulate || 0} ACC / ${data.summary?.starter || 0} START`} color={accent2} />
         <Stat label="OPTIONS FUND" value={pmMoney(data.optionEquity)} sub={`${optionSummary.ready || 0} READY / ${optionSummary.total || 0} CAND`} color={accent} />
-        <Stat label="TOTAL PLANNED RISK" value={`$${Math.round(totalRisk).toLocaleString()}`} sub={`${fmtPct(riskPct)} OF CAPITAL`} color="#fbbf24" />
+        <Stat label="TOTAL PLANNED RISK" value={pmMoney(totalRisk)} sub={`${fmtPct(riskPct)} OF CAPITAL`} color="#fbbf24" />
         <Stat label="OPTIONS ROUTED" value={(optionSummary.option || 0) + (optionSummary.both || 0)} sub={`${optionSummary.both || 0} BOTH`} color="#4ade80" />
-        <Stat label="FUND HEALTH" value={fundReady ? "READY" : "CHECK"} sub="PM / DESKS" color={fundReady ? "#4ade80" : "#f87171"} />
+        <Stat label="CONNECTION DIAGNOSTICS" value={data.health == null ? "UNKNOWN" : fundReady ? "REPORTED OK" : "CHECK"} sub="NOT EXECUTION AUTHORIZATION" color={fundReady ? accent2 : muted} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
@@ -566,11 +567,11 @@ function TotalFundView({ data }) {
         </Card>
 
         <Card title="TOTAL RISK ALLOCATION" accentColor="#fbbf24">
-          <PlanRow k="TOTAL PLANNED RISK" v={`$${Number(totalRisk || 0).toFixed(2)}`} color="#fbbf24" />
-          <PlanRow k="EQUITIES PLANNED RISK" v={`$${Number(equityRisk || 0).toFixed(2)}`} color={accent2} />
-          <PlanRow k="OPTIONS READY RISK" v={`$${Number(optionRisk || 0).toFixed(2)}`} color={accent} />
+          <PlanRow k="TOTAL PLANNED RISK" v={pmMoney(totalRisk)} color="#fbbf24" />
+          <PlanRow k="EQUITIES PLANNED RISK" v={pmMoney(equityRisk)} color={accent2} />
+          <PlanRow k="OPTIONS READY RISK" v={pmMoney(optionRisk)} color={accent} />
           <PlanRow k="RISK / TOTAL CAPITAL" v={fmtPct(riskPct)} color={riskPct <= 3 ? "#4ade80" : riskPct <= 5 ? "#fbbf24" : "#f87171"} />
-          <PlanRow k="OPTIONS OPEN POSITIONS" v={data.optionsPositions?.length || 0} />
+          <PlanRow k="OPTIONS OPEN POSITIONS" v={data.optionsPositions?.length ?? "-"} />
         </Card>
 
         <Card title="TOTAL PM ROUTING" accentColor={accent2}>
@@ -582,10 +583,10 @@ function TotalFundView({ data }) {
         </Card>
 
         <Card title="TOTAL SYSTEM CHECK" accentColor={fundReady ? "#4ade80" : "#f87171"}>
-          <PlanRow k="PM ENGINE" v={data.health?.ready_for_pm ? "READY" : "BLOCKED"} color={data.health?.ready_for_pm ? "#4ade80" : "#f87171"} />
-          <PlanRow k="TRADE FLOOR" v={data.health?.ready_for_trade_floor ? "READY" : "BLOCKED"} color={data.health?.ready_for_trade_floor ? "#4ade80" : "#f87171"} />
-          <PlanRow k="OPTIONS DESK" v={data.optionsAccount?.ok ? "READY" : "BLOCKED"} color={data.optionsAccount?.ok ? "#4ade80" : "#f87171"} />
-          <PlanRow k="OPTIONS PAPER" v={data.optionsAccount?.paper_only ? "YES" : "NO"} color={data.optionsAccount?.paper_only ? "#4ade80" : "#f87171"} />
+          <PlanRow k="PM DIAGNOSTIC" v={diagnostic(data.health?.ready_for_pm)} color={accent2} />
+          <PlanRow k="TRADE FLOOR DIAGNOSTIC" v={diagnostic(data.health?.ready_for_trade_floor)} color={accent2} />
+          <PlanRow k="OPTIONS CONNECTION" v={diagnostic(data.optionsAccount?.ok)} color={accent2} />
+          <PlanRow k="OPTIONS PAPER" v={data.optionsAccount?.paper_only === true ? "YES" : data.optionsAccount?.paper_only === false ? "NO" : "UNKNOWN"} color={accent2} />
           <PlanRow k="LATEST SCAN" v={data.health?.database?.latest_scan_at || "--"} color={accent2} />
         </Card>
       </div>
@@ -625,11 +626,11 @@ function EquitiesFundView({ plan, optionsPlan, rows, filter, setFilter, summary,
           <ExposurePie data={pmRows(exposure.by_action)} />
         </Card>
         <Card title="CASH PLAN" accentColor="#fbbf24">
-          <PlanRow k="CAPITAL" v={`$${Number(summary.equity_basis || 0).toFixed(2)}`} />
-          <PlanRow k="DEPLOYED PLAN" v={`$${Number(summary.planned_deployment || 0).toFixed(2)}`} />
-          <PlanRow k="RESERVED CASH" v={`$${Number(summary.cash_reserved || 0).toFixed(2)}`} />
-          <PlanRow k="MAX STOP RISK" v={`$${Number(summary.planned_risk || 0).toFixed(2)}`} color="#fbbf24" />
-          <PlanRow k="TARGET UPSIDE" v={`$${Number(summary.target_upside_usd || 0).toFixed(2)}`} color="#4ade80" />
+          <PlanRow k="CAPITAL" v={pmMoney(summary.equity_basis)} />
+          <PlanRow k="DEPLOYED PLAN" v={pmMoney(summary.planned_deployment)} />
+          <PlanRow k="RESERVED CASH" v={pmMoney(summary.cash_reserved)} />
+          <PlanRow k="MAX STOP RISK" v={pmMoney(summary.planned_risk)} color="#fbbf24" />
+          <PlanRow k="TARGET UPSIDE" v={pmMoney(summary.target_upside_usd)} color="#4ade80" />
         </Card>
         <Card title="RISK SHOCK TEST" accentColor="#f87171">
           {pmRows(summary.shock_tests).length ? (
@@ -764,11 +765,11 @@ function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rules
     <>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         <Stat label="OPTIONS EQUITY" value={pmMoney(account.equity)} sub={optionsAccount?.configured ? "SEPARATE PAPER" : "KEYS MISSING"} color={accent} accentBar />
-        <Stat label="BUYING POWER" value={`$${Number(account.buying_power || 0).toLocaleString()}`} sub={String(account.status || "UNKNOWN").toUpperCase()} color={optionsHealthOk ? "#4ade80" : "#f87171"} />
+        <Stat label="BUYING POWER" value={pmMoney(account.buying_power)} sub={String(account.status || "UNKNOWN").toUpperCase()} color={optionsHealthOk ? "#4ade80" : muted} />
         <Stat label="CANDIDATES" value={summary.total || 0} sub={`${summary.ready || 0} MANUAL READY`} color={accent2} />
         <Stat label="OPTION" value={summary.option || 0} sub="PM ROUTED" color={accent} />
         <Stat label="BOTH" value={summary.both || 0} sub="HIGH CONVICTION" color="#4ade80" />
-        <Stat label="OPEN POS" value={positions.length || 0} sub={`${orders.length || 0} ORDERS`} color="#fbbf24" />
+        <Stat label="OPEN POS" value={positions?.length ?? "-"} sub={`${orders?.length ?? "-"} ORDERS`} color="#fbbf24" />
       </div>
 
       <Card title="OPTIONS FUND ROUTING" accentColor={accent2}>
@@ -786,8 +787,8 @@ function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rules
           <OptionsDecisionTable rows={candidates} />
         </Card>
         <Card title="OPTIONS FUND RULES + HEALTH" accentColor={optionsHealthOk ? "#4ade80" : "#f87171"}>
-          <PlanRow k="ACCOUNT" v={optionsHealthOk ? "PAPER READY" : "BLOCKED"} color={optionsHealthOk ? "#4ade80" : "#f87171"} />
-          <PlanRow k="BASE" v={optionsAccount?.paper_only ? "PAPER ONLY" : "NOT PAPER"} color={optionsAccount?.paper_only ? "#4ade80" : "#f87171"} />
+          <PlanRow k="ACCOUNT CONNECTION" v={diagnostic(optionsAccount?.ok)} color={accent2} />
+          <PlanRow k="BASE" v={optionsAccount?.paper_only === true ? "PAPER ONLY" : optionsAccount?.paper_only === false ? "NOT PAPER" : "UNKNOWN"} color={optionsAccount?.paper_only == null ? muted : optionsAccount.paper_only ? accent2 : "#f87171"} />
           <PlanRow k="MAX RISK" v={`$${Number(riskPolicy.max_risk_usd || 400).toFixed(0)} / ${Number((riskPolicy.max_risk_pct || 0.02) * 100).toFixed(1)}%`} color="#fbbf24" />
           <PlanRow k="SCOUT RISK" v={`$${Number(riskPolicy.scout_risk_usd || 100).toFixed(0)}`} />
           <PlanRow k="STARTER RISK" v={`$100-$${Number(riskPolicy.starter_risk_usd || 175).toFixed(0)}`} />
@@ -809,10 +810,10 @@ function OptionsFundView({ optionsPlan, optionsAccount, positions, orders, rules
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
         <Card title="OPTIONS OPEN POSITIONS" accentColor={accent}>
-          <SimpleOptionsList rows={positions} empty="No open options positions." />
+          <SimpleOptionsList rows={pmRows(positions)} empty={positions == null ? "Options positions unavailable." : "No open options positions."} />
         </Card>
         <Card title="OPTIONS ORDERS" accentColor={accent2}>
-          <SimpleOptionsList rows={orders} empty="No options orders yet." />
+          <SimpleOptionsList rows={pmRows(orders)} empty={orders == null ? "Options orders unavailable." : "No options orders yet."} />
         </Card>
       </div>
 
@@ -871,20 +872,20 @@ function FundGovernanceView({ fund, rulesets, health, optionsAccount, refreshRul
       <Card title={`${fund} SYSTEM HEALTH`} accentColor={healthOk ? "#4ade80" : "#f87171"}>
         {isOptions ? (
           <>
-            <PlanRow k="OPTIONS ACCOUNT" v={optionsAccount?.ok ? "READY" : "BLOCKED"} color={optionsAccount?.ok ? "#4ade80" : "#f87171"} />
-            <PlanRow k="PAPER ONLY" v={optionsAccount?.paper_only ? "YES" : "NO"} color={optionsAccount?.paper_only ? "#4ade80" : "#f87171"} />
-            <PlanRow k="CONFIGURED" v={optionsAccount?.configured ? "YES" : "NO"} color={optionsAccount?.configured ? "#4ade80" : "#f87171"} />
+            <PlanRow k="OPTIONS CONNECTION" v={diagnostic(optionsAccount?.ok)} color={accent2} />
+            <PlanRow k="PAPER ONLY" v={optionsAccount?.paper_only === true ? "YES" : optionsAccount?.paper_only === false ? "NO" : "UNKNOWN"} color={accent2} />
+            <PlanRow k="CONFIGURED" v={optionsAccount?.configured === true ? "YES" : optionsAccount?.configured === false ? "NO" : "UNKNOWN"} color={accent2} />
             <PlanRow k="ACCOUNT STATUS" v={optionsAccount?.account?.status || "--"} />
-            <PlanRow k="REASON" v={optionsAccount?.reason || "OK"} color={healthOk ? "#4ade80" : "#f87171"} />
+            <PlanRow k="REASON" v={optionsAccount?.reason || "No diagnostic reason reported"} color={muted} />
           </>
         ) : !health ? (
           <div style={{ color: muted, padding: 20 }}>Loading equity health...</div>
         ) : (
           <>
-            <PlanRow k="TRADE FLOOR" v={health.ready_for_trade_floor ? "READY" : "BLOCKED"} color={health.ready_for_trade_floor ? "#4ade80" : "#f87171"} />
+            <PlanRow k="TRADE FLOOR DIAGNOSTIC" v={diagnostic(health.ready_for_trade_floor)} color={accent2} />
             <PlanRow k="ALPACA" v={health.alpaca?.ok ? "ACCOUNT OK" : "BLOCKED"} color={health.alpaca?.ok ? "#4ade80" : "#f87171"} />
-            <PlanRow k="SCANNING" v={health.ready_for_scanning ? "READY" : "BLOCKED"} color={health.ready_for_scanning ? "#4ade80" : "#f87171"} />
-            <PlanRow k="PM" v={health.ready_for_pm ? "READY" : "BLOCKED"} color={health.ready_for_pm ? "#4ade80" : "#f87171"} />
+            <PlanRow k="SCANNING DIAGNOSTIC" v={diagnostic(health.ready_for_scanning)} color={accent2} />
+            <PlanRow k="PM DIAGNOSTIC" v={diagnostic(health.ready_for_pm)} color={accent2} />
             <PlanRow k="LATEST SCAN" v={health.database?.latest_scan_at || "--"} color={accent2} />
             {refreshHealth && (
               <button onClick={refreshHealth} style={{
@@ -1687,7 +1688,7 @@ function SystemHealthView({ health, refresh }) {
       </div>
       <div style={{ display: "flex", background: cardBg, border: hairline, marginBottom: 22, flexWrap: "wrap" }}>
         {readiness.map(([label, ok], i) => (
-          <Stat key={label} label={label} value={ok ? "READY" : "BLOCKED"} sub={i === 0 ? "SYSTEM" : "CHECK"} color={ok ? "#4ade80" : "#f87171"} accentBar={i === 0} />
+          <Stat key={label} label={label} value={diagnostic(ok)} sub="CONNECTION DIAGNOSTIC ONLY" color={ok == null ? muted : ok ? accent2 : "#f87171"} accentBar={i === 0} />
         ))}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 18 }}>
@@ -1839,9 +1840,9 @@ function pmWeekSummary(cells) {
   for (let i = 0; i < cells.length; i += 7) {
     const rows = cells.slice(i, i + 7).map(c => c.row).filter(Boolean);
     const values = rows.map(row => pmNumber(row.terminal_total_pct));
-    const total = values.length && values.every(Number.isFinite) ? values.reduce((sum, value) => sum + value, 0) : null;
+    const total = values.length && values.every(Number.isFinite) ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
     const spyValues = rows.map(row => pmNumber(row.spy_return_pct));
-    const spy = spyValues.length && spyValues.every(Number.isFinite) ? spyValues.reduce((sum, value) => sum + value, 0) : null;
+    const spy = spyValues.length && spyValues.every(Number.isFinite) ? spyValues.reduce((sum, value) => sum + value, 0) / spyValues.length : null;
     const green = rows.filter(row => Number(row.terminal_total_pct) > 0).length;
     weeks.push({ days: rows.length, total, spy, green });
   }
@@ -1888,12 +1889,12 @@ function pctColor(v) {
 }
 
 function pmCalendarTitle(row) {
-  if (!row) return "No P/L row for this date.";
+  if (!row) return "No proxy observation for this date.";
   return [
     row.date,
-    `Total fund: ${fmtPct(row.terminal_total_pct)}`,
-    `Equities: ${fmtPct(row.stock_gain_pct)}`,
-    `Options: ${fmtPct(row.options_gain_pct)}`,
+    `Combined proxy: ${fmtPct(row.terminal_total_pct)}`,
+    `Equity signal average: ${fmtPct(row.stock_gain_pct)}`,
+    `Theoretical options: ${fmtPct(row.options_gain_pct)}`,
     `SPY: ${fmtPct(row.spy_return_pct)}`,
   ].join("\n");
 }
@@ -1953,11 +1954,11 @@ function PMWeekRail({ weeks }) {
       {weeks.map((week, idx) => {
         const color = pctColor(week.total);
         return (
-          <button key={idx} style={calendarWeekCard(color)} title={`Week ${idx + 1}\nFund: ${fmtPct(week.total)}\nSPY: ${fmtPct(week.spy)}\nGreen days: ${week.green}`}>
-            <span>Week {idx + 1}</span>
+          <div key={idx} style={calendarWeekCard(color)} title={`Week ${idx + 1}\nProxy observation average: ${fmtPct(week.total)}\nSPY observation average: ${fmtPct(week.spy)}\nPositive observations: ${week.green}`}>
+            <span>Week {idx + 1} Avg</span>
             <strong>{fmtPct(week.total)}</strong>
-            <small>{week.days} days</small>
-          </button>
+            <small>{week.days} observations</small>
+          </div>
         );
       })}
     </div>
@@ -2040,13 +2041,17 @@ function RatchetRule({ name, text }) {
 }
 const pmRows = value => Array.isArray(value) ? value.filter(row => row && typeof row === "object" && !Array.isArray(row)) : [];
 const pmText = value => Array.isArray(value) ? value.filter(row => typeof row === "string" || typeof row === "number") : [];
-const pmNumber = value => value == null || value === "" ? NaN : Number(value);
+const pmNumber = value => (typeof value !== "number" && typeof value !== "string") || String(value).trim() === "" ? NaN : Number(value);
 const pmMoney = value => Number.isFinite(pmNumber(value)) ? `$${Number(value).toFixed(2)}` : "--";
+const diagnostic = value => value === true ? "REPORTED OK" : value === false ? "REPORTED FAILURE" : "UNKNOWN";
 const pmResponsiveCss = `
+  .pm-owned-calendar-viewport .pm-owned-calendar-weekdays,
+  .pm-owned-calendar-viewport .pm-owned-calendar-days { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; }
   .pm-owned-table { display: block; overflow-x: auto; max-width: 100%; }
   @media (max-width: 700px) {
     .pm-owned-calendar, .pm-owned-exposure { grid-template-columns: minmax(0, 1fr) !important; }
     .pm-owned-week-rail { grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); padding-top: 0 !important; }
-    .pm-owned-calendar-days { overflow-x: auto; grid-template-columns: repeat(7, minmax(78px, 1fr)) !important; }
+    .pm-owned-calendar-viewport .pm-owned-calendar-weekdays,
+    .pm-owned-calendar-viewport .pm-owned-calendar-days { min-width: 576px; grid-template-columns: repeat(7, minmax(78px, 1fr)) !important; }
   }
 `;

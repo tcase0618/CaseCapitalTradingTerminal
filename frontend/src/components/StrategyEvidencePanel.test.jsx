@@ -32,7 +32,11 @@ const saved = overrides => ({
 
 function renderSaved(report, horizon = 5) {
   let index = 0;
-  const spy = jest.spyOn(React, "useState").mockImplementation(() => [[report, false, horizon][index++], jest.fn()]);
+  const spy = jest.spyOn(React, "useState").mockImplementation(initial => {
+    const values = [report, false, horizon];
+    const position = index++;
+    return [position < values.length ? values[position] : initial, jest.fn()];
+  });
   try { return renderToString(<StrategyEvidencePanel />); }
   finally { spy.mockRestore(); }
 }
@@ -139,6 +143,30 @@ test.each(["rejected", "malformed"])("renders unavailable evidence for %s respon
     await act(async () => root.render(<StrategyEvidencePanel />));
     expect(container.querySelector('[role="alert"]').textContent).toContain("unavailable");
     expect(container.textContent).not.toContain("0.00%");
+  } finally { await act(async () => root.unmount()); }
+});
+
+test("saved evidence retry and mode filter use only read requests", async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  axios.get.mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ data: saved({ scorecards: [
+    scorecard(5, { strategy_id: "lottery", mode: "SHADOW" }), scorecard(5, { strategy_id: "core", mode: "RESEARCH" }),
+  ] }) });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<StrategyEvidencePanel />));
+    expect(container.textContent).toContain("unavailable");
+    await act(async () => container.querySelector('[aria-label="Reload saved strategy evidence"]').click());
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(2);
+    await act(async () => {
+      const mode = container.querySelector('[aria-label="Evidence mode"]');
+      mode.value = "SHADOW";
+      mode.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(container.querySelector("tbody").textContent).toContain("lottery");
+    expect(axios.get).toHaveBeenCalledTimes(2);
+    expect(axios.post).not.toHaveBeenCalled();
   } finally { await act(async () => root.unmount()); }
 });
 

@@ -27,13 +27,32 @@ const definitions = [
   ["/ticker/:ticker", "Company Profile", "Research", () => import("../components/TickerPage")],
 ];
 
+const searchAliases = {
+  "/": ["dashboard", "overview", "command"],
+  "/scanner": ["scan", "screen", "candidates"],
+  "/portfolio-manager": ["holdings", "positions", "portfolio", "pm"],
+  "/trade-floor": ["equities", "stocks", "trade journal"],
+  "/options-desk": ["options", "contracts risk"],
+  "/performance": ["returns", "pnl", "profit", "loss"],
+  "/learning": ["lessons", "outcomes"],
+  "/intel": ["news", "headlines", "intelligence"],
+  "/sec": ["filings", "edgar", "insiders"],
+  "/earnings": ["calendar", "reports", "calls"],
+  "/georisk": ["geopolitics", "world", "georisk"],
+  "/macro": ["economy", "rates", "economic events"],
+  "/audit-logs": ["logs", "audit trail"],
+  "/quality": ["qc", "freshness", "data health"],
+  "/truth-review": ["evidence", "verification", "truth"],
+  "/settings": ["configuration", "preferences"],
+};
+
 export const pages = definitions.map(([path, label, group, importer]) => {
   let pending;
   const load = () => {
     if (!pending) pending = importer().catch(error => { pending = null; throw error; });
     return pending;
   };
-  return { path, label, group, load, Component: lazy(load) };
+  return { path, label, group, aliases: searchAliases[path] || [], load, Component: lazy(load) };
 });
 
 export function prefetchPage(path) {

@@ -31,6 +31,7 @@ export default function PerformancePage() {
   const [curveDays, setCurveDays] = useState(90);
   const [seeding, setSeeding] = useState(false);
   const [refreshingPrices, setRefreshingPrices] = useState(false);
+  const [legacyOpen, setLegacyOpen] = useState(false);
   const perfRead = useDisplayResource(`${API}/performance/summary`, 30000);
   const backtestRead = useDisplayResource(`${API}/backtest/summary`, 30000);
   const trackerRead = useDisplayResource(`${API}/signals/tracker?limit=200`, 30000);
@@ -133,22 +134,22 @@ export default function PerformancePage() {
           { label: "Price Source", value: priceRead.loading ? "CHECKING" : priceSourceLabel, color: priceSource?.finnhub_available || priceSource?.massive_available ? "#4ade80" : "#fbbf24" },
           { label: "Signals", value: tracker?.tracked ?? "--", detail: "tracked records" },
           { label: "Benchmark", value: benchmarkCurve?.benchmark || "SPY", color: accent },
-          { label: "Forward Proof", value: proof?.rows?.length || proof?.sample_size || 0, color: accent2 },
+          { label: "Forward Proof", value: proof?.sample_size ?? (Array.isArray(proof?.rows) ? proof.rows.length : "--"), color: accent2 },
           { label: "Edge State", value: edge?.headline?.decision || edge?.decision || "REVIEW" },
         ]}
       />
 
       {/* Summary stat strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20 }}>
-        <Stat label="SIGNALS TRACKED" value={tracker?.tracked || 0}
-              sub={`${tracker?.total || 0} TOTAL · ${tracker?.winners || 0}W / ${tracker?.losers || 0}L`} color={accent} />
+        <Stat label="SIGNALS TRACKED" value={tracker?.tracked ?? "--"}
+              sub={`${tracker?.total ?? "--"} TOTAL · ${tracker?.winners ?? "--"}W / ${tracker?.losers ?? "--"}L`} color={accent} />
         <Stat label="AVG GAIN SINCE SIGNAL" value={fmt(tracker?.avg_gain_pct) + "%"}
               color={pctColor(tracker?.avg_gain_pct)} sub="ALL TIME" />
         <Stat label="BEST PICK" value={tracker?.best ? `${tracker.best.ticker} ${fmt(tracker.best.gain_pct)}%` : "—"}
               color="#4ade80" sub="HIGHEST GAIN" />
         <Stat label="WORST PICK" value={tracker?.worst ? `${tracker.worst.ticker} ${fmt(tracker.worst.gain_pct)}%` : "—"}
               color="#f87171" sub="LOWEST GAIN" />
-        <Stat label="SIGNAL COMBOS" value={(perf?.signals || []).length} sub="WITH 7/30/90D" />
+        <Stat label="SIGNAL COMBOS" value={Array.isArray(perf?.signals) ? perf.signals.length : "--"} sub="WITH 7/30/90D" />
         <Stat label="REPLAY SOURCE" value="LSE" sub="ALPACA BACKUP" color={accent} />
       </div>
 
@@ -240,7 +241,9 @@ export default function PerformancePage() {
       <OptionsAlphaGapCard data={optionsGap} />
 
       {/* Legacy detailed table — DEPRECATED replaced by Active/Closed split + Options bar chart above */}
-      <Card title={`LEGACY DETAIL · ${tracker?.tracked || 0} TRACKED · COLLAPSED BY DEFAULT`}>
+      <details onToggle={event => setLegacyOpen(event.currentTarget.open)} style={{ marginBottom: 20 }}>
+      <summary style={{ color: muted, fontSize: 12, padding: "10px 0", cursor: "pointer" }}>LEGACY SIGNAL DETAIL · {tracker?.tracked ?? "--"} TRACKED</summary>
+      {legacyOpen && <Card title="LEGACY SIGNAL DETAIL">
         {!tracker || !tracker.rows || tracker.rows.length === 0 ? (
           <div style={{ color: muted, fontSize: 13, padding: "10px 0" }}>
             No signals tracked yet. Every scan now records the first time it surfaces a
@@ -299,7 +302,8 @@ export default function PerformancePage() {
             </tbody>
           </table>
         )}
-      </Card>
+      </Card>}
+      </details>
 
       {/* Case Cap Performance Curve — Robinhood-style */}
       <PerfCurve

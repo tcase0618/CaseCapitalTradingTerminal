@@ -88,13 +88,13 @@ export default function LearningPage() {
       <StrategyEvidencePanel />
       {/* Status strip */}
       <div style={{ display: "flex", background: tokens.cardBg, border: hairline, marginBottom: 20, flexWrap: "wrap" }}>
-        <Stat label="LAST RUN" value={lastRun ? new Date(lastRun.run_at).toLocaleDateString() : "NEVER"}
+        <Stat label="LAST RUN" value={lastRun?.run_at && Number.isFinite(new Date(lastRun.run_at).getTime()) ? new Date(lastRun.run_at).toLocaleDateString() : status && !statusRead.error ? "NO RECORDED RUN" : "--"}
               sub={lastRun?.run_at ? new Date(lastRun.run_at).toLocaleTimeString() : "—"} color={accent} />
-        <Stat label="TRADES ANALYZED" value={preview?.trades_available || 0}
-              sub={`${preview?.trades_30d || 0} × 30D + ${(preview?.trades_live || 0) - (preview?.trades_30d || 0)} × LIVE`} />
+        <Stat label="TRADES ANALYZED" value={preview?.trades_available ?? "--"}
+              sub={preview?.trades_live != null && preview?.trades_30d != null ? `${preview.trades_30d} × 30D + ${preview.trades_live - preview.trades_30d} × LIVE` : "--"} />
         <Stat label="OVERALL WIN RATE" value={lastRun?.trades_analyzed > 0 && lastRun?.overall_win_rate != null ? `${(lastRun.overall_win_rate * 100).toFixed(1)}%` : "—"}
               color={lastRun?.overall_win_rate == null ? muted : lastRun.overall_win_rate >= 0.5 ? "#4ade80" : "#f87171"} sub="ALL TRADES" />
-        <Stat label="PENDING CHANGES" value={preview?.would_change_count || 0}
+        <Stat label="PENDING CHANGES" value={preview?.would_change_count ?? "--"}
               color={preview?.would_change_count > 0 ? "#fb923c" : muted} sub="IF RUN NOW" />
         <Stat label="MODE" value="SHADOW" sub="PROPOSALS ONLY" />
       </div>

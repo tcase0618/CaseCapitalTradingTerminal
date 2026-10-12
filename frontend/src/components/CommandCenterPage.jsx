@@ -7,6 +7,7 @@ import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, tokens } from "./CrtShell";
 import { DataConfidenceStrip, DataTableShell, SourceBadge } from "./Institutional";
+import DisplayReadStatus from "./DisplayReadStatus";
 
 const { accent, accent2, dim, muted, labelLight, hairline, pageBg } = tokens;
 
@@ -236,20 +237,21 @@ export default function CommandCenterPage() {
   const [initialLoad, setInitialLoad] = useState(true);
   const [loadWarning, setLoadWarning] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [readStates, setReadStates] = useState({});
   const [workspaceView, setWorkspaceView] = useState("overview");
   const [displayRefreshing, setDisplayRefreshing] = useState(false);
   const refreshInFlight = useRef(false);
   const refreshQueued = useRef(false);
   const mounted = useRef(false);
   const displayReads = useMemo(() => [
-    ["/status", setStatus], ["/scan/latest", setScan],
-    ["/position_monitor/latest", setPositionMonitor], ["/portfolio_manager/latest", setPm],
-    ["/scan/funnel/today", setScanFunnel], ["/admin/integration_status", setAdmin],
-    ["/system/health", setHealth], ["/execution_gate/overview", setExecutionGate],
-    ["/trade_floor/positions", setTradeFloor], ["/admin/price_source", setPriceSource],
-    ["/activity?limit=12", data => setActivity(Array.isArray(data) ? data : [])],
-    ["/telegram/events?limit=12", data => setTelegramEvents(Array.isArray(data?.events) ? data.events : Array.isArray(data) ? data : [])],
-    ["/data_quality/overview", setQualityOverview],
+    ["/status", setStatus, "Terminal status"], ["/scan/latest", setScan, "Latest scan"],
+    ["/position_monitor/latest", setPositionMonitor, "Portfolio monitor"], ["/portfolio_manager/latest", setPm, "Portfolio Manager"],
+    ["/scan/funnel/today", setScanFunnel, "Today's scan funnel"], ["/admin/integration_status", setAdmin, "Integrations"],
+    ["/system/health", setHealth, "System health"], ["/execution_gate/overview", setExecutionGate, "Execution gate"],
+    ["/trade_floor/positions", setTradeFloor, "Trade floor"], ["/admin/price_source", setPriceSource, "Price providers"],
+    ["/activity?limit=12", data => setActivity(Array.isArray(data) ? data : []), "Activity"],
+    ["/telegram/events?limit=12", data => setTelegramEvents(Array.isArray(data?.events) ? data.events : Array.isArray(data) ? data : []), "Telegram events"],
+    ["/data_quality/overview", setQualityOverview, "Data quality"],
   ], []);
   const launcherRef = useRef(null);
   const runningRef = useRef(running);
@@ -293,6 +295,7 @@ export default function CommandCenterPage() {
       const promise = !force && cached.updatedAt && Date.now() - cached.updatedAt < 20000 ? Promise.resolve() : resource.refresh(force);
       return promise.then(() => {
         const state = resource.getSnapshot();
+        if (mounted.current) setReadStates(previous => ({ ...previous, [path]: state }));
         if (state.error) throw state.error;
         if (state.updatedAt) timestamps.push(state.updatedAt);
         if (mounted.current) setter(state.data);
@@ -322,6 +325,7 @@ export default function CommandCenterPage() {
       const resource = displayResource(`${API}${path}`, 20000);
       const applySnapshot = () => {
         const state = resource.getSnapshot();
+        if (mounted.current) setReadStates(previous => previous[path] === state ? previous : { ...previous, [path]: state });
         if (mounted.current && state.data != null) setter(state.data);
       };
       const off = resource.subscribe(applySnapshot, 20000);
@@ -416,6 +420,7 @@ export default function CommandCenterPage() {
         </button>
       }>
       {loadWarning && <div style={{ marginBottom: 12, padding: "10px 14px", border: "1px solid #f87171", color: "#f87171", background: "rgba(248,113,113,0.08)", fontSize: 11, letterSpacing: "0.08em" }}>{loadWarning}</div>}
+      <DisplayReadStatus sources={displayReads} states={readStates} />
       {qualityOverview?.ok === false && <div style={{ marginBottom: 12, padding: "10px 14px", border: "1px solid #fbbf24", color: "#fbbf24", background: "rgba(251,191,36,0.08)", fontSize: 11, letterSpacing: "0.08em" }}>
         DATA READINESS: {qualityOverview?.trading_gate?.decision || "CHECK"} {qualityOverview?.trading_gate?.reason ? `| ${qualityOverview.trading_gate.reason}` : "| inspect QUALITY for source-level detail"}
       </div>}
