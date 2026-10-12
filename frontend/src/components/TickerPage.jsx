@@ -21,6 +21,7 @@ export default function TickerPage() {
   const [accountant, setAccountant] = useState(null);
   const [accountantStatus, setAccountantStatus] = useState("loading");
   const [loadError, setLoadError] = useState(false);
+  const [sourceStatus, setSourceStatus] = useState({ options: "loading", flow: "loading", freeData: "loading" });
 
   useEffect(() => {
     if (!ticker) return undefined;
@@ -31,14 +32,16 @@ export default function TickerPage() {
       return response;
     });
     setLoadError(false);
+    setSourceStatus({ options: "loading", flow: "loading", freeData: "loading" });
     setData(null); setOpts(null); setFlow(null); setFreeData(null); setKronos(null);
     setPmDossier(null); setDossierStatus("loading"); setAccountant(null); setAccountantStatus("loading");
     request(`/ticker/${ticker}`).then(r => setData(r.data)).catch(error => {
       if (active && error.name !== "CanceledError") { setData({ ticker }); setLoadError(true); }
     });
-    request(`/options/${ticker}`).then(r => setOpts(r.data.options)).catch(() => {});
-    request(`/flow/${ticker}`).then(r => setFlow(r.data.flow)).catch(() => {});
-    request(`/data/free/ticker/${ticker}`).then(r => setFreeData(r.data)).catch(() => { if (active) setFreeData(null); });
+    const sourceState = (key, value) => { if (active) setSourceStatus(previous => ({ ...previous, [key]: value })); };
+    request(`/options/${ticker}`).then(r => { setOpts(r.data?.options); sourceState("options", "ready"); }).catch(() => sourceState("options", "unavailable"));
+    request(`/flow/${ticker}`).then(r => { setFlow(r.data?.flow); sourceState("flow", "ready"); }).catch(() => sourceState("flow", "unavailable"));
+    request(`/data/free/ticker/${ticker}`).then(r => { setFreeData(r.data); sourceState("freeData", r.data && r.data.ok !== false ? "ready" : "unavailable"); }).catch(() => sourceState("freeData", "unavailable"));
     request(`/kronos/battle_card/${ticker}`).then(r => setKronos(r.data)).catch(error => { if (active && error.name !== "CanceledError") setKronos({ error: error.message }); });
     request(`/pm/company/${ticker}?limit=12`).then(r => {
       setPmDossier(r.data);
@@ -149,13 +152,13 @@ export default function TickerPage() {
           </Card>
 
           <KeyRatiosCard freeData={freeData} />
-          <FreeDataCard freeData={freeData} />
+          <FreeDataCard freeData={freeData} status={sourceStatus.freeData} />
         </div>
 
         <div>
           <Card title="OPTIONS INTELLIGENCE">
             {!opts ? (
-              <div style={{ color: muted, fontSize: 13 }}>No options data available.</div>
+              <div role="status" style={{ color: muted, fontSize: 13 }}>{sourceStatus.options === "loading" ? "Options data loading..." : sourceStatus.options === "unavailable" ? "Options source unavailable." : "No options data returned."}</div>
             ) : (
               <>
                 <Row k="STRATEGY" v={(opts.strategy_name || opts.strategy || "—").toUpperCase()} c={accent} />
@@ -207,7 +210,7 @@ export default function TickerPage() {
 
           <Card title="UNUSUAL FLOW">
             {!flow ? (
-              <div style={{ color: muted, fontSize: 13 }}>No flow data.</div>
+              <div role="status" style={{ color: muted, fontSize: 13 }}>{sourceStatus.flow === "loading" ? "Flow data loading..." : sourceStatus.flow === "unavailable" ? "Flow source unavailable." : "No flow data returned."}</div>
             ) : (
               <>
                 <Row k="FLOW BIAS" v={flow.flow_bias}
@@ -541,7 +544,7 @@ function fieldValue(row, keys) {
   return value == null || value === "" ? null : value;
 }
 
-function KronosTickerForecastBox({ data, kronos }) {
+export function KronosTickerForecastBox({ data, kronos }) {
   const card = kronos?.battle_card || {};
   const tt = data?.time_target || {};
   const holdLow = Number(tt.hold_period_low || tt.low || 0);
@@ -552,35 +555,32 @@ function KronosTickerForecastBox({ data, kronos }) {
     : holdMid
       ? `${holdMid} DAY SCANNER HOLD CONE`
       : "SCANNER HOLD CONE";
-  const oneDay = card.horizons?.["1D"] || coneFromBase(card.forecast_pct, 1, card.instrument);
-  const holdCone = holdMid
-    ? coneFromBase(card.forecast_pct, Math.max(1, holdMid), card.instrument)
-    : card.horizons?.["10D"] || coneFromBase(card.forecast_pct, 10, card.instrument);
+  const supplied = Array.isArray(card.horizons) ? card.horizons : [];
+  const horizons = supplied.map(row => ({
+    ...row, low_pct: forecastNumber(row?.cone_low_pct), base_pct: forecastNumber(row?.forecast_pct), high_pct: forecastNumber(row?.cone_high_pct),
+  })).filter(row => row.low_pct != null && row.base_pct != null && row.high_pct != null && row.low_pct <= row.base_pct && row.base_pct <= row.high_pct);
   const probs = card.probabilities || {};
-  const attribution = card.attribution || [];
+  const attribution = list(card.attribution);
 
   return (
     <Card title="KRONOS FORECAST">
       {!kronos ? (
         <div style={{ color: muted, fontSize: 13 }}>Kronos forecast loading...</div>
-      ) : kronos.error ? (
-        <div style={{ color: "#f87171", fontSize: 13 }}>Kronos degraded: {kronos.error}</div>
+      ) : kronos.error || kronos.ok !== true ? (
+        <div role="status" style={{ color: "#f87171", fontSize: 13 }}>Kronos unavailable: {String(kronos.error || kronos.reason || "No verified forecast response")}</div>
       ) : (
         <div style={{ display: "grid", gap: 14 }}>
           <div style={kronosMiniGrid}>
             <KronosMini label="BIAS" value={card.forecast_bias || "UNKNOWN"} color={forecastColor(card.forecast_bias)} />
             <KronosMini label="KRONOS SCORE" value={card.kronos_score ?? "-"} color={accent} />
             <KronosMini label="CONFIDENCE" value={card.confidence == null ? "-" : `${card.confidence}%`} color="#5eead4" />
-            <KronosMini label="PM ALIGNMENT" value={card.aligned_with_pm ? "ALIGNED" : "WATCH"} color={card.aligned_with_pm ? "#4ade80" : "#fbbf24"} />
+            <KronosMini label="PM ALIGNMENT" value={card.aligned_with_pm == null ? "UNKNOWN" : card.aligned_with_pm ? "ALIGNED" : "WATCH"} color={card.aligned_with_pm ? "#4ade80" : muted} />
           </div>
 
-          <ForecastCone title="1 DAY FORECAST CONE" cone={oneDay} price={data?.price} />
-          <ForecastCone
-            title={holdLabel}
-            cone={holdCone}
-            price={data?.price}
-            sub={holdLow && holdHigh ? `Midpoint estimate uses day ${holdMid}` : "Uses nearest available Kronos horizon"}
-          />
+          <div style={{ color: muted, fontSize: 11, overflowWrap: "anywhere" }}>INPUT AS-OF: {card.input_asof || "--"} | TARGET: {card.target_at || "--"}</div>
+          {horizons.length ? horizons.map((row, index) => <ForecastCone key={`${row.horizon}-${index}`} title={row.horizon || "SUPPLIED HORIZON"} cone={row} price={data?.price} sub={row.target_at || card.target_at || undefined} />)
+            : <div role="status" style={{ color: muted, fontSize: 12 }}>No supplied forecast ranges available.</div>}
+          {(holdLow > 0 || holdMid > 0) && <div style={{ color: muted, fontSize: 11 }}>{holdLabel.replace("HOLD CONE", "HOLD WINDOW")} / SCANNER ESTIMATE</div>}
 
           <div style={kronosTwoCol}>
             <div style={kronosPanel}>
@@ -670,7 +670,7 @@ function KronosMini({ label, value, color }) {
   );
 }
 
-function FreeDataCard({ freeData }) {
+function FreeDataCard({ freeData, status }) {
   const secFacts = freeData?.sec?.companyfacts || {};
   const secLookup = freeData?.sec?.lookup || {};
   const metrics = secFacts.metrics || {};
@@ -690,7 +690,7 @@ function FreeDataCard({ freeData }) {
 
   return (
     <Card title="FREE DATA INTELLIGENCE">
-      {!freeData ? (
+      {status === "unavailable" ? <div role="status" style={{ color: muted, fontSize: 13 }}>Source bundle unavailable.</div> : !freeData ? (
         <div style={{ color: muted, fontSize: 13 }}>Source bundle loading...</div>
       ) : (
         <>
@@ -818,16 +818,10 @@ function ratioColor(status) {
   return muted;
 }
 
-function coneFromBase(basePct, days, instrument) {
-  const base = Number(basePct || 0);
-  const root = Math.sqrt(Math.max(1, days));
-  const vol = instrument === "OPTION" ? 4.8 : 1.15;
-  const scaled = base * Math.min(6, root / Math.sqrt(5));
-  return {
-    low_pct: Number((scaled - vol * root).toFixed(2)),
-    base_pct: Number(scaled.toFixed(2)),
-    high_pct: Number((scaled + vol * root).toFixed(2)),
-  };
+function forecastNumber(value) {
+  if (value == null || value === "" || typeof value === "boolean") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function signedPct(v) {

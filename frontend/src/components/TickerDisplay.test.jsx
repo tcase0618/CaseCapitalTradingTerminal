@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import axios from "axios";
-import TickerPage from "./TickerPage";
+import TickerPage, { KronosTickerForecastBox } from "./TickerPage";
 
 let mockTicker = "AAA";
 jest.mock("react-router-dom", () => ({ useParams: () => ({ ticker: mockTicker }), Link: ({ children }) => <span>{children}</span> }));
@@ -47,4 +47,25 @@ test("failed company read is unavailable rather than a fabricated zero score", a
   await act(async () => { root.render(<TickerPage />); await flush(); });
   expect(container.textContent).toContain("Company data unavailable");
   expect(container.textContent).toContain("CASE SCORE—");
+});
+
+test("company forecasts display real array horizons without inventing a hold cone", async () => {
+  await act(async () => root.render(<KronosTickerForecastBox data={{ price: 100, time_target: { low: 10, high: 20 } }} kronos={{ ok: true, battle_card: {
+    input_asof: "2026-10-09T20:00:00Z", target_at: "2026-10-12T20:00:00Z",
+    horizons: [{ horizon: "NEXT FULL RTH BAR", forecast_pct: 2, cone_low_pct: -3, cone_high_pct: 4 }],
+  } }} />));
+  expect(container.textContent).toContain("NEXT FULL RTH BAR");
+  expect(container.textContent).toContain("-3.0%");
+  expect(container.textContent).toContain("+4.0%");
+  expect(container.textContent).toContain("2026-10-12T20:00:00Z");
+  expect(container.textContent).not.toContain("1 DAY FORECAST CONE");
+  expect(container.textContent).toContain("PM ALIGNMENTUNKNOWN");
+});
+
+test("failed or incomplete forecasts never produce locally synthesized ranges", async () => {
+  await act(async () => root.render(<KronosTickerForecastBox data={{ price: 100 }} kronos={{ ok: false, battle_card: { forecast_pct: 7 } }} />));
+  expect(container.textContent).toContain("Kronos unavailable");
+  expect(container.textContent).not.toContain("+7.0%");
+  await act(async () => root.render(<KronosTickerForecastBox data={{ price: 100 }} kronos={{ ok: true, battle_card: { forecast_pct: 7 } }} />));
+  expect(container.textContent).toContain("No supplied forecast ranges available");
 });

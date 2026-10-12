@@ -28,7 +28,7 @@ test("Lottery exposes every candidate by pagination and all six views tolerate p
   const next = container.querySelector('[aria-label="Next Lottery page"]');
   await act(async () => { next.click(); await flush(); });
   expect(container.textContent).toContain("TEST30"); expect(container.textContent).toContain("31-60 OF 65");
-  for (const tab of ["LIVE TICKETS", "TRUTH BOARD", "LEARNING ENGINE", "VARIANT BOOK", "METHODOLOGY"]) await click(tab);
+  for (const tab of ["OPEN PAPER TICKETS", "TRUTH BOARD", "LEARNING ENGINE", "VARIANT BOOK", "METHODOLOGY"]) await click(tab);
   expect(container.textContent).not.toContain("NaN");
 });
 

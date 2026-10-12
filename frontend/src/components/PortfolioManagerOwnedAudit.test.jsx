@@ -88,7 +88,7 @@ test("every owned PM view tolerates malformed arrays without automatic commands"
   await click("OPTIONS");
   expect(container.textContent).toContain("OPTIONS REPLAY SAMPLE");
   await click("P/L CALENDAR");
-  expect(container.textContent).toContain("PM P/L CALENDAR");
+  expect(container.textContent).toContain("PM PROXY OBSERVATION CALENDAR");
   expect(container.textContent).not.toContain("+0.0%");
   await click("TRADE JOURNAL");
   expect(container.textContent).toContain("JOURNAL CHILD");

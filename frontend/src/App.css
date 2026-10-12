@@ -37,6 +37,15 @@
 .workspace-results button.selected { background: #7df7de10; color: #7df7de; }
 .workspace-results small { color: #7d8796; margin-left: auto; }
 .workspace-search-empty { padding: 24px; color: #7d8796; }
+.terminal-skip-link { position: fixed; top: 8px; left: 8px; z-index: 400; padding: 12px 16px; background: #0b0d12; color: #7df7de; border: 2px solid #7df7de; transform: translateY(-150%); }
+.terminal-skip-link:focus { transform: translateY(0); }
+.terminal-frame [data-testid="system-bar"] { flex-wrap: wrap; row-gap: 6px !important; }
+.workspace-search { min-height: 0; max-height: min(75vh, 75dvh); }
+.workspace-results { min-height: 0; overscroll-behavior: contain; }
+.workspace-results button > span { min-width: 0; overflow-wrap: anywhere; }
+.workspace-results button > small { flex-shrink: 0; }
+.workspace-results button > svg { flex-shrink: 0; }
+.workspace-search-input button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; flex-shrink: 0; }
 .workspace-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid #d7bd6855; border-bottom: 1px solid #ffffff18; margin: 18px 0 16px; }
 .workspace-overview > div { padding: 18px 16px; border-right: 1px solid #ffffff10; min-width: 0; }
 .workspace-overview > div:first-child { padding-left: 0; }
@@ -63,6 +72,11 @@
   .workspace-view-overview .command-panel-execution-gate, .workspace-view-overview .command-panel-top-scanner-output { grid-column: 1 / -1 !important; }
 }
 @media (max-width: 768px) {
+  .terminal-frame .terminal-sidebar { height: 100dvh !important; max-width: calc(100vw - 44px); }
+  .terminal-frame .terminal-page-body .pm-owned-calendar > div:first-child > div:first-child,
+  .terminal-frame .terminal-page-body .pm-owned-calendar-days { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; }
+  .terminal-frame .terminal-page-actions > [data-testid="global-refresh-tab"] { width: 38px !important; min-width: 38px !important; }
+  .terminal-frame .terminal-page-actions > :nth-child(n + 4) { grid-column: 1 / -1; min-width: 0; }
   .terminal-frame .terminal-page-body .workspace-funnel-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .terminal-frame .terminal-page-body .workspace-scanner-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .terminal-frame .terminal-page-body .workspace-calendar-grid, .terminal-frame .terminal-page-body .workspace-calendar-weekdays { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; gap: 2px !important; }

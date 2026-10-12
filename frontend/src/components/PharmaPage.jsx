@@ -159,7 +159,7 @@ export default function PharmaPage() {
   };
 
   const summary = useMemo(() => {
-    const baseRows = pdufa.length ? pdufa : rows(calendar?.events);
+    const baseRows = loaded.pdufa ? pdufa : rows(calendar?.events);
     const counts = baseRows.reduce((a, p) => {
       a[p.tier] = (a[p.tier] || 0) + 1;
       return a;
@@ -177,7 +177,9 @@ export default function PharmaPage() {
       ].filter(Boolean),
     }));
     return { counts, leader: sorted[0], urgent, speculative, baseRows };
-  }, [pdufa, calendar]);
+  }, [pdufa, calendar, loaded.pdufa]);
+  const scoredPdufa = useMemo(() => [...pdufa].sort((a, b) =>
+    (number(b.binary_event_score) ?? -Infinity) - (number(a.binary_event_score) ?? -Infinity)), [pdufa]);
 
   return (
     <CrtShell
@@ -331,7 +333,7 @@ export default function PharmaPage() {
               </tr>
             </thead>
             <tbody>
-              {pdufa.map(p => {
+              {scoredPdufa.map(p => {
                 const key = `${p.ticker}-${p.pdufa_date}`;
                 const open = expanded === key;
                 return (
@@ -608,7 +610,7 @@ function DataDepthCard({ p, intel }) {
     <div style={depthCard}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
         <Link to={`/ticker/${p.ticker}`} style={{ color: accent, fontWeight: 900, fontSize: 18, textDecoration: "none" }}>${p.ticker}</Link>
-        <span style={badge(intel?.ok ? "#4ade80" : "#fb923c")}>{intel?.unavailable ? "UNAVAILABLE" : intel ? "LOADED" : "FETCHING"}</span>
+        <span style={badge(intel?.ok ? "#4ade80" : "#fb923c")}>{intel?.unavailable || intel?.ok === false ? "UNAVAILABLE" : intel ? "LOADED" : "FETCHING"}</span>
       </div>
       <div style={{ color: labelLight, fontSize: 12, marginTop: 8, minHeight: 34 }}>{intel?.company_name || p.drug || p.indication}</div>
       <div style={depthMetrics}>

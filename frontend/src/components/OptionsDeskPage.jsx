@@ -30,6 +30,7 @@ export default function OptionsDeskPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [loadWarning, setLoadWarning] = useState("");
+  const [displayLoading, setDisplayLoading] = useState(true);
 
   const riskRead = useDisplayResource(`${API}/options_desk/risk`, 60000);
   const tradesRead = useDisplayResource(`${API}/options_desk/trades?sync_live=false`, 60000);
@@ -40,6 +41,7 @@ export default function OptionsDeskPage() {
 
   // Candidates and expectancy GETs can persist backend state; do not poll them.
   const load = useCallback(async (signal) => {
+    setDisplayLoading(true);
     const reads = [
       ["account", setAccount], ["candidates", setCandidates], ["positions", setPositions],
       ["orders", setOrders], ["leaps", setLeaps], ["tail", setTail], ["expectancy", setExpectancy],
@@ -58,6 +60,7 @@ export default function OptionsDeskPage() {
       }
     });
     setLoadWarning(failed.length ? `Display unavailable: ${failed.join(", ")}. Last successful data retained where available.` : "");
+    setDisplayLoading(false);
     if (!signal) await Promise.all([refreshRisk(), refreshTrades()]);
   }, [refreshRisk, refreshTrades]);
 
@@ -67,9 +70,9 @@ export default function OptionsDeskPage() {
     return () => controller.abort();
   }, [load]);
 
-  const rows = deskRowsOnly(candidates?.candidates);
-  const deskRows = rows.filter(r => r.route !== "EQUITY");
-  const readyRows = deskRows.filter(r => r.manual_fire_ready);
+  const rows = useMemo(() => deskRowsOnly(candidates?.candidates), [candidates]);
+  const deskRows = useMemo(() => rows.filter(r => r.route !== "EQUITY"), [rows]);
+  const readyRows = useMemo(() => deskRows.filter(r => r.manual_fire_ready), [deskRows]);
   const selectedTicket = deskRows.find(row => selected && row.candidate_id === selected.candidate_id) || readyRows[0] || deskRows[0];
   const acct = account?.account || {};
   const deskSummary = {
@@ -209,6 +212,7 @@ export default function OptionsDeskPage() {
         </div>
       }>
       <style>{optionsResponsiveCss}</style>
+      {displayLoading && <div role="status" style={messageBox}>Loading options display...</div>}
       <div style={notice}>
         SEPARATE PAPER OPTIONS ACCOUNT. PM ROUTES THE EXPRESSION. EQUITY TRADE FLOOR IS NOT CONNECTED TO THIS DESK.
       </div>
@@ -222,16 +226,16 @@ export default function OptionsDeskPage() {
       </div>
 
       <div className="options-stat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(10, minmax(0, 1fr))", background: cardBg, border: hairline, marginBottom: 22 }}>
-        <Stat label="DESK STATUS" value={account?.ok ? "ARMED" : "DISABLED"} sub={account?.reason || "OPTIONS PAPER"} color={account?.ok ? "#4ade80" : "#f87171"} accentBar />
+        <Stat label="DESK STATUS" value={account == null ? "UNAVAILABLE" : account.ok ? "PAPER ACCOUNT" : "DISABLED"} sub={account?.reason || "OPTIONS PAPER"} color={account == null ? muted : account.ok ? accent2 : "#f87171"} accentBar />
         <Stat label="EQUITY BASIS" value={money(candidates?.options_equity_basis)} sub="OPTIONS PM" color={accent} />
-        <Stat label="BUYING POWER" value={acct.buying_power ? `$${Number(acct.buying_power).toFixed(0)}` : "-"} sub={acct.status || "NO ACCOUNT"} color={accent2} />
-        <Stat label="READY" value={deskSummary.ready || 0} sub={`${deskSummary.total || 0} DESK CANDIDATES`} color="#4ade80" />
-        <Stat label="OPTION/BOTH" value={(deskSummary.option || 0) + (deskSummary.both || 0)} sub="PM ROUTED" color="#fbbf24" />
-        <Stat label="DAILY PREMIUM" value={`$${Number(account?.daily_premium_used || 0).toFixed(0)}`} sub={`/ $${Number(account?.daily_premium_cap || 4000).toFixed(0)} CAP`} color="#fbbf24" />
-        <Stat label="LIVE DATA" value={`${dataPolicy.alpaca_refreshes_used ?? 0}/${dataPolicy.alpaca_refresh_limit ?? 18}`} sub="SCORE-FIRST ALPACA" color={accent2} />
-        <Stat label="TAIL READY" value={`${tailReady.length}/${tailRows.length}`} sub={`${tail?.status?.active_tail ?? 0} ACTIVE`} color={tailReady.length ? "#4ade80" : "#fbbf24"} />
-        <Stat label="HARD STOP" value="-25%" sub={`${risk?.positions_checked || 0} OPEN CHECKED`} color="#f87171" />
-        <Stat label="THETA WATCH" value={deskRowsOnly(risk?.checks).filter(c => c.theta_status === "WATCH").length} sub="DECAY FLAGS" color="#fbbf24" />
+        <Stat label="BUYING POWER" value={money(acct.buying_power)} sub={acct.status || "NO ACCOUNT"} color={accent2} />
+        <Stat label="READY" value={Array.isArray(candidates?.candidates) ? deskSummary.ready : "-"} sub={`${Array.isArray(candidates?.candidates) ? deskSummary.total : "-"} DESK CANDIDATES`} color="#4ade80" />
+        <Stat label="OPTION/BOTH" value={Array.isArray(candidates?.candidates) ? deskSummary.option + deskSummary.both : "-"} sub="PM ROUTED" color="#fbbf24" />
+        <Stat label="DAILY PREMIUM" value={money(account?.daily_premium_used)} sub={`/ ${money(account?.daily_premium_cap)} CAP`} color="#fbbf24" />
+        <Stat label="LIVE DATA" value={`${num(dataPolicy.alpaca_refreshes_used, 0)}/${num(dataPolicy.alpaca_refresh_limit, 0)}`} sub="SCORE-FIRST ALPACA" color={accent2} />
+        <Stat label="TAIL READY" value={Array.isArray(tail?.candidates) ? `${tailReady.length}/${tailRows.length}` : "-/-"} sub={`${num(tail?.status?.active_tail, 0)} ACTIVE`} color={tailReady.length ? "#4ade80" : "#fbbf24"} />
+        <Stat label="HARD STOP" value="-25%" sub={`${num(risk?.positions_checked, 0)} OPEN CHECKED`} color="#f87171" />
+        <Stat label="THETA WATCH" value={Array.isArray(risk?.checks) ? deskRowsOnly(risk.checks).filter(c => c.theta_status === "WATCH").length : "-"} sub="DECAY FLAGS" color="#fbbf24" />
       </div>
 
       <div style={dataPolicyBox}>
@@ -241,12 +245,12 @@ export default function OptionsDeskPage() {
       <DataConfidenceStrip
         title="OPTIONS DESK CONTROL CHECK"
         items={[
-          { label: "Account", value: account?.ok ? "ARMED" : "DISABLED", detail: account?.reason || acct.status },
-          { label: "PM Routes", value: `${deskSummary.option + deskSummary.both}/${deskSummary.total}`, color: deskSummary.option + deskSummary.both ? "#fbbf24" : muted, detail: "option or both" },
-          { label: "Manual Ready", value: `${deskSummary.ready}/${deskSummary.total}`, color: deskSummary.ready ? "#4ade80" : "#f87171" },
-          { label: "Alpaca Chain Pulls", value: `${dataPolicy.alpaca_refreshes_used ?? 0}/${dataPolicy.alpaca_refresh_limit ?? 18}`, color: accent2 },
-          { label: "Risk Sweep", value: `${risk?.positions_checked || 0} checked`, color: "#f87171", detail: "25% mid-basis stop" },
-          { label: "Expectancy", value: fmtExpectancy(expectancy?.grind), color: expectancyColor(expectancy?.grind), detail: `n=${expectancy?.grind?.sample_size ?? 0}` },
+          { label: "Account", value: account == null ? "UNAVAILABLE" : account.ok ? "PAPER ACCOUNT" : "DISABLED", detail: account?.reason || acct.status },
+          { label: "PM Routes", value: Array.isArray(candidates?.candidates) ? `${deskSummary.option + deskSummary.both}/${deskSummary.total}` : "UNAVAILABLE", color: deskSummary.option + deskSummary.both ? "#fbbf24" : muted, detail: "option or both" },
+          { label: "Manual Ready", value: Array.isArray(candidates?.candidates) ? `${deskSummary.ready}/${deskSummary.total}` : "UNAVAILABLE", color: deskSummary.ready ? "#4ade80" : muted },
+          { label: "Alpaca Chain Pulls", value: `${num(dataPolicy.alpaca_refreshes_used, 0)}/${num(dataPolicy.alpaca_refresh_limit, 0)}`, color: accent2 },
+          { label: "Risk Sweep", value: `${num(risk?.positions_checked, 0)} checked`, color: "#f87171", detail: "25% mid-basis stop" },
+          { label: "Expectancy", value: fmtExpectancy(expectancy?.grind), color: expectancyColor(expectancy?.grind), detail: `n=${num(expectancy?.grind?.sample_size, 0)}` },
         ]}
       />
 
@@ -317,7 +321,7 @@ export default function OptionsDeskPage() {
       <div className="options-owned-grid" style={deskGrid}>
         <Card title="OPTIONS ORDERS" accentColor={accent}>
           <SimpleTable
-            empty="No options orders."
+            empty={Array.isArray(orders?.orders) ? "No options orders." : "Options orders unavailable."}
             head={["SYMBOL", "SIDE", "QTY", "TYPE", "STATUS"]}
             rows={deskRowsOnly(orders?.orders).slice(0, 12).map(o => [
               o.symbol,
@@ -330,7 +334,7 @@ export default function OptionsDeskPage() {
         </Card>
         <Card title="FILL SYNC" accentColor={accent2}>
           <SimpleTable
-            empty="No synced option fills yet."
+            empty={Array.isArray(trades?.trades) ? "No synced option fills yet." : "Option fills unavailable."}
             head={["SYMBOL", "STATUS", "ENTRY", "CURRENT", "P/L"]}
             rows={deskRowsOnly(trades?.trades).slice(0, 10).map(t => [
               t.symbol,
@@ -588,14 +592,31 @@ function ExpectancyPanel({ data }) {
 }
 
 function CandidateTable({ rows, selected, onSelect }) {
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("SOURCE");
+  const visibleRows = useMemo(() => {
+    const result = rows.filter(row => `${row.ticker || ""} ${row.strategy || ""} ${row.route || ""}`.toLowerCase().includes(query.trim().toLowerCase()));
+    if (sort === "TICKER") result.sort((a, b) => String(a.ticker || "").localeCompare(String(b.ticker || "")));
+    if (sort === "PM") result.sort((a, b) => (finiteNumber(b.pm_score) ?? -Infinity) - (finiteNumber(a.pm_score) ?? -Infinity));
+    return result;
+  }, [rows, query, sort]);
   if (!rows.length) return <div style={{ color: muted, padding: 20 }}>No option candidates available. Run a scan first.</div>;
   return (
-    <div style={{ overflowX: "auto" }}>
+    <div style={{ minWidth: 0 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        <input aria-label="Filter options candidates" placeholder="Ticker / strategy / route" value={query} onChange={event => setQuery(event.target.value)} style={{ background: cardBg, color: labelLight, border: hairline, padding: 8, minWidth: 0, maxWidth: "100%" }} />
+        <select aria-label="Sort options candidates" value={sort} onChange={event => setSort(event.target.value)} style={{ background: cardBg, color: accent2, border: hairline, padding: 8 }}>
+          <option value="SOURCE">Source order</option><option value="TICKER">Ticker A-Z</option><option value="PM">PM score high-low</option>
+        </select>
+        <span role="status" style={{ color: muted, fontSize: 11, alignSelf: "center" }}>{visibleRows.length} / {rows.length}</span>
+      </div>
+      <div style={{ overflowX: "auto", maxWidth: "100%" }} role="region" aria-label="Options candidate table" tabIndex={0}>
       <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 920 }}>
         <thead><tr>{["TICKER", "ROUTE", "PLAYBOOK", "STRATEGY", "PM", "R/R", "DATA", "READY"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
         <tbody>
-          {rows.map(r => (
-            <tr key={r.candidate_id} onClick={() => onSelect(r)} style={{ borderTop: hairline, cursor: "pointer", background: selected?.candidate_id === r.candidate_id ? "rgba(200,168,75,0.08)" : "transparent" }}>
+          {!visibleRows.length && <tr><td colSpan={8} style={td}>No matching candidates.</td></tr>}
+          {visibleRows.map(r => (
+            <tr key={r.candidate_id} tabIndex={0} aria-selected={selected?.candidate_id === r.candidate_id} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(r); } }} onClick={() => onSelect(r)} style={{ borderTop: hairline, cursor: "pointer", background: selected?.candidate_id === r.candidate_id ? "rgba(200,168,75,0.08)" : "transparent" }}>
               <td style={{ ...td, color: accent, fontWeight: 900 }}>${r.ticker}</td>
               <td style={{ ...td, color: ROUTE_COLOR[r.route] || labelLight, fontWeight: 900 }}>{r.route}</td>
               <td style={{ ...td, color: accent2, fontWeight: 800 }}>{r.strategy_lane?.lane || "-"}</td>
@@ -611,6 +632,7 @@ function CandidateTable({ rows, selected, onSelect }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -636,7 +658,7 @@ function ExecutionTicket({ ticket, account, busy, onExecute, lseContext }) {
       <PlanRow k="Kind" v={instrument.kind || "-"} />
       <PlanRow k="Expiration" v={instrument.expiration || ticket.expiration || "-"} />
       <PlanRow k="Strike" v={instrument.strike || instrument.buy_strike || "-"} />
-      <PlanRow k="Premium / Debit" v={money(instrument.premium || instrument.net_debit)} />
+      <PlanRow k="Premium / Debit" v={money(instrument.premium ?? instrument.net_debit)} />
       <PlanRow k="Max Loss" v={money(instrument.max_loss)} color="#fbbf24" />
       <PlanRow k="Risk Budget" v={money(ticket.risk_budget)} color={accent} />
       <PlanRow k="Contracts" v={ticket.contracts || 0} />
@@ -737,7 +759,7 @@ function OpenPositionsTable({ positions, selected, riskBySymbol, onSelect }) {
                 <td style={{ ...td, color: accent, fontWeight: 900 }}>{p.symbol}</td>
                 <td style={td}>{p.qty}</td>
                 <td style={td}>{money(p.market_value)}</td>
-                <td style={{ ...td, color: Number(p.unrealized_plpc) >= 0 ? "#4ade80" : "#f87171" }}>{num(Number(p.unrealized_plpc) * 100, 2)}%</td>
+                <td style={{ ...td, color: finiteNumber(p.unrealized_plpc) == null ? muted : Number(p.unrealized_plpc) >= 0 ? "#4ade80" : "#f87171" }}>{finiteNumber(p.unrealized_plpc) == null ? "-" : `${num(Number(p.unrealized_plpc) * 100, 2)}%`}</td>
                 <td style={{ ...td, color: risk.hard_stop_triggered ? "#f87171" : risk.theta_status === "WATCH" ? "#fbbf24" : "#4ade80" }}>
                   {risk.hard_stop_triggered ? "HARD STOP" : risk.theta_status || "SYNC"}
                 </td>
@@ -755,7 +777,7 @@ function PositionProfileCard({ position, trade, risk }) {
   const symbol = position.symbol || trade?.symbol || "";
   const ticker = trade?.ticker || parseOptionRoot(symbol);
   const exit = risk?.ratchet || trade?.exit_policy || {};
-  const pnlPct = risk?.pnl_pct ?? (Number(position.unrealized_plpc) * 100);
+  const pnlPct = risk?.pnl_pct ?? (finiteNumber(position.unrealized_plpc) == null ? null : finiteNumber(position.unrealized_plpc) * 100);
   const nextTier = nextRatchetTier(exit);
   return (
     <div>
@@ -764,7 +786,7 @@ function PositionProfileCard({ position, trade, risk }) {
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
         <MiniStat label="CONTRACT" value={symbol} color={accent} />
-        <MiniStat label="STATUS" value={trade?.status || "LIVE"} color="#4ade80" />
+        <MiniStat label="STATUS" value={trade?.status || "UNKNOWN"} color={trade?.status ? accent2 : muted} />
         <MiniStat label="ENTRY" value={money(risk?.entry_premium ?? trade?.entry_premium ?? position.avg_entry_price)} />
         <MiniStat label="CURRENT" value={money(risk?.current_premium ?? trade?.current_premium ?? position.current_price)} color={Number(pnlPct) >= 0 ? "#4ade80" : "#f87171"} />
         <MiniStat label="P/L" value={`${num(pnlPct, 2)}%`} color={Number(pnlPct) >= 0 ? "#4ade80" : "#f87171"} />
@@ -854,13 +876,19 @@ function PlanRow({ k, v, color = labelLight }) {
 }
 
 function num(v, d = 1) {
-  const n = v == null || v === "" ? NaN : Number(v);
+  const n = finiteNumber(v);
   return Number.isFinite(n) ? n.toFixed(d) : "-";
 }
 
 function money(v) {
-  const n = v == null || v === "" ? NaN : Number(v);
+  const n = finiteNumber(v);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "-";
+}
+
+function finiteNumber(value) {
+  if ((typeof value !== "number" && typeof value !== "string") || String(value).trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function fmtExpectancy(row) {

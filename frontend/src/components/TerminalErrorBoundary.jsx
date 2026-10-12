@@ -45,8 +45,8 @@ export default class TerminalErrorBoundary extends React.Component {
         <div style={styles.panel}>
           <div style={styles.kicker}>FRONTEND FAULT CONTAINED</div>
           <h1 style={styles.title}>Terminal view failed to render</h1>
-          <p style={styles.copy}>
-            The app is still running. Retry the current view or return to Command Center.
+          <p style={styles.copy} role="alert">
+            This view is unavailable. Execution and broker status are not verified by this screen. Retry the current view or return to Command Center.
           </p>
           <div style={styles.errorBox}>
             {this.state.error?.message || "Unknown frontend error"}
