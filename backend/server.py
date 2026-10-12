@@ -336,9 +336,9 @@ async def admin_trading_status():
 
 @api.post("/admin/halt")
 async def admin_halt(reason: str = "operator_halt"):
-    from services import safety, trade_floor
+    from services import safety, halt_orders
     status = await safety.set_trading(False, reason=reason)
-    cancelled = await trade_floor.cancel_stale_orders(max_age_hours=0)
+    cancelled = await halt_orders.cancel_open_entry_orders()
     try:
         from services import telegram_events
         await telegram_events.emit_event(
@@ -352,7 +352,7 @@ async def admin_halt(reason: str = "operator_halt"):
         )
     except Exception:
         pass
-    return {"ok": True, "status": status, "cancelled": cancelled}
+    return {"ok": bool(cancelled.get("ok")), "status": status, "cancelled": cancelled}
 
 
 @api.post("/admin/resume")
