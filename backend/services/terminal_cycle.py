@@ -164,7 +164,7 @@ async def _persist_execution_funnel(
     return payload
 
 
-async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
+async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_lease=None) -> dict[str, Any]:
     started = _now()
     stage_times: dict[str, float] = {}
 
@@ -339,6 +339,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
     scan["pm_payload"] = pm_payload
     scan["lottery_summary"] = lottery_summary
 
+    if cycle_lease is None or not await cycle_lease.healthy():
+        return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "cycle_id": scan.get("cycle_id")}
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
     execution_freshness: dict[str, Any] = {"skipped": True, "reason": "public_equity_execution_not_enabled"}
     if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
@@ -351,6 +353,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
                     "execution_freshness",
                     public_execution.refresh_execution_freshness(pm_payload.get("recommendations") or []),
                 )
+                if not await cycle_lease.healthy():
+                    return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "cycle_id": scan.get("cycle_id")}
                 equity_execution = await timed("public_equity_execution", public_execution.execute_pm_equity(pm_payload.get("recommendations") or [], cycle_id=scan.get("cycle_id")))
             else:
                 # Public is the sole equity broker. Alpaca is intentionally
@@ -365,6 +369,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
 
     options_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_OPTIONS_EXECUTION is off"}
     if options_desk.options_execution_enabled():
+        if not await cycle_lease.healthy():
+            return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "cycle_id": scan.get("cycle_id")}
         options_execution = await timed(
             "options_execution",
             options_desk.auto_execute_latest(candidate_set=options_payload),
@@ -512,8 +518,20 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[s
 
 
 async def run_full_terminal_scan(triggered_by: str = "full_terminal") -> dict[str, Any]:
-    """Run one full cycle at a time; concurrent manual/scheduled calls skip."""
+    """Use both a local mutex and a shared PostgreSQL session reservation."""
     if _FULL_SCAN_LOCK.locked():
         return {"ok": False, "skipped": True, "reason": "full_terminal_scan_already_running", "triggered_by": triggered_by}
     async with _FULL_SCAN_LOCK:
-        return await _run_full_terminal_scan(triggered_by=triggered_by)
+        from . import advisory_locks
+        try:
+            lease = await advisory_locks.try_acquire("case-capital:terminal:full-cycle")
+        except Exception:
+            return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_unavailable", "triggered_by": triggered_by}
+        if lease is None:
+            return {"ok": False, "skipped": True, "reason": "full_terminal_scan_already_running", "triggered_by": triggered_by}
+        try:
+            if not await lease.healthy():
+                return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "triggered_by": triggered_by}
+            return await _run_full_terminal_scan(triggered_by=triggered_by, cycle_lease=lease)
+        finally:
+            await lease.release()
