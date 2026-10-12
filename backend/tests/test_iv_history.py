@@ -517,7 +517,7 @@ async def test_telegram_iv_command_shows_unknown_without_suppressing_available_a
     async def log(*args, **kwargs):
         pass
 
-    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     monkeypatch.setattr(telegram_service, "send_message", send)
     monkeypatch.setattr(telegram_service, "log_activity", log)
     monkeypatch.setattr(telegram_service, "get_db", lambda: object())
@@ -550,7 +550,7 @@ async def test_telegram_low_iv_command_excludes_unknown_and_keeps_real_zero(monk
     async def log(*args, **kwargs):
         pass
 
-    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     monkeypatch.setattr(telegram_service, "send_message", send)
     monkeypatch.setattr(telegram_service, "log_activity", log)
     monkeypatch.setattr(telegram_service, "get_db", lambda: object())
