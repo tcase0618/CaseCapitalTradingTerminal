@@ -1783,31 +1783,24 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     return {"ok": True, "order": order, "candidate": ticket, "exit_policy": exit_policy}
 
 
-async def _acquire_auto_execute_lock(ttl_seconds: int = 240) -> dict[str, Any]:
-    db = get_db()
-    now = datetime.now(timezone.utc)
-    now_iso = now.isoformat()
-    lock_until = (now + timedelta(seconds=ttl_seconds)).isoformat()
-    lock_id = "options_auto_execute_lock"
-    existing = await db.bot_state.find_one({"_id": lock_id}, {"_id": 0})
-    if existing and str(existing.get("locked_until") or "") > now_iso:
-        return {"ok": False, "reason": "options_auto_execute_already_running", "lock": existing}
-    await db.bot_state.update_one(
-        {"_id": lock_id},
-        {"$set": {"locked_at": now_iso, "locked_until": lock_until, "owner": "options_desk.auto_execute_latest"}},
-        upsert=True,
-    )
-    return {"ok": True, "lock_id": lock_id, "locked_until": lock_until}
-
-
-async def _release_auto_execute_lock() -> None:
+async def _acquire_auto_execute_lock() -> dict[str, Any]:
+    from . import advisory_locks
     try:
-        await get_db().bot_state.update_one(
-            {"_id": "options_auto_execute_lock"},
-            {"$set": {"locked_until": datetime.now(timezone.utc).isoformat(), "released_at": _now()}},
-        )
+        lease = await advisory_locks.try_acquire("case-capital:options:auto-execute")
     except Exception:
-        pass
+        return {"ok": False, "reason": "options_auto_execute_lock_unavailable"}
+    if lease is None:
+        return {"ok": False, "reason": "options_auto_execute_already_running"}
+    return {"ok": True, "lease": lease}
+
+
+async def _release_auto_execute_lock(lock: dict[str, Any]) -> None:
+    try:
+        lease = lock.get("lease")
+        if lease is not None:
+            await lease.release()
+    except Exception:
+        logger.warning("Options execution lock session cleanup failed")
 
 
 async def auto_execute_latest(
@@ -1821,8 +1814,6 @@ async def auto_execute_latest(
     and enforces only mechanical paper execution constraints already present in
     execute(): risk budget, valid order fields, and Alpaca acceptance.
     """
-    from . import execution_gate, safety
-
     lock = await _acquire_auto_execute_lock()
     if not lock.get("ok"):
         return {
@@ -1835,15 +1826,16 @@ async def auto_execute_latest(
             "summary": {},
     }
     try:
-        return await _auto_execute_latest_locked(limit=limit, candidate_set=candidate_set)
+        return await _auto_execute_latest_locked(limit=limit, candidate_set=candidate_set, lease=lock["lease"])
     finally:
-        await _release_auto_execute_lock()
+        await _release_auto_execute_lock(lock)
 
 
 async def _auto_execute_latest_locked(
     limit: int | None = None,
     *,
     candidate_set: dict[str, Any] | None = None,
+    lease=None,
 ) -> dict[str, Any]:
     from . import execution_gate, safety
 
@@ -1903,6 +1895,7 @@ async def _auto_execute_latest_locked(
     max_orders = min(max_orders, remaining_today)
     submitted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    lock_lost = False
     if remaining_today <= 0:
         skipped.extend({"ticker": c.get("ticker"), "reason": "auto_daily_order_limit_reached"} for c in ready)
         ready = []
@@ -1923,6 +1916,10 @@ async def _auto_execute_latest_locked(
         if existing:
             skipped.append({"ticker": ticket.get("ticker"), "symbol": symbol, "reason": "duplicate_scan_contract"})
             continue
+        if lease is None or not await lease.healthy():
+            skipped.append({"ticker": ticket.get("ticker"), "symbol": symbol, "reason": "options_auto_execute_lock_lost"})
+            lock_lost = True
+            break
         result = await execute(ticket["candidate_id"])
         if result.get("ok"):
             await db.options_desk_orders.update_one(
@@ -1951,7 +1948,8 @@ async def _auto_execute_latest_locked(
         {"submitted": submitted, "skipped": skipped[:10]},
     )
     payload = {
-        "ok": True,
+        "ok": not lock_lost,
+        "reason": "options_auto_execute_lock_lost" if lock_lost else None,
         "auto": True,
         "ready": len(ready),
         "auto_orders_submitted_today_before_run": submitted_today,
