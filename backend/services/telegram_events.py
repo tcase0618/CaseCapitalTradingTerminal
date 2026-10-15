@@ -336,6 +336,8 @@ def _consolidated_scan_report_text(
         "<b>CASE CAPITAL | SCHEDULED TERMINAL REPORT</b>",
         f"<code>{_now_et()}</code>",
         f"Trigger: <b>{_esc(scan.get('triggered_by') or 'scheduler')}</b> · Cycle: <b>{_esc(scan.get('finished_at') or '--')}</b>",
+        *(["<b>DEGRADED: execution lock lost; remaining execution phases held. Submitted orders remain recorded below.</b>"]
+          if scan.get("lock_lost") or execution_summary.get("lock_lost") else []),
         "",
         "<b>CORE SCAN</b>",
         f"Universe: <b>{scan.get('universe_size', '--')}</b> · Passed: <b>{len(results)}</b> · New: <b>{new_scan.get('count', 0)}</b>",
@@ -678,6 +680,7 @@ async def build_scan_report(scan: dict[str, Any]) -> dict[str, Any]:
         *([f"Options not routed by PM: <b>{non_option_routed}</b> equity/pass/watch lane(s)"] if non_option_routed else []),
         "",
         "<b>EXECUTION OUTCOME</b>",
+        *(["<b>DEGRADED: execution lock lost; remaining execution phases held.</b>"] if scan.get("lock_lost") or exec_summary.get("lock_lost") else []),
         f"Equity submitted: <b>{exec_summary.get('equity_executed', 0)}</b> | Rejected: <b>{exec_summary.get('equity_rejected', 0)}</b>",
         *([f"Equity rejection reasons: {equity_reason_line}"] if equity_reason_line else []),
         f"Options submitted: <b>{exec_summary.get('options_submitted', 0)}</b> | Ready: <b>{exec_summary.get('options_ready', opt_summary.get('ready', 0))}</b> | Skipped: <b>{exec_summary.get('options_skipped', 0)}</b>",
