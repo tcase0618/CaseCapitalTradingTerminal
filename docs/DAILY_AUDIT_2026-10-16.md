@@ -46,7 +46,7 @@ The operator read-only check is still required before 09:30 ET:
 - **Component:** `backend/services/terminal_cycle.py` on `Claude-Gpt-audit` `14ae96f`.
 - **Evidence:**
   - After `14ae96f`, a lost lock sets `equity_execution = {"skipped": True, "reason": "full_terminal_scan_lock_lost", "executed": [], "rejected": []}` and execution continues.
-  - At `terminal_cycle.py:394-403`, `_resolve_stale_execution_retries` still runs whenever `triggered_by == "stale_retry_scan_1030"`, and nothing checks `lock_lost`.
+  - At `terminal_cycle.py:395-403`, `_resolve_stale_execution_retries` still runs whenever `triggered_by == "stale_retry_scan_1030"`, and nothing checks `lock_lost`.
   - Each `PENDING_1030_FULL_RESCAN` ticker that the PM re-approved finds no match in `executed` or `rejected`. `_is_stale_public_entry_rejection(None)` is False, so the row is written `REJECTED_1030` (`:106-141`, status at `:137`).
   - Repro: `_resolve_stale_execution_retries(pm_rows=[{"ticker":"TEST","action":"STARTER"}], equity_execution=<lock-lost dict>)` gives row status `REJECTED_1030` and returns `{"reviewed":1,"retried":1,"executed":0}`.
 - **Before the fix:** on `main` the early return skipped resolution, so rows stayed PENDING. The regression comes from removing that early return.
