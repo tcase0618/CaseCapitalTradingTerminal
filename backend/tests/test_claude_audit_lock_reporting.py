@@ -166,12 +166,40 @@ async def test_retry_resolver_itself_does_not_consume_skipped_execution(monkeypa
     (False, 'safety_halt', 'REJECTED_1030'),
 ])
 async def test_attempted_retry_still_records_actual_outcome(monkeypatch, executed, reason, status):
-    pending = {'retry_key': 'offline-retry', 'ticker': 'TEST', 'status': 'PENDING_1030_FULL_RESCAN'}
+    pending = {'retry_key': '2026-10-18:TEST:CORE', 'ticker': 'TEST', 'status': 'PENDING_1030_FULL_RESCAN'}
     monkeypatch.setattr(terminal_cycle, 'get_db', lambda: SimpleNamespace(stale_execution_retries=MemoryCollection([pending])))
     result = await terminal_cycle._resolve_stale_execution_retries(
         pm_rows=[{'ticker': 'TEST', 'action': 'STARTER'}],
         equity_execution={'executed': [{'ticker': 'TEST'}] if executed else [],
                           'rejected': [] if executed else [{'ticker': 'TEST', 'reason': reason}]},
-        cycle_id='offline-cycle')
+        cycle_id='offline-cycle', observed_at='2026-10-18T14:30:00+00:00')
     assert pending['status'] == status
     assert result['retried'] == 1 and result['executed'] == int(executed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('skipped', [False, True])
+async def test_prior_day_retries_cannot_borrow_later_execution(monkeypatch, skipped):
+    rows = [dict(retry_key=f'{day}:TEST:CORE', ticker='TEST', status='PENDING_1030_FULL_RESCAN')
+            for day in ['2026-10-17', '2026-10-18', '2026-10-19']]
+    monkeypatch.setattr(terminal_cycle, 'get_db', lambda: SimpleNamespace(stale_execution_retries=MemoryCollection(rows)))
+    result = await terminal_cycle._resolve_stale_execution_retries(
+        pm_rows=[{'ticker': 'TEST', 'action': 'STARTER'}],
+        equity_execution={'skipped': skipped, 'reason': 'pm_scan_mismatch', 'executed': [] if skipped else [{'ticker': 'TEST'}]},
+        cycle_id='day2', observed_at='2026-10-18T14:30:00+00:00')
+    assert rows[0]['status'] == 'EXPIRED_UNRESOLVED'
+    assert 'retry_cycle_id' not in rows[0]
+    assert rows[1]['status'] == ('PENDING_1030_FULL_RESCAN' if skipped else 'EXECUTED_1030')
+    assert rows[2]['status'] == 'PENDING_1030_FULL_RESCAN'
+    assert result['retried'] == (0 if skipped else 1)
+
+
+@pytest.mark.asyncio
+async def test_old_retry_backlog_does_not_starve_today(monkeypatch):
+    rows = [dict(retry_key=f'2026-10-17:OLD{i}:CORE', ticker=f'OLD{i}', status='PENDING_1030_FULL_RESCAN') for i in range(501)]
+    today = dict(retry_key='2026-10-18:TEST:CORE', ticker='TEST', status='PENDING_1030_FULL_RESCAN')
+    rows.append(today)
+    monkeypatch.setattr(terminal_cycle, 'get_db', lambda: SimpleNamespace(stale_execution_retries=MemoryCollection(rows)))
+    result = await terminal_cycle._resolve_stale_execution_retries(pm_rows=[{'ticker': 'TEST', 'action': 'STARTER'}],
+        equity_execution={'executed': [{'ticker': 'TEST'}]}, cycle_id='day2', observed_at='2026-10-18T14:30:00+00:00')
+    assert today['status'] == 'EXECUTED_1030' and result['retried'] == 1

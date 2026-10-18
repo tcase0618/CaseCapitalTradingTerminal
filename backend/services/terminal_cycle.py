@@ -108,17 +108,40 @@ async def _resolve_stale_execution_retries(
     pm_rows: list[dict[str, Any]],
     equity_execution: dict[str, Any],
     cycle_id: str,
+    observed_at: str | None = None,
 ) -> dict[str, Any]:
     """Record the outcome of the 10:30 *new* PM cycle for queued tickers."""
+    # Match the calendar date used by _persist_stale_execution_retries rather
+    # than assigning an older signal to the current docket's broker outcome.
+    raw_date = str(observed_at or _now().isoformat())[:10]
+    try:
+        retry_day = datetime.strptime(raw_date, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return {"reviewed": 0, "retried": 0, "executed": 0, "skipped": True, "reason": "retry_session_date_unverified"}
+    db = get_db()
+    older = await db.stale_execution_retries.find(
+        {"status": "PENDING_1030_FULL_RESCAN", "retry_key": {"$lt": retry_day + ":"}}, {"_id": 0}
+    ).to_list(500)
+    expired = 0
+    for item in older:
+        try:
+            datetime.strptime(str(item.get("retry_key") or "").split(":", 1)[0], "%Y-%m-%d")
+        except ValueError:
+            continue  # Unbound legacy dates need explicit reconciliation.
+        await db.stale_execution_retries.update_one(
+            {"retry_key": item["retry_key"], "status": "PENDING_1030_FULL_RESCAN"},
+            {"$set": {"status": "EXPIRED_UNRESOLVED", "expired_at": _now().isoformat(),
+                      "expiration_reason": "retry_session_elapsed"}})
+        expired += 1
     if equity_execution.get("skipped"):
         return {"reviewed": 0, "retried": 0, "executed": 0, "skipped": True,
+                "expired": expired,
                 "reason": equity_execution.get("reason") or "equity_execution_skipped"}
-    db = get_db()
     pending = await db.stale_execution_retries.find(
-        {"status": "PENDING_1030_FULL_RESCAN"}, {"_id": 0}
+        {"status": "PENDING_1030_FULL_RESCAN", "retry_key": {"$gte": retry_day + ":", "$lt": retry_day + ";"}}, {"_id": 0}
     ).to_list(500)
     if not pending:
-        return {"reviewed": 0, "retried": 0, "executed": 0}
+        return {"reviewed": 0, "retried": 0, "executed": 0, "expired": expired}
     current = {str(row.get("ticker") or "").upper(): row for row in pm_rows}
     executed = {str(row.get("ticker") or "").upper() for row in equity_execution.get("executed") or []}
     rejected = {str(row.get("ticker") or "").upper(): row for row in equity_execution.get("rejected") or [] if isinstance(row, dict)}
@@ -142,7 +165,7 @@ async def _resolve_stale_execution_retries(
             {"retry_key": item.get("retry_key")},
             {"$set": {"status": status, "retry_cycle_id": cycle_id, "resolved_at": _now().isoformat()}},
         )
-    return {"reviewed": len(pending), "retried": retried, "executed": completed}
+    return {"reviewed": len(pending), "retried": retried, "executed": completed, "expired": expired}
 
 
 async def _persist_execution_funnel(
@@ -406,6 +429,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
                 pm_rows=pm_payload.get("recommendations") or [],
                 equity_execution=equity_execution,
                 cycle_id=str(scan["cycle_id"]),
+                observed_at=scan.get("finished_at"),
             ),
         )
 
