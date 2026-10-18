@@ -110,6 +110,9 @@ async def _resolve_stale_execution_retries(
     cycle_id: str,
 ) -> dict[str, Any]:
     """Record the outcome of the 10:30 *new* PM cycle for queued tickers."""
+    if equity_execution.get("skipped"):
+        return {"reviewed": 0, "retried": 0, "executed": 0, "skipped": True,
+                "reason": equity_execution.get("reason") or "equity_execution_skipped"}
     db = get_db()
     pending = await db.stale_execution_retries.find(
         {"status": "PENDING_1030_FULL_RESCAN"}, {"_id": 0}
@@ -392,7 +395,11 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
         ),
     )
     stale_retry_resolution = {"reviewed": 0, "retried": 0, "executed": 0}
-    if triggered_by == "stale_retry_scan_1030":
+    if triggered_by == "stale_retry_scan_1030" and lock_lost:
+        # Evidence persistence continues after lock loss, but a held retry is
+        # not an attempted entry. Leave its pending row for reconciliation.
+        stale_retry_resolution.update({"skipped": True, "reason": "full_terminal_scan_lock_lost"})
+    elif triggered_by == "stale_retry_scan_1030":
         stale_retry_resolution = await timed(
             "stale_execution_retry_resolution",
             _resolve_stale_execution_retries(

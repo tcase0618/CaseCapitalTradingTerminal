@@ -126,3 +126,52 @@ def test_consolidated_report_visibly_flags_lost_execution_lock():
         pm_actions={'ACCUMULATE': 0, 'STARTER': 0, 'WATCH': 0, 'REJECT': 0},
         opt_summary={}, gate={}, qc={}, edge={}, blockers=0, execution_summary={})
     assert 'DEGRADED: execution lock lost' in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('health', [[False], [True, False], [True, True, False]])
+async def test_1030_lock_loss_preserves_pending_retry(cycle_case, monkeypatch, health):
+    from services import portfolio_manager
+    db, equity, options, _, _, report = cycle_case
+    pending = {'retry_key': 'offline-retry', 'ticker': 'TEST', 'status': 'PENDING_1030_FULL_RESCAN'}
+    db.stale_execution_retries = MemoryCollection([pending])
+    monkeypatch.setattr(portfolio_manager, 'latest_portfolio_plan', AsyncMock(return_value={
+        'scan_finished_at': '2026-10-15T08:00:00+00:00',
+        'recommendations': [{'ticker': 'TEST', 'action': 'STARTER'}]}))
+    result = await terminal_cycle._run_full_terminal_scan(
+        'stale_retry_scan_1030', cycle_lease=SimpleNamespace(healthy=AsyncMock(side_effect=health)))
+    assert pending['status'] == 'PENDING_1030_FULL_RESCAN'
+    assert result['stale_execution_retry_resolution']['retried'] == 0
+    assert result['stale_execution_retry_resolution']['reason'] == 'full_terminal_scan_lock_lost'
+    report.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_resolver_itself_does_not_consume_skipped_execution(monkeypatch):
+    pending = {'retry_key': 'offline-retry', 'ticker': 'TEST', 'status': 'PENDING_1030_FULL_RESCAN'}
+    db = SimpleNamespace(stale_execution_retries=MemoryCollection([pending]))
+    monkeypatch.setattr(terminal_cycle, 'get_db', lambda: db)
+    result = await terminal_cycle._resolve_stale_execution_retries(
+        pm_rows=[{'ticker': 'TEST', 'action': 'STARTER'}],
+        equity_execution={'skipped': True, 'reason': 'full_terminal_scan_lock_lost', 'executed': [], 'rejected': []},
+        cycle_id='offline-cycle')
+    assert pending['status'] == 'PENDING_1030_FULL_RESCAN'
+    assert result['retried'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('executed,reason,status', [
+    (True, None, 'EXECUTED_1030'),
+    (False, 'public_execution_quote_stale_or_unverifiable', 'STALE_AGAIN_1030'),
+    (False, 'safety_halt', 'REJECTED_1030'),
+])
+async def test_attempted_retry_still_records_actual_outcome(monkeypatch, executed, reason, status):
+    pending = {'retry_key': 'offline-retry', 'ticker': 'TEST', 'status': 'PENDING_1030_FULL_RESCAN'}
+    monkeypatch.setattr(terminal_cycle, 'get_db', lambda: SimpleNamespace(stale_execution_retries=MemoryCollection([pending])))
+    result = await terminal_cycle._resolve_stale_execution_retries(
+        pm_rows=[{'ticker': 'TEST', 'action': 'STARTER'}],
+        equity_execution={'executed': [{'ticker': 'TEST'}] if executed else [],
+                          'rejected': [] if executed else [{'ticker': 'TEST', 'reason': reason}]},
+        cycle_id='offline-cycle')
+    assert pending['status'] == status
+    assert result['retried'] == 1 and result['executed'] == int(executed)
