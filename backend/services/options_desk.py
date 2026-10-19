@@ -1451,6 +1451,7 @@ async def build_candidates(
             "blocked_reasons": blocked,
             "route_reasons": route_reasons,
             "scan_finished_at": (scan or {}).get("finished_at"),
+            "cycle_id": (scan or {}).get("cycle_id") if authoritative_pm else None,
             "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
             "generated_at": _now(),
         }
@@ -1482,6 +1483,7 @@ async def build_candidates(
     return {
         "generated_at": _now(),
         "scan_finished_at": (scan or {}).get("finished_at"),
+        "cycle_id": (scan or {}).get("cycle_id") if authoritative_pm else None,
         "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
         "options_equity_basis": OPTIONS_EQUITY,
         "options_data_policy": _options_data_policy(alpaca_refreshes),
@@ -1769,6 +1771,7 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     exit_policy = options_ratchet_state(entry_premium=order_limit, peak_premium=order_limit)
     record = stamped({
         "candidate": ticket,
+        "cycle_id": ticket.get("cycle_id"),
         "order": order,
         "client_order_id": client_order_id,
         "submitted_at": _now(),
@@ -1969,8 +1972,28 @@ async def _auto_execute_latest_locked(
 async def refresh_and_auto_execute_latest(limit: int | None = None) -> dict[str, Any]:
     fill = await sync_fills()
     risk = await monitor_open_positions(enforce_hard_stop=True)
-    await build_candidates(limit=100, persist=True)
-    result = await auto_execute_latest(limit=limit)
+    # The scheduled sweep may refresh contracts and exit risk, but it must
+    # never recompute PM authority from an independent default-equity pass.
+    try:
+        scan = await get_db().scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)]) or {}
+        pm = scan.get("pm_payload") or {}
+        observed = _parse_dt(scan.get("finished_at"))
+        age = (datetime.now(timezone.utc) - observed).total_seconds() if observed else None
+        valid = (
+            bool(scan.get("cycle_id")) and bool(scan.get("full_cycle_finished_at"))
+            and not scan.get("lock_lost") and isinstance(pm, dict)
+            and pm.get("scan_finished_at") == scan.get("finished_at")
+            and isinstance(pm.get("recommendations"), list)
+            and all(isinstance(row, dict) for row in pm["recommendations"])
+            and age is not None and 0 <= age <= 4 * 60 * 60
+        )
+    except Exception:
+        valid = False
+    if not valid:
+        return {"ok": False, "skipped": True, "reason": "persisted_pm_cycle_unavailable_or_stale",
+                "submitted": [], "pre_execution_fill_sync": fill, "pre_execution_risk_check": risk}
+    candidates = await build_candidates(limit=100, persist=True, scan=scan, pm_recommendations=pm["recommendations"])
+    result = await auto_execute_latest(limit=limit, candidate_set=candidates)
     result["pre_execution_fill_sync"] = fill
     result["pre_execution_risk_check"] = risk
     return result

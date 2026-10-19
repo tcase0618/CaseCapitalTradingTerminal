@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -140,6 +140,31 @@ async def _daily_scan_job(triggered_by: str = "scheduler"):
             return
         from . import terminal_cycle
         result = await terminal_cycle.run_full_terminal_scan(triggered_by=triggered_by)
+        if result.get("skipped") or result.get("ok") is False:
+            reason = result.get("reason") or "full_terminal_cycle_incomplete"
+            status = "SKIPPED" if result.get("skipped") else "DEGRADED"
+            try:
+                await get_db().scheduler_runs.insert_one({
+                    "job_id": triggered_by, "status": status, "reason": reason,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "cycle_id": result.get("cycle_id"), "lock_lost": bool(result.get("lock_lost")),
+                    "summary": result.get("summary"),
+                })
+            except Exception:
+                logger.exception("Unable to persist incomplete scheduled cycle")
+            await log_activity(f"Scheduled full terminal cycle {status.lower()}: {reason}", "warning", result)
+            if reason != "full_terminal_scan_already_running":
+                try:
+                    from . import telegram_events
+                    await telegram_events.emit_event(
+                        "scheduled_cycle_incomplete", severity="watch", scope="scanner",
+                        title="Scheduled cycle incomplete", summary=reason,
+                        details={"reason": reason, "job_id": triggered_by, "status": status},
+                        priority="summary", send_now=True,
+                    )
+                except Exception:
+                    logger.exception("Unable to emit incomplete scheduled cycle alert")
+            return result
         await log_activity(
             "Scheduled full terminal cycle complete",
             "info",
