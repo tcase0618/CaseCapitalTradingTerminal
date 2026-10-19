@@ -339,11 +339,12 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
     scan["pm_payload"] = pm_payload
     scan["lottery_summary"] = lottery_summary
 
-    if cycle_lease is None or not await cycle_lease.healthy():
-        return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "cycle_id": scan.get("cycle_id")}
+    lock_lost = cycle_lease is None or not await cycle_lease.healthy()
     equity_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_TRADE_EXECUTION is off"}
     execution_freshness: dict[str, Any] = {"skipped": True, "reason": "public_equity_execution_not_enabled"}
-    if os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    if lock_lost:
+        equity_execution = {"skipped": True, "reason": "full_terminal_scan_lock_lost", "executed": [], "rejected": []}
+    elif os.environ.get("ENABLE_TRADE_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}:
         from . import public_execution
         if pm_payload.get("scan_finished_at") != scan.get("finished_at"):
             equity_execution = {"skipped": True, "reason": "pm_scan_mismatch", "executed": [], "rejected": []}
@@ -354,8 +355,10 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
                     public_execution.refresh_execution_freshness(pm_payload.get("recommendations") or []),
                 )
                 if not await cycle_lease.healthy():
-                    return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "cycle_id": scan.get("cycle_id")}
-                equity_execution = await timed("public_equity_execution", public_execution.execute_pm_equity(pm_payload.get("recommendations") or [], cycle_id=scan.get("cycle_id")))
+                    lock_lost = True
+                    equity_execution = {"skipped": True, "reason": "full_terminal_scan_lock_lost", "executed": [], "rejected": []}
+                else:
+                    equity_execution = await timed("public_equity_execution", public_execution.execute_pm_equity(pm_payload.get("recommendations") or [], cycle_id=scan.get("cycle_id")))
             else:
                 # Public is the sole equity broker. Alpaca is intentionally
                 # isolated to the options desk and must never become an equity
@@ -369,12 +372,15 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
 
     options_execution: dict[str, Any] = {"skipped": True, "reason": "ENABLE_OPTIONS_EXECUTION is off"}
     if options_desk.options_execution_enabled():
-        if not await cycle_lease.healthy():
-            return {"ok": False, "skipped": True, "reason": "full_terminal_scan_lock_lost", "cycle_id": scan.get("cycle_id")}
-        options_execution = await timed(
-            "options_execution",
-            options_desk.auto_execute_latest(candidate_set=options_payload),
-        )
+        lock_lost = lock_lost or not await cycle_lease.healthy()
+        if not lock_lost:
+            options_execution = await timed(
+                "options_execution",
+                options_desk.auto_execute_latest(candidate_set=options_payload),
+            )
+    if lock_lost:
+        options_execution = {"skipped": True, "reason": "full_terminal_scan_lock_lost", "submitted": []}
+    scan["lock_lost"] = lock_lost
 
     stale_retry_queue = await timed(
         "stale_execution_retry_queue",
@@ -411,6 +417,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
     )
 
     scan["execution_summary"] = {
+        "lock_lost": lock_lost,
         "equity_status": "SKIPPED" if equity_execution.get("skipped") else "ATTEMPTED",
         "equity_skip_reason": equity_execution.get("reason") if equity_execution.get("skipped") else None,
         "equity_executed": len(equity_execution.get("executed") or []),
@@ -443,6 +450,8 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
             {"finished_at": scan.get("finished_at")},
             {"$set": {
                 "full_cycle_finished_at": _now().isoformat(),
+                "cycle_id": scan["cycle_id"],
+                "lock_lost": lock_lost,
                 "strategy_payload": strategy_payload,
                 "lottery_result": lottery_result,
                 "lottery_summary": lottery_summary,
@@ -483,9 +492,13 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
         "pharma_rows": len(pharma_result.get("results") or []) if isinstance(pharma_result, dict) else None,
         "pharma_shocks": pharma_shock_result.get("candidate_count") if isinstance(pharma_shock_result, dict) else None,
     }
-    await log_activity("Full terminal scan completed", "info", {"duration_sec": duration, "stage_times": stage_times, "summary": summary})
+    await log_activity("Full terminal scan degraded" if lock_lost else "Full terminal scan completed",
+                       "warning" if lock_lost else "info", {"duration_sec": duration, "stage_times": stage_times, "summary": summary, "lock_lost": lock_lost})
     return {
-        "ok": True,
+        "ok": not lock_lost,
+        "lock_lost": lock_lost,
+        "reason": "full_terminal_scan_lock_lost" if lock_lost else None,
+        "cycle_id": scan["cycle_id"],
         "triggered_by": triggered_by,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
