@@ -814,7 +814,11 @@ async def test_execution_freshness_keeps_newer_stale_public_quote(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry_allowed", [True, False])
 @pytest.mark.parametrize("loss_state", ["ok", "unavailable", "tripped", "exception"])
-async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, entry_allowed, loss_state):
+@pytest.mark.parametrize("pending_buy", [False, True])
+async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, entry_allowed, loss_state, pending_buy):
+    async def no_pending(_portfolio):
+        return {'AAPL'} if pending_buy else set()
+    monkeypatch.setattr(public_execution, '_pending_buy_symbols', no_pending)
     async def gate(**kwargs):
         assert kwargs["scope"] == "equity" and kwargs["ticker"] == "AAPL"
         return {"ok": entry_allowed, "blockers": [] if entry_allowed else ["global_execution_kill_enabled"]}
@@ -916,6 +920,10 @@ async def test_public_execution_uses_fresh_quote_and_submits_order(monkeypatch, 
         }[loss_state]
         return
 
+    if pending_buy:
+        assert not result['executed'] and not fake_client.submitted
+        assert result['rejected']
+        return
     assert len(result["executed"]) == 1
     assert result["rejected"] == []
     assert fake_client.submitted[0]["session"] == "CORE"

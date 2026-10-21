@@ -947,6 +947,7 @@ async def _equity_book_context() -> dict[str, Any]:
                     "equity": _num(state.get("equity")),
                     "cash_buying_power": state.get("cash_buying_power"),
                     "positions": state.get("positions") or [],
+                    "pending_buy_symbols": state.get("pending_buy_symbols") or [],
                     "read_ok": True,
                 }
             return {
@@ -981,6 +982,7 @@ def _apply_equity_book_constraints(recommendations: list[dict[str, Any]], book: 
     if book.get("broker") != "public":
         return {"applied": False}
     held = {_position_ticker(position) for position in book.get("positions") or []}
+    pending_buys = {str(symbol).upper() for symbol in book.get("pending_buy_symbols") or []}
     cash = _num(book.get("cash_buying_power"), -1.0)
     minimum = 6.0  # Public core fractional minimum is $5; $6 is this PM's smallest legal live allocation.
     blocked = {"existing_position": 0, "cash_unavailable": 0, "cash_insufficient": 0}
@@ -997,6 +999,9 @@ def _apply_equity_book_constraints(recommendations: list[dict[str, Any]], book: 
         reason = None
         if ticker in held:
             reason = "already held in Public equity book"
+            blocked["existing_position"] += 1
+        elif ticker in pending_buys:
+            reason = "pending buy reserved in Public equity book"
             blocked["existing_position"] += 1
         elif cash < 0:
             reason = "Public cash buying power unavailable"

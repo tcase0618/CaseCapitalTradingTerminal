@@ -1179,6 +1179,29 @@ def _cash_buying_power(payload: dict[str, Any]) -> float | None:
     return None
 
 
+async def _pending_buy_symbols(portfolio: dict[str, Any]) -> set[str]:
+    """Reserve known working entries without claiming they are filled positions."""
+    pending = await get_db().tf_trades.find(
+        {"broker_base": BROKER_BASE, "status": "OPEN", "fill_status": {"$in": ["PENDING", "PARTIALLY_FILLED"]}}, {"_id": 0}
+    ).to_list(500)
+    if len(pending) >= 500:
+        raise RuntimeError("Public pending-entry coverage saturated")
+    symbols = {_symbol(row) for row in pending if _symbol(row)}
+    orders = portfolio.get("orders", [])
+    if not isinstance(orders, list):
+        raise RuntimeError("Public portfolio order coverage malformed")
+    for order in orders:
+        if not isinstance(order, dict):
+            raise RuntimeError("Public portfolio order malformed")
+        side = str(order.get("orderSide") or order.get("side") or "").upper()
+        status = str(order.get("status") or order.get("orderStatus") or "UNKNOWN").upper()
+        if side == "BUY" and status not in {"FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "FAILED"}:
+            if not _symbol(order):
+                raise RuntimeError("Public pending buy symbol missing")
+            symbols.add(_symbol(order))
+    return symbols
+
+
 async def portfolio_state() -> dict[str, Any]:
     """Return the live Public equity book in a PM-safe normalized shape.
 
@@ -1191,6 +1214,7 @@ async def portfolio_state() -> dict[str, Any]:
     try:
         async with public_api.PublicAPIClient(use_sdk=False) as client:
             payload = await client.portfolio()
+            pending_buys = await _pending_buy_symbols(payload)
     except Exception as exc:
         return {"ok": False, "reason": f"public_portfolio_unavailable:{exc.__class__.__name__}", "broker": BROKER_BASE}
 
@@ -1244,6 +1268,7 @@ async def portfolio_state() -> dict[str, Any]:
         "equity": round(total_value, 2),
         "cash_buying_power": round(cash, 2) if cash is not None else None,
         "positions": positions,
+        "pending_buy_symbols": sorted(pending_buys),
         "position_count": len(positions),
         "open_orders": open_orders,
         "open_order_count": len(open_orders),
@@ -1543,6 +1568,11 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
             return {"skipped": False, "reason": "public_halt_feed_unavailable", "executed": [], "rejected": [{"ticker": "", "reason": "public_halt_feed_unavailable"}], "rejection_reason_counts": {"public_halt_feed_unavailable": 1}}
         active_halts = {str(item.get("symbol") or "").upper() for item in halt_payload.get("halts") or [] if item.get("active")}
         held = {_symbol(row) for row in _positions(portfolio)}
+        try:
+            pending_buys = await _pending_buy_symbols(portfolio)
+        except Exception:
+            reason = "public_pending_entry_coverage_unavailable"
+            return {"skipped": False, "executed": [], "rejected": [{"ticker": "", "reason": reason}], "reason": reason}
         quote_rows = _quotes(await client.quotes([_symbol(row) for row in approved]))
         quote_by_symbol = {_symbol(row): row for row in quote_rows}
         for row in approved:
@@ -1609,6 +1639,9 @@ async def execute_pm_equity(pm_rows: list[dict[str, Any]], *, cycle_id: str | No
                 continue
             if ticker in held:
                 rejected.append({"ticker": ticker, "reason": "public_position_exists"})
+                continue
+            if ticker in pending_buys:
+                rejected.append({"ticker": ticker, "reason": "public_pending_buy_exists"})
                 continue
             if amount > buying_power:
                 rejected.append({"ticker": ticker, "reason": "public_buying_power_insufficient", "required_usd": amount, "available_usd": buying_power})
