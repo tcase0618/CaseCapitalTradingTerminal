@@ -10,6 +10,8 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 from pathlib import Path, PurePosixPath
 from ctypes import wintypes
 
@@ -91,38 +93,50 @@ def seal(sftp, remote, destination, key):
     return record
 
 
+def _archive_plaintext(stream, record, key):
+    stream.seek(0, 2)
+    remaining = stream.tell() - 34
+    stream.seek(0)
+    header = stream.read(18)
+    if remaining < 0 or len(header) != 18 or header[:6] != b'CCVPS1':
+        raise RuntimeError('Invalid or truncated archive format')
+    stream.seek(-16, 2)
+    decoder = Cipher(algorithms.AES(key), modes.GCM(header[6:], stream.read(16))).decryptor()
+    decoder.authenticate_additional_data(record['remote_file'].encode())
+    stream.seek(18)
+    while remaining:
+        chunk = stream.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError('Truncated archive')
+        remaining -= len(chunk)
+        yield decoder.update(chunk)
+    yield decoder.finalize()
+
+
 def unseal(source, output, key):
     record = json.loads(source.with_suffix(source.suffix + '.json').read_text())
     if output.exists():
         raise RuntimeError('Refusing to overwrite recovery output')
     temporary = output.with_suffix(output.suffix + '.partial')
-    digest = hashlib.sha256()
     created = False
     try:
-        target = temporary.open('xb')
-        created = True
-        with target, source.open('rb') as stream:
-            header = stream.read(18)
-            if header[:6] != b'CCVPS1':
-                raise RuntimeError('Unknown archive format')
-            stream.seek(-16, 2)
-            decoder = Cipher(algorithms.AES(key), modes.GCM(header[6:], stream.read(16))).decryptor()
-            decoder.authenticate_additional_data(record['remote_file'].encode())
-            stream.seek(18)
-            remaining = source.stat().st_size - 34
-            while remaining > 0:
-                chunk = stream.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    raise RuntimeError('Truncated archive')
-                remaining -= len(chunk)
-                plaintext = decoder.update(chunk)
+        # Snapshot only ciphertext so source changes cannot invalidate the
+        # authentication check between verification and recovery. Memory stays
+        # bounded, and no plaintext file exists until GCM and metadata pass.
+        with tempfile.TemporaryFile('w+b') as snapshot:
+            with source.open('rb') as stream:
+                shutil.copyfileobj(stream, snapshot, length=1024 * 1024)
+            digest, size = hashlib.sha256(), 0
+            for plaintext in _archive_plaintext(snapshot, record, key):
                 digest.update(plaintext)
-                target.write(plaintext)
-            tail = decoder.finalize()
-            digest.update(tail)
-            target.write(tail)
-        if digest.hexdigest() != record['plaintext_sha256'] or temporary.stat().st_size != record['bytes']:
-            raise RuntimeError('Recovered archive checksum mismatch')
+                size += len(plaintext)
+            if digest.hexdigest() != record['plaintext_sha256'] or size != record['bytes']:
+                raise RuntimeError('Recovered archive checksum mismatch')
+            target = temporary.open('xb')
+            created = True
+            with target:
+                for plaintext in _archive_plaintext(snapshot, record, key):
+                    target.write(plaintext)
         temporary.rename(output)
     except Exception:
         if created:
