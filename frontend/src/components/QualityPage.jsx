@@ -1,6 +1,7 @@
 import { isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import useDisplayResource from "../hooks/useDisplayResource";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { CalendarClock, RefreshCw, ShieldCheck, ShieldAlert, Zap, Wrench } from "lucide-react";
 import { API } from "../config";
 import { CrtShell } from "./CrtShell";
@@ -82,6 +83,8 @@ export default function QualityPage() {
     document.addEventListener("visibilitychange", visible);
     return () => { mounted.current = false; pending.current?.abort(); pending.current = null; nextReadAt.current = 0; clearInterval(id); document.removeEventListener("visibilitychange", visible); };
   }, [load]);
+
+  useDisplayRefresh(() => { nextReadAt.current = 0; load(); });
 
   const repull = async () => {
     if (repulling) return;

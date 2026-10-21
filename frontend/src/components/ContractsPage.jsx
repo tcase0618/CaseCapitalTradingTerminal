@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { Link, useNavigate } from "react-router-dom";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
@@ -58,6 +59,7 @@ export default function ContractsPage() {
   }, [days, minAmount, agency]);
 
   useEffect(() => { setContracts([]); load(); return () => requestRef.current?.abort(); }, [load]);
+  useDisplayRefresh(load);
 
   const filtered = useMemo(() => {
     const query = textFilter.trim().toLowerCase();

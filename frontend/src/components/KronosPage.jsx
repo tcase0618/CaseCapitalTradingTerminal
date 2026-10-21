@@ -1,6 +1,8 @@
 import { isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import useDisplayResource, { displayResource } from "../hooks/useDisplayResource";
+import useDisplayBatch from "../hooks/useDisplayBatch";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { API } from "../config";
 import {
   ResponsiveContainer,
@@ -72,17 +74,12 @@ export default function KronosPage() {
   const [calendar, setCalendar] = useState(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [lastSync, setLastSync] = useState(null);
-  const refreshInFlight = useRef(false);
   const mounted = useRef(false);
-  const lastGood = useRef(new Map());
-  const nextReadAt = useRef(0);
   const sandboxRequest = useRef(null);
   const calendarRequest = useRef(null);
   const [visibleVersion, setVisibleVersion] = useState(0);
-  const [displayFailures, setDisplayFailures] = useState([]);
   const persistedForecast = usePersistedKronos("/kronos/forecast", setKronos);
   const persistedStatus = usePersistedKronos("/kronos/status", setKronosStatus);
   const persistedAccuracy = usePersistedKronos("/kronos/accuracy?limit=900", setKronosAccuracy);
@@ -90,80 +87,30 @@ export default function KronosPage() {
   const persistedDisagreements = usePersistedKronos("/kronos/disagreements?limit=250", setDisagreements);
   useEffect(() => { setLastSync(persistedForecast.data?.generated_at || null); }, [persistedForecast.data]);
 
-  const refresh = useCallback(async (force = false) => {
-    if (!mounted.current || refreshInFlight.current || (!force && (document.visibilityState === "hidden" || Date.now() < nextReadAt.current))) return;
-    const controller = new AbortController();
-    refreshInFlight.current = controller;
-    nextReadAt.current = Date.now() + 60000;
-    setLoading(true);
-    const failures = [];
-    const get = async (path, fallback, timeout = 10000) => {
-      try {
-        if (PERSISTED_READS.has(path)) {
-          const resource = displayResource(`${API}${path}`, 60000);
-          const cached = resource.getSnapshot();
-          if (force || cached.updatedAt == null || Date.now() - cached.updatedAt >= 60000) await resource.refresh(force);
-          const state = resource.getSnapshot();
-          if (state.error) failures.push(path);
-          return { data: state.data };
-        }
-        const response = await axios.get(`${API}${path}`, { timeout, signal: controller.signal });
-        if (!controller.signal.aborted) lastGood.current.set(path, response.data);
-        return response;
-      } catch (error) {
-        failures.push(path);
-        return { data: lastGood.current.get(path) || null };
-      }
-    };
-    try {
-      const [scanRes, pmRes, eqRes, optRes, riskRes, tradeRes, trackerRes, healthRes, macroRes, kronosRes, statusRes, accuracyRes, learningRes, disagreementRes] = await Promise.all([
-        get("/scan/latest", { results: [] }),
-        get("/portfolio_manager/latest", { decisions: [] }, 12000),
-        get("/kronos/positions", { positions: [] }),
-        get("/options_desk/positions", { positions: [] }),
-        get("/options_desk/risk", { checks: [] }),
-        get("/options_desk/trades?sync_live=false", { trades: [] }),
-        get("/signals/tracker?limit=250", { rows: [] }),
-        get("/data/lse/health", { ok: false }),
-        get("/data/lse/macro?limit=80", { economic_calendar: [], bond_yields: [] }),
-        get("/kronos/forecast", { forecasts: [] }, 12000),
-        get("/kronos/status", { ok: false, health: "DEGRADED" }, 12000),
-        get("/kronos/accuracy?limit=900", { ok: false, overall: {} }, 16000),
-        get("/kronos/learning?limit=900", { ok: false, health: "UNKNOWN", recommendations: [] }, 16000),
-        get("/kronos/disagreements?limit=250", { rows: [] }),
-      ]);
-      if (!mounted.current || controller.signal.aborted) return;
-      setScan(scanRes.data);
-      setPm(pmRes.data);
-      setEquityPositions(eqRes.data);
-      setOptionPositions(optRes.data);
-      setOptionRisk(riskRes.data);
-      setOptionTrades(tradeRes.data);
-      setTracker(trackerRes.data);
-      setLseHealth(healthRes.data);
-      setMacro(macroRes.data);
-      // Persisted subscribers own these values. A slower context batch must
-      // not overwrite a newer cache publication with its earlier snapshot.
-      setDisplayFailures(failures);
-      if (!kronosRes.data?.error && kronosRes.data?.generated_at) setLastSync(kronosRes.data.generated_at);
-    } finally {
-      if (refreshInFlight.current === controller) refreshInFlight.current = false;
-      if (mounted.current && !controller.signal.aborted) setLoading(false);
-    }
-  }, []);
-
+  const contextSources = useMemo(() => [
+    ["/scan/latest", setScan], ["/portfolio_manager/latest", setPm],
+    ["/kronos/positions", setEquityPositions], ["/options_desk/positions", setOptionPositions],
+    ["/options_desk/risk", setOptionRisk], ["/options_desk/trades?sync_live=false", setOptionTrades],
+    ["/signals/tracker?limit=250", setTracker], ["/data/lse/health", setLseHealth],
+    ["/data/lse/macro?limit=80", setMacro],
+  ], []);
+  const context = useDisplayBatch(API, contextSources, 60000);
+  const refreshContext = context.refresh;
+  const loading = context.loading && persistedForecast.loading;
+  const displayFailures = contextSources.filter(([path]) => context.states[path]?.error).map(([path]) => path);
+  const refresh = useCallback((force = true) => Promise.allSettled([
+    refreshContext(force), ...[...PERSISTED_READS].map(path => displayResource(`${API}${path}`, 60000).refresh(force)),
+  ]), [refreshContext]);
+  useDisplayRefresh(() => refresh(true));
   useEffect(() => {
     mounted.current = true;
-    refresh();
-    const id = setInterval(refresh, 60000);
-    const visible = () => { if (document.visibilityState !== "hidden") { setVisibleVersion(value => value + 1); refresh(); } };
+    const visible = () => { if (document.visibilityState !== "hidden") setVisibleVersion(value => value + 1); };
     document.addEventListener("visibilitychange", visible);
     return () => {
-      mounted.current = false; refreshInFlight.current?.abort?.(); refreshInFlight.current = false; nextReadAt.current = 0;
-      sandboxRequest.current?.abort(); calendarRequest.current?.abort();
-      clearInterval(id); document.removeEventListener("visibilitychange", visible);
+      mounted.current = false; sandboxRequest.current?.abort(); calendarRequest.current?.abort();
+      document.removeEventListener("visibilitychange", visible);
     };
-  }, [refresh]);
+  }, []);
 
   const forceRefresh = useCallback(async () => {
     if (actionLoading) return;

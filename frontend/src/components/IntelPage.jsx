@@ -5,6 +5,7 @@ import { API } from "../config";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { displayResource } from "../hooks/useDisplayResource";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
 
@@ -236,6 +237,7 @@ export default function IntelPage() {
     if (document.visibilityState === "hidden") document.addEventListener("visibilitychange", initialRead);
     return () => { mounted.current = false; refreshController.current?.abort(); document.removeEventListener("visibilitychange", initialRead); };
   }, [refresh]);
+  useDisplayRefresh(() => refresh(true));
 
   const intel = useMemo(() => {
     const data = payloads || {};

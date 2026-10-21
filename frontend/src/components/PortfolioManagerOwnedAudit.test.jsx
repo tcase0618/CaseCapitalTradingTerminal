@@ -95,6 +95,26 @@ test("every owned PM view tolerates malformed arrays without automatic commands"
   expect(axios.post).not.toHaveBeenCalled();
 });
 
+test("scheduled PM packets refresh the default display only when scan identity matches", async () => {
+  let packet = {};
+  axios.get.mockImplementation(url => Promise.resolve({ data: url.endsWith('/scan/latest') ? packet : fixture(url) }));
+  await mount();
+  await click("EQUITIES");
+  const finished = "2026-10-08T15:00:00Z";
+  packet = { finished_at: finished, pm_payload: {
+    scan_finished_at: finished, recommendations: [{ ticker: "SNAPSHOT_ONLY", action: "STARTER", reasons: [], cautions: [] }], summary: {}, exposure: {},
+  } };
+  await advance(30000);
+  expect(container.textContent).toContain("SNAPSHOT_ONLY");
+  packet = { finished_at: finished, pm_payload: {
+    scan_finished_at: "2026-10-07T15:00:00Z", recommendations: [{ ticker: "MISMATCHED_PACKET", action: "STARTER" }], summary: {},
+  } };
+  await advance(30000);
+  expect(container.textContent).not.toContain("MISMATCHED_PACKET");
+  expect(axios.get.mock.calls.filter(([url]) => url.endsWith('/portfolio_manager/latest'))).toHaveLength(1);
+  expect(axios.post).not.toHaveBeenCalled();
+});
+
 test("learning uses cached cancellable keys, pauses while hidden, and detaches when leaving", async () => {
   await mount();
   await click("LEARNING");
@@ -151,7 +171,7 @@ test("root display reads abort on unmount", async () => {
   const signals = [];
   axios.get.mockImplementation((url, options) => new Promise(() => signals.push(options.signal)));
   await mount();
-  expect(signals).toHaveLength(7);
+  expect(signals).toHaveLength(8);
   await act(async () => { root.unmount(); await flush(); });
   expect(signals.every(signal => signal.aborted)).toBe(true);
 });

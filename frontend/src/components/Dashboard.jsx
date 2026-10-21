@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
-import { displayResource } from "../hooks/useDisplayResource";
+import useDisplayBatch from "../hooks/useDisplayBatch";
 import { API } from "../config";
 import { toast } from "sonner";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -165,11 +165,6 @@ export default function Dashboard() {
   const [openPanel, setOpenPanel] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const mounted = useRef(false);
-  const displayGeneration = useRef(0);
-  const refreshInFlight = useRef(null);
-  const forceRefreshQueued = useRef(false);
-  const [displayError, setDisplayError] = useState("");
   const displayReads = useMemo(() => [
       ["/status", setStatus, 15000], ["/scan/latest", setScan, 15000],
       ["/activity?limit=20", data => setActivity(Array.isArray(data) ? data : []), 15000], ["/watchlist", data => setWatchlist(Array.isArray(data) ? data : []), 15000], ["/alerts", data => setAlerts(Array.isArray(data) ? data : []), 15000],
@@ -179,65 +174,8 @@ export default function Dashboard() {
       ["/scan/replay_calendar?days=90", setReplayCalendar, 60000],
       ["/scheduler/overview", setScheduler, 15000],
     ], []);
-  const refresh = useCallback((force = false) => {
-    if (!mounted.current || (!force && document.visibilityState === "hidden")) return Promise.resolve();
-    if (refreshInFlight.current) {
-      if (force) forceRefreshQueued.current = true;
-      return refreshInFlight.current;
-    }
-    const generation = displayGeneration.current;
-    const current = () => mounted.current && displayGeneration.current === generation;
-    const request = Promise.allSettled(displayReads.map(async ([path, setter, interval]) => {
-      const resource = displayResource(`${API}${path}`, interval);
-      const cached = resource.getSnapshot();
-      if (cached.data != null && current()) setter(cached.data);
-      if (force || !cached.updatedAt || Date.now() - cached.updatedAt >= interval) await resource.refresh(force);
-      const state = resource.getSnapshot();
-      if (state.error) {
-        if (path === "/scheduler/overview" && current()) setScheduler(null);
-        throw state.error;
-      }
-      if (current() && state.data != null) setter(state.data);
-    })).then(results => {
-      if (current()) setDisplayError(results.some(result => result.status === "rejected") ? "Some scanner data could not refresh. Last loaded values may be outdated." : "");
-    }).finally(() => {
-      if (refreshInFlight.current !== request) return;
-      refreshInFlight.current = null;
-      if (current() && forceRefreshQueued.current) {
-        forceRefreshQueued.current = false;
-        refresh(true);
-      }
-    });
-    refreshInFlight.current = request;
-    return request;
-  }, [displayReads]);
-
-  useEffect(() => {
-    mounted.current = true;
-    displayGeneration.current += 1;
-    // Keep display subscriptions alive only while this page owns them.
-    const generation = displayGeneration.current;
-    const unsubscribe = displayReads.map(([path, setter, interval]) => {
-      const resource = displayResource(`${API}${path}`, interval);
-      const applySnapshot = () => {
-        const state = resource.getSnapshot();
-        if (mounted.current && displayGeneration.current === generation && state.data != null) setter(state.data);
-      };
-      const off = resource.subscribe(applySnapshot, interval);
-      applySnapshot();
-      return off;
-    });
-    refresh();
-    const visibleRefresh = () => { if (document.visibilityState !== "hidden") refresh(); };
-    const id = setInterval(visibleRefresh, 15000);
-    document.addEventListener("visibilitychange", visibleRefresh);
-    return () => {
-      mounted.current = false; displayGeneration.current += 1;
-      refreshInFlight.current = null; forceRefreshQueued.current = false;
-      unsubscribe.forEach(off => off());
-      clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh);
-    };
-  }, [refresh, displayReads]);
+  const { refresh, failed, states: displayStates } = useDisplayBatch(API, displayReads, 15000);
+  const displayError = failed ? "Some scanner data could not refresh. Last loaded values may be outdated." : "";
 
   useEffect(() => {
     if (!selected) {
@@ -778,7 +716,7 @@ export default function Dashboard() {
             </div>
             <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.04)", margin: "0 20px" }} />
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
-              <ScannerCountdown scheduler={scheduler} />
+              <ScannerCountdown scheduler={displayStates["/scheduler/overview"]?.error ? null : scheduler} />
               <button data-testid="dispatch-button" onClick={dispatch} disabled={dispatching}
                 style={{
                   background: dispatching ? "rgba(200,168,75,0.1)" : "transparent",

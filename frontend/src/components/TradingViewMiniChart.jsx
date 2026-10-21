@@ -79,7 +79,7 @@ export default function TradingViewMiniChart({ ticker, companyName = "", height 
           zIndex: 2,
         }}
       >
-        <span style={{ color: accent }}>LIVE CHART</span>
+        <span style={{ color: accent }}>MARKET CHART</span>
         <span style={{ color: dim }}>/</span>
         <span
           style={{
@@ -98,6 +98,8 @@ export default function TradingViewMiniChart({ ticker, companyName = "", height 
         id={`casecap-tv-${symbol}`}
         title={`${symbol} TradingView chart`}
         src={frameUrl}
+        loading="lazy"
+        referrerPolicy="no-referrer"
         scrolling="no"
         frameBorder="0"
         style={{

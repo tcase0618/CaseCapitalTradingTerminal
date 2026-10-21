@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
@@ -70,6 +71,7 @@ export default function TradeFloorPage() {
     clearTimeout(reloadTimer.current);
     reloadTimer.current = setTimeout(reload, 1500);
   };
+  useDisplayRefresh(reload);
 
   const acct = account?.account || {};
   const acctReady = account?.alpaca_configured;

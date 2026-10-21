@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import useDisplayResource from "../hooks/useDisplayResource";
+import DisplayFreshness from "./DisplayFreshness";
 import axios from "axios";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -27,15 +29,11 @@ const VARIANTS = [
 ];
 
 export default function LotteryPage() {
-  const [board, setBoard] = useState(null);
   const [tab, setTab] = useState("candidates");
   const [page, setPage] = useState(0);
-  const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState(null);
-  const requestRef = useRef(null);
   const toastTimer = useRef(null);
-  const [loadError, setLoadError] = useState(false);
   const mountedRef = useRef(false);
 
   const showToast = (kind, msg) => {
@@ -45,24 +43,16 @@ export default function LotteryPage() {
     toastTimer.current = setTimeout(() => setToast(null), 4500);
   };
 
-  const load = useCallback(async () => {
-    if (!mountedRef.current) return;
-    requestRef.current?.abort();
-    const controller = new AbortController(); requestRef.current = controller;
-    setLoading(true);
-    setLoadError(false);
-    try {
-      const { data } = await axios.get(`${API}/lottery/board`, { signal: controller.signal, timeout: 20000 });
-      if (!controller.signal.aborted) { setBoard(record(data) ? data : null); setLoadError(!record(data)); }
-    } catch (e) {
-      if (!controller.signal.aborted) { setLoadError(true); showToast("err", `Lottery League load failed: ${e?.message || "unknown"}`); }
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-    }
+  // This legacy GET grades tickets: cached display, explicit refresh, no polling.
+  const boardRead = useDisplayResource(`${API}/lottery/board`, false);
+  const board = record(boardRead.data) ? boardRead.data : null;
+  const loading = boardRead.loading;
+  const loadError = Boolean(boardRead.error || (boardRead.data != null && !board));
+  const load = boardRead.refresh;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; clearTimeout(toastTimer.current); };
   }, []);
-
-  // Board reads grade closed tickets in the backend; do not introduce polling.
-  useEffect(() => { mountedRef.current = true; load(); return () => { mountedRef.current = false; requestRef.current?.abort(); clearTimeout(toastTimer.current); }; }, [load]);
 
   const runScan = async () => {
     setScanning(true);
@@ -145,6 +135,7 @@ export default function LotteryPage() {
         </button>
       }
     >
+      <DisplayFreshness {...boardRead} data={board} onRefresh={load} />
       {loading && <div role="status" style={{ color: muted, marginBottom: 12 }}>Loading Lottery board...</div>}
       {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Lottery display unavailable. Any retained rows are from the previous load, not a new scan.</div>}
       {incomplete && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Lottery response is incomplete. Missing observations are unavailable, not zero performance.</div>}

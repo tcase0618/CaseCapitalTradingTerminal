@@ -23,6 +23,8 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 
 test("Lottery exposes every candidate by pagination and all six views tolerate partial lists", async () => {
   axios.get.mockResolvedValue({ data: { candidates: Array.from({ length: 65 }, (_, i) => ({ ticker: "TEST" + i, triggers: {}, penalties: {}, score: 50 })), tickets: {}, truth_board: { segments: { variant: {} }, latest_grades: {}, learning: { notes: {} }, learned_config: { retired_variants: {} } } } });
+  const response = await axios.get();
+  useDisplayResource.mockReturnValue({ data: response.data, error: null, loading: false, refresh: jest.fn() });
   await act(async () => { root.render(<LotteryPage />); await flush(); });
   expect(container.textContent).toContain("TEST29"); expect(container.textContent).not.toContain("TEST30");
   const next = container.querySelector('[aria-label="Next Lottery page"]');

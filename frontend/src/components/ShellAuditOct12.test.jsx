@@ -4,6 +4,7 @@ import { CrtShell } from "./CrtShell";
 import WorkspaceSearch from "./WorkspaceSearch";
 
 const mockNavigate = jest.fn();
+const mockRefreshActiveDisplays = jest.fn();
 let mockResource;
 let mockPathname;
 jest.mock("react-router-dom", () => ({
@@ -11,7 +12,7 @@ jest.mock("react-router-dom", () => ({
   useLocation: () => ({ pathname: mockPathname }),
   useNavigate: () => mockNavigate,
 }));
-jest.mock("../hooks/useDisplayResource", () => () => mockResource);
+jest.mock("../hooks/useDisplayResource", () => ({ __esModule: true, default: () => mockResource, refreshActiveDisplays: (...args) => mockRefreshActiveDisplays(...args) }));
 jest.mock("../lib/pageRegistry", () => ({
   prefetchPage: jest.fn(),
   pages: Array.from({ length: 23 }, (_, index) => ({ path: `/workspace-${index}`, label: `Workspace ${index}`, group: "Research", aliases: index === 0 ? ["holdings", "qc", "filings", "evidence"] : [] })),
@@ -23,6 +24,7 @@ beforeEach(() => {
   container = document.createElement("div"); document.body.append(container);
   root = createRoot(container);
   localStorage.clear(); mockNavigate.mockClear();
+  mockRefreshActiveDisplays.mockClear();
   mockResource = { data: null, loading: false, error: "Unavailable", refresh: jest.fn() };
   mockPathname = "/scanner";
 });
@@ -47,6 +49,14 @@ test("blocked preference storage does not crash the shell", async () => {
   await act(async () => root.render(<CrtShell title="Scanner">Content</CrtShell>));
   await act(async () => container.querySelector('[aria-label="Collapse navigation"]').click());
   expect(container.querySelector(".terminal-compact-nav")).not.toBeNull();
+});
+
+test("global refresh refreshes active displays without navigating away", async () => {
+  await act(async () => root.render(<CrtShell title="Scanner">Content</CrtShell>));
+  await act(async () => container.querySelector('[data-testid="global-refresh-tab"]').click());
+  expect(mockRefreshActiveDisplays).toHaveBeenCalledTimes(1);
+  expect(mockNavigate).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Content");
 });
 
 test("company profiles do not masquerade as Command Center", async () => {

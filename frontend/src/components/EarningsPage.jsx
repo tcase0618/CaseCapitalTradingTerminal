@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline } = tokens;
@@ -44,6 +45,8 @@ export default function EarningsPage() {
   const [routeStatus, setRouteStatus] = useState("");
   const [lseHealth, setLseHealth] = useState(null);
   const [error, setError] = useState("");
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  useDisplayRefresh(() => setRefreshVersion(value => value + 1));
   const weekRef = useRef(weekOffset);
   weekRef.current = weekOffset;
 
@@ -57,7 +60,7 @@ export default function EarningsPage() {
     setDispatchStatus("");
     setRouteStatus("");
     // This GET may persist/enrich snapshots. Keep the existing week-change cadence.
-    axios.get(`${API}/v32/earnings_week`, { params: { week_offset: weekOffset }, signal: controller.signal }).then(r => {
+    axios.get(`${API}/v32/earnings_week`, { params: { week_offset: weekOffset }, signal: controller.signal, timeout: 20000 }).then(r => {
       if (!cancelled) {
         if (!r.data || typeof r.data !== "object" || Array.isArray(r.data)) setError("Earnings response unavailable.");
         else setData(r.data);
@@ -67,12 +70,12 @@ export default function EarningsPage() {
       if (!cancelled) { setLoading(false); setError("Earnings unavailable for the selected week."); }
     });
     return () => { cancelled = true; controller.abort(); };
-  }, [weekOffset]);
+  }, [weekOffset, refreshVersion]);
 
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
-    axios.get(`${API}/data/lse/health`, { signal: controller.signal }).then(r => {
+    axios.get(`${API}/data/lse/health`, { signal: controller.signal, timeout: 12000 }).then(r => {
       if (!cancelled) setLseHealth(r.data);
     }).catch(() => {
       if (!cancelled) setLseHealth({ unavailable: true });

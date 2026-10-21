@@ -173,8 +173,8 @@ test("bad top-level payloads and producer ok:false responses are explicitly degr
   fixtures["/desktop/diagnostics"] = null;
   fixtures["/data_truth/overview"] = { ok: false };
   await renderPage();
-  expect(warning().textContent).toContain("Malformed settings responses: Integration status, Desktop diagnostics");
-  expect(warning().textContent).toContain("could not refresh: Data truth");
+  expect(warning().textContent).toContain("Malformed settings responses: Integration status");
+  expect(warning().textContent).toContain("could not refresh: Desktop diagnostics, Data truth");
 });
 
 test("scoped grids use container-bounded tracks and long row values wrap", async () => {

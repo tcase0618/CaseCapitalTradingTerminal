@@ -47,8 +47,10 @@ beforeEach(() => {
   displayResource.mockImplementation(url => {
     if (!resources.has(url)) {
       const state = { data: fixtures[url.slice(4)] ?? null, updatedAt: Date.now(), error: null };
-      const off = jest.fn();
-      resources.set(url, { state, getSnapshot: () => state, refresh: jest.fn().mockResolvedValue(), subscribe: jest.fn(() => off), off });
+      let timer;
+      const off = jest.fn(() => clearInterval(timer));
+      resources.set(url, { state, getSnapshot: () => ({ ...state }), refresh: jest.fn().mockResolvedValue(),
+        subscribe: jest.fn((listener, period) => { timer = setInterval(listener, period); return off; }), off });
     }
     return resources.get(url);
   });
@@ -132,16 +134,11 @@ test("Strict Mode remount publishes first results without waiting for the pollin
   expect(container.querySelector('[data-testid="next-scan-countdown"]').textContent).toContain("00:15:00");
 });
 
-test("overlapping automatic refreshes coalesce and unmount releases all subscriptions", async () => {
-  let release;
-  const pending = new Promise(resolve => { release = resolve; });
-  const factory = displayResource.getMockImplementation();
-  displayResource.mockImplementation(url => {
-    const resource = factory(url);
-    resource.state.updatedAt = 0;
-    resource.refresh.mockImplementation(() => pending);
-    return resource;
-  });
+test("overlapping automatic refreshes stay bounded and unmount cancels queued reads", async () => {
+  const actual = jest.requireActual("../hooks/useDisplayResource").displayResource;
+  displayResource.mockImplementation((url, interval) => actual(url, interval));
+  const signals = [];
+  axios.get.mockImplementation((url, config) => new Promise(() => signals.push(config.signal)));
   await act(async () => { root.render(<Dashboard />); await flush(); });
   await act(async () => {
     jest.advanceTimersByTime(45000);
@@ -149,9 +146,10 @@ test("overlapping automatic refreshes coalesce and unmount releases all subscrip
     document.dispatchEvent(new Event("visibilitychange"));
     await flush();
   });
-  resources.forEach(resource => expect(resource.refresh).toHaveBeenCalledTimes(1));
-  await act(async () => { root.unmount(); release(); await flush(); });
-  resources.forEach(resource => expect(resource.off).toHaveBeenCalledTimes(1));
+  expect(axios.get).toHaveBeenCalledTimes(4);
+  await act(async () => { root.unmount(); await flush(); });
+  expect(signals.every(signal => signal.aborted)).toBe(true);
+  expect(axios.get).toHaveBeenCalledTimes(4);
   root = createRoot(container);
 });
 

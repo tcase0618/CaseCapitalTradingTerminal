@@ -1,6 +1,7 @@
 import { isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import useDisplayResource from "../hooks/useDisplayResource";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { FileCheck2, RefreshCw, Send, ShieldCheck } from "lucide-react";
 import { API } from "../config";
 import { CrtShell } from "./CrtShell";
@@ -64,6 +65,8 @@ export default function TruthReviewPage() {
     document.addEventListener("visibilitychange", visible);
     return () => { mounted.current = false; pending.current?.abort(); pending.current = null; nextReadAt.current = 0; clearInterval(id); document.removeEventListener("visibilitychange", visible); };
   }, [load]);
+
+  useDisplayRefresh(() => load(true));
 
   const refresh = async () => {
     if (refreshing) return;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
@@ -38,6 +39,7 @@ export default function MacroPage() {
   }, []);
 
   useEffect(() => { load(); return () => requestRef.current?.abort(); }, [load]);
+  useDisplayRefresh(load);
 
   const regions = useMemo(() => rowsOf(data?.regions).map(region => ({
     ...region, label: String(region.label || region.key || "UNKNOWN"),

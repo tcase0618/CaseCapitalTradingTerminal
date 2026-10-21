@@ -4,7 +4,7 @@
 import { Link, useLocation } from "react-router-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
-import useDisplayResource from "../hooks/useDisplayResource";
+import useDisplayResource, { refreshActiveDisplays } from "../hooks/useDisplayResource";
 import { prefetchPage } from "../lib/pageRegistry";
 import WorkspaceSearch from "./WorkspaceSearch";
 import { API } from "../config";
@@ -231,10 +231,10 @@ function SystemBar({ safety = {} }) {
 }
 
 function useLiveAlertCounts() {
-  const dh = useDisplayResource(`${API}/v32/dark_horse?days=2`, 60000);
-  const xf = useDisplayResource(`${API}/v32/x_factor?days=2`, 60000);
-  const conv = useDisplayResource(`${API}/v32/conviction`, 60000);
-  const lot = useDisplayResource(`${API}/v32/lottery/current`, 60000);
+  const dh = useDisplayResource(`${API}/v32/dark_horse?days=2`, 60000, -1);
+  const xf = useDisplayResource(`${API}/v32/x_factor?days=2`, 60000, -1);
+  const conv = useDisplayResource(`${API}/v32/conviction`, 60000, -1);
+  const lot = useDisplayResource(`${API}/v32/lottery/current`, 60000, -1);
   return {
     dh: dh.error || !Array.isArray(dh.data) ? null : dh.data.length,
     xf: xf.error || !Array.isArray(xf.data) ? null : xf.data.length,
@@ -244,8 +244,8 @@ function useLiveAlertCounts() {
 }
 
 function useNewsStrip() {
-  const active = useDisplayResource(`${API}/news_intel/latest?limit=18&lane=active`, 120000);
-  const discovery = useDisplayResource(`${API}/news_intel/latest?limit=18&lane=discovery`, 120000);
+  const active = useDisplayResource(`${API}/news_intel/latest?limit=18&lane=active`, 120000, -1);
+  const discovery = useDisplayResource(`${API}/news_intel/latest?limit=18&lane=discovery`, 120000, -1);
   const lane = resource => ({
     items: resource.data?.articles?.slice(0, 14) || [],
     loading: resource.loading,
@@ -772,7 +772,7 @@ export function CrtShell({ title, children, headerRight = null }) {
                 type="button"
                 aria-label="Refresh this terminal page"
                 title="Refresh this terminal page"
-                onClick={() => window.location.reload()}
+                onClick={refreshActiveDisplays}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",

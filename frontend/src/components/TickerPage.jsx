@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
 
@@ -11,6 +12,8 @@ const priceText = value => value != null && value !== "" && Number.isFinite(Numb
 
 export default function TickerPage() {
   const { ticker } = useParams();
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  useDisplayRefresh(() => setRefreshVersion(value => value + 1));
   const [data, setData] = useState(null);
   const [opts, setOpts] = useState(null);
   const [flow, setFlow] = useState(null);
@@ -22,9 +25,12 @@ export default function TickerPage() {
   const [accountantStatus, setAccountantStatus] = useState("loading");
   const [loadError, setLoadError] = useState(false);
   const [sourceStatus, setSourceStatus] = useState({ options: "loading", flow: "loading", freeData: "loading" });
+  const profileTicker = useRef(null);
 
   useEffect(() => {
     if (!ticker) return undefined;
+    const changedTicker = profileTicker.current !== ticker;
+    profileTicker.current = ticker;
     const controller = new AbortController();
     let active = true;
     const request = (path) => axios.get(`${API}${path}`, { signal: controller.signal, timeout: 12000 }).then(response => {
@@ -33,10 +39,13 @@ export default function TickerPage() {
     });
     setLoadError(false);
     setSourceStatus({ options: "loading", flow: "loading", freeData: "loading" });
-    setData(null); setOpts(null); setFlow(null); setFreeData(null); setKronos(null);
-    setPmDossier(null); setDossierStatus("loading"); setAccountant(null); setAccountantStatus("loading");
+    if (changedTicker) {
+      setData(null); setOpts(null); setFlow(null); setFreeData(null); setKronos(null);
+      setPmDossier(null); setAccountant(null);
+    }
+    setDossierStatus("loading"); setAccountantStatus("loading");
     request(`/ticker/${ticker}`).then(r => setData(r.data)).catch(error => {
-      if (active && error.name !== "CanceledError") { setData({ ticker }); setLoadError(true); }
+      if (active && error.name !== "CanceledError") { setData(previous => previous || { ticker }); setLoadError(true); }
     });
     const sourceState = (key, value) => { if (active) setSourceStatus(previous => ({ ...previous, [key]: value })); };
     request(`/options/${ticker}`).then(r => { setOpts(r.data?.options); sourceState("options", "ready"); }).catch(() => sourceState("options", "unavailable"));
@@ -56,7 +65,7 @@ export default function TickerPage() {
       if (active && error.name !== "CanceledError") setAccountantStatus("unavailable");
     });
     return () => { active = false; controller.abort(); };
-  }, [ticker]);
+  }, [ticker, refreshVersion]);
 
   if (!data) return (
     <CrtShell title={`LOADING ${ticker?.toUpperCase()}...`}>
@@ -95,7 +104,7 @@ export default function TickerPage() {
           </span>
         </div>
       }>
-      {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Company data unavailable. Missing prices and signals are not zero results.</div>}
+      {loadError && <div role="status" style={{ color: "#fbbf24", marginBottom: 12 }}>Company data unavailable or refresh failed. Prior displayed values may be outdated; missing prices and signals are not zero results.</div>}
       <TradingViewMiniChart ticker={t} companyName={companyName} />
 
       <CompanyProfileCard profile={companyProfile} />

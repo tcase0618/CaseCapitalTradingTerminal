@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { displayResource } from "../hooks/useDisplayResource";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg } = tokens;
 
@@ -115,6 +116,7 @@ export default function PharmaPage() {
     return () => { mounted.current = false; feedController.current?.abort(); calendarController.current?.abort(); };
   }, [reload]);
   useEffect(() => { loadCalendar(); }, [loadCalendar]);
+  useDisplayRefresh(() => { reload(true); loadCalendar(); });
 
   useEffect(() => {
     const top = [...pdufa]

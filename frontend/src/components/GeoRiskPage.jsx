@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { CrtShell, Stat, tokens } from "./CrtShell";
 
 const { accent, accent2, dim, muted, labelLight, hairline, cardBg, pageBg } = tokens;
@@ -51,6 +52,8 @@ export default function GeoRiskPage() {
   const [tradeFloor, setTradeFloor] = useState(null);
   const [lseMacro, setLseMacro] = useState(null);
   const [loadError, setLoadError] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  useDisplayRefresh(() => setRefreshVersion(value => value + 1));
   const [overlayStatus, setOverlayStatus] = useState({ holdings: "loading", macro: "loading" });
 
   useEffect(() => {
@@ -75,7 +78,7 @@ export default function GeoRiskPage() {
       if (!cancelled) { setLseMacro(r.data || null); setOverlayStatus(previous => ({ ...previous, macro: r.data ? "loaded" : "unavailable" })); }
     }).catch(() => { if (!cancelled) setOverlayStatus(previous => ({ ...previous, macro: "unavailable" })); });
     return () => { cancelled = true; controller.abort(); };
-  }, []);
+  }, [refreshVersion]);
 
   const events = useMemo(() => Array.isArray(data?.events) ? data.events.filter(row => row && typeof row === "object") : [], [data]);
   const holdings = useMemo(() => normalizeHoldings(tradeFloor), [tradeFloor]);

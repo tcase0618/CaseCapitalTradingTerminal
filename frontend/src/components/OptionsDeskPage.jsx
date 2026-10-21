@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import useDisplayResource from "../hooks/useDisplayResource";
+import useDisplayBatch from "../hooks/useDisplayBatch";
+import DisplayFreshness from "./DisplayFreshness";
 import { API } from "../config";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import TradingViewMiniChart from "./TradingViewMiniChart";
@@ -29,8 +31,6 @@ export default function OptionsDeskPage() {
   const [lseContext, setLseContext] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [loadWarning, setLoadWarning] = useState("");
-  const [displayLoading, setDisplayLoading] = useState(true);
 
   const riskRead = useDisplayResource(`${API}/options_desk/risk`, 60000);
   const tradesRead = useDisplayResource(`${API}/options_desk/trades?sync_live=false`, 60000);
@@ -39,36 +39,21 @@ export default function OptionsDeskPage() {
   useEffect(() => { if (riskRead.data != null) setRisk(riskRead.data); }, [riskRead.data]);
   useEffect(() => { if (tradesRead.data != null) setTrades(tradesRead.data); }, [tradesRead.data]);
 
-  // Candidates and expectancy GETs can persist backend state; do not poll them.
-  const load = useCallback(async (signal) => {
-    setDisplayLoading(true);
-    const reads = [
-      ["account", setAccount], ["candidates", setCandidates], ["positions", setPositions],
-      ["orders", setOrders], ["leaps", setLeaps], ["tail", setTail], ["expectancy", setExpectancy],
-    ];
-    const results = await Promise.allSettled(reads.map(([path]) =>
-      axios.get(`${API}/options_desk/${path}`, { signal, timeout: 20000 })
-    ));
-    if (signal?.aborted) return;
-    const failed = [];
-    results.forEach((result, i) => {
-      const [path, setValue] = reads[i];
-      if (result.status === "rejected" || result.value?.data == null || result.value.data.error) {
-        failed.push(path);
-      } else {
-        setValue(result.value.data);
-      }
-    });
-    setLoadWarning(failed.length ? `Display unavailable: ${failed.join(", ")}. Last successful data retained where available.` : "");
-    setDisplayLoading(false);
-    if (!signal) await Promise.all([refreshRisk(), refreshTrades()]);
-  }, [refreshRisk, refreshTrades]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+  // Only broker read endpoints poll. Candidate/expectancy GETs retain manual cadence.
+  const displaySources = useMemo(() => [
+    ["/options_desk/account", setAccount, 30000], ["/options_desk/candidates", setCandidates, false],
+    ["/options_desk/positions", setPositions, 30000], ["/options_desk/orders", setOrders, 30000],
+    ["/options_desk/leaps", setLeaps, false], ["/options_desk/tail", setTail, false],
+    ["/options_desk/expectancy", setExpectancy, false],
+  ], []);
+  const display = useDisplayBatch(API, displaySources);
+  const refreshDisplay = display.refresh;
+  const displayLoading = display.loading;
+  const failedSources = displaySources.filter(([path]) => display.states[path]?.error).map(([path]) => path.split("/").pop());
+  const loadWarning = failedSources.length ? `Display unavailable: ${failedSources.join(", ")}. Last successful data retained where available.` : "";
+  const load = useCallback(async () => {
+    await Promise.allSettled([refreshDisplay(), refreshRisk(), refreshTrades()]);
+  }, [refreshDisplay, refreshRisk, refreshTrades]);
 
   const rows = useMemo(() => deskRowsOnly(candidates?.candidates), [candidates]);
   const deskRows = useMemo(() => rows.filter(r => r.route !== "EQUITY"), [rows]);
@@ -212,6 +197,7 @@ export default function OptionsDeskPage() {
         </div>
       }>
       <style>{optionsResponsiveCss}</style>
+      <DisplayFreshness updatedAt={display.states["/options_desk/candidates"]?.updatedAt} data={candidates} error={display.states["/options_desk/candidates"]?.error} refreshing={display.refreshing} onRefresh={load} />
       {displayLoading && <div role="status" style={messageBox}>Loading options display...</div>}
       <div style={notice}>
         SEPARATE PAPER OPTIONS ACCOUNT. PM ROUTES THE EXPRESSION. EQUITY TRADE FLOOR IS NOT CONNECTED TO THIS DESK.

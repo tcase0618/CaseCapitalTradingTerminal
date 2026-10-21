@@ -5,6 +5,7 @@ import QualityPage from "./QualityPage";
 import TruthReviewPage from "./TruthReviewPage";
 import KronosPage from "./KronosPage";
 import { displayResource } from "../hooks/useDisplayResource";
+import { DISPLAY_REFRESH_EVENT } from "../hooks/useDisplayRefresh";
 
 jest.mock("../config", () => ({ API: "/api" }));
 jest.mock("axios", () => ({ get: jest.fn(), post: jest.fn(), defaults: { headers: { common: {} } } }));
@@ -69,6 +70,14 @@ describe.each([
   ["Quality", QualityPage, "/data_quality/overview", 30000, "quality-display-warning"],
   ["Truth", TruthReviewPage, "/truth_review/overview", 60000, "truth-display-warning"],
 ])("%s display lifecycle", (name, Page, path, interval, warningId) => {
+  test("global display refresh re-reads overview without issuing a command", async () => {
+    await render(Page);
+    expect(overviewCalls(path)).toHaveLength(1);
+    await act(async () => { window.dispatchEvent(new Event(DISPLAY_REFRESH_EVENT)); await flush(); });
+    expect(overviewCalls(path)).toHaveLength(2);
+    expect(axios.post).not.toHaveBeenCalled();
+    if (name === "Truth") expect(overviewCalls(path)[1][1].params).toEqual({ persist: false });
+  });
   test("hidden mount/polling pause and visible return do not accelerate side-effecting overview", async () => {
     visibility.mockReturnValue("hidden"); await render(Page); await advance(interval * 2);
     expect(axios.get).not.toHaveBeenCalled();
@@ -139,8 +148,9 @@ test("Kronos hidden mount makes no requests and guarded batch does not overlap",
   }));
   await show(); const count = axios.get.mock.calls.length;
   await advance(120000);
-  expect(overviewCalls("/portfolio_manager/latest")).toHaveLength(1);
-  const batchSignals = axios.get.mock.calls.filter(([url]) => url === "/api/portfolio_manager/latest").map(([, options]) => options.signal);
+  expect(axios.get.mock.calls.filter(([url]) => !url.includes("/price/history/") && !url.includes("/kronos/candle_forecast/"))).toHaveLength(4);
+  expect(overviewCalls("/portfolio_manager/latest").length).toBeLessThanOrEqual(1);
+  const batchSignals = axios.get.mock.calls.map(([, options]) => options.signal);
   await act(async () => { root.unmount(); await flush(); });
   expect(batchSignals.every(signal => signal.aborted)).toBe(true);
   expect(axios.get.mock.calls.length).toBe(count);

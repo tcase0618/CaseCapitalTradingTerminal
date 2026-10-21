@@ -79,11 +79,14 @@ test("all Options subtabs tolerate malformed lists and missing cone data", async
   expect(axios.post).not.toHaveBeenCalled();
 });
 
-test("only persisted risk and explicit non-sync trades poll; hidden tabs pause", async () => {
+test("broker reads and non-sync trades poll without rebuilding candidates; hidden tabs pause", async () => {
   await mount();
   axios.get.mockClear();
   await advance(60000);
-  expect(axios.get.mock.calls.map(([url]) => url).sort()).toEqual(["/api/options_desk/risk", "/api/options_desk/trades?sync_live=false"]);
+  expect(axios.get.mock.calls.map(([url]) => url).sort()).toEqual([
+    "/api/options_desk/account", "/api/options_desk/orders", "/api/options_desk/positions",
+    "/api/options_desk/risk", "/api/options_desk/trades?sync_live=false",
+  ]);
   axios.get.mockClear();
   visibility.mockReturnValue("hidden");
   await advance(120000);
@@ -125,7 +128,7 @@ test("all active mount reads abort on unmount without mutation", async () => {
   const signals = [];
   axios.get.mockImplementation((url, config) => new Promise(() => { signals.push(config.signal); }));
   await mount();
-  expect(signals.length).toBeGreaterThan(6);
+  expect(signals).toHaveLength(4);
   await act(async () => { root.unmount(); await flush(); });
   expect(signals.every(signal => signal.aborted)).toBe(true);
   expect(axios.post).not.toHaveBeenCalled();

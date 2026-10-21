@@ -1,5 +1,5 @@
 import axios from "axios";
-import { displayResource } from "./useDisplayResource";
+import { displayResource, refreshActiveDisplays } from "./useDisplayResource";
 
 jest.mock("axios", () => ({ get: jest.fn(), defaults: { headers: { common: {} } } }));
 let serial = 0;
@@ -26,6 +26,73 @@ test("coalesces concurrent GETs and keeps a stable snapshot between updates", as
   expect(resource.getSnapshot().data).toEqual({ count: 17 });
   expect(resource.getSnapshot()).toBe(resource.getSnapshot());
   resource.dispose();
+});
+
+test("manual-only resources load once and never start automatic polling", async () => {
+  axios.get.mockResolvedValue({ data: { count: 1 } });
+  const resource = displayResource("/manual-only", false);
+  const off = resource.subscribe(jest.fn(), false);
+  await flush();
+  jest.advanceTimersByTime(10 * 60 * 1000); await flush();
+  window.dispatchEvent(new Event("focus")); await flush();
+  expect(axios.get).toHaveBeenCalledTimes(1);
+  await refreshActiveDisplays();
+  expect(axios.get).toHaveBeenCalledTimes(2);
+  off(); resource.dispose();
+});
+
+test.each([null, { error: "provider unavailable" }])("unavailable HTTP 200 payload retains the previous data: %p", async payload => {
+  const resource = make();
+  axios.get.mockResolvedValueOnce({ data: { count: 17 } }).mockResolvedValueOnce({ data: payload });
+  await resource.refresh();
+  const previousTime = resource.getSnapshot().updatedAt;
+  await resource.refresh(true);
+  expect(resource.getSnapshot().data).toEqual({ count: 17 });
+  expect(resource.getSnapshot().updatedAt).toBe(previousTime);
+  expect(resource.getSnapshot().error).toBeInstanceOf(Error);
+  resource.dispose();
+});
+
+test("abandoned requests release slots even when a transport ignores abort", async () => {
+  axios.get.mockImplementation(() => new Promise(() => {}));
+  const old = Array.from({ length: 4 }, make);
+  const stops = old.map(resource => resource.subscribe(jest.fn()));
+  await flush();
+  expect(axios.get).toHaveBeenCalledTimes(4);
+  stops.forEach(off => off());
+  axios.get.mockResolvedValue({ data: { current: true } });
+  const next = make();
+  await next.refresh();
+  expect(next.getSnapshot().data).toEqual({ current: true });
+  old.forEach(resource => resource.dispose()); next.dispose();
+});
+
+test("foreground reads start before queued background tapes", async () => {
+  const releases = [];
+  axios.get.mockImplementation(() => new Promise(resolve => releases.push(resolve)));
+  const blockers = Array.from({ length: 4 }, make);
+  const pending = blockers.map(resource => resource.refresh());
+  await flush();
+  const background = displayResource("/background-tape");
+  const foreground = displayResource("/foreground-page");
+  const queuedBackground = background.refresh(false, -1);
+  const queuedForeground = foreground.refresh(false, 1);
+  releases[0]({ data: {} }); await flush();
+  expect(axios.get.mock.calls[4][0]).toBe("/foreground-page");
+  releases[1]({ data: {} }); await flush();
+  releases.forEach(resolve => resolve({ data: {} }));
+  await Promise.all([...pending, queuedBackground, queuedForeground]);
+  [...blockers, foreground, background].forEach(resource => resource.dispose());
+});
+
+test("blocked browser storage does not crash display loading", async () => {
+  const storage = jest.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+  axios.get.mockResolvedValue({ data: { available: true } });
+  try {
+    const resource = make(); await resource.refresh();
+    expect(resource.getSnapshot().data.available).toBe(true);
+    resource.dispose();
+  } finally { storage.mockRestore(); }
 });
 
 test("automatic failures back off; an explicit refresh can retry immediately", async () => {

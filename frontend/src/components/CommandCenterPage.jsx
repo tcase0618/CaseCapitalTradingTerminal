@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Search, RefreshCw } from "lucide-react";
-import { displayResource } from "../hooks/useDisplayResource";
+import useDisplayBatch from "../hooks/useDisplayBatch";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../config";
@@ -234,15 +234,7 @@ export default function CommandCenterPage() {
   const [backendRefreshing, setBackendRefreshing] = useState(false);
   const [backendRefresh, setBackendRefresh] = useState(null);
   const [completed, setCompleted] = useState([]);
-  const [initialLoad, setInitialLoad] = useState(true);
-  const [loadWarning, setLoadWarning] = useState("");
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [readStates, setReadStates] = useState({});
   const [workspaceView, setWorkspaceView] = useState("overview");
-  const [displayRefreshing, setDisplayRefreshing] = useState(false);
-  const refreshInFlight = useRef(false);
-  const refreshQueued = useRef(false);
-  const mounted = useRef(false);
   const displayReads = useMemo(() => [
     ["/status", setStatus, "Terminal status"], ["/scan/latest", setScan, "Latest scan"],
     ["/position_monitor/latest", setPositionMonitor, "Portfolio monitor"], ["/portfolio_manager/latest", setPm, "Portfolio Manager"],
@@ -279,65 +271,9 @@ export default function CommandCenterPage() {
     return () => { document.removeEventListener("keydown", onKeyDown); previousFocus?.focus(); };
   }, [launcherOpen]);
 
-  const refresh = useCallback(async (force = false) => {
-    if (refreshInFlight.current) {
-      if (force) refreshQueued.current = true;
-      return;
-    }
-    refreshInFlight.current = true;
-    if (mounted.current) setDisplayRefreshing(true);
-    const timestamps = [];
-    try {
-    const read = (path, setter) => {
-      const resource = displayResource(`${API}${path}`, 20000);
-      const cached = resource.getSnapshot();
-      if (cached.data != null && mounted.current) setter(cached.data);
-      const promise = !force && cached.updatedAt && Date.now() - cached.updatedAt < 20000 ? Promise.resolve() : resource.refresh(force);
-      return promise.then(() => {
-        const state = resource.getSnapshot();
-        if (mounted.current) setReadStates(previous => ({ ...previous, [path]: state }));
-        if (state.error) throw state.error;
-        if (state.updatedAt) timestamps.push(state.updatedAt);
-        if (mounted.current) setter(state.data);
-      });
-    };
-    const calls = displayReads.map(([path, setter]) => read(path, setter));
-    const results = await Promise.allSettled(calls);
-    const failed = results.filter(result => result.status === "rejected").length;
-    if (mounted.current) {
-      setLoadWarning(failed ? `${failed} DATA REQUEST(S) FAILED - LAST LOADED VALUES MAY BE OUTDATED` : "");
-      if (!failed && timestamps.length === calls.length) setLastUpdated(Math.min(...timestamps));
-      setInitialLoad(false);
-    }
-    } finally {
-      refreshInFlight.current = false;
-      if (mounted.current) setDisplayRefreshing(false);
-      if (refreshQueued.current) {
-        refreshQueued.current = false;
-        if (mounted.current) refresh(true);
-      }
-    }
-  }, [displayReads]);
-
-  useEffect(() => {
-    mounted.current = true;
-    const unsubscribe = displayReads.map(([path, setter]) => {
-      const resource = displayResource(`${API}${path}`, 20000);
-      const applySnapshot = () => {
-        const state = resource.getSnapshot();
-        if (mounted.current) setReadStates(previous => previous[path] === state ? previous : { ...previous, [path]: state });
-        if (mounted.current && state.data != null) setter(state.data);
-      };
-      const off = resource.subscribe(applySnapshot, 20000);
-      applySnapshot();
-      return off;
-    });
-    refresh();
-    const visibleRefresh = () => { if (document.visibilityState !== "hidden") refresh(); };
-    const id = setInterval(visibleRefresh, 20000);
-    document.addEventListener("visibilitychange", visibleRefresh);
-    return () => { mounted.current = false; unsubscribe.forEach(off => off()); clearInterval(id); document.removeEventListener("visibilitychange", visibleRefresh); };
-  }, [refresh, displayReads]);
+  const display = useDisplayBatch(API, displayReads, 20000);
+  const { refresh, states: readStates, refreshing: displayRefreshing, loading: initialLoad, updatedAt: lastUpdated } = display;
+  const loadWarning = display.failed ? `${display.failed} DATA REQUEST(S) FAILED - LAST LOADED VALUES MAY BE OUTDATED` : "";
 
   const livePositions = useMemo(
     () => buildCommandPositions(tradeFloor, positionMonitor),

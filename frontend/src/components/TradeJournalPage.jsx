@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { API } from "../config";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
 import { DataConfidenceStrip } from "./Institutional";
 
@@ -57,6 +58,7 @@ export function TradeJournalView() {
   }, []);
 
   useEffect(() => { load(); return () => controllerRef.current?.abort(); }, [load]);
+  useDisplayRefresh(load);
 
   const summary = journal?.summary || {};
   const counts = journal?.source_counts || {};

@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import axios from "axios";
 import TickerPage, { KronosTickerForecastBox } from "./TickerPage";
+import { DISPLAY_REFRESH_EVENT } from "../hooks/useDisplayRefresh";
 
 let mockTicker = "AAA";
 jest.mock("react-router-dom", () => ({ useParams: () => ({ ticker: mockTicker }), Link: ({ children }) => <span>{children}</span> }));
@@ -47,6 +48,19 @@ test("failed company read is unavailable rather than a fabricated zero score", a
   await act(async () => { root.render(<TickerPage />); await flush(); });
   expect(container.textContent).toContain("Company data unavailable");
   expect(container.textContent).toContain("CASE SCORE—");
+});
+
+test("same-company refresh preserves its profile during loading and failure", async () => {
+  axios.get.mockImplementation(url => Promise.resolve({ data: url === "/api/ticker/AAA" ? { ticker: "AAA", price: 12.5 } : {} }));
+  await act(async () => { root.render(<TickerPage />); await flush(); });
+  let fail;
+  axios.get.mockImplementation(url => url === "/api/ticker/AAA" ? new Promise((resolve, reject) => { fail = reject; }) : Promise.resolve({ data: {} }));
+  await act(async () => { window.dispatchEvent(new Event(DISPLAY_REFRESH_EVENT)); await flush(); });
+  expect(container.textContent).toContain("$12.50");
+  expect(container.textContent).not.toContain("FETCHING INTELLIGENCE");
+  await act(async () => { fail(new Error("offline")); await flush(); });
+  expect(container.textContent).toContain("$12.50");
+  expect(container.textContent).toContain("Prior displayed values may be outdated");
 });
 
 test("company forecasts display real array horizons without inventing a hold cone", async () => {

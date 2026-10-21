@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import useDisplayResource from "../hooks/useDisplayResource";
+import useDisplayRefresh from "../hooks/useDisplayRefresh";
 import { API } from "../config";
 import { CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { CrtShell, Card, Stat, tokens } from "./CrtShell";
@@ -60,6 +61,14 @@ export default function PortfolioManagerPage() {
   const [readErrors, setReadErrors] = useState({});
   const controllers = useRef(new Set());
   const planSequence = useRef(0);
+  const persistedScan = useDisplayResource(`${API}/scan/latest`, 30000);
+  useEffect(() => {
+    const scan = persistedScan.data;
+    const pm = scan?.pm_payload;
+    if (mode === "AUTO" && equity === "" && pm && typeof scan.finished_at === "string" && scan.finished_at && pm.scan_finished_at === scan.finished_at) {
+      setPlan(pm);
+    }
+  }, [persistedScan.data, mode, equity]);
   const backtestAttempted = useRef(false);
   const calendarAttempted = useRef(false);
   const readGet = useCallback(async (url, options = {}) => {
@@ -102,6 +111,7 @@ export default function PortfolioManagerPage() {
   }, [equity, mode, readGet]);
 
   useEffect(() => { load(); }, [load]);
+  useDisplayRefresh(load);
 
   const loadBacktest = useCallback(async () => {
     setBacktestLoading(true);
