@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
@@ -18,6 +18,7 @@ from .db import get_db
 PROVIDER = "case_capital_accountant"
 RESEARCH_ONLY = True
 DECISION_AUTHORITY = "NONE"
+PACKET_VERSION = "ACCOUNTANT_RESEARCH_PACKET_V2"
 
 
 def _now() -> str:
@@ -53,6 +54,13 @@ def _scan_limit() -> int:
         return 36
 
 
+def _max_age_days() -> int:
+    try:
+        return max(1, min(365, int(os.environ.get("ACCOUNTANT_RESEARCH_MAX_AGE_DAYS", "7"))))
+    except (TypeError, ValueError):
+        return 7
+
+
 def _symbol(value: Any) -> str:
     return "".join(ch for ch in str(value or "").upper().strip() if ch.isalnum() or ch in {".", "-"})
 
@@ -63,18 +71,104 @@ def _headers() -> dict[str, str]:
 
 
 def _parse_time(value: Any) -> datetime | None:
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo and parsed.utcoffset() is not None else None
     except (TypeError, ValueError):
         return None
 
 
 def _fresh(snapshot: dict[str, Any]) -> bool:
     fetched = _parse_time(snapshot.get("fetched_at"))
-    return bool(fetched and (datetime.now(timezone.utc) - fetched).total_seconds() <= _cache_ttl())
+    return bool(fetched and 0 <= (datetime.now(timezone.utc) - fetched).total_seconds() <= _cache_ttl())
+
+
+def _acceptance(status: str, reasons: list[str], packet: dict[str, Any] | None = None) -> dict[str, Any]:
+    supplied = (packet or {}).get("acceptance")
+    supplied = supplied if isinstance(supplied, dict) else {}
+    return {
+        "status": status,
+        "accepted": status == "VALIDATED",
+        "reasons": reasons,
+        "source_as_of": supplied.get("source_as_of") if isinstance(supplied.get("source_as_of"), str) else None,
+        "report_as_of": supplied.get("report_as_of") if isinstance(supplied.get("report_as_of"), str) else None,
+    }
+
+
+def _validate_packet(ticker: str, integration: dict[str, Any], packet: dict[str, Any]) -> list[str]:
+    reasons = []
+    acceptance = packet.get("acceptance")
+    acceptance = acceptance if isinstance(acceptance, dict) else {}
+    mode = packet.get("operating_mode")
+    mode = mode if isinstance(mode, dict) else {}
+    integrity = packet.get("source_integrity")
+    integrity = integrity if isinstance(integrity, dict) else {}
+    if packet.get("packet_version") != PACKET_VERSION:
+        reasons.append("unsupported_packet_version")
+    if integration.get("ticker") != ticker or packet.get("ticker") != ticker:
+        reasons.append("ticker_mismatch")
+    if not (acceptance.get("status") == "VALIDATED" and acceptance.get("accepted") is True
+            and isinstance(acceptance.get("reasons"), list)
+            and acceptance["reasons"] == []):
+        reasons.append("producer_not_validated")
+    if packet.get("research_only") is not True or packet.get("execution_allowed") is not False:
+        reasons.append("invalid_research_authority")
+    if mode.get("terminal_handoff_allowed") is not True:
+        reasons.append("terminal_handoff_not_allowed")
+    controls = packet.get("research_controls")
+    for authority in (mode, controls):
+        if isinstance(authority, dict) and (
+            ("execution_allowed" in authority and authority["execution_allowed"] is not False)
+            or ("research_only" in authority and authority["research_only"] is not True)
+        ):
+            reasons.append("conflicting_research_authority")
+    if integrity.get("source_grade") not in ("STRONG", "WATCH"):
+        reasons.append("insufficient_source_grade")
+    now = datetime.now(timezone.utc)
+    timestamps = {
+        "integration_generated_at": integration.get("generated_at"),
+        "packet_generated_at": packet.get("generated_at"),
+        "source_as_of": acceptance.get("source_as_of"),
+        "report_as_of": acceptance.get("report_as_of"),
+    }
+    evidence_present = False
+    for name in ("report", "report_card"):
+        evidence = packet.get(name)
+        if isinstance(evidence, dict) and evidence:
+            evidence_present = True
+            if "ticker" in evidence and evidence["ticker"] != ticker:
+                reasons.append(f"{name}_ticker_mismatch")
+            if "updated_at" in evidence:
+                timestamps[f"{name}_updated_at"] = evidence["updated_at"]
+        elif evidence is not None:
+            reasons.append(f"invalid_{name}")
+    if not evidence_present:
+        reasons.append("missing_research_evidence")
+    for name, value in timestamps.items():
+        parsed = _parse_time(value)
+        # Producer as-of fields have calendar-day precision, not generation time.
+        # Only these fields accept dates; actual event timestamps stay aware.
+        if parsed is None and name in {"source_as_of", "report_as_of"} and isinstance(value, str):
+            try:
+                day = date.fromisoformat(value)
+                parsed = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+            except ValueError:
+                pass
+        if parsed is None:
+            reasons.append(f"{name}_invalid")
+        else:
+            age = (now - parsed).total_seconds()
+            if age < 0:
+                reasons.append(f"{name}_future")
+            elif age > _max_age_days() * 86400:
+                reasons.append(f"{name}_stale")
+    for evidence in (integration, packet, packet.get("report"), packet.get("report_card")):
+        if isinstance(evidence, dict) and "INSUFFICIENT" in str(evidence.get("data_quality_tier", "")).upper():
+            reasons.append("insufficient_data_quality")
+            break
+    return reasons
 
 
 def status() -> dict[str, Any]:
@@ -86,10 +180,12 @@ def status() -> dict[str, Any]:
         "provider": PROVIDER,
         "base_url": _base_url() or None,
         "research_only": RESEARCH_ONLY,
+        "execution_allowed": False,
         "decision_authority": DECISION_AUTHORITY,
         "wired_to_pm_evidence": True,
         "wired_to_execution": False,
         "cache_ttl_seconds": _cache_ttl(),
+        "max_age_days": _max_age_days(),
         "scan_max_tickers": _scan_limit(),
     }
 
@@ -104,6 +200,9 @@ def _compact_packet(ticker: str, integration: dict[str, Any], packet: dict[str, 
         "ticker": ticker,
         "provider": PROVIDER,
         "research_only": RESEARCH_ONLY,
+        "execution_allowed": False,
+        "acceptance": _acceptance("VALIDATED", [], packet),
+        "operating_mode": packet.get("operating_mode"),
         "decision_authority": DECISION_AUTHORITY,
         "fetched_at": _now(),
         "integration": {
@@ -127,10 +226,13 @@ def _compact_packet(ticker: str, integration: dict[str, Any], packet: dict[str, 
             for key in ("filing_type", "period_of_report", "filed_date", "accepted_at", "source_url", "final_verdict")
         } if report_card else None,
         "research_controls": {
-            key: controls.get(key) for key in ("research_only", "execution_allowed", "warnings")
+            key: controls.get(key) for key in (
+                "version", "approval_state", "qa_status", "qa_checks", "qa_failures",
+                "hard_vetoes", "execution_authority", "research_only", "execution_allowed", "warnings",
+            )
         } if controls else {},
         "source_integrity": {
-            key: integrity.get(key) for key in ("ok", "quality", "warnings", "generated_at")
+            key: integrity.get(key) for key in ("source_grade", "ok", "quality", "warnings", "generated_at")
         } if integrity else {},
         "provenance": {
             "packet_version": packet.get("packet_version"),
@@ -156,44 +258,61 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> tuple[dict[str, Any
 
 
 async def ticker_research(ticker: str, *, force_refresh: bool = False) -> dict[str, Any]:
-    """Return a compact Accountant research snapshot, using terminal cache first."""
+    """Validate current producer evidence; cached evidence is diagnostic only.
+
+    force_refresh remains API-compatible, but every request checks readiness and
+    the packet so cache age cannot hide revoked handoff or authentication failures.
+    """
     symbol = _symbol(ticker)
     base = {
         "ok": False,
         "ticker": symbol,
         "provider": PROVIDER,
         "research_only": RESEARCH_ONLY,
+        "execution_allowed": False,
+        "acceptance": _acceptance("UNAVAILABLE", ["not_loaded"]),
         "decision_authority": DECISION_AUTHORITY,
     }
     if not symbol:
-        return {**base, "reason": "missing_symbol"}
+        return {**base, "reason": "missing_symbol", "acceptance": _acceptance("UNAVAILABLE", ["missing_symbol"])}
     config = status()
     if not config["enabled"]:
-        return {**base, "reason": "accountant_adapter_disabled"}
+        return {**base, "reason": "accountant_adapter_disabled", "acceptance": _acceptance("UNAVAILABLE", ["accountant_adapter_disabled"])}
     if not config["configured"]:
-        return {**base, "reason": "missing_accountant_api_base_url"}
+        return {**base, "reason": "missing_accountant_api_base_url", "acceptance": _acceptance("UNAVAILABLE", ["missing_accountant_api_base_url"])}
 
     db = get_db()
     cached = await db.accountant_research_snapshots.find_one({"ticker": symbol}, {"_id": 0}) or {}
-    if cached and not force_refresh and _fresh(cached):
-        return {**cached, "ok": True, "cache_state": "fresh"}
+    def reject(reason: str, *, packet: dict[str, Any] | None = None, reasons: list[str] | None = None) -> dict[str, Any]:
+        result = {
+            **base, "reason": reason,
+            "acceptance": _acceptance("UNVALIDATED" if packet is not None else "UNAVAILABLE", reasons or [reason], packet),
+            "cache_state": "rejected",
+        }
+        if cached:
+            # Never expose a cached success or acceptance through diagnostics.
+            result["stale_diagnostics"] = {
+                **cached, "ok": False, "research_only": True, "execution_allowed": False,
+                "decision_authority": DECISION_AUTHORITY,
+                "acceptance": _acceptance("UNAVAILABLE", [reason]),
+            }
+        return result
 
     async with httpx.AsyncClient(timeout=_timeout(), headers=_headers(), follow_redirects=True) as client:
         integration, integration_error = await _get_json(client, f"/api/integration/accountant/{symbol}")
         if integration is None:
-            fallback = {**base, "reason": f"accountant_integration_{integration_error or 'unavailable'}"}
-            if cached:
-                return {**cached, "ok": True, "cache_state": "stale_fallback", "refresh_reason": fallback["reason"]}
-            return fallback
-        packet: dict[str, Any] | None = None
-        packet_error = None
-        if integration.get("report_available") or integration.get("report_card_available"):
-            packet, packet_error = await _get_json(client, f"/api/research-packets/{symbol}")
+            return reject(f"accountant_integration_{integration_error or 'unavailable'}")
+        if integration.get("ready_for_readonly_integration") is not True:
+            return reject("accountant_not_ready")
+        packet, packet_error = await _get_json(client, f"/api/research-packets/{symbol}")
+        if packet is None:
+            return reject(f"accountant_packet_{packet_error or 'unavailable'}")
+        reasons = _validate_packet(symbol, integration, packet)
+        if reasons:
+            return reject(reasons[0], packet=packet, reasons=reasons)
         snapshot = _compact_packet(symbol, integration, packet)
         snapshot["ok"] = True
         snapshot["cache_state"] = "refreshed"
-        if packet_error:
-            snapshot["packet_reason"] = packet_error
         await db.accountant_research_snapshots.update_one(
             {"ticker": symbol},
             {"$set": snapshot, "$setOnInsert": {"created_at": _now()}},
@@ -218,6 +337,9 @@ async def enrich_scan_candidates(rows: list[dict[str, Any]]) -> dict[str, Any]:
     a hidden gate or trading instruction.
     """
     config = status()
+    for row in rows:
+        if isinstance(row, dict):
+            row.pop("accountant_research", None)
     eligible = [row for row in rows if isinstance(row, dict) and _symbol(row.get("ticker")) and row.get("pm_routable") and not row.get("read_only")]
     if not config["ok"]:
         return {"ok": False, "reason": "accountant_not_configured", "requested": 0, "enriched": 0, "status": config}
@@ -248,8 +370,10 @@ async def enrich_scan_candidates(rows: list[dict[str, Any]]) -> dict[str, Any]:
         else:
             errors[symbol] = str(payload.get("reason") or "unavailable")
     for row in rows:
+        if not isinstance(row, dict):
+            continue
         snapshot = snapshots.get(_symbol(row.get("ticker")))
-        if snapshot:
+        if snapshot and row.get("pm_routable") and not row.get("read_only"):
             row["accountant_research"] = snapshot
     return {
         "ok": True,
