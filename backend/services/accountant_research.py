@@ -19,6 +19,7 @@ PROVIDER = "case_capital_accountant"
 RESEARCH_ONLY = True
 DECISION_AUTHORITY = "NONE"
 PACKET_VERSION = "ACCOUNTANT_RESEARCH_PACKET_V2"
+RESEARCH_BUDGET_SECONDS = 15.0
 
 
 def _now() -> str:
@@ -187,6 +188,7 @@ def status() -> dict[str, Any]:
         "cache_ttl_seconds": _cache_ttl(),
         "max_age_days": _max_age_days(),
         "scan_max_tickers": _scan_limit(),
+        "research_budget_seconds": RESEARCH_BUDGET_SECONDS,
     }
 
 
@@ -258,6 +260,22 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> tuple[dict[str, Any
 
 
 async def ticker_research(ticker: str, *, force_refresh: bool = False) -> dict[str, Any]:
+    """Bound cache access, both HTTP requests and persistence by one deadline."""
+    try:
+        return await asyncio.wait_for(
+            _ticker_research(ticker, force_refresh=force_refresh), timeout=RESEARCH_BUDGET_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "ok": False, "ticker": _symbol(ticker), "provider": PROVIDER,
+            "reason": "accountant_research_timeout", "cache_state": "rejected",
+            "research_only": RESEARCH_ONLY, "execution_allowed": False,
+            "decision_authority": DECISION_AUTHORITY,
+            "acceptance": _acceptance("UNAVAILABLE", ["accountant_research_timeout"]),
+        }
+
+
+async def _ticker_research(ticker: str, *, force_refresh: bool = False) -> dict[str, Any]:
     """Validate current producer evidence; cached evidence is diagnostic only.
 
     force_refresh remains API-compatible, but every request checks readiness and
@@ -358,7 +376,20 @@ async def enrich_scan_candidates(rows: list[dict[str, Any]]) -> dict[str, Any]:
         async with semaphore:
             return symbol, await ticker_research(symbol)
 
-    results = await asyncio.gather(*(load(symbol) for symbol in selected), return_exceptions=True)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(load(symbol) for symbol in selected), return_exceptions=True),
+            timeout=RESEARCH_BUDGET_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # gather cancellation drains both active loads and semaphore waiters.
+        # Do not attach partial/cached evidence when the batch missed its budget.
+        return {
+            "ok": False, "reason": "accountant_research_timeout",
+            "requested": len(selected), "enriched": 0, "unavailable": len(selected),
+            "tickers": [], "errors": {symbol: "accountant_research_timeout" for symbol in selected},
+            "research_only": RESEARCH_ONLY, "decision_authority": DECISION_AUTHORITY,
+        }
     snapshots: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     for item in results:
