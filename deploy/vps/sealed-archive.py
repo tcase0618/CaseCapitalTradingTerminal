@@ -15,7 +15,6 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from ctypes import wintypes
 
-import paramiko
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
@@ -170,6 +169,9 @@ def main():
         return
     if not args.host or not args.hostkey_sha256 or not args.remote_file:
         raise RuntimeError('Archive host, pinned fingerprint, and source files required')
+    # Only remote collection needs SSH; local recovery must work without it.
+    import paramiko
+
     class PinnedPolicy(paramiko.MissingHostKeyPolicy):
         def missing_host_key(self, client, hostname, hostkey):
             fingerprint = base64.b64encode(hashlib.sha256(hostkey.asbytes()).digest()).decode().rstrip('=')

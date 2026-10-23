@@ -1,3 +1,4 @@
+import builtins
 import hashlib
 import importlib.util
 import io
@@ -8,10 +9,20 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def no_ssh_transport(monkeypatch):
+    original_import = builtins.__import__
+
+    def without_ssh(name, *args, **kwargs):
+        if name == 'paramiko' or name.startswith('paramiko.'):
+            raise ImportError('SSH transport is deliberately unavailable in recovery tests')
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', without_ssh)
+
+
 @pytest.mark.parametrize('damage', ['ciphertext', 'tag', 'key', 'checksum', 'size', 'aad', 'truncated', 'header'])
 def test_invalid_archive_never_opens_plaintext_output(tmp_path, monkeypatch, damage):
-    pytest.importorskip('paramiko')
-    pytest.importorskip('cryptography')
     from cryptography.exceptions import InvalidTag
     path = Path(__file__).resolve().parents[2] / 'deploy/vps/sealed-archive.py'
     spec = importlib.util.spec_from_file_location('sealed_archive', path)
@@ -65,8 +76,6 @@ def test_invalid_archive_never_opens_plaintext_output(tmp_path, monkeypatch, dam
 @pytest.mark.parametrize('repetitions', [0, 1000, 100000])
 @pytest.mark.parametrize('source_changes', [False, True])
 def test_sealed_archive_recovers_and_rejects_tampering(tmp_path, monkeypatch, repetitions, source_changes):
-    pytest.importorskip('paramiko')
-    pytest.importorskip('cryptography')
     path = Path(__file__).resolve().parents[2] / 'deploy/vps/sealed-archive.py'
     spec = importlib.util.spec_from_file_location('sealed_archive', path)
     module = importlib.util.module_from_spec(spec)
