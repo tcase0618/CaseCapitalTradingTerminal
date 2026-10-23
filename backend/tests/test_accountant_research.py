@@ -43,6 +43,104 @@ def test_status_is_explicitly_research_only(monkeypatch):
     assert status["wired_to_execution"] is False
 
 
+@pytest.mark.parametrize('phase', ['cache', 'integration', 'packet', 'persist'])
+def test_total_research_deadline_rejects_evidence_and_cancels_io(monkeypatch, bridge, phase):
+    monkeypatch.setattr(accountant_research, 'RESEARCH_BUDGET_SECONDS', 0.02, raising=False)
+    cancelled = []
+
+    async def hanging(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(phase)
+
+    original_get = accountant_research._get_json
+
+    async def get_json(client, path):
+        if (phase == 'integration' and '/integration/' in path) or (phase == 'packet' and '/research-packets/' in path):
+            return await hanging()
+        return await original_get(client, path)
+
+    # Even a previously accepted cache row cannot authorize a timed-out request.
+    bridge.store.rows['AAPL'] = {'ticker': 'AAPL', 'ok': True, 'acceptance': {'accepted': True}}
+    monkeypatch.setattr(accountant_research, '_get_json', get_json)
+    if phase == 'cache':
+        monkeypatch.setattr(bridge.store, 'find_one', hanging)
+    if phase == 'persist':
+        monkeypatch.setattr(bridge.store, 'update_one', hanging)
+
+    async def run():
+        return await asyncio.wait_for(accountant_research.ticker_research('AAPL'), timeout=0.5)
+
+    result = asyncio.run(run())
+    assert result['ok'] is False
+    assert result['reason'] == 'accountant_research_timeout'
+    assert result['acceptance']['accepted'] is False
+    assert result['research_only'] is True
+    assert result['execution_allowed'] is False
+    assert result['decision_authority'] == 'NONE'
+    assert cancelled == [phase]
+
+
+def test_enrichment_has_one_budget_for_entire_batch(monkeypatch):
+    monkeypatch.setenv('ACCOUNTANT_API_BASE_URL', 'http://accountant.invalid')
+    monkeypatch.setenv('ACCOUNTANT_RESEARCH_ENABLED', 'true')
+    monkeypatch.setattr(accountant_research, 'RESEARCH_BUDGET_SECONDS', 0.02, raising=False)
+    active = set()
+
+    async def delayed(ticker):
+        active.add(ticker)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active.remove(ticker)
+
+    monkeypatch.setattr(accountant_research, 'ticker_research', delayed)
+    rows = [{'ticker': f'T{n}', 'pm_routable': True, 'accountant_research': {'ok': True}} for n in range(36)]
+
+    async def run():
+        result = await asyncio.wait_for(accountant_research.enrich_scan_candidates(rows), timeout=0.5)
+        assert not active
+        return result
+
+    result = asyncio.run(run())
+    assert result['ok'] is False
+    assert result['reason'] == 'accountant_research_timeout'
+    assert result['requested'] == 36
+    assert result['enriched'] == 0
+    assert result['unavailable'] == 36
+    assert all('accountant_research' not in row for row in rows)
+
+
+def test_two_http_calls_share_one_deadline(monkeypatch, bridge):
+    # Leave ample timer-resolution margin on Windows while keeping each
+    # individual request below the shared budget and their sum above it.
+    monkeypatch.setattr(accountant_research, 'RESEARCH_BUDGET_SECONDS', 0.3)
+    original_get = accountant_research._get_json
+    calls = []
+
+    async def slow_get(client, path):
+        calls.append(path)
+        await asyncio.sleep(0.2)
+        return await original_get(client, path)
+
+    monkeypatch.setattr(accountant_research, '_get_json', slow_get)
+    result = asyncio.run(accountant_research.ticker_research('AAPL'))
+    assert len(calls) == 2
+    assert result['reason'] == 'accountant_research_timeout'
+    assert result['acceptance']['accepted'] is False
+    assert not bridge.store.rows
+
+
+def test_caller_cancellation_is_not_converted_to_research_result(monkeypatch, bridge):
+    async def cancelled(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(bridge.store, 'find_one', cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(accountant_research.ticker_research('AAPL'))
+
+
 def test_ticker_research_compacts_packet_and_never_keeps_raw_facts(monkeypatch):
     monkeypatch.setenv("ACCOUNTANT_API_BASE_URL", "http://accountant.internal")
     store = _Snapshots()
