@@ -144,11 +144,23 @@ def _authorized_request(request: Request) -> bool:
     scheme, _, token = auth.partition(" ")
     if scheme.lower() != "bearer" or not token:
         token = request.headers.get("x-terminal-session", "").strip()
-    return bool(token and (token in OPERATOR_SESSIONS or _valid_signed_operator_token(token)))
+    # Tokens minted during unconfigured local setup cannot gain authority when
+    # an access code or sensitive runtime is subsequently enabled.
+    return bool(token and (
+        _valid_signed_operator_token(token)
+        or (not _auth_required() and token in OPERATOR_SESSIONS)
+    ))
 
 
 def _auth_required() -> bool:
-    return _cloud_mode() or _operator_configured()
+    # Match scheduler startup's enabled-by-default policy. Local deployment is
+    # not an authentication exemption when it can schedule or execute work.
+    scheduler_enabled = os.environ.get("ENABLE_SCHEDULER", "true").strip().lower() not in {"0", "false", "no", "off"}
+    execution_enabled = any(
+        os.environ.get(flag, "false").strip().lower() in {"1", "true", "yes", "on"}
+        for flag in ("ENABLE_TRADE_EXECUTION", "ENABLE_OPTIONS_EXECUTION")
+    )
+    return _cloud_mode() or _operator_configured() or scheduler_enabled or execution_enabled
 
 
 def _client_key(request: Request) -> str:
@@ -171,7 +183,7 @@ async def cloud_operator_write_gate(request: Request, call_next):
     if (
         _auth_required()
         and request.url.path not in AUTH_EXEMPT_PATHS
-        and not _authorized_request(request)
+        and (not _operator_configured() or not _authorized_request(request))
     ):
         return JSONResponse(
             {"ok": False, "detail": "Operator session required. Preview mode is read-only."},
@@ -209,7 +221,7 @@ async def auth_config():
     return {
         "ok": True,
         "cloud": _cloud_mode(),
-        "operator_login_enabled": _operator_configured() or not _cloud_mode(),
+        "operator_login_enabled": _operator_configured() or not _auth_required(),
         "preview_enabled": _preview_enabled(),
         "setup_enabled": not _cloud_mode(),
     }
@@ -229,7 +241,7 @@ async def auth_login(request: Request, payload: AuthLoginRequest):
     if not code:
         raise HTTPException(status_code=400, detail="Access code required.")
     expected = _operator_hash()
-    if not expected and _cloud_mode():
+    if not expected and _auth_required():
         raise HTTPException(status_code=403, detail="Operator access code is not configured on the server.")
     attempted = hashlib.sha256(f"case-capital:{code}".encode("utf-8")).hexdigest()
     if expected and not hmac.compare_digest(attempted, expected):
@@ -2295,8 +2307,8 @@ def _cors_origins() -> list[str]:
     configured = [item.strip().rstrip("/") for item in os.environ.get("CORS_ORIGINS", "").split(",") if item.strip()]
     if configured:
         return configured
-    # Wildcard origins cannot safely be combined with credentials in cloud mode.
-    return [] if _cloud_mode() else ["*"]
+    # Sensitive local runtimes need the same explicit origin policy as cloud.
+    return [] if _auth_required() else ["*"]
 
 
 app.add_middleware(
