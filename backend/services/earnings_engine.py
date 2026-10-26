@@ -12,6 +12,7 @@ configured calendar providers. For each ticker, computes a 5-95% Beat Probabilit
 Final blend = 60% model + 40% options-flow direction (48h pre-earnings).
 
 Strategy recommendation:
+  • Unknown historical IV → AVOID options; no cheap/rich inference
   • Beat >70 + cheap IV   → LONG CALL
   • Beat >70 + rich IV    → CALL SPREAD (sell premium)
   • Beat 45-70            → AVOID
@@ -231,9 +232,14 @@ def _compute_beat_probability(ticker_data: dict[str, Any]) -> dict[str, Any]:
     score = max(5.0, min(95.0, score))
 
     # Strategy
-    iv_rank = ticker_data.get("iv_rank")
-    iv_cheap = iv_rank is None or iv_rank < 35
-    if score >= 70 and iv_cheap:
+    raw_rank = ticker_data.get("iv_rank")
+    iv_rank = _num(raw_rank)
+    iv_available = (not isinstance(raw_rank, bool) and iv_rank is not None
+                    and math.isfinite(iv_rank) and 0 <= iv_rank <= 100)
+    iv_cheap = iv_available and iv_rank < 35
+    if not iv_available:
+        strat = "AVOID"
+    elif score >= 70 and iv_cheap:
         strat = "LONG CALL"
     elif score >= 70:
         strat = "CALL SPREAD (sell rich IV)"
@@ -246,6 +252,7 @@ def _compute_beat_probability(ticker_data: dict[str, Any]) -> dict[str, Any]:
         "components": comp,
         "strategy": strat,
         "iv_cheap": iv_cheap,
+        "iv_evidence": "AVAILABLE" if iv_available else "UNKNOWN",
     }
 
 

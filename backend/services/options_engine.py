@@ -687,8 +687,12 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     has_bullish_anchor = any([is_insider, is_contract, is_congress, is_flow, is_squeeze, is_earnings])
 
     # Rule order matters.
-    # Unknown rank is neutral for existing selection rules, not a new gate.
-    if is_earnings and iv_rank is not None and iv_rank > 80:
+    # Unknown history is not a fabricated rank. Observed elevated absolute IV
+    # can still require the existing conservative earnings lane.
+    elevated_absolute_iv = iv_rank is None and iv_history.absolute_iv_label(
+        (chain or {}).get("atm_iv")
+    ) in {"HIGH", "VERY_HIGH"}
+    if is_earnings and ((iv_rank is not None and iv_rank > 80) or elevated_absolute_iv):
         if has_bullish_anchor and score >= 55 and rr >= 1.5:
             return {"strategy": "LONG_CALL_EVENT_SCOUT", "direction": "BULL",
                     "reason": "High-IV near-event setup is allowed only as a capped paper scout after Alpaca liquidity clears"}
@@ -869,6 +873,13 @@ def assess_iv_crush_risk(stock: dict, chain: dict | None) -> dict:
     is_earnings = "upcoming_earnings" in (stock.get("signals") or [])
 
     if iv_rank is None:
+        absolute_label = iv_history.absolute_iv_label((chain or {}).get("atm_iv"))
+        if is_earnings and days <= 14 and absolute_label in {"HIGH", "VERY_HIGH"}:
+            return {
+                "crush_risk": "SEVERE" if days < 7 and absolute_label == "VERY_HIGH" else "HIGH",
+                "recommendation": "Elevated observed absolute IV ahead of earnings; historical rank is unavailable. Avoid uncapped premium exposure.",
+                "iv_evidence": "ABSOLUTE_IV", "absolute_iv_label": absolute_label,
+            }
         return {"crush_risk": "UNKNOWN",
                 "recommendation": "Historical ATM IV rank is unavailable; IV crush risk is unassessed."}
     if is_earnings and days < 7 and iv_rank > 65:
