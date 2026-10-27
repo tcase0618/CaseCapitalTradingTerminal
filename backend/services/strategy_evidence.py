@@ -215,12 +215,24 @@ async def _refresh(*, limit: int, lookback_days: int, max_symbols: int) -> dict:
     episode_rows, exclusions = episodes(observations[:limit])
     # First retain persisted resolved facts. Provider outages must not erase them.
     saved_map = {}
+    attempt_map = {}
     episode_ids = [row["episode_id"] for row in episode_rows]
     for offset in range(0, len(episode_ids), 200):
         saved = await db.strategy_evidence_outcomes.find({"version": VERSION, "episode_id": {"$in": episode_ids[offset:offset + 200]}}, {"_id": 0}).to_list(None)
         saved_map.update({r["episode_id"]: r for r in saved})
+        attempts = await db.strategy_evidence_attempts.find(
+            {"version": VERSION, "episode_id": {"$in": episode_ids[offset:offset + 200]}}, {"_id": 0},
+        ).to_list(None)
+        attempt_map.update({r["episode_id"]: r for r in attempts})
     due = [r for r in episode_rows if r["episode_id"] not in saved_map and parse_time(r["target_at"]) <= now]
-    symbols = sorted(set(r["ticker"] for r in due))[:max(1, min(500, max_symbols))]
+    # Never-attempted work first, then least-recently attempted. Oldest target
+    # breaks ties, so missing early-alphabet symbols cannot monopolize retries.
+    ordered_due = sorted(due, key=lambda row: (
+        parse_time(attempt_map.get(row["episode_id"], {}).get("last_attempted_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        parse_time(row["target_at"]), row["ticker"], row["episode_id"],
+    ))
+    symbols = list(dict.fromkeys(row["ticker"] for row in ordered_due))[:max(1, min(500, max_symbols))]
     start = (cutoff - timedelta(days=10)).date().isoformat()
     end = now.date().isoformat()
     sem = asyncio.Semaphore(3)
@@ -244,6 +256,15 @@ async def _refresh(*, limit: int, lookback_days: int, max_symbols: int) -> dict:
             if outcome["status"] == "RESOLVED":
                 outcome["resolved_at"] = now.isoformat()
                 await db.strategy_evidence_outcomes.update_one({"episode_id": episode["episode_id"]}, {"$setOnInsert": outcome}, upsert=True)
+            if episode["ticker"] in symbols and parse_time(episode["target_at"]) <= now:
+                # Retrieval attempts are separate from immutable resolved facts.
+                # Missing data is durable evidence, never a fabricated final return.
+                await db.strategy_evidence_attempts.update_one(
+                    {"version": VERSION, "episode_id": episode["episode_id"]},
+                    {"$set": {**outcome, "last_attempted_at": now.isoformat(),
+                              "provider_errors": {symbol: errors[symbol] for symbol in {episode["ticker"], "SPY"} if symbol in errors}}},
+                    upsert=True,
+                )
         resolved.append(outcome)
     groups = defaultdict(list)
     for row in resolved:
@@ -254,6 +275,8 @@ async def _refresh(*, limit: int, lookback_days: int, max_symbols: int) -> dict:
         "generated_at": now.isoformat(), "observations": len(observations[:limit]),
         "truncated": truncated, "lookback_days": lookback_days,
         "exclusions": exclusions, "provider_errors": errors, "provider_symbols": len(symbols),
+        "provider_deferred_symbols": len({row["ticker"] for row in due} - set(symbols)),
+        "provider_deferred_episodes": sum(row["status"] == "DEFERRED_PROVIDER_BUDGET" for row in resolved),
         "scorecards": [{"strategy_id": strategy, "horizon_sessions": horizon, "scoring_version": version, "mode": mode, **scorecard(rows)}
                        for (strategy, horizon, version, mode), rows in sorted(groups.items())],
         "limitations": [ASSET_LIMITATION,

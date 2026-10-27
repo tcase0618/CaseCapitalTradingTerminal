@@ -618,6 +618,7 @@ def doc_key(collection: str, doc: dict[str, Any]) -> str:
         "kronos_candle_predictions": ("prediction_id",),
         "kronos_candle_outcomes": ("prediction_id",),
         "kronos_pm_disagreements": ("audit_id",),
+        "strategy_evidence_attempts": ("version", "episode_id"),
         "pm_company_observations": ("observation_id",),
         "pm_decision_ledger": ("decision_id",),
         "pm_decision_outcomes": ("outcome_id",),
