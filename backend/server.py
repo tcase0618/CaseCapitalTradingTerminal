@@ -2829,7 +2829,7 @@ async def options_desk_auto_execute_latest(limit: int | None = None):
     allowed, guard = await execution_safety.add_risk_allowed("api_options_auto_execute")
     if not allowed:
         return {"ok": False, "reason": "safety_halt", "guard": guard, "submitted": [], "skipped": []}
-    return await options_desk.auto_execute_latest(limit=limit)
+    return await options_desk.refresh_and_auto_execute_latest(limit=limit)
 
 
 class OptionsDeskClosePayload(BaseModel):
