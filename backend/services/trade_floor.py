@@ -767,6 +767,12 @@ async def close_position(ticker: str) -> dict[str, Any] | None:
 
 # ─────── Regime gate ───────
 async def regime_status() -> dict[str, Any]:
+    from . import market_regime
+
+    return await market_regime.resolve(_compute_regime_status)
+
+
+async def _compute_regime_status(*, force: bool = False) -> dict[str, Any]:
     """Four-weather market snapshot.
 
     GREEN: SPY above 200d EMA.
@@ -777,7 +783,8 @@ async def regime_status() -> dict[str, Any]:
     """
     try:
         from . import pricer
-        values = [float(value) for _, value in sorted((await pricer.get_history("SPY", days=220)).items()) if value]
+        from . import market_regime
+        values = market_regime.history_values(await pricer.get_history("SPY", days=220, force=force))
     except Exception:
         values = []
     if len(values) < 2:
