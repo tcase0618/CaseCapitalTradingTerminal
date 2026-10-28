@@ -669,16 +669,8 @@ def start_scheduler():
         try:
             from . import trade_floor
             r = await trade_floor.regime_status()
-            if r.get("halt_new_entries") and os.environ.get("TELEGRAM_CHAT_ID"):
-                await telegram_service.send_message(
-                    f"<b>CASE CAPITAL | REGIME GATE</b>\n"
-                    f"<code>{datetime.now(ET).strftime('%b %d %H:%M ET')}</code>\n\n"
-                    f"Status: <b>HALT NEW ENTRIES</b>\n"
-                    f"VIX: <b>{r['vix']}</b>\n"
-                    f"SPY: <b>{r['spy_last']}</b> vs EMA200 <b>{r['spy_ema200']}</b>\n"
-                    f"Action: PM blocks new risk until regime clears.",
-                    chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
-                )
+            from . import market_regime
+            await market_regime.notify_transition(r)
         except Exception as e:
             logger.warning("regime job: %s", e)
     _scheduler.add_job(
