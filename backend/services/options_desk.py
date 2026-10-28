@@ -1656,7 +1656,10 @@ async def _symbol_already_exposed(symbol: str) -> dict[str, Any]:
     return {"blocked": False}
 
 
-async def execute(candidate_id: str, qty: int | None = None, limit_price: float | None = None) -> dict[str, Any]:
+async def execute(
+    candidate_id: str, qty: int | None = None, limit_price: float | None = None,
+    *, expected_cycle_id: str | None = None,
+) -> dict[str, Any]:
     from . import execution_gate, safety
 
     db = get_db()
@@ -1666,6 +1669,10 @@ async def execute(candidate_id: str, qty: int | None = None, limit_price: float 
     ticket = await db.options_desk_candidates.find_one({"candidate_id": candidate_id}, {"_id": 0})
     if not ticket:
         return {"ok": False, "reason": "candidate_not_found"}
+    cycle_id = ticket.get("cycle_id")
+    if (not isinstance(cycle_id, str) or not cycle_id.strip()
+            or (expected_cycle_id is not None and cycle_id != expected_cycle_id)):
+        return {"ok": False, "reason": "candidate_pm_cycle_missing_or_changed", "candidate": ticket}
     gate = await execution_gate.check(scope="options", ticker=ticket.get("ticker"), record=True)
     if not gate.get("ok"):
         return {"ok": False, "reason": "execution_gate_blocked", "gate": gate, "candidate": ticket}
@@ -1816,6 +1823,8 @@ async def auto_execute_latest(
     The Options Desk does not re-decide the trade. It submits PM-ready tickets
     and enforces only mechanical paper execution constraints already present in
     execute(): risk budget, valid order fields, and Alpaca acceptance.
+    Callers must supply a cycle-attributed candidate set; cached standalone
+    tickets never trigger an independent PM rebuild here.
     """
     lock = await _acquire_auto_execute_lock()
     if not lock.get("ok"):
@@ -1873,25 +1882,16 @@ async def _auto_execute_latest_locked(
             "skipped": [],
             "summary": {},
         }
-    db = get_db()
-    rows = await db.options_desk_candidates.find({}, {"_id": 0}).sort("pm_score", -1).to_list(100)
-    if candidate_set is not None:
-        pass
-    elif rows and not await _cached_candidates_stale(rows):
-        rows = [_normalize_candidate_execution_state(x) for x in rows]
-        candidate_set = {
-            "generated_at": _now(),
-            "scan_finished_at": _candidate_scan_finished_at(rows),
-            "options_equity_basis": OPTIONS_EQUITY,
-            "options_data_policy": _options_data_policy(
-                sum(1 for x in rows if x.get("options_live_refresh_attempted"))
-            ),
-            "summary": _summary(rows),
-            "candidates": rows,
+    cycle_id = candidate_set.get("cycle_id") if isinstance(candidate_set, dict) else None
+    candidates = candidate_set.get("candidates") if isinstance(candidate_set, dict) else None
+    if (not isinstance(cycle_id, str) or not cycle_id.strip() or not isinstance(candidates, list)
+            or any(not isinstance(row, dict) or row.get("cycle_id") != cycle_id for row in candidates)):
+        return {
+            "ok": False, "auto": True, "reason": "coordinated_pm_candidate_set_required",
+            "submitted": [], "skipped": [], "summary": {},
         }
-    else:
-        candidate_set = await build_candidates(limit=100, persist=True)
-    ready = [c for c in candidate_set.get("candidates", []) if c.get("manual_fire_ready")]
+    db = get_db()
+    ready = [c for c in candidates if c.get("manual_fire_ready")]
     max_orders = int(limit or AUTO_MAX_ORDERS_PER_SCAN)
     submitted_today = await _auto_orders_submitted_today()
     remaining_today = max(0, AUTO_MAX_ORDERS_PER_DAY - submitted_today)
@@ -1923,7 +1923,7 @@ async def _auto_execute_latest_locked(
             skipped.append({"ticker": ticket.get("ticker"), "symbol": symbol, "reason": "options_auto_execute_lock_lost"})
             lock_lost = True
             break
-        result = await execute(ticket["candidate_id"])
+        result = await execute(ticket["candidate_id"], expected_cycle_id=cycle_id)
         if result.get("ok"):
             await db.options_desk_orders.update_one(
                 {"order.id": result.get("order", {}).get("id")},
