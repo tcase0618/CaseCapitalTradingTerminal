@@ -10,7 +10,7 @@ services:
       POSTGRES_ENABLED: "true"
       CORS_ORIGINS: http://localhost:3000,http://localhost:8080
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
 
   frontend:
     build:

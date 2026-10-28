@@ -41,7 +41,7 @@ async def test_refresh_persists_once_and_provider_outage_preserves_outcomes(monk
     now = datetime.now(timezone.utc)
     observed = (now - timedelta(days=8)).replace(hour=14, minute=0, second=0, microsecond=0)
     db = SimpleNamespace(pm_company_observations=Collection([mark(at=observed.isoformat())]),
-                         strategy_evidence_outcomes=Collection(), bot_state=Collection())
+                         strategy_evidence_outcomes=Collection(), strategy_evidence_attempts=Collection(), bot_state=Collection())
     monkeypatch.setattr(evidence, 'get_db', lambda: db)
     async def history(*args):
         return {(now - timedelta(days=d)).date().isoformat(): 110 for d in range(35)}
