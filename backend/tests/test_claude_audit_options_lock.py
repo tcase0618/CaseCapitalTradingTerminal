@@ -150,7 +150,8 @@ async def test_lost_session_blocks_order_submission(monkeypatch, sessions):
     lock = await options_desk._acquire_auto_execute_lock()
     sessions[1][0].fail_query = True
     result = await options_desk._auto_execute_latest_locked(lease=lock['lease'], candidate_set={
-        'candidates': [{'candidate_id': 'offline', 'ticker': 'TEST', 'manual_fire_ready': True,
+        'cycle_id': 'offline-cycle',
+        'candidates': [{'candidate_id': 'offline', 'ticker': 'TEST', 'manual_fire_ready': True, 'cycle_id': 'offline-cycle',
                         'instrument': {'symbol': 'TEST261218C00100000'}}]})
     assert not result['submitted'] and not result['ok']
     assert result['skipped'][0]['reason'] == 'options_auto_execute_lock_lost'
