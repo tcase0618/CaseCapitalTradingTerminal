@@ -18,6 +18,7 @@ import httpx
 
 from .db import get_db, log_activity, stamped
 from .options_policy import get_policy
+from . import iv_history
 
 logger = logging.getLogger(__name__)
 
@@ -845,8 +846,24 @@ def _add_block(blocked: list[str], reason: str) -> None:
 
 
 def _historical_iv_rank(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     rank = _safe_float(value, None)
     return rank if rank is not None and 0 <= rank <= 100 else None
+
+
+def _unknown_rank_elevated_iv(packet: dict[str, Any]) -> bool:
+    if _historical_iv_rank(packet.get("iv_rank")) is not None:
+        return False
+    # Absolute IV is observed risk evidence, never a substitute historical rank.
+    return (iv_history.absolute_iv_label(packet.get("atm_iv")) in {"HIGH", "VERY_HIGH"}
+            or packet.get("absolute_iv_label") in {"HIGH", "VERY_HIGH"})
+
+
+def _ticket_iv_blocked(ticket: dict[str, Any]) -> bool:
+    return any(_unknown_rank_elevated_iv(packet) for packet in (
+        ticket, ticket.get("research_options") or {}, ticket.get("execution_options") or {},
+    ))
 
 
 def _legacy_strategy_lane(row: dict[str, Any], instrument: dict[str, Any]) -> dict[str, Any]:
@@ -914,6 +931,8 @@ def _normalize_candidate_execution_state(ticket: dict[str, Any]) -> dict[str, An
     )
 
     if route in {"OPTION", "BOTH"}:
+        if _ticket_iv_blocked(row):
+            _add_block(blocked, "unknown_rank_elevated_absolute_iv")
         if not OPTIONS_EXECUTION_ENABLED:
             _add_block(blocked, "options execution is disabled")
         if not paper_only():
@@ -975,8 +994,10 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
     if (opts.get("strategy") == "AVOID_OPTIONS" and not options_intent) or pm_row.get("option_view") == "STOCK_ONLY":
         return "EQUITY", ["Options engine says avoid options or hold stock instead."]
     iv_rank = _historical_iv_rank(opts.get("iv_rank"))
+    if _unknown_rank_elevated_iv(opts):
+        return "EQUITY", ["Historical IV rank unavailable and observed absolute IV elevated; no premium buy approved."]
     if iv_rank is None:
-        reasons.append("Historical IV rank unavailable; no favorable IV evidence inferred and no additional routing block applied.")
+        reasons.append("Historical IV rank unavailable; no favorable IV evidence inferred.")
     rr = float(pm_row.get("risk_reward") or 0)
     score = float(pm_row.get("pm_score") or 0)
     strategy = str(opts.get("strategy") or "").upper()
@@ -1006,6 +1027,8 @@ def _route(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> tuple[str, list[
 
 def _pm_can_consider_options(pm_row: dict[str, Any], scan_row: dict[str, Any]) -> bool:
     opts = scan_row.get("options") or {}
+    if _unknown_rank_elevated_iv(opts):
+        return False
     action = pm_row.get("action")
     if action not in {"ACCUMULATE", "STARTER", "WATCH"}:
         return False
@@ -1410,6 +1433,7 @@ async def build_candidates(
             "iv_rank": _historical_iv_rank(opts.get("iv_rank")),
             "iv_label": (opts.get("iv_label") or "UNKNOWN") if _historical_iv_rank(opts.get("iv_rank")) is not None else "UNKNOWN",
             "absolute_iv_label": opts.get("absolute_iv_label") or "UNKNOWN",
+            "atm_iv": opts.get("atm_iv"),
             "iv_rank_history": opts.get("iv_rank_history"),
             "rv_20": opts.get("rv_20"), "iv_rv": opts.get("iv_rv"),
             "rv_history": opts.get("rv_history"),
@@ -1470,6 +1494,9 @@ async def build_candidates(
             "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
             "generated_at": _now(),
         }
+        if _ticket_iv_blocked(ticket):
+            _add_block(blocked, "unknown_rank_elevated_absolute_iv")
+            ticket["manual_fire_ready"] = False
         try:
             from . import options_contract_learning
             learning_record = await options_contract_learning.record_selection(ticket)
@@ -1688,6 +1715,8 @@ async def execute(
     if (not isinstance(cycle_id, str) or not cycle_id.strip()
             or (expected_cycle_id is not None and cycle_id != expected_cycle_id)):
         return {"ok": False, "reason": "candidate_pm_cycle_missing_or_changed", "candidate": ticket}
+    if _ticket_iv_blocked(ticket):
+        return {"ok": False, "reason": "unknown_rank_elevated_absolute_iv", "candidate": ticket}
     gate = await execution_gate.check(scope="options", ticker=ticket.get("ticker"), record=True)
     if not gate.get("ok"):
         return {"ok": False, "reason": "execution_gate_blocked", "gate": gate, "candidate": ticket}

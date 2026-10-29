@@ -672,6 +672,8 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
     sq_score = (stock.get("squeeze") or {}).get("score") or 0
     days = (stock.get("time_target") or {}).get("days_remaining") or 30
     iv_rank = _safe_float((chain or {}).get("iv_rank"), None)
+    if isinstance((chain or {}).get("iv_rank"), bool) or iv_rank is not None and not 0 <= iv_rank <= 100:
+        iv_rank = None
     score = _safe_float(stock.get("score") or stock.get("case_score") or stock.get("pm_score"))
     rr = _safe_float(stock.get("risk_reward") or stock.get("rr") or stock.get("riskReward"))
     signal_set = {str(s) for s in signals}
@@ -701,6 +703,9 @@ def select_strategy(stock: dict, chain: dict | None) -> dict:
                     "reason": "Elevated earnings IV without enough PM evidence for a capped event scout"}
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
                 "reason": "Binary event is inside 48h with extreme IV; single-leg premium is not a clean paper scout"}
+    if elevated_absolute_iv:
+        return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
+                "reason": "Historical IV rank unavailable and observed absolute IV elevated; avoid outright premium"}
     if risk_level == "EXTREME" and score < 70:
         return {"strategy": "AVOID_OPTIONS", "direction": "NONE",
                 "reason": "Extreme setup needs stronger PM score before the Options Desk can scout it"}
