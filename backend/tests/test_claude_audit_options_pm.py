@@ -77,11 +77,16 @@ async def test_authoritative_candidate_retains_cycle_without_recomputing_pm(monk
 @pytest.mark.asyncio
 async def test_option_entry_record_retains_candidate_cycle(monkeypatch):
     from services import safety, execution_gate
+    now = datetime.now(timezone.utc).isoformat()
     ticket = {'candidate_id': 'offline-entry', 'ticker': 'TEST', 'cycle_id': 'frozen-cycle',
+              'scan_finished_at': now,
               'manual_fire_ready': True, 'pm_action': 'STARTER', 'contracts': 1, 'risk_budget': 200,
               'data_provider': 'ALPACA_OPTIONS', 'data_quality': 'REALTIME',
               'instrument': {'kind': 'single_leg', 'symbol': 'TEST261218C00100000'}}
-    db = SimpleNamespace(options_desk_candidates=MemoryCollection([ticket]), options_desk_orders=MemoryCollection())
+    scan = {'cycle_id': 'frozen-cycle', 'finished_at': now, 'full_cycle_finished_at': now,
+            'pm_payload': {'scan_finished_at': now, 'recommendations': [{'ticker': 'TEST', 'action': 'STARTER'}]}}
+    db = SimpleNamespace(options_desk_candidates=MemoryCollection([ticket]), options_desk_orders=MemoryCollection(),
+                         scan_results=MemoryCollection([scan]))
     monkeypatch.setattr(options_desk, 'get_db', lambda: db)
     monkeypatch.setattr(safety, 'trading_enabled', AsyncMock(return_value=(True, {})))
     monkeypatch.setattr(execution_gate, 'check', AsyncMock(return_value={'ok': True}))
