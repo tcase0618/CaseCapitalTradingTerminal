@@ -1698,6 +1698,39 @@ async def _symbol_already_exposed(symbol: str) -> dict[str, Any]:
     return {"blocked": False}
 
 
+async def _manual_pm_cycle_valid(ticket: dict[str, Any]) -> bool:
+    """Resolve manual risk-add authority against the latest completed PM docket.
+
+    Coordinated automatic execution uses its same-cycle payload before the full
+    cycle is persisted. Manual callers must instead prove persisted authority.
+    """
+    try:
+        scan = await get_db().scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)]) or {}
+        pm = scan.get("pm_payload") or {}
+        observed = _parse_dt(scan.get("finished_at"))
+        completed = _parse_dt(scan.get("full_cycle_finished_at"))
+        now = datetime.now(timezone.utc)
+        if (not observed or not observed.tzinfo or not completed or not completed.tzinfo
+                or not observed <= completed <= now
+                or not 0 <= (now - observed).total_seconds() <= 4 * 60 * 60
+                or scan.get("cycle_id") != ticket.get("cycle_id") or scan.get("lock_lost")
+                or ticket.get("scan_finished_at") != scan.get("finished_at")
+                or not isinstance(pm, dict) or pm.get("scan_finished_at") != scan.get("finished_at")):
+            return False
+        rows = pm.get("recommendations")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            return False
+        ticker = str(ticket.get("ticker") or "").upper()
+        matching = [row for row in rows if str(row.get("ticker") or "").upper() == ticker]
+        return bool(ticker and len(matching) == 1
+                    and matching[0].get("action") in PM_EXECUTABLE_ACTIONS
+                    and matching[0].get("action") == ticket.get("pm_action")
+                    and matching[0].get("option_view") != "STOCK_ONLY")
+    except Exception:
+        # DB failure or malformed authority must never become an entry permit.
+        return False
+
+
 async def execute(
     candidate_id: str, qty: int | None = None, limit_price: float | None = None,
     *, expected_cycle_id: str | None = None,
@@ -1717,6 +1750,8 @@ async def execute(
         return {"ok": False, "reason": "candidate_pm_cycle_missing_or_changed", "candidate": ticket}
     if _ticket_iv_blocked(ticket):
         return {"ok": False, "reason": "unknown_rank_elevated_absolute_iv", "candidate": ticket}
+    if expected_cycle_id is None and not await _manual_pm_cycle_valid(ticket):
+        return {"ok": False, "reason": "manual_pm_cycle_unavailable_or_stale", "candidate": ticket}
     gate = await execution_gate.check(scope="options", ticker=ticket.get("ticker"), record=True)
     if not gate.get("ok"):
         return {"ok": False, "reason": "execution_gate_blocked", "gate": gate, "candidate": ticket}
