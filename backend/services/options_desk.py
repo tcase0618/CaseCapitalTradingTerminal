@@ -2078,6 +2078,44 @@ async def refresh_and_auto_execute_latest(limit: int | None = None) -> dict[str,
     return result
 
 
+def _option_close_order_rows(
+    rows: list[Any], terminal: set[str],
+) -> list[tuple[dict[str, Any], dict[str, Any]]] | None:
+    """Validate nested coverage and count each broker order ID only once."""
+    by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for parent in rows:
+        if not isinstance(parent, dict):
+            return None
+        legs = parent.get("legs")
+        if legs is None:
+            legs = []
+        if not isinstance(legs, list):
+            return None
+        for order in [parent, *legs]:
+            if not isinstance(order, dict) or not isinstance(order.get("id"), str) or not order["id"].strip():
+                return None
+            if order is not parent and order.get("legs") is not None and order.get("legs") != []:
+                return None  # Unsupported deeper nesting is not complete coverage.
+            if order is not parent or not legs:
+                if (not isinstance(order.get("symbol"), str) or not order["symbol"].strip()
+                        or not isinstance(order.get("side"), str) or order["side"] not in {"buy", "sell"}
+                        or not isinstance(order.get("status"), str) or not order["status"].strip()):
+                    return None
+            prior = by_id.get(order["id"])
+            if prior:
+                old, old_parent = prior
+                if any(old.get(key) and order.get(key) and old[key] != order[key] for key in ("symbol", "side")):
+                    return None
+                old_working = str(old.get("status") or "").lower() not in terminal
+                working = str(order.get("status") or "").lower() not in terminal
+                if old_working and not working:
+                    continue  # A terminal copy cannot erase observed working coverage.
+                if old_working == working and old_parent.get("legs") and not parent.get("legs"):
+                    continue  # Preserve nested context: do not cancel a leg independently.
+            by_id[order["id"]] = (order, parent)
+    return list(by_id.values())
+
+
 async def close(symbol: str, qty: int | None = None, *, emergency: bool = False) -> dict[str, Any]:
     """Submit a fresh-quote limit close; never send an unbounded market order."""
     route = options_account_route_guard()
@@ -2123,17 +2161,13 @@ async def close(symbol: str, qty: int | None = None, *, emergency: bool = False)
         history = response.json()
         if not isinstance(history, list):
             return {"ok": False, "reason": "option_close_orders_incomplete"}
-        if any(not isinstance(order, dict) or not order.get("id") for order in [*history, *open_orders]):
-            return {"ok": False, "reason": "option_close_order_schema_unverified"}
-        by_id = {order.get("id"): order for order in history}
-        by_id.update({order.get("id"): order for order in open_orders})
-        history = list(by_id.values())
         terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
-        matching = []
-        for parent in history:
-            for order in [parent, *(parent.get("legs") or [])]:
-                if str(order.get("symbol") or "").upper() == symbol.upper() and str(order.get("side") or "").lower() == "sell":
-                    matching.append((order, parent))
+        order_rows = _option_close_order_rows([*history, *open_orders], terminal)
+        if order_rows is None:
+            return {"ok": False, "reason": "option_close_order_schema_unverified"}
+        matching = [(order, parent) for order, parent in order_rows
+                    if str(order.get("symbol") or "").upper() == symbol.upper()
+                    and str(order.get("side") or "").lower() == "sell"]
         working = [(order, parent) for order, parent in matching if str(order.get("status") or "").lower() not in terminal]
         if len(working) > 1:
             return {"ok": False, "reason": "multiple_option_close_orders_require_reconciliation"}
