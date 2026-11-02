@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import html
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -62,6 +63,11 @@ OPTION_ACTIVE_STATUSES = {
 }
 OPTIONS_POLICY = get_policy()
 PM_EXECUTABLE_ACTIONS = {"ACCUMULATE", "STARTER"}
+OPTIONS_ENTRY_AUTHORITY_FIELDS = (
+    "candidate_id", "cycle_id", "scan_finished_at", "ticker", "route", "pm_action",
+    "strategy", "strategy_lane", "direction", "instrument", "contracts", "risk_budget",
+    "manual_fire_ready", "data_provider", "data_quality",
+)
 MIN_OPEN_INTEREST = OPTIONS_POLICY.min_open_interest
 MIN_VOLUME_WHEN_LOW_OI = OPTIONS_POLICY.min_volume_when_low_oi
 MIN_OPTION_VOLUME_IF_OI_UNKNOWN = OPTIONS_POLICY.min_volume_if_oi_unknown
@@ -1691,10 +1697,11 @@ async def _manual_pm_cycle_valid(ticket: dict[str, Any]) -> bool:
 
 async def execute(
     candidate_id: str, qty: int | None = None, limit_price: float | None = None,
-    *, expected_cycle_id: str | None = None,
+    *, expected_cycle_id: str | None = None, expected_candidate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from . import execution_gate, safety
 
+    expected_candidate = deepcopy(expected_candidate)
     db = get_db()
     enabled, safety_status = await safety.trading_enabled(scope="options")
     if not enabled:
@@ -1706,6 +1713,11 @@ async def execute(
     if (not isinstance(cycle_id, str) or not cycle_id.strip()
             or (expected_cycle_id is not None and cycle_id != expected_cycle_id)):
         return {"ok": False, "reason": "candidate_pm_cycle_missing_or_changed", "candidate": ticket}
+    if expected_cycle_id is not None and (
+        not isinstance(expected_candidate, dict)
+        or any(ticket.get(key) != expected_candidate.get(key) for key in OPTIONS_ENTRY_AUTHORITY_FIELDS)
+    ):
+        return {"ok": False, "reason": "candidate_batch_identity_changed_or_missing", "candidate": ticket}
     if expected_cycle_id is None and not await _manual_pm_cycle_valid(ticket):
         return {"ok": False, "reason": "manual_pm_cycle_unavailable_or_stale", "candidate": ticket}
     gate = await execution_gate.check(scope="options", ticker=ticket.get("ticker"), record=True)
@@ -1886,6 +1898,9 @@ async def _auto_execute_latest_locked(
 ) -> dict[str, Any]:
     from . import execution_gate, safety
 
+    # Freeze nested contract/risk authority before the first await. Reloaded
+    # candidate storage must not silently replace the coordinated batch.
+    candidate_set = deepcopy(candidate_set)
     enabled, safety_status = await safety.trading_enabled(scope="options_auto")
     if not enabled:
         return {
@@ -1958,7 +1973,7 @@ async def _auto_execute_latest_locked(
             skipped.append({"ticker": ticket.get("ticker"), "symbol": symbol, "reason": "options_auto_execute_lock_lost"})
             lock_lost = True
             break
-        result = await execute(ticket["candidate_id"], expected_cycle_id=cycle_id)
+        result = await execute(ticket["candidate_id"], expected_cycle_id=cycle_id, expected_candidate=ticket)
         if result.get("ok"):
             await db.options_desk_orders.update_one(
                 {"order.id": result.get("order", {}).get("id")},
