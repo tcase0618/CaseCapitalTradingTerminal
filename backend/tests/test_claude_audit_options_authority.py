@@ -1,4 +1,5 @@
 """Offline options entry authority; execution handlers are harmless mocks."""
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -56,7 +57,8 @@ async def test_auto_passes_frozen_cycle_identity_to_entry_handler(authority_case
     await options_desk._auto_execute_latest_locked(
         candidate_set={'cycle_id': ticket['cycle_id'], 'candidates': [ticket]}, lease=lease,
     )
-    execute.assert_awaited_once_with(ticket['candidate_id'], expected_cycle_id=ticket['cycle_id'])
+    execute.assert_awaited_once_with(ticket['candidate_id'], expected_cycle_id=ticket['cycle_id'],
+                                   expected_candidate=ticket)
 
 
 @pytest.mark.asyncio
@@ -80,3 +82,50 @@ async def test_changed_persisted_cycle_stops_before_preflight(authority_case, mo
     assert result['ok'] is False
     assert result['reason'] == 'candidate_pm_cycle_missing_or_changed'
     gate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [
+    ('ticker', 'OTHER'), ('instrument', {'symbol': 'OTHER261218C00100000'}),
+    ('risk_budget', 1000), ('contracts', 10), ('pm_action', 'ACCUMULATE'),
+    ('route', 'BOTH'), ('strategy', 'DIFFERENT'), ('scan_finished_at', 'other-scan'),
+])
+async def test_same_cycle_reload_cannot_change_batch_authority(authority_case, monkeypatch, field, value):
+    ticket, db, lease, _ = authority_case
+    batch_ticket = deepcopy(ticket)
+    db.options_desk_candidates.rows[0][field] = value
+    gate = AsyncMock(side_effect=lambda **kwargs: {'ok': kwargs.get('ticker') is None})
+    monkeypatch.setattr(execution_gate, 'check', gate)
+    result = await options_desk._auto_execute_latest_locked(
+        candidate_set={'cycle_id': batch_ticket['cycle_id'], 'candidates': [batch_ticket]}, lease=lease)
+    assert result['skipped'][0]['reason'] == 'candidate_batch_identity_changed_or_missing'
+    assert gate.await_count == 1  # Root gate only; never the reloaded entry's broker checks.
+
+
+@pytest.mark.asyncio
+async def test_batch_is_frozen_before_gate_await(authority_case, monkeypatch):
+    ticket, _, lease, _ = authority_case
+    ticket['risk_budget'] = 200
+    original = deepcopy(ticket)
+    async def change_input(**kwargs):
+        ticket['risk_budget'] = 1000
+        ticket['instrument']['symbol'] = 'OTHER261218C00100000'
+        return {'ok': True}
+    monkeypatch.setattr(execution_gate, 'check', change_input)
+    execute = AsyncMock(return_value={'ok': False, 'reason': 'offline-handler'})
+    monkeypatch.setattr(options_desk, 'execute', execute)
+    await options_desk._auto_execute_latest_locked(
+        candidate_set={'cycle_id': ticket['cycle_id'], 'candidates': [ticket]}, lease=lease)
+    assert execute.call_args.kwargs['expected_candidate'] == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('supplied', [True, False])
+async def test_automatic_entry_requires_matching_full_snapshot(authority_case, monkeypatch, supplied):
+    ticket, _, _, _ = authority_case
+    gate = AsyncMock(return_value={'ok': False})
+    monkeypatch.setattr(execution_gate, 'check', gate)
+    result = await options_desk.execute(ticket['candidate_id'], expected_cycle_id=ticket['cycle_id'],
+                                       expected_candidate=deepcopy(ticket) if supplied else None)
+    assert result['reason'] == ('execution_gate_blocked' if supplied else 'candidate_batch_identity_changed_or_missing')
+    assert gate.await_count == int(supplied)
