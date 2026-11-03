@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .db import get_db
+from .db import database_failure_reason, get_db
 
 
 def _now() -> str:
@@ -90,14 +90,16 @@ async def overview() -> dict[str, Any]:
     try:
         db = await _db_counts()
     except Exception as exc:
-        db["reason"] = str(exc)[:220]
+        db["reason"] = database_failure_reason(exc)
 
     alpaca = await _alpaca_probe()
     try:
         from . import postgres_store
         postgres = await postgres_store.status()
     except Exception as exc:
-        postgres = {"enabled": False, "ready": False, "last_error": str(exc)[:220]}
+        postgres = {"enabled": False, "ready": False, "last_error": database_failure_reason(exc)}
+    if postgres.get("last_error"):
+        postgres["last_error"] = "database_unavailable"
     env = {
         "postgres": _mask(os.environ.get("POSTGRES_DSN")),
         "postgres_enabled": os.environ.get("POSTGRES_ENABLED", "true").lower() == "true",
@@ -122,6 +124,7 @@ async def overview() -> dict[str, Any]:
 
     return {
         "generated_at": _now(),
+        "protection_status": "NOT_ASSESSED" if db.get("ok") else "UNVERIFIED",
         "ready_for_scanning": bool(db.get("ok")),
         "ready_for_pm": bool(db.get("ok") and db.get("counts", {}).get("scan_results")),
         "ready_for_trade_floor": bool(db.get("ok") and alpaca.get("ok")),
