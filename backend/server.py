@@ -27,7 +27,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 from services import claude_service, risk_target, scanner, scheduler, telegram_service, usaspending  # noqa: E402
-from services.db import get_db, log_activity  # noqa: E402
+from services.db import database_failure_reason, get_db, log_activity  # noqa: E402
 from services.scrapers import fetch_quote  # noqa: E402
 from routers.research import router as research_router  # noqa: E402
 
@@ -299,6 +299,8 @@ async def admin_config_validation():
 @api.get("/status")
 async def status():
     db_available = True
+    db_reason = None
+    failed_read = "connection"
     state = {}
     cache_today = 0
     last_scan = None
@@ -307,19 +309,29 @@ async def status():
     try:
         db = get_db()
         today_iso_prefix = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        failed_read = "bot_state"
         state = await db.bot_state.find_one({"_id": "state"}, {"_id": 0}) or {}
+        failed_read = "claude_cache"
         cache_today = await db.claude_cache.count_documents({"date_key": today_iso_prefix})
+        failed_read = "scan_results"
         last_scan = await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
+        failed_read = "watchlist"
         watchlist_count = await db.watchlist.count_documents({})
+        failed_read = "alerts"
         alerts_count = await db.alerts.count_documents({"triggered": False})
     except Exception as e:
         db_available = False
-        logger.warning("status degraded; PostgreSQL unavailable: %s", e)
+        db_reason = database_failure_reason(e)
+        state = {}
+        logger.warning("status degraded; database read=%s reason=%s", failed_read, db_reason)
 
     return {
         "bot": {
             "online": True,
             "db_available": db_available,
+            "db_reason": db_reason,
+            "db_failed_read": failed_read if not db_available else None,
+            "protection_status": "NOT_ASSESSED" if db_available else "UNVERIFIED",
             "telegram_configured": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
             "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
             "default_chat_id_set": bool(os.environ.get("TELEGRAM_CHAT_ID")),
@@ -328,14 +340,14 @@ async def status():
         "webhook_set_at": state.get("webhook_set_at"),
         "last_scan_at": state.get("last_scan_at"),
         "last_scan_summary": state.get("last_scan_summary"),
-        "stats": {
+        "stats": {key: value if db_available else None for key, value in {
             "cached_analyses_today": cache_today,
             "watchlist_count": watchlist_count,
             "active_alerts": alerts_count,
             "tickers_in_last_scan": (last_scan or {}).get("pre_filter_passed", 0),
             "claude_calls_in_last_scan": (last_scan or {}).get("claude_calls_made", 0),
             "claude_cache_hits_in_last_scan": (last_scan or {}).get("claude_cache_hits", 0),
-        },
+        }.items()},
         "now": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -377,8 +389,13 @@ async def admin_resume(reason: str = "operator_resume"):
 
 @api.get("/position_monitor/latest")
 async def position_monitor_latest():
-    db = get_db()
-    row = await db.bot_state.find_one({"_id": "live_position_snapshot_latest"}, {"_id": 0})
+    try:
+        db = get_db()
+        row = await db.bot_state.find_one({"_id": "live_position_snapshot_latest"}, {"_id": 0})
+    except Exception as exc:
+        return {"ok": False, "status": "UNVERIFIED", "db_available": False,
+                "db_reason": database_failure_reason(exc), "protection_unverified": True,
+                "snapshot_at": None, "totals": None, "equities": {}, "options": {}}
     if row:
         return {"ok": True, **row}
     return {"ok": True, "snapshot_at": None, "totals": {"positions": 0, "open_orders": 0, "market_value": 0, "unrealized_pl": 0}, "equities": {}, "options": {}}

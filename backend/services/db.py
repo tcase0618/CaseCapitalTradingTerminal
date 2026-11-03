@@ -8,6 +8,22 @@ _client: Any | None = None
 FEATURE_VERSION = "3.0"
 
 
+def database_failure_reason(exc: Exception) -> str:
+    """Public-safe categories only; exception messages can contain credentials."""
+    if isinstance(exc, TimeoutError):
+        return "database_timeout"
+    sqlstate = str(getattr(exc, "sqlstate", "") or "")
+    if sqlstate.startswith("28"):
+        return "database_authentication_failed"
+    if sqlstate.startswith("08") or isinstance(exc, OSError):
+        return "database_connection_failed"
+    if sqlstate.startswith("53"):
+        return "database_capacity_unavailable"
+    if sqlstate.startswith("42"):
+        return "database_schema_unavailable"
+    return "database_read_failed"
+
+
 def get_db():
     # PostgreSQL is the only supported runtime backend. Keep the function
     # boundary so services retain their existing collection-style interface.
