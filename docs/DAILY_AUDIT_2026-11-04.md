@@ -28,7 +28,7 @@ None new. CRIT-003 escalated in duration (see register).
   - **Branch progress:** `Claude-Gpt-audit` @ 31090b4 adds sanitized `db_reason`, `db_failed_read`, `protection_status=UNVERIFIED`, null stats on failure, and a non-raising `/position_monitor/latest` (`backend/server.py`, `backend/services/db.py:11-24`, `backend/services/system_health.py`). Independently verified: `test_claude_audit_db_outage.py` **14 passed**; full branch suite **1,122 passed, 14 skipped, 153 deselected**; CI run 41607663272 success.
   - **Still missing:** deduplicated Telegram critical alert on DB outage; deployment; DB recovery. Minor: `system_health.py` overwrites any classified `postgres.last_error` with the generic `database_unavailable`, discarding the category just computed.
   - Status: **Open** on main/deployed; Partially addressed (diagnostics only) on branch.
-- **CCTT-HIGH-012:** new evidence — deployed response shape predates 31090b4; 14 `Claude-Gpt-audit` commits remain unpromoted; still no SHA endpoint.
+- **CCTT-HIGH-012:** new evidence — deployed response shape predates 31090b4; `git rev-list` shows `Claude-Gpt-audit` 41 commits ahead of main and 29 ahead of the VPS branch (counts include cherry-pick equivalents); still no SHA endpoint.
 - **CCTT-HIGH-011:** HTTPS on 443 fails (status 000) at 06:52Z; HTTP answers. Re-confirmed.
 - **Re-checked unchanged on main 2c768c3:** CRIT-001 `public_execution.py:2232-2235` skip on phase/emergency order ID; CRIT-002 `execution_safety.py:68` 24 h claim TTL.
 - **Unchanged:** all other items.
