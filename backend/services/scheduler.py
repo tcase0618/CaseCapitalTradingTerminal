@@ -501,6 +501,12 @@ def start_scheduler():
         if _scheduler:
             return
         _scheduler = AsyncIOScheduler(timezone=ET, job_defaults=SCHEDULER_JOB_DEFAULTS)
+    # Independent of broker execution and DB-backed Telegram delivery guards.
+    from . import database_watchdog
+    _scheduler.add_job(
+        database_watchdog.check, IntervalTrigger(minutes=1),
+        id="database_health_watchdog_1m", replace_existing=True,
+    )
     # Coordinated stock-scan cadence, restricted to market-session days by the
     # runtime guard in _daily_scan_job. The job runs the core scanner and
     # specialist scan families together before PM/Telegram publication.
