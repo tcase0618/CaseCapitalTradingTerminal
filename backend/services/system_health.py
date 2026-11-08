@@ -9,6 +9,12 @@ import httpx
 
 from .db import database_failure_reason, get_db
 
+_SAFE_DATABASE_REASONS = frozenset({
+    "database_timeout", "database_authentication_failed", "database_connection_failed",
+    "database_capacity_unavailable", "database_schema_unavailable", "database_read_failed",
+    "database_unavailable",
+})
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -99,7 +105,9 @@ async def overview() -> dict[str, Any]:
     except Exception as exc:
         postgres = {"enabled": False, "ready": False, "last_error": database_failure_reason(exc)}
     if postgres.get("last_error"):
-        postgres["last_error"] = "database_unavailable"
+        reason = postgres["last_error"]
+        if not isinstance(reason, str) or reason not in _SAFE_DATABASE_REASONS:
+            postgres["last_error"] = "database_unavailable"
     env = {
         "postgres": _mask(os.environ.get("POSTGRES_DSN")),
         "postgres_enabled": os.environ.get("POSTGRES_ENABLED", "true").lower() == "true",
