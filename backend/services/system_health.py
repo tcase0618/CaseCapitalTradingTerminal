@@ -92,6 +92,8 @@ async def _db_counts() -> dict[str, Any]:
 
 
 async def overview() -> dict[str, Any]:
+    from . import backup_health
+    backup = backup_health.status()
     db = {"ok": False, "counts": {}, "latest_scan_at": None, "reason": None}
     try:
         db = await _db_counts()
@@ -121,6 +123,8 @@ async def overview() -> dict[str, Any]:
     }
 
     blockers = []
+    if not backup["ok"]:
+        blockers.append(f"PostgreSQL backup is {backup['status']}")
     if not db.get("ok"):
         blockers.append("PostgreSQL unavailable")
     if not alpaca.get("ok"):
@@ -139,6 +143,7 @@ async def overview() -> dict[str, Any]:
         "ready_for_journal_learning": bool(db.get("ok") and db.get("counts", {}).get("tf_trades")),
         "blockers": blockers,
         "database": db,
+        "backup": backup,
         "postgres": postgres,
         "alpaca": alpaca,
         "env": env,

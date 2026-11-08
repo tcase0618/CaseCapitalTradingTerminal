@@ -62,6 +62,7 @@ pg_dump --format=custom --no-owner --file="${tmp}"
 pg_restore --list "${tmp}" >/dev/null
 mv "${tmp}" "${final}"
 sha256sum "${final}" > "${final}.sha256"
+python3 "${APP_DIR}/backend/services/backup_health.py" "${final}"
 trap - EXIT
 
 # Only prune artifacts this job owns. Never glob unrelated application data.
