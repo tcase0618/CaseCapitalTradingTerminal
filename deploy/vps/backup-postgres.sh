@@ -62,6 +62,7 @@ nice -n 10 ionice -c 3 pg_dump --format=custom --no-owner --file="${tmp}"
 pg_restore --list "${tmp}" >/dev/null
 mv "${tmp}" "${final}"
 sha256sum "${final}" > "${final}.sha256"
+python3 "${APP_DIR}/backend/services/backup_health.py" "${final}"
 trap - EXIT
 
 # Pruning is a separate operator step after off-host checksum and restore
