@@ -398,7 +398,7 @@ async def position_monitor_latest():
                 "snapshot_at": None, "totals": None, "equities": {}, "options": {}}
     if row:
         return {"ok": True, **row}
-    return {"ok": True, "snapshot_at": None, "totals": {"positions": 0, "open_orders": 0, "market_value": 0, "unrealized_pl": 0}, "equities": {}, "options": {}}
+    return {"ok": False, "status": "MISSING", "snapshot_at": None, "totals": None, "equities": {}, "options": {}}
 
 
 @api.get("/position_monitor/history")
