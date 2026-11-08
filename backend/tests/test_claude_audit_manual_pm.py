@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from services import execution_gate, options_desk, safety
-from test_claude_audit_exit_recovery import MemoryCollection
+from test_claude_audit_lock_reporting import MemoryCollection
 
 
 @pytest.fixture
