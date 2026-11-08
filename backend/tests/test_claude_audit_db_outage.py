@@ -39,6 +39,16 @@ async def test_monitor_returns_unknown_coverage_on_db_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_monitor_snapshot_is_not_an_empty_protected_book(monkeypatch):
+    read = AsyncMock(return_value=None)
+    monkeypatch.setattr(server, 'get_db', lambda: SimpleNamespace(bot_state=SimpleNamespace(find_one=read)))
+    result = await server.position_monitor_latest()
+    assert result['ok'] is False
+    assert result['status'] == 'MISSING'
+    assert result['totals'] is None
+
+
+@pytest.mark.asyncio
 async def test_health_marks_protection_unknown_and_sanitizes_database_errors(monkeypatch):
     monkeypatch.setattr(system_health, '_db_counts', AsyncMock(side_effect=RuntimeError('fixture-secret')))
     monkeypatch.setattr(system_health, '_alpaca_probe', AsyncMock(return_value={'ok': False, 'reason': 'offline'}))
