@@ -80,3 +80,31 @@ async def test_connection_failure_before_first_read_is_sanitized(monkeypatch):
     assert result['bot']['db_reason'] == 'database_connection_failed'
     assert result['bot']['db_failed_read'] == 'connection'
     assert 'fixture-secret' not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('sqlstate,expected', [('28000', 'database_authentication_failed'),
+    ('08006', 'database_connection_failed'), ('53300', 'database_capacity_unavailable'),
+    ('42P01', 'database_schema_unavailable'), (None, 'database_read_failed')])
+async def test_health_preserves_classified_postgres_probe_failure(monkeypatch, sqlstate, expected):
+    error = RuntimeError('fixture-secret')
+    error.sqlstate = sqlstate
+    monkeypatch.setattr(system_health, '_db_counts', AsyncMock(return_value={'ok': False, 'counts': {}}))
+    monkeypatch.setattr(system_health, '_alpaca_probe', AsyncMock(return_value={'ok': False, 'reason': 'offline'}))
+    monkeypatch.setattr(postgres_store, 'status', AsyncMock(side_effect=error))
+    result = await system_health.overview()
+    assert result['postgres']['last_error'] == expected
+    assert result['protection_status'] == 'UNVERIFIED'
+    assert 'fixture-secret' not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason,expected', [('database_timeout', 'database_timeout'),
+    ('postgresql://fixture-secret@private-host/db', 'database_unavailable'), (['bad-schema'], 'database_unavailable')])
+async def test_health_keeps_only_allowlisted_postgres_reasons(monkeypatch, reason, expected):
+    monkeypatch.setattr(system_health, '_db_counts', AsyncMock(return_value={'ok': False, 'counts': {}}))
+    monkeypatch.setattr(system_health, '_alpaca_probe', AsyncMock(return_value={'ok': False, 'reason': 'offline'}))
+    monkeypatch.setattr(postgres_store, 'status', AsyncMock(return_value={'ready': False, 'last_error': reason}))
+    result = await system_health.overview()
+    assert result['postgres']['last_error'] == expected
+    assert 'fixture-secret' not in str(result)
