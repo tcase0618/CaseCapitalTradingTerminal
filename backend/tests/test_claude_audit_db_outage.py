@@ -1,5 +1,7 @@
 """CRIT-003: database errors must not fabricate coverage or disclose secrets."""
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -108,3 +110,23 @@ async def test_health_keeps_only_allowlisted_postgres_reasons(monkeypatch, reaso
     result = await system_health.overview()
     assert result['postgres']['last_error'] == expected
     assert 'fixture-secret' not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_health_reports_aged_completed_dump_as_degraded(monkeypatch, tmp_path):
+    monkeypatch.setenv('CASE_CAPITAL_BACKUP_DIR', str(tmp_path))
+    archive = tmp_path / 'case-capital-offline.dump'
+    archive.write_bytes(b'offline fixture')
+    archive.with_suffix('.dump.sha256').write_text('a' * 64 + '  ' + archive.name)
+    (tmp_path / 'last-success.json').write_text(json.dumps({
+        'archive': archive.name, 'size_bytes': archive.stat().st_size, 'sha256': 'a' * 64,
+        'completed_at': (datetime.now(timezone.utc) - timedelta(hours=27)).isoformat(),
+    }))
+    monkeypatch.setattr(system_health, '_db_counts', AsyncMock(return_value={'ok': True, 'counts': {}}))
+    monkeypatch.setattr(system_health, '_alpaca_probe', AsyncMock(return_value={'ok': False, 'reason': 'offline'}))
+    monkeypatch.setattr(postgres_store, 'status', AsyncMock(return_value={'ready': True}))
+    result = await system_health.overview()
+    assert result['backup']['status'] == 'STALE'
+    assert result['backup']['ok'] is False
+    assert result['backup']['age_hours'] >= 27
+    assert 'PostgreSQL backup is STALE' in result['blockers']
