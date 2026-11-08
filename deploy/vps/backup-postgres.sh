@@ -57,6 +57,7 @@ print(
 PY
 )"
 export PGSSLMODE="${CASE_CAPITAL_POSTGRES_SSLMODE:-disable}"
+python3 "${APP_DIR}/deploy/vps/backup-headroom.py" "${BACKUP_DIR}"
 nice -n 10 ionice -c 3 pg_dump --format=custom --no-owner --file="${tmp}"
 pg_restore --list "${tmp}" >/dev/null
 mv "${tmp}" "${final}"
