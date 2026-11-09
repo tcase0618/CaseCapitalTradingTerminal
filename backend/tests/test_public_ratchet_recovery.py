@@ -67,6 +67,16 @@ def test_fractional_premarket_cannot_be_reported_fully_protected():
     assert public_execution._verified_monitored_exit(row, now=now)[0] is True
 
 
+def test_known_filled_entry_does_not_repoll_an_unneeded_historical_order():
+    trade = {"fill_status": "FILLED", "filled_at": "2026-10-01T15:00:00Z",
+             "filled_avg_price": 100, "protective_order_error": "not allowed on lit exchanges"}
+    assert public_execution._needs_entry_order_poll(trade) is False
+    for changes in [{"fill_status": "PARTIALLY_FILLED"}, {"fill_status": "PENDING"},
+                    {"filled_avg_price": 0}, {"protective_order_id": "working-stop"},
+                    {"protective_order_error": "unknown error"}]:
+        assert public_execution._needs_entry_order_poll({**trade, **changes}) is True
+
+
 @pytest.mark.asyncio
 async def test_actual_ratchet_to_exit_pipeline_latches_breach_and_waits_for_legal_session(monkeypatch):
     trade = {"ticker": "TEST", "client_order_id": "recovery", "broker_base": "public",
