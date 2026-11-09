@@ -594,6 +594,8 @@ def _protective_exit_quote(row: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     resting sell limit when the provider's bid/ask are delayed. Never stamp a
     stale bid as current or use this sell-only fallback to authorize a buy.
     """
+    if str(row.get("outcome") or "SUCCESS").upper() != "SUCCESS":
+        return None, "public_quote_outcome_unsuccessful"
     quote, reason = _execution_quote(row, side="SELL", emergency=True)
     fresh, _age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(row)})
     if fresh and quote:
@@ -601,8 +603,6 @@ def _protective_exit_quote(row: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     last = _num(row.get("last") or row.get("lastPrice"))
     timestamp = row.get("lastTimestamp") or row.get("last_timestamp")
     last_fresh, _age = safety.quote_is_fresh({"ts": timestamp})
-    if str(row.get("outcome") or "SUCCESS").upper() != "SUCCESS":
-        return None, "public_quote_outcome_unsuccessful"
     if last_fresh and math.isfinite(last) and last > 0:
         # Round upward for a sell so rounding cannot discount the observed
         # trade. A limit at that price can remain unfilled; expose the basis.
