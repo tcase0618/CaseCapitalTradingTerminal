@@ -153,7 +153,8 @@ async def test_stale_ratchet_input_uses_monotone_database_operators(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_reconcile_exception_does_not_skip_exits_in_scheduled_monitor(monkeypatch):
+@pytest.mark.parametrize("reconcile_error", [True, False])
+async def test_scheduled_monitor_runs_exits_and_reports_missing_coverage(monkeypatch, reconcile_error):
     class FakeScheduler:
         def __init__(self, **_kwargs):
             self.jobs = []
@@ -172,10 +173,11 @@ async def test_reconcile_exception_does_not_skip_exits_in_scheduled_monitor(monk
     persist = AsyncMock(return_value=snapshot)
     monkeypatch.setattr(scheduler, "persist_live_position_snapshot", persist)
     monkeypatch.setattr(public_execution, "enabled", lambda: True)
-    monkeypatch.setattr(public_execution, "reconcile", AsyncMock(side_effect=RuntimeError("offline fixture")))
+    reconciliation = AsyncMock(side_effect=RuntimeError("offline fixture")) if reconcile_error else AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(public_execution, "reconcile", reconciliation)
     exits = AsyncMock(return_value={"ok": True, "checked": 1, "deferred": []})
     monkeypatch.setattr(public_execution, "process_protective_exits", exits)
-    monkeypatch.setattr(public_execution, "protection_coverage", AsyncMock(return_value={}))
+    monkeypatch.setattr(public_execution, "protection_coverage", AsyncMock(return_value={"monitored_exit_only_open": 1}))
     monkeypatch.setattr(pm_ratchet, "process_open_ratchets", AsyncMock(return_value={"ok": True}))
     scheduler.start_scheduler()
     try:
@@ -184,7 +186,8 @@ async def test_reconcile_exception_does_not_skip_exits_in_scheduled_monitor(monk
         exits.assert_awaited_once()
         result = persist.call_args.kwargs["management"]["legacy_position_monitor"]
         assert result["ok"] is False
-        assert result["failures"][0]["stage"] == "public_reconciliation"
+        expected = "public_reconciliation" if reconcile_error else "public_protection_coverage"
+        assert result["failures"][0]["stage"] == expected
         assert result["protective_exits"]["checked"] == 1
     finally:
         scheduler.shutdown_scheduler()
