@@ -43,6 +43,8 @@ def test_last_trade_requires_its_own_timestamp_and_success():
     row = delayed_sides()
     row["outcome"] = "FAILED"
     assert public_execution._protective_exit_quote(row)[0] is None
+    row["bidTimestamp"] = row["askTimestamp"] = datetime.now(timezone.utc).isoformat()
+    assert public_execution._protective_exit_quote(row)[0] is None
 
 
 def test_fresh_bid_remains_preferred():
@@ -127,7 +129,7 @@ async def test_actual_ratchet_to_exit_pipeline_latches_breach_and_waits_for_lega
 
 
 @pytest.mark.asyncio
-async def test_overlapping_stale_ratchet_rows_cannot_lower_authoritative_stops(monkeypatch):
+async def test_stale_ratchet_input_uses_monotone_database_operators(monkeypatch):
     state = {"current_stop": 135, "pm_active_stop": 135, "peak_price_since_entry": 145, "pm_ratchet_level": 40}
     stale = {"ticker": "TEST", "client_order_id": "overlap", "filled_avg_price": 100,
              "current_stop": 90, "pm_ratchet_plan": {"enabled": True}}

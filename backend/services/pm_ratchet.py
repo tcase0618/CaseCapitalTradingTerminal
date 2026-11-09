@@ -256,8 +256,8 @@ async def _apply_public_ratchet_marks(
                 "active_target": levels["active_target"],
                 "gain_pct": levels["gain_pct"],
             })
-        # Stream callbacks and the minute monitor may overlap. Authoritative
-        # stops and peaks must not move backwards when either uses an old row.
+        # Reapply maxima against the adapter's latest row rather than copying
+        # lower values from this earlier scan of positions.
         maxima = {"current_stop": levels["active_stop"], "pm_active_stop": levels["active_stop"],
                   "peak_price_since_entry": observed_peak, "pm_ratchet_level": max(current_level, levels["ratchet_level"])}
         for key in maxima:
