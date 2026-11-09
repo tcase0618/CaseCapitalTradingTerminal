@@ -776,6 +776,21 @@ def _routing_rejects_stop(trade: dict[str, Any]) -> bool:
     return "not allowed on lit exchanges" in error or '"code":145' in error.replace(" ", "")
 
 
+def _needs_entry_order_poll(trade: dict[str, Any]) -> bool:
+    """Keep confirmed fills independent of unavailable historical order URLs.
+
+    Known routing-rejected stops have nothing to re-arm from the entry order.
+    Broker positions and all working exits are still reconciled separately.
+    """
+    return not (
+        str(trade.get("fill_status") or "").upper() == "FILLED"
+        and trade.get("filled_at")
+        and _num(trade.get("filled_avg_price")) > 0
+        and _routing_rejects_stop(trade)
+        and not trade.get("protective_order_id")
+    )
+
+
 def _broker_protection_capability(order_shape: dict[str, Any], stop_price: float) -> dict[str, Any]:
     """Describe the protection Public can *actually* attach to an entry.
 
@@ -1772,6 +1787,8 @@ async def reconcile() -> dict[str, Any]:
         poll_errors = 0
         for trade in pending:
             ticker = _symbol(trade)
+            if not _needs_entry_order_poll(trade):
+                continue
             submitted_at = trade.get("submitted_at")
             try:
                 submitted_dt = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00")) if submitted_at else None
