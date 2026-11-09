@@ -2,7 +2,7 @@
 
 Public's SDK calls this a price stream, but it is SDK-managed quote polling.
 The worker intentionally subscribes only to broker-reconciled Public holdings,
-validates every callback with the same executable-quote policy as order entry,
+validates each callback using the protective sell price-reference policy,
 and delegates all stop updates to ``pm_ratchet``.  It never submits orders.
 """
 from __future__ import annotations
@@ -130,6 +130,8 @@ def _record_invalid(symbol: str, row: dict[str, Any]) -> None:
     _state["invalid_reason_counts"] = counts
     _state["last_invalid_symbol"] = symbol or None
     _state["last_invalid_reason"] = reason
+    _state["quote_coverage_status"] = "degraded" if _state.get("updates") else "unavailable"
+    _state["status"] = "degraded"
 
 
 async def _persist_callback_telemetry() -> None:
@@ -164,7 +166,7 @@ async def _run_subscription(symbols: list[str]) -> None:
                 _record_invalid(symbol, row)
                 await _persist_callback_telemetry()
                 return
-            mark = pm_ratchet._fresh_public_execution_mark(row)
+            mark = pm_ratchet._public_ratchet_mark(row)
             if not mark:
                 _record_invalid(symbol, row)
                 await _persist_callback_telemetry()
@@ -173,6 +175,9 @@ async def _run_subscription(symbols: list[str]) -> None:
             _state["updates"] = int(_state.get("updates") or 0) + 1
             _state["last_quote_at"] = datetime.now(timezone.utc).isoformat()
             _state["last_symbol"] = symbol
+            _state["last_price_basis"] = mark["price_basis"]
+            _state["status"] = "running"
+            _state["quote_coverage_status"] = "fresh_reference_observed"
             _state["last_ratchet_result"] = {"ratcheted": result.get("ratcheted", 0), "checked": result.get("checked", 0)}
             await _persist_callback_telemetry()
         except Exception as exc:
@@ -255,7 +260,9 @@ async def start() -> dict[str, Any]:
             await _persist_state(status="disabled")
             return {"started": False, "reason": "not_configured", **_state}
         _task = asyncio.create_task(_run(), name="public-price-stream")
-        await _persist_state(status="starting")
+        await _persist_state(status="starting", updates=0, invalid_updates=0,
+                             last_quote_at=None, last_symbol=None, last_ratchet_result=None,
+                             quote_coverage_status="not_yet_observed", invalid_reason_counts={})
         return {"started": True, **_state}
 
 

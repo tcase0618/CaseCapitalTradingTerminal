@@ -71,7 +71,7 @@ async def test_automatic_public_stop_exit_uses_broker_quantity_and_session(monke
         assert submissions[0]["quantity"] == expected
         assert submissions[0]["session"] == session
         assert submissions[0]["limit_price"] == 2.67
-        assert updates[0]["emergency_exit_order_qty"] == expected
+        assert next(update for update in updates if "emergency_exit_order_qty" in update)["emergency_exit_order_qty"] == expected
 
 
 def test_public_trade_quantity_prefers_reconciled_remaining_quantity():
@@ -199,6 +199,7 @@ def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
     now = datetime(2026, 9, 29, 19, 0, tzinfo=timezone.utc)
     monkeypatch.setenv("PUBLIC_MONITORED_EXIT_MAX_AGE_SECONDS", "180")
     covered, age = public_execution._verified_monitored_exit({
+        "qty_remaining": 1,
         "pm_active_stop": 9.5,
         "pm_last_ratchet_check": (now - timedelta(seconds=60)).isoformat(),
         "pm_ratchet_plan": {"enabled": True},
@@ -208,6 +209,7 @@ def test_verified_monitored_exit_requires_recent_active_ratchet(monkeypatch):
     assert age == 60
 
     stale, _ = public_execution._verified_monitored_exit({
+        "qty_remaining": 1,
         "pm_active_stop": 9.5,
         "pm_last_ratchet_check": (now - timedelta(seconds=181)).isoformat(),
         "pm_ratchet_plan": {"enabled": True},
@@ -224,6 +226,7 @@ async def test_protection_coverage_counts_recent_terminal_monitored_exit(monkeyp
         async def to_list(self, _limit):
             return [{
                 "ticker": "AAPL",
+                "qty_remaining": 1,
                 "pm_active_stop": 90.0,
                 "pm_last_ratchet_check": now.isoformat(),
                 "pm_ratchet_plan": {"enabled": True},

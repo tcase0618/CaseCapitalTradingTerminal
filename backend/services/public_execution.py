@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import asyncio
 from collections import Counter
@@ -88,7 +89,9 @@ def _verified_monitored_exit(row: dict[str, Any], *, now: datetime | None = None
     plan = row.get("pm_ratchet_plan") or {}
     age = _timestamp_age_seconds(row.get("pm_last_ratchet_check"), now=now)
     active = bool(plan.get("enabled")) and str(row.get("protection_state") or "").upper() == "MONITORED_EXIT_ONLY"
-    return bool(active and stop > 0 and age is not None and age <= _monitored_exit_max_age_seconds()), age
+    shape, _reason = _exit_order_shape(_qty(row), now=now)
+    full_quantity_eligible = bool(shape and _num(shape.get("quantity")) >= _qty(row) - 1e-8)
+    return bool(active and full_quantity_eligible and stop > 0 and age is not None and age <= _monitored_exit_max_age_seconds()), age
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -562,7 +565,7 @@ def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False)
     sale at a price the market is not bidding.
     """
     bid, ask = _quote_sides(row)
-    if bid <= 0 or ask <= 0 or ask < bid:
+    if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or ask < bid:
         return None, "public_execution_quote_requires_valid_bid_ask"
     mid = (bid + ask) / 2.0
     spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else None
@@ -584,6 +587,35 @@ def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False)
     }, None
 
 
+def _protective_exit_quote(row: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Price a protective LIMIT, not a guaranteed executable or market sell.
+
+    Prefer a current bid. A current last trade can independently anchor a
+    resting sell limit when the provider's bid/ask are delayed. Never stamp a
+    stale bid as current or use this sell-only fallback to authorize a buy.
+    """
+    quote, reason = _execution_quote(row, side="SELL", emergency=True)
+    fresh, _age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(row)})
+    if fresh and quote:
+        return {**quote, "price_basis": "PUBLIC_FRESH_BID", "reference_price": quote["bid"]}, None
+    last = _num(row.get("last") or row.get("lastPrice"))
+    timestamp = row.get("lastTimestamp") or row.get("last_timestamp")
+    last_fresh, _age = safety.quote_is_fresh({"ts": timestamp})
+    if str(row.get("outcome") or "SUCCESS").upper() != "SUCCESS":
+        return None, "public_quote_outcome_unsuccessful"
+    if last_fresh and math.isfinite(last) and last > 0:
+        # Round upward for a sell so rounding cannot discount the observed
+        # trade. A limit at that price can remain unfilled; expose the basis.
+        scale = 10000 if last < 1 else 100
+        limit = math.ceil(last * scale - 1e-9) / scale
+        return {
+            "bid": None, "ask": None, "mid": None, "spread_bps": None,
+            "reference_price": last, "limit_price": limit, "quote_time": timestamp,
+            "price_basis": "PUBLIC_FRESH_LAST_TRADE_LIMIT", "fill_guaranteed": False,
+        }, None
+    return None, reason or "public_exit_quote_stale_or_unverifiable"
+
+
 def _exit_quote_retry_config() -> tuple[int, float]:
     """Bound rapid refreshes for an exit that cannot safely price yet."""
     attempts = max(1, min(30, int(_num(os.getenv("PUBLIC_EXIT_QUOTE_REFRESH_ATTEMPTS", "30"), 30))))
@@ -602,8 +634,8 @@ async def _refresh_exit_quotes(
 
     A single request is made for every unresolved symbol on each attempt. This
     keeps a burst of stop exits bounded to one provider call per retry rather
-    than one call per position. Only Public's fresh two-sided quote can release
-    an exit for submission.
+    than one call per position. Protective exits may instead use an explicitly
+    labelled fresh-last-trade limit; that is not a guaranteed executable bid.
     """
     attempts, interval = _exit_quote_retry_config()
     if max_attempts is not None:
@@ -625,8 +657,13 @@ async def _refresh_exit_quotes(
             by_symbol = {}
         for symbol in list(pending):
             row = by_symbol.get(symbol) or {}
-            quote, reason = _execution_quote(row, side="SELL", emergency=emergency)
-            fresh, age = safety.quote_is_fresh({"ts": _execution_quote_timestamp(row)})
+            if emergency:
+                quote, reason = _protective_exit_quote(row)
+                timestamp = (quote or {}).get("quote_time")
+            else:
+                quote, reason = _execution_quote(row, side="SELL")
+                timestamp = _execution_quote_timestamp(row)
+            fresh, age = safety.quote_is_fresh({"ts": timestamp})
             if fresh and quote:
                 resolved[symbol] = {"quote": row, "execution_quote": quote, "age_seconds": age, "attempt": attempt}
                 pending.discard(symbol)
@@ -1450,6 +1487,7 @@ async def protection_coverage() -> dict[str, Any]:
             "pm_ratchet_plan": 1,
             "pm_last_ratchet_check": 1,
             "protection_state": 1,
+            "qty_remaining": 1,
         },
     ).to_list(500)
     unprotected = []
@@ -2237,10 +2275,22 @@ async def process_protective_exits() -> dict[str, Any]:
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
             refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
             exit_quote = refreshed_quote.get("execution_quote")
-            current = _num((exit_quote or {}).get("bid"))
+            current = _num((exit_quote or {}).get("reference_price") or (exit_quote or {}).get("bid"))
             quantity = _qty(trade)
-            if stop <= 0 or current <= 0 or not exit_quote or quantity <= 0 or current > stop:
+            if stop <= 0 or quantity <= 0:
                 continue
+            if current <= 0 or not exit_quote:
+                unresolved = (refreshed.get("unresolved") or {}).get(ticker) or {}
+                deferred.append({"ticker": ticker, "reason": unresolved.get("reason") or "public_exit_quote_unavailable", "breach_known": bool(trade.get("emergency_exit_triggered_at"))})
+                continue
+            already_triggered = bool(trade.get("emergency_exit_triggered_at"))
+            if current > stop and not already_triggered:
+                continue
+            if not already_triggered:
+                await db.tf_trades.update_one(
+                    {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
+                    {"$set": {"emergency_exit_triggered_at": datetime.now(timezone.utc).isoformat(), "emergency_exit_trigger_stop": stop, "emergency_exit_trigger_price": current, "emergency_exit_trigger_basis": exit_quote.get("price_basis")}},
+                )
             if broker_positions is None:
                 broker_positions = {
                     _symbol(position): position
@@ -2249,10 +2299,11 @@ async def process_protective_exits() -> dict[str, Any]:
             broker_quantity = _qty(broker_positions.get(ticker) or {})
             order_shape, shape_note = _exit_order_shape(broker_quantity)
             if not order_shape:
-                deferred.append({"ticker": ticker, "reason": shape_note})
+                deferred.append({"ticker": ticker, "reason": shape_note, "breach_known": True, "stop": stop, "reference_price": current})
                 continue
             quantity = _num(order_shape.get("quantity"))
-            client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, stop, prefix="public")
+            trigger_stop = _num(trade.get("emergency_exit_trigger_stop")) or stop
+            client_id = execution_safety.stable_client_order_id("public_stop", trade.get("client_order_id"), ticker, trigger_stop, prefix="public")
             claim = await execution_safety.claim_execution_intent(scope="public_equity_exit", client_order_id=client_id, symbol=ticker, side="sell", metadata={"stop": stop})
             if not claim.get("ok"):
                 continue
@@ -2279,7 +2330,7 @@ async def process_protective_exits() -> dict[str, Any]:
                     {"client_order_id": trade.get("client_order_id"), "broker_base": BROKER_BASE},
                     {"$set": {"emergency_exit_order_id": order_id, "emergency_exit_order_qty": quantity, "emergency_exit_status": "SUBMITTED", "emergency_exit_limit": exit_limit, "emergency_exit_quote": exit_quote, "emergency_exit_preflight": result.get("preflight"), "emergency_exit_session": order_shape["session"], "emergency_exit_shape_note": shape_note}},
                 )
-                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "limit_price": exit_limit, "order_type": "EMERGENCY_LIMIT_EXIT"})
+                submitted.append({"ticker": ticker, "order_id": order_id, "stop": stop, "limit_price": exit_limit, "price_basis": exit_quote.get("price_basis"), "order_type": "EMERGENCY_LIMIT_EXIT"})
                 await execution_safety.mark_execution_intent(client_id, "submitted", {"order_id": order_id})
             except Exception as exc:
                 await execution_safety.mark_execution_intent(client_id, "broker_rejected", {"error": str(exc)[:220]})

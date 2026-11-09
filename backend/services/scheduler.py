@@ -711,13 +711,18 @@ def start_scheduler():
         coverage_degraded: dict[str, Any] = {}
         public_ratchet_status: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
         protection_coverage: dict[str, Any] = {"skipped": True, "reason": "public_execution_unavailable"}
+        public_protection: dict[str, Any] = {"skipped": True, "reason": "not_run"}
         try:
             try:
                 from . import public_execution
                 if public_execution.enabled():
-                    public_reconciliation = await public_execution.reconcile()
-                    if not public_reconciliation.get("skipped") and not public_reconciliation.get("ok", True):
-                        failures.append({"stage": "public_reconciliation", "reason": "reconciliation_degraded"})
+                    try:
+                        public_reconciliation = await public_execution.reconcile()
+                        if not public_reconciliation.get("skipped") and not public_reconciliation.get("ok", True):
+                            failures.append({"stage": "public_reconciliation", "reason": "reconciliation_degraded"})
+                    except Exception as exc:
+                        failures.append({"stage": "public_reconciliation", "reason": exc.__class__.__name__})
+                        logger.exception("Public reconciliation failed; independent exits will still run")
                     # Exit protection is the only Public responsibility that
                     # must run every minute. It goes before ratchets, phase
                     # trims, scoring, and replacement work so a breached stop
@@ -740,6 +745,8 @@ def start_scheduler():
                                 "status": public_ratchet_status.get("quote_coverage_status") or "partial",
                                 "unpriced": public_ratchet_status.get("unpriced") or [],
                             }
+                            if public_ratchet_status.get("quote_coverage_status") == "unavailable":
+                                failures.append({"stage": "public_pm_ratchet", "reason": "no_fresh_position_marks"})
                     except Exception as exc:
                         public_ratchet_status = {"ok": False, "reason": exc.__class__.__name__}
                         failures.append({"stage": "public_pm_ratchet", "reason": exc.__class__.__name__})
@@ -770,6 +777,7 @@ def start_scheduler():
             "failures": failures,
             "pm_ratchet": public_ratchet_status,
             "protection_coverage": protection_coverage,
+            "protective_exits": public_protection,
             "coverage_degraded": coverage_degraded,
         }
 

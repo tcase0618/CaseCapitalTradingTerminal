@@ -135,35 +135,43 @@ def _fresh_public_execution_mark(row: dict[str, Any]) -> float | None:
     return mark if mark > 0 else None
 
 
-async def _public_prices(tickers: list[str]) -> dict[str, float]:
-    """Return only fresh, executable Public marks for Public-broker ratchets."""
+def _public_ratchet_mark(row: dict[str, Any]) -> dict[str, Any] | None:
+    from . import public_execution
+
+    quote, _reason = public_execution._protective_exit_quote(row)
+    if not quote:
+        return None
+    return {"price": quote["reference_price"], "price_basis": quote["price_basis"], "timestamp": quote["quote_time"]}
+
+
+async def _public_prices(tickers: list[str]) -> dict[str, dict[str, Any]]:
+    """Track fresh observations even when the provider's NBBO is delayed."""
     from . import public_api, public_execution
 
     if not tickers:
         return {}
     async with public_api.PublicAPIClient(use_sdk=False) as client:
         rows = public_execution._quotes(await client.quotes(tickers))
-    prices: dict[str, float] = {}
+    prices: dict[str, dict[str, Any]] = {}
     for row in rows:
         ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
-        price = _fresh_public_execution_mark(row)
-        if ticker and price:
-            prices[ticker] = price
+        mark = _public_ratchet_mark(row)
+        if ticker and mark:
+            prices[ticker] = mark
     return prices
 
 
 async def _apply_public_ratchet_marks(
     open_trades: list[dict[str, Any]],
-    prices: dict[str, float],
+    prices: dict[str, Any],
     *,
     source: str,
 ) -> dict[str, Any]:
     """Apply already-validated Public marks to the authoritative ratchet ledger.
 
     Both the one-minute REST monitor and the SDK price subscription use this
-    path.  The caller must have already rejected stale, one-sided, or
-    untradeably wide quotes; this function never treats a portfolio mark as an
-    executable price.
+    path. Callers validate either a current bid or a separately timestamped
+    last trade. A last-trade reference is not represented as an executable bid.
     """
     db = get_db()
     actions: list[dict[str, Any]] = []
@@ -175,8 +183,9 @@ async def _apply_public_ratchet_marks(
         entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
         if not ticker or entry <= 0:
             continue
-        current = prices.get(ticker)
-        if not current or current <= 0:
+        mark = prices.get(ticker)
+        current = _num(mark.get("price")) if isinstance(mark, dict) else _num(mark)
+        if not math.isfinite(current) or current <= 0:
             unpriced.append(ticker)
             continue
         plan = trade.get("pm_ratchet_plan") or {}
@@ -204,6 +213,7 @@ async def _apply_public_ratchet_marks(
             "pm_active_stop": levels["active_stop"],
             "pm_last_ratchet_check": _now().isoformat(),
             "pm_last_ratchet_source": source,
+            "pm_last_ratchet_price_basis": mark.get("price_basis") if isinstance(mark, dict) else "VALIDATED_CALLER_MARK",
             "peak_price_since_entry": observed_peak,
             "pm_last_ratchet_mark": float(current),
             "public_stop_policy": policy,
@@ -246,9 +256,15 @@ async def _apply_public_ratchet_marks(
                 "active_target": levels["active_target"],
                 "gain_pct": levels["gain_pct"],
             })
+        # Stream callbacks and the minute monitor may overlap. Authoritative
+        # stops and peaks must not move backwards when either uses an old row.
+        maxima = {"current_stop": levels["active_stop"], "pm_active_stop": levels["active_stop"],
+                  "peak_price_since_entry": observed_peak, "pm_ratchet_level": max(current_level, levels["ratchet_level"])}
+        for key in maxima:
+            updates.pop(key, None)
         await db.tf_trades.update_one(
             {"$and": [{"client_order_id": trade.get("client_order_id")}, broker_scope]},
-            {"$set": updates},
+            {"$set": updates, "$max": maxima},
         )
     return {
         "checked": len(open_trades),
@@ -261,12 +277,12 @@ async def _apply_public_ratchet_marks(
     }
 
 
-async def process_public_ratchet_marks(marks: dict[str, float], *, source: str = "public_price_stream") -> dict[str, Any]:
+async def process_public_ratchet_marks(marks: dict[str, Any], *, source: str = "public_price_stream") -> dict[str, Any]:
     """Apply callback marks from Public's SDK subscription to held positions."""
     prices = {
-        str(ticker).upper(): float(price)
-        for ticker, price in marks.items()
-        if str(ticker).strip() and _num(price) > 0
+        str(ticker).upper(): mark
+        for ticker, mark in marks.items()
+        if str(ticker).strip() and _num(mark.get("price") if isinstance(mark, dict) else mark) > 0
     }
     if not prices:
         return {"ok": True, "checked": 0, "ratcheted": 0, "source": source}
