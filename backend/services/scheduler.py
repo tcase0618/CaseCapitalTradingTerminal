@@ -762,8 +762,12 @@ def start_scheduler():
                             "reason": f"{unresolved}_positions_without_managed_exit_coverage",
                         })
                     elif protection_coverage.get("monitored_exit_only_open", 0):
+                        failures.append({
+                            "stage": "public_protection_coverage",
+                            "reason": f"{protection_coverage['monitored_exit_only_open']}_positions_without_current_exit_coverage",
+                        })
                         coverage_degraded["public_protection"] = {
-                            "reason": "terminal_exit_coverage_waiting_for_fresh_quote",
+                            "reason": "terminal_exit_coverage_unavailable_quote_or_session",
                             "monitored_exit_only_open": protection_coverage["monitored_exit_only_open"],
                         }
             except Exception as exc:

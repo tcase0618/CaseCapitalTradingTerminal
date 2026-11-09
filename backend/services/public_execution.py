@@ -1517,12 +1517,15 @@ async def protection_coverage() -> dict[str, Any]:
             monitored_protected += 1
             continue
         is_legacy_unmanaged = bool(row.get("broker_imported")) and row.get("management_state") == "REQUIRES_STRATEGY_RECONCILIATION"
+        exit_shape, session_reason = _exit_order_shape(_qty(row))
+        if exit_shape and _num(exit_shape.get("quantity")) < _qty(row) - 1e-8:
+            session_reason = session_reason or "public_fractional_residual_requires_core"
         unprotected.append({
             "ticker": _symbol(row),
             "status": "LEGACY_UNMANAGED" if is_legacy_unmanaged else (
                 "MONITORED_EXIT_STALE_OR_INCOMPLETE" if str(row.get("protection_state") or "").upper() == "MONITORED_EXIT_ONLY" else str(row.get("protective_order_status") or "MISSING").upper()
             ),
-            "reason": str(row.get("protective_order_error") or "broker_protective_order_missing")[:220],
+            "reason": str(session_reason or row.get("protective_order_error") or "broker_protective_order_missing")[:220],
             "legacy_unmanaged": is_legacy_unmanaged,
             "monitor_age_seconds": monitor_age,
         })
