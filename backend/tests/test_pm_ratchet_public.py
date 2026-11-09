@@ -51,6 +51,8 @@ async def test_public_profit_floor_persists_across_reversal_and_restart(monkeypa
         async def update_one(self, query, update):
             assert query["$and"][1] == {"broker_base": "public"}
             trade.update(update["$set"])
+            for key, value in update.get("$max", {}).items():
+                trade[key] = max(trade.get(key, value), value)
 
     class Events:
         async def insert_one(self, event):
@@ -116,7 +118,7 @@ async def test_public_ratchet_uses_fresh_public_mark_and_persists_raised_stop(mo
             return Cursor()
 
         async def update_one(self, _query, update):
-            updates.append(update["$set"])
+            updates.append({**update["$set"], **update.get("$max", {})})
 
     class Events:
         async def insert_one(self, event):
@@ -167,7 +169,7 @@ async def test_public_ratchet_initializes_account_protection_for_unplanned_posit
             return Cursor()
 
         async def update_one(self, _query, update):
-            updates.append(update["$set"])
+            updates.append({**update["$set"], **update.get("$max", {})})
 
     class Events:
         async def insert_one(self, event):
@@ -263,7 +265,7 @@ async def test_sdk_stream_mark_uses_the_same_public_ratchet_ledger(monkeypatch):
             return Cursor()
 
         async def update_one(self, _query, update):
-            updates.append(update["$set"])
+            updates.append({**update["$set"], **update.get("$max", {})})
 
     class Events:
         async def insert_one(self, _event):

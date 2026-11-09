@@ -74,6 +74,7 @@ def test_holding_score_distinguishes_verified_terminal_monitor_from_broker_stop(
         {"ticker": "MON", "pm_score": 60, "case_score": 60},
         {
             "pm_active_stop": 9.0,
+            "qty_remaining": 1,
             "pm_last_ratchet_check": datetime.now(timezone.utc).isoformat(),
             "pm_ratchet_plan": {"enabled": True},
             "protection_state": "MONITORED_EXIT_ONLY",
