@@ -1,5 +1,5 @@
 """Offline regressions for CCTT-CRIT-001/002 and CCTT-HIGH-001."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -158,6 +158,56 @@ async def test_wide_spread_does_not_suppress_fresh_bid_stop_exit(exit_case):
     assert client.submissions[0]['limit_price'] == 9.0
     quote, reason = public_execution._execution_quote({'bid': 9, 'ask': 10}, side='BUY')
     assert quote is None and reason == 'public_execution_quote_spread_too_wide'
+
+
+@pytest.mark.parametrize('bid,expected', [
+    (9.009, 9.00), (9.999, 9.99), (9.01, 9.01),
+    (0.12349, 0.1234), (0.99999, 0.9999), (0.00009, None),
+])
+def test_emergency_sell_limit_never_rounds_above_bid(bid, expected):
+    quote, reason = public_execution._execution_quote(
+        {'bid': bid, 'ask': bid * 1.12, 'last': bid * 1.08},
+        side='SELL', emergency=True)
+    if expected is None:
+        assert quote is None and reason == 'public_execution_quote_limit_invalid'
+    else:
+        assert reason is None
+        assert quote['limit_price'] == expected
+        assert quote['limit_price'] <= bid
+
+
+@pytest.mark.asyncio
+async def test_wide_fractional_bid_exit_retries_expired_order_at_bid_or_below(exit_case):
+    trade, client, _, _ = exit_case
+    client.bid, client.ask = 9.009, 10.0
+    assert (await public_execution.process_protective_exits())['submitted']
+    client.orders['exit-1'] = {'status': 'EXPIRED'}
+    client.quantity = 0.5
+    assert (await public_execution.process_protective_exits())['submitted']
+    assert len(client.submissions) == 2
+    assert all(order['limit_price'] <= client.bid for order in client.submissions)
+    assert client.submissions[1]['quantity'] == 0.5
+    assert client.submissions[0]['client_order_id'] != client.submissions[1]['client_order_id']
+    assert trade['emergency_exit_history'][0]['order_id'] == 'exit-1'
+
+
+@pytest.mark.asyncio
+async def test_stale_sides_with_fresh_last_trade_do_not_price_exit(exit_case, monkeypatch):
+    _, client, _, alerts = exit_case
+    monkeypatch.setenv('PUBLIC_EXIT_QUOTE_REFRESH_ATTEMPTS', '1')
+    now = datetime.now(timezone.utc)
+    stale = (now - timedelta(minutes=10)).isoformat()
+
+    async def quotes(symbols):
+        return {'quotes': [{'symbol': 'TEST', 'bid': 9.0, 'ask': 10.0,
+                            'last': 9.8, 'quoteTime': now.isoformat(),
+                            'bidTimestamp': stale, 'askTimestamp': stale}]}
+
+    monkeypatch.setattr(client, 'quotes', quotes)
+    result = await public_execution.process_protective_exits()
+    assert not result['ok'] and not client.submissions
+    assert any(args[0] == 'public_exit_quote_unavailable' and kwargs['priority'] == 'critical'
+               for args, kwargs in alerts)
 
 
 @pytest.mark.asyncio

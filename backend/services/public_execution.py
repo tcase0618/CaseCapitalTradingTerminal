@@ -7,6 +7,7 @@ import asyncio
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -572,7 +573,12 @@ def _execution_quote(row: dict[str, Any], *, side: str, emergency: bool = False)
     normal_side = str(side or "").upper()
     raw_limit = bid if emergency and normal_side == "SELL" else mid
     precision = 4 if raw_limit < 1 else 2
-    limit = round(raw_limit, precision)
+    if emergency and normal_side == "SELL":
+        # Nearest rounding can put a protective sell above the actual bid.
+        tick = Decimal("0.0001" if precision == 4 else "0.01")
+        limit = float(Decimal(str(raw_limit)).quantize(tick, rounding=ROUND_FLOOR))
+    else:
+        limit = round(raw_limit, precision)
     if limit <= 0:
         return None, "public_execution_quote_limit_invalid"
     return {
