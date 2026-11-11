@@ -231,6 +231,41 @@ async def test_public_ratchet_quote_gap_is_degraded_and_not_ok(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entry", [None, 0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("source", ["rest", "stream"])
+@pytest.mark.parametrize("include_healthy", [False, True])
+async def test_public_holding_without_valid_entry_is_unverified(monkeypatch, entry, source, include_healthy):
+    from test_claude_audit_exit_recovery import MemoryCollection
+
+    trade = {"client_order_id": "missing-entry", "broker_base": "public",
+             "status": "OPEN", "fill_status": "FILLED", "qty_remaining": 1,
+             "ticker": "TEST", "filled_avg_price": entry, "current_stop": 9.0}
+    healthy = {**trade, "client_order_id": "healthy", "ticker": "GOOD", "filled_avg_price": 10.0}
+    trades = MemoryCollection([trade, healthy] if include_healthy else [trade])
+    events = MemoryCollection()
+    monkeypatch.setattr(pm_ratchet, "get_db", lambda: SimpleNamespace(
+        tf_trades=trades, pm_ratchet_events=events))
+
+    async def fresh_marks(_tickers):
+        return {"TEST": 10.0, "GOOD": 11.0}
+
+    monkeypatch.setattr(pm_ratchet, "_public_prices", fresh_marks)
+    if source == "rest":
+        result = await pm_ratchet.process_open_ratchets(broker_base="public")
+    else:
+        result = await pm_ratchet.process_public_ratchet_marks({"TEST": 10.0, "GOOD": 11.0})
+    assert result["ok"] is False
+    assert result["monitor_status"] == "DEGRADED"
+    assert result["coverage_status"] == ("partial" if include_healthy else "unavailable")
+    assert result["unverified"] == [{"ticker": "TEST", "reason": "public_ratchet_entry_unavailable"}]
+    assert result["ratcheted"] == int(include_healthy)
+    assert trade["current_stop"] == 9.0
+    assert len(events.rows) == int(include_healthy)
+    if include_healthy:
+        assert healthy["current_stop"] > 9.0
+
+
+@pytest.mark.asyncio
 async def test_sdk_stream_mark_uses_the_same_public_ratchet_ledger(monkeypatch):
     trade = {
         "client_order_id": "public-stream-1",

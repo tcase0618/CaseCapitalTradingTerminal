@@ -169,11 +169,16 @@ async def _apply_public_ratchet_marks(
     actions: list[dict[str, Any]] = []
     coverage_initialized: list[str] = []
     unpriced: list[str] = []
+    unverified: list[dict[str, Any]] = []
     broker_scope = {"broker_base": "public"}
     for trade in open_trades:
         ticker = (trade.get("ticker") or "").upper()
         entry = _num(trade.get("filled_avg_price") or trade.get("entry_price_ref"))
-        if not ticker or entry <= 0:
+        if not ticker or not math.isfinite(entry) or entry <= 0:
+            unverified.append({
+                "ticker": ticker or None,
+                "reason": "public_ratchet_entry_unavailable" if ticker else "public_ratchet_ticker_unavailable",
+            })
             continue
         current = prices.get(ticker)
         if not current or current <= 0:
@@ -256,8 +261,28 @@ async def _apply_public_ratchet_marks(
         "coverage_initialized": len(coverage_initialized),
         "coverage_initialized_tickers": coverage_initialized,
         "unpriced": sorted(set(unpriced)),
+        "unverified": unverified,
         "actions": actions,
         "ran_at": _now().isoformat(),
+    }
+
+
+def _public_monitor_status(result: dict[str, Any]) -> dict[str, Any]:
+    """Distinguish quote coverage from holdings that cannot be evaluated."""
+    checked = int(result.get("checked") or 0)
+    unpriced = len(result.get("unpriced") or [])
+    unverified = len(result.get("unverified") or [])
+    unresolved = unpriced + unverified
+    return {
+        "ok": not unresolved,
+        "monitor_status": "DEGRADED" if unresolved else "OK",
+        "degraded": bool(unresolved),
+        "reason": ("public_ratchet_holdings_unverified" if unverified else
+                   "public_ratchet_quotes_unavailable" if unpriced else None),
+        "coverage_status": ("unavailable" if checked and unresolved >= checked else
+                            "partial" if unresolved else "complete"),
+        "quote_coverage_status": ("unavailable" if checked and unpriced >= checked else
+                                  "partial" if unpriced else "complete"),
     }
 
 
@@ -281,14 +306,9 @@ async def process_public_ratchet_marks(marks: dict[str, float], *, source: str =
     rows = await db.tf_trades.find(filters, {"_id": 0}).to_list(500)
     result = await _apply_public_ratchet_marks(rows, prices, source=source)
     return {
-        # Missing fresh quotes is a coverage condition, not a ratchet service
-        # failure.  The next stream/REST mark can resume ratcheting normally.
-        "ok": True,
-        "degraded": bool(result.get("unpriced")),
-        "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
-        "quote_coverage_status": "partial" if result.get("unpriced") else "complete",
         "source": source,
         **result,
+        **_public_monitor_status(result),
     }
 
 
@@ -322,19 +342,9 @@ async def process_open_ratchets(*, broker_base: str | None = None) -> dict[str, 
     if broker_base == "public":
         public_prices = await _public_prices([str(trade.get("ticker") or "") for trade in open_trades])
         result = await _apply_public_ratchet_marks(open_trades, public_prices, source="public_rest_monitor")
-        checked = int(result.get("checked") or 0)
-        unpriced = len(result.get("unpriced") or [])
-        coverage_status = "complete"
-        if unpriced:
-            coverage_status = "unavailable" if checked and unpriced >= checked else "partial"
         return {
             **result,
-            # Missing quotes leave protection unverified; never report OK.
-            "ok": not unpriced,
-            "monitor_status": "DEGRADED" if unpriced else "OK",
-            "degraded": bool(unpriced),
-            "reason": "public_ratchet_quotes_unavailable" if result.get("unpriced") else None,
-            "quote_coverage_status": coverage_status,
+            **_public_monitor_status(result),
             "broker_base": broker_base,
         }
     actions: list[dict[str, Any]] = []
