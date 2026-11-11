@@ -214,6 +214,7 @@ async def _apply_public_ratchet_marks(
             "pm_last_ratchet_check": _now().isoformat(),
             "pm_last_ratchet_source": source,
             "pm_last_ratchet_price_basis": mark.get("price_basis") if isinstance(mark, dict) else "VALIDATED_CALLER_MARK",
+            "pm_last_ratchet_reference": dict(mark) if isinstance(mark, dict) else None,
             "peak_price_since_entry": observed_peak,
             "pm_last_ratchet_mark": float(current),
             "public_stop_policy": policy,

@@ -39,11 +39,13 @@ async def test_public_read_only_endpoints_use_bearer_and_never_mutate():
         async with public_api.PublicAPIClient(_cfg(), http) as client:
             accounts = await client.accounts()
             quotes = await client.quotes(["aapl", "AAPL"])
+            await client.instruments("aapl")
     assert accounts["accounts"][0]["accountId"] == "acct-1"
     assert quotes["quotes"] == []
     assert seen == [
         ("GET", "/userapigateway/trading/account", "Bearer token", b""),
         ("POST", "/userapigateway/marketdata/acct-1/quotes", "Bearer token", b'{"instruments":[{"symbol":"AAPL","type":"EQUITY"}]}'),
+        ("GET", "/userapigateway/trading/instruments/AAPL/EQUITY", "Bearer token", b""),
     ]
 
 

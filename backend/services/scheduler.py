@@ -32,6 +32,34 @@ SCHEDULER_JOB_DEFAULTS = {
     "coalesce": True,
     "misfire_grace_time": 300,
 }
+
+
+def _monitor_incident_key(failures: list[dict[str, str]]) -> str:
+    categories: set[str] = set()
+    for item in failures:
+        stage = str(item.get("stage") or "unknown")
+        reason = str(item.get("reason") or "unknown")
+        if stage == "public_protection_coverage" or (
+            stage == "public_pm_ratchet" and reason in {"no_fresh_position_marks", "public_ratchet_quotes_unavailable"}
+        ):
+            categories.add("PUBLIC_EXIT_COVERAGE_DEGRADED")
+        elif any(token in reason.lower() for token in ("timeout", "connect", "gateway", "upstream", "publicapierror")):
+            categories.add("PUBLIC_UPSTREAM_UNAVAILABLE")
+        elif "reconciliation" in stage:
+            categories.add("PUBLIC_RECONCILIATION_DEGRADED")
+        else:
+            categories.add(f"{stage}:{reason}")
+    return "|".join(sorted(categories)) or "UNKNOWN"
+
+
+def _canonical_monitor_incident(value: str) -> str:
+    # Preserve active incidents across deployment instead of sending the same
+    # coverage alert again under a new spelling or a different position count.
+    return "|".join(sorted({
+        "PUBLIC_EXIT_COVERAGE_DEGRADED" if part == "PUBLIC_QUOTE_COVERAGE_DEGRADED"
+        or part.startswith("public_protection_coverage:") else part
+        for part in str(value or "").split("|") if part
+    }))
 STOCK_SCAN_CADENCE_ET = [
     ("midnight_scan", 0, 0),
     ("morning_scan", 8, 0),
@@ -851,21 +879,6 @@ def start_scheduler():
             "pm_portfolio_scores": portfolio_score_status,
         }
 
-    def _monitor_incident_key(failures: list[dict[str, str]]) -> str:
-        """Classify failures so an upstream outage is one incident, not spam."""
-        categories: set[str] = set()
-        for item in failures:
-            reason = str(item.get("reason") or "").lower()
-            if any(token in reason for token in ("timeout", "connect", "gateway", "upstream", "publicapierror")):
-                categories.add("PUBLIC_UPSTREAM_UNAVAILABLE")
-            elif "quote" in reason or "ratchet" in str(item.get("stage") or "").lower():
-                categories.add("PUBLIC_QUOTE_COVERAGE_DEGRADED")
-            elif "reconciliation" in reason or "reconciliation" in str(item.get("stage") or "").lower():
-                categories.add("PUBLIC_RECONCILIATION_DEGRADED")
-            else:
-                categories.add(f"{item.get('stage', 'unknown')}:{item.get('reason', 'unknown')}")
-        return "|".join(sorted(categories)) or "UNKNOWN"
-
     async def _send_position_monitor_failure(failures: list[dict[str, str]], stage: str = "monitor"):
         if not failures or not os.environ.get("TELEGRAM_CHAT_ID"):
             return
@@ -874,12 +887,17 @@ def start_scheduler():
         state_key = f"position_monitor_alert:{stage}"
         db = get_db()
         prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
-        if prior.get("active") and prior.get("incident") == incident:
+        if prior.get("active") and prior.get("healthy_since"):
+            await db.bot_state.update_one({"_id": state_key}, {"$set": {"healthy_since": None}})
+        if prior.get("active") and _canonical_monitor_incident(prior.get("incident")) == incident:
+            await db.bot_state.update_one({"_id": state_key}, {"$set": {
+                "incident": incident, "details": details, "last_seen_at": _now_iso(), "healthy_since": None,
+            }})
             return
-        coverage_only = all(item.get("stage") == "public_protection_coverage" for item in failures)
+        coverage_only = incident == "PUBLIC_EXIT_COVERAGE_DEGRADED"
         title = "CASE CAPITAL | PORTFOLIO PROTECTION DEGRADED" if coverage_only else "CASE CAPITAL | PORTFOLIO MONITOR FAILURE"
         action = (
-            "Action: broker stops are unavailable and fresh two-sided Public quotes have not recently verified terminal exit coverage."
+            "Action: usable current Public prices or supported exit sessions are unavailable. Monitoring continues; no sale or protection is implied."
             if coverage_only
             else "Action: monitor status requires review; no new risk is authorized by this alert."
         )
@@ -895,7 +913,7 @@ def start_scheduler():
         if sent:
             await db.bot_state.update_one(
                 {"_id": state_key},
-                {"$set": {"active": True, "incident": incident, "details": details, "updated_at": _now_iso()}},
+                {"$set": {"active": True, "incident": incident, "details": details, "updated_at": _now_iso(), "healthy_since": None}},
                 upsert=True,
             )
 
@@ -903,6 +921,21 @@ def start_scheduler():
         state_key = f"position_monitor_alert:{stage}"
         db = get_db()
         prior = await db.bot_state.find_one({"_id": state_key}, {"_id": 0}) or {}
+        if prior.get("active"):
+            now = datetime.now(timezone.utc)
+            try:
+                healthy_since = datetime.fromisoformat(str(prior.get("healthy_since")).replace("Z", "+00:00"))
+                healthy_seconds = (now - healthy_since).total_seconds()
+                stable = healthy_seconds >= 120
+                if healthy_seconds < 0:
+                    healthy_since = None
+            except (TypeError, ValueError):
+                stable = False
+                healthy_since = None
+            if not stable:
+                if healthy_since is None:
+                    await db.bot_state.update_one({"_id": state_key}, {"$set": {"healthy_since": now.isoformat()}})
+                return
         if prior.get("active") and os.environ.get("TELEGRAM_CHAT_ID"):
             sent = await telegram_service.send_message(
                 f"<b>CASE CAPITAL | PORTFOLIO MONITOR RECOVERED</b>\n"

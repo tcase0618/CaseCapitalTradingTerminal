@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -43,7 +43,8 @@ async def test_failed_protection_alert_is_retried(monkeypatch, recovery):
     monkeypatch.setattr(scheduler, '_scheduler', None)
     monkeypatch.setattr(scheduler, 'AsyncIOScheduler', _FakeScheduler)
     monkeypatch.setenv('TELEGRAM_CHAT_ID', 'offline-test-chat')
-    state = MemoryCollection([{'_id': 'position_monitor_alert:monitor', 'active': True, 'incident': 'OLD'}] if recovery else [])
+    state = MemoryCollection([{'_id': 'position_monitor_alert:monitor', 'active': True, 'incident': 'OLD',
+        'healthy_since': (datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat()}] if recovery else [])
     calls = []
     async def send(*args, **kwargs):
         calls.append(args)

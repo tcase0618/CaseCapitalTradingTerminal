@@ -19,20 +19,22 @@ def notice(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failed', ['bot_state', 'claude_cache', 'scan_results', 'watchlist', 'alerts'])
+@pytest.mark.parametrize('failed', ['bot_state', 'tf_trades'])
 async def test_each_failed_read_alerts_once_without_database_delivery_state(monkeypatch, notice, failed):
     _, sender = notice
     collections = {name: SimpleNamespace(find_one=AsyncMock(return_value=None),
         count_documents=AsyncMock(return_value=0)) for name in
-        ['bot_state', 'claude_cache', 'scan_results', 'watchlist', 'alerts']}
+        ['bot_state', 'tf_trades']}
     collection = collections[failed]
-    method = collection.find_one if failed in {'bot_state', 'scan_results'} else collection.count_documents
+    method = collection.find_one
     method.side_effect = RuntimeError('fixture-secret')
     monkeypatch.setattr(watchdog, 'get_db', lambda: SimpleNamespace(**collections))
     for _ in range(2):
         result = await watchdog.check()
         assert result['db_available'] is False and result['protection_status'] == 'UNVERIFIED'
         assert 'fixture-secret' not in str(result)
+        assert result['failed_stage'] == failed
+        assert result['failure_scope'] == 'critical_ledger_read'
     sender.assert_awaited_once()
 
 
