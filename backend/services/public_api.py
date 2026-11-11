@@ -578,8 +578,8 @@ class PublicAPIClient:
 
     async def instruments(self, symbol: str | None = None) -> dict[str, Any]:
         if symbol:
-            return await self._get(f"/userapigateway/instruments/{symbol.upper()}")
-        return await self._get("/userapigateway/instruments")
+            return await self._get(f"/userapigateway/trading/instruments/{symbol.upper()}/EQUITY")
+        return await self._get("/userapigateway/trading/instruments")
 
     def _mutation_client(self) -> httpx.AsyncClient:
         """Return the bearer-authenticated HTTP client for order mutations.

@@ -623,6 +623,22 @@ def _exit_quote_retry_config() -> tuple[int, float]:
     return attempts, interval
 
 
+def _cached_protective_exit_quote(trade: dict[str, Any]) -> dict[str, Any] | None:
+    """Reuse a recent validated observation without changing provider time."""
+    reference = trade.get("pm_last_ratchet_reference") or {}
+    if not isinstance(reference, dict) or reference.get("price_basis") not in {"PUBLIC_FRESH_BID", "PUBLIC_FRESH_LAST_TRADE_LIMIT"}:
+        return None
+    price = _num(reference.get("price"))
+    fresh, _age = safety.quote_is_fresh({"ts": reference.get("timestamp")})
+    if not fresh or not math.isfinite(price) or price <= 0:
+        return None
+    scale = 10000 if price < 1 else 100
+    return {"reference_price": price, "limit_price": math.ceil(price * scale - 1e-9) / scale,
+            "quote_time": reference["timestamp"], "price_basis": "PUBLIC_RECENT_OBSERVATION_LIMIT",
+            "observation_basis": reference["price_basis"], "bid": None, "ask": None,
+            "mid": None, "spread_bps": None, "fill_guaranteed": False}
+
+
 async def _refresh_exit_quotes(
     client: public_api.PublicAPIClient,
     symbols: list[str],
@@ -668,9 +684,13 @@ async def _refresh_exit_quotes(
                 resolved[symbol] = {"quote": row, "execution_quote": quote, "age_seconds": age, "attempt": attempt}
                 pending.discard(symbol)
             else:
+                bid_ask_age = safety.quote_age_seconds(_execution_quote_timestamp(row))
+                last_age = safety.quote_age_seconds(row.get("lastTimestamp") or row.get("last_timestamp"))
                 unresolved[symbol] = {
                     "reason": reason or "public_exit_quote_stale_or_unverifiable",
                     "age_seconds": age,
+                    "bid_ask_age_seconds": bid_ask_age,
+                    "last_trade_age_seconds": last_age,
                     "attempt": attempt,
                 }
         if pending and attempt < attempts and interval:
@@ -2295,6 +2315,12 @@ async def process_protective_exits() -> dict[str, Any]:
             stop = _num(trade.get("pm_active_stop") or trade.get("current_stop"))
             refreshed_quote = (refreshed.get("resolved") or {}).get(ticker) or {}
             exit_quote = refreshed_quote.get("execution_quote")
+            cached = _cached_protective_exit_quote(trade)
+            if cached:
+                live_age = safety.quote_age_seconds((exit_quote or {}).get("quote_time"))
+                cached_age = safety.quote_age_seconds(cached["quote_time"])
+                if not exit_quote or (live_age is not None and cached_age is not None and cached_age < live_age):
+                    exit_quote = cached
             current = _num((exit_quote or {}).get("reference_price") or (exit_quote or {}).get("bid"))
             quantity = _qty(trade)
             if stop <= 0 or quantity <= 0:

@@ -7,17 +7,17 @@ This cannot promise cross-process or restart-persistent exactly-once delivery.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import logging
 import os
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import httpx
 
 from .db import database_failure_reason, get_db
 
 logger = logging.getLogger(__name__)
+_probe_details: ContextVar[dict | None] = ContextVar("database_probe_details", default=None)
 
 
 def _now() -> float:
@@ -33,10 +33,10 @@ async def _send_outage_alert() -> dict:
         return {"attempted": False, "sent": False, "reason": "not_configured"}
     # This fixed critical notice alone bypasses DB-backed delivery guards: the
     # ordinary send_message path cannot acquire those guards during this outage.
-    text = ("CASE CAPITAL | PORTFOLIO DATABASE OUTAGE — CRITICAL\n"
-            "Ledger reads failed. Terminal exit protection is UNVERIFIED.\n"
-            "Check PostgreSQL/backend logs and broker-side protection. "
-            "Database recovery and position coverage have not been confirmed.")
+    text = ("CASE CAPITAL | LEDGER READ FAILURE - CRITICAL\n"
+            "A critical ledger read failed or timed out; PostgreSQL may still be online.\n"
+            "Terminal exit protection is UNVERIFIED. Check backend query diagnostics "
+            "and broker-side protection; no database crash or recovery is implied.")
     payload = {"chat_id": telegram_service._default_chat_id(), "text": text, "disable_web_page_preview": True}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -79,21 +79,39 @@ _notifier = OutageNotifier()
 
 async def _read_database() -> None:
     db = get_db()
-    await db.bot_state.find_one({"_id": "state"}, {"_id": 0})
-    day = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    await db.claude_cache.count_documents({"date_key": day})
-    await db.scan_results.find_one({}, {"_id": 0}, sort=[("finished_at", -1)])
-    await db.watchlist.count_documents({})
-    await db.alerts.count_documents({"triggered": False})
+    # Do not fetch full scan payloads or count display/research collections to
+    # decide whether the position ledger is reachable during protective work.
+    for stage, operation in [
+        ("bot_state", lambda: db.bot_state.find_one({"_id": "state"}, {"_id": 0})),
+        ("tf_trades", lambda: db.tf_trades.find_one({}, {"_id": 0, "client_order_id": 1})),
+    ]:
+        details = _probe_details.get()
+        started = _now()
+        if details is not None:
+            details["stage"] = stage
+        try:
+            await operation()
+        finally:
+            if details is not None:
+                details["stage_timings_ms"][stage] = round((_now() - started) * 1000, 2)
 
 
 async def check() -> dict:
     reason = None
+    details = {"stage": "initialization", "stage_timings_ms": {}}
+    context = _probe_details.set(details)
     try:
         await asyncio.wait_for(_read_database(), timeout=5.0)
     except Exception as exc:
         reason = database_failure_reason(exc)
+        logger.warning("Critical ledger probe failed: stage=%s reason=%s timings_ms=%s",
+                       details["stage"], reason, details["stage_timings_ms"])
+    finally:
+        _probe_details.reset(context)
     available = reason is None
     notification = await _notifier.observe(available)
     return {"db_available": available, "db_reason": reason, "notification": notification,
+            "failure_scope": "critical_ledger_read" if reason else None,
+            "failed_stage": details["stage"] if reason else None,
+            "stage_timings_ms": details["stage_timings_ms"],
             "protection_status": "NOT_ASSESSED" if available else "UNVERIFIED"}
