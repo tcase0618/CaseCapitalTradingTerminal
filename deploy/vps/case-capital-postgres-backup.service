@@ -2,6 +2,7 @@
 Description=Case Capital PostgreSQL backup and verification
 After=postgresql.service
 Wants=postgresql.service
+OnFailure=case-capital-backup-failure.service
 
 [Service]
 Type=oneshot

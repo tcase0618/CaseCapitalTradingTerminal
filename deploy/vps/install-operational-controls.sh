@@ -10,6 +10,7 @@ install -d -o "${APP_USER}" -g "${APP_USER}" -m 700 /opt/case-capital/backups/po
 chmod 755 "${APP_DIR}/deploy/vps/backup-postgres.sh" "${APP_DIR}/deploy/vps/restore-postgres.sh"
 install -o root -g root -m 644 "${APP_DIR}/deploy/vps/case-capital-terminal.service" /etc/systemd/system/case-capital-terminal.service
 install -o root -g root -m 644 "${APP_DIR}/deploy/vps/case-capital-postgres-backup.service" /etc/systemd/system/case-capital-postgres-backup.service
+install -o root -g root -m 644 "${APP_DIR}/deploy/vps/case-capital-backup-failure.service" /etc/systemd/system/case-capital-backup-failure.service
 install -o root -g root -m 644 "${APP_DIR}/deploy/vps/case-capital-postgres-backup.timer" /etc/systemd/system/case-capital-postgres-backup.timer
 systemctl daemon-reload
 systemctl enable --now case-capital-postgres-backup.timer

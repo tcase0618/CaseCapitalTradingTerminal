@@ -1,0 +1,21 @@
+[Unit]
+Description=Case Capital database-independent backup failure alert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=casecapital
+Group=casecapital
+WorkingDirectory=/opt/case-capital/stock-intel/backend
+EnvironmentFile=-/opt/case-capital/stock-intel/backend/.env
+ExecStart=/opt/case-capital/stock-intel/backend/.venv/bin/python -m services.backup_failure
+Restart=no
+TimeoutStartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+StandardOutput=journal
+StandardError=journal

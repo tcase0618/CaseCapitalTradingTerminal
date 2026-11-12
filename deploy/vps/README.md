@@ -1,5 +1,26 @@
 # Case Capital VPS Deployment
 
+## Backup failure notifications
+
+After an approved deployment, `install-operational-controls.sh` installs the
+`case-capital-backup-failure.service` handler referenced by the backup unit's
+`OnFailure=`. Installing or updating these files alone does not activate them;
+this requires the operator's normal deployment and systemd reload.
+
+The handler makes one attempt to send a fixed critical Telegram notice without
+reading or writing PostgreSQL. It respects the existing ops-message policy and
+`TELEGRAM_EVENTS_ENABLED`, and needs configured Telegram credentials plus the
+backend virtual environment. Disabled delivery exits successfully; missing
+configuration or unverified delivery leaves the handler failed with a fixed
+journal reason. It does not retry an ambiguous timeout.
+
+This hook covers failures of the systemd backup service, including startup and
+dump failures. Running the shell script directly does not trigger it. A stopped
+timer/host or unavailable notifier runtime/network still needs independent
+monitoring. Repeated service activations can send repeated notices; global
+deduplication and live delivery are not guaranteed. Retention, off-host copies
+and restore verification remain separate operator responsibilities.
+
 Target: Ubuntu 24.04 LTS on a small VPS.
 
 ## Server shape
