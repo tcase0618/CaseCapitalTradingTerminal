@@ -269,6 +269,7 @@ async def _run_full_terminal_scan(triggered_by: str = "full_terminal", *, cycle_
                 ],
             },
             lottery_result=lottery_result,
+            persist_history=True,
         ),
     )
     # PM memory is written from this frozen decision packet before execution.
