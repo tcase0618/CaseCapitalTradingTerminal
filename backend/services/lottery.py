@@ -591,9 +591,9 @@ async def _short_interest_candidates() -> list[dict[str, Any]]:
             **row,
             "ticker": ticker,
             "price": row.get("price"),
-            "relative_volume": row.get("relative_volume") or 0,
+            "relative_volume": row.get("relative_volume"),
             "source": "finviz_high_short_lottery_screen",
-            "signals": ["HIGH_SHORT_INTEREST", "ATTENTION"],
+            "signals": list(dict.fromkeys([*(row.get("signals") or []), "HIGH_SHORT_INTEREST"])),
         })
     return out
 
@@ -622,7 +622,7 @@ async def _attention_candidates() -> list[dict[str, Any]]:
             "source": "attention_lottery_screen",
             "sources": sources,
             "signals": signals,
-            "relative_volume": 2,
+            "relative_volume": None,
         })
     return out
 
@@ -645,9 +645,9 @@ async def _pharma_catalyst_candidates() -> list[dict[str, Any]]:
             **row,
             "ticker": ticker,
             "source": "pharma_catalyst_lottery_screen",
-            "signals": list(dict.fromkeys([*(row.get("signals") or []), "PHARMA_PDUFA", "ATTENTION"])),
-            "relative_volume": row.get("relative_volume") or 2,
-            "change_pct": row.get("change_pct") or 0,
+            "signals": list(dict.fromkeys([*(row.get("signals") or []), "PHARMA_PDUFA"])),
+            "relative_volume": row.get("relative_volume"),
+            "change_pct": row.get("change_pct"),
         })
     return out
 
