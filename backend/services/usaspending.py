@@ -238,7 +238,14 @@ async def fetch_recipient_history(recipient_name: str, lookback_days: int = 365,
     }
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         data = await _post(client, "/search/spending_by_award/", payload)
-    return (data or {}).get("results", []) if data else []
+    if not isinstance(data, dict) or not isinstance(data.get('results'), list):
+        raise RuntimeError('recipient_history_unavailable')
+    rows = data['results']
+    metadata = data.get('page_metadata')
+    has_next = metadata.get('hasNext') if isinstance(metadata, dict) else None
+    if has_next is True or (len(rows) >= safe_limit and has_next is not False):
+        raise RuntimeError('recipient_history_incomplete')
+    return rows
 
 
 async def fetch_agency_obligations_by_month(months_back: int = 4) -> dict[str, list[dict[str, Any]]]:
@@ -369,6 +376,12 @@ async def detect_gov_signals() -> dict[str, Any]:
             hist = await fetch_recipient_history(recipient, lookback_days=365,
                                                   min_amount=5_000_000, limit=200)
         except Exception:
+            out[ticker]['gov_summary']['new_winner_history_status'] = 'UNAVAILABLE_OR_INCOMPLETE'
+            return []
+        if not hist:
+            # Recent qualifying awards already exist; an empty history query
+            # cannot prove the absence of older awards for this recipient.
+            out[ticker]['gov_summary']['new_winner_history_status'] = 'EMPTY_HISTORY_UNVERIFIED'
             return []
         hist_agencies_old: set[str] = set()
         cutoff = date.today() - timedelta(days=30)
@@ -379,10 +392,14 @@ async def detect_gov_signals() -> dict[str, Any]:
                 d_start = date.fromisoformat(start[:10]) if start else None
             except Exception:
                 d_start = None
+            if d_start is None or not agency:
+                out[ticker]['gov_summary']['new_winner_history_status'] = 'HISTORY_FIELDS_UNVERIFIED'
+                return []
             # consider as "old" if start before cutoff (i.e., before last 30d)
             if d_start and d_start < cutoff and agency:
                 hist_agencies_old.add(agency)
         new_ones = recent_agencies - hist_agencies_old
+        out[ticker]['gov_summary']['new_winner_history_status'] = 'AVAILABLE'
         return list(new_ones)
 
     tasks = []
