@@ -183,8 +183,9 @@ async def _alpaca_quote(ticker: str) -> float | None:
     return float(meta["price"]) if meta and meta.get("price") else None
 
 
-async def live_price_meta(ticker: str) -> dict[str, Any]:
-    """Return best scanner/live price metadata without hiding stale sources."""
+async def live_price_meta(ticker: str, *, max_age_seconds: float | None = None) -> dict[str, Any]:
+    """Prefer Public within the caller's freshness budget; retain stale diagnostics."""
+    max_age = _live_price_max_age_seconds() if max_age_seconds is None else max(0.0, float(max_age_seconds))
     ticker = (ticker or "").upper().strip()
     empty = {
         "ticker": ticker,
@@ -202,6 +203,7 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
 
     # Public is the preferred actionable quote source.  Alpaca and the other
     # providers remain fallbacks so a Public outage does not erase research.
+    stale_public: dict[str, Any] | None = None
     if _public_configured():
         try:
             from . import public_api
@@ -221,10 +223,9 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
                 if not provider_ts and not (quote.get("bidTimestamp") or quote.get("askTimestamp")):
                     provider_ts = quote.get("quoteTime")
                 age_s = _age_seconds(provider_ts)
-                max_age = _live_price_max_age_seconds()
                 parsed_ts = _parse_provider_ts(provider_ts)
                 fresh = bool(parsed_ts and parsed_ts <= _now() + timedelta(seconds=2) and age_s is not None and age_s <= max_age)
-                return {
+                public_meta = {
                     "ticker": ticker,
                     "price": float(price),
                     "source": "public_quote",
@@ -237,6 +238,9 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
                     "warning": None if fresh else ("public_quote_timestamp_stale" if parsed_ts else "public_quote_timestamp_unverifiable"),
                     "raw": quote,
                 }
+                if fresh:
+                    return public_meta
+                stale_public = public_meta
         except Exception as exc:
             logger.debug("public quote %s failed; falling back: %s", ticker, exc)
 
@@ -251,22 +255,48 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
         if feed in tried_feeds:
             continue
         tried_feeds.append(feed)
-        meta = await _alpaca_trade_meta(ticker, feed=feed)
+        try:
+            meta = await _alpaca_trade_meta(ticker, feed=feed)
+        except Exception as exc:
+            logger.debug("alpaca quote %s feed %s failed: %s", ticker, feed, exc)
+            continue
         if not meta:
             continue
+        meta = dict(meta)
+        provider_ts = _parse_provider_ts(meta.get("provider_ts"))
+        age_s = _age_seconds(meta.get("provider_ts"))
+        delayed = bool(meta.get("delayed") or feed == "delayed_sip")
+        effective_max_age = (
+            int(os.environ.get('SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS', '1200'))
+            if delayed and max_age_seconds is None else max_age
+        )
+        fresh = bool(
+            (not delayed or max_age_seconds is None) and meta.get("fresh") and provider_ts
+            and provider_ts <= _now() + timedelta(seconds=2)
+            and age_s is not None and age_s <= effective_max_age
+        )
         meta.update({
             "ticker": ticker,
-            "premarket_confirmed": bool(meta.get("fresh") and not meta.get("delayed")),
-            "warning": "alpaca_delayed_sip_15m" if meta.get("delayed") else (None if meta.get("fresh") else "alpaca_trade_timestamp_stale"),
+            "fresh": fresh,
+            "delayed": delayed,
+            "execution_eligible": bool(fresh and not delayed and meta.get("execution_eligible")),
+            "premarket_confirmed": bool(fresh and not delayed),
+            "warning": "alpaca_delayed_sip_15m" if delayed else (None if fresh else "alpaca_trade_timestamp_stale"),
         })
-        if meta.get("fresh"):
+        if meta.get("fresh") and not delayed:
             return meta
         if stale_alpaca is None:
             stale_alpaca = meta
 
+    # A failed fallback must not erase the original Public evidence or timestamp.
+    if stale_public is not None:
+        return stale_public
     if stale_alpaca is not None:
         return stale_alpaca
 
+    if max_age_seconds is not None:
+        # The price-only Finnhub helper cannot prove a caller's timestamp budget.
+        return empty
     fh_price = await _finnhub_quote(ticker)
     if fh_price is not None:
         return {
@@ -289,6 +319,7 @@ async def batch_live_price_meta(
     tickers: list[str],
     *,
     concurrency: int = 8,
+    max_age_seconds: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fetch live scanner price metadata for a list of tickers.
 
@@ -302,7 +333,9 @@ async def batch_live_price_meta(
 
     async def _one(t: str) -> tuple[str, dict[str, Any]]:
         async with sem:
-            return t, await live_price_meta(t)
+            if max_age_seconds is None:
+                return t, await live_price_meta(t)
+            return t, await live_price_meta(t, max_age_seconds=max_age_seconds)
 
     pairs = await asyncio.gather(*[_one(t) for t in clean])
     db = get_db()

@@ -618,7 +618,7 @@ def test_strategy_run_uses_attached_lottery_result(monkeypatch):
 
 
 def test_independent_options_rows_do_not_use_core_scan(monkeypatch):
-    async def fake_batch_live_price_meta(tickers, concurrency=8):
+    async def fake_batch_live_price_meta(tickers, concurrency=8, max_age_seconds=None):
         return {t: {"price": 10.0, "age_seconds": 1, "source": "test_live"} for t in tickers}
 
     async def fake_high_short(min_pct=10.0, limit=35):

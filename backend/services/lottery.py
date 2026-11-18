@@ -45,6 +45,8 @@ def lottery_signal_groups(row: dict[str, Any]) -> list[str]:
     signals = {str(value).upper() for value in (row.get("signals") or [])}
     groups: list[str] = []
     for group, evidence in LOTTERY_SIGNAL_GROUPS.items():
+        if group == 'CATALYST' and row.get('catalyst_is_attention_proxy'):
+            continue
         component_keys = {value for value in evidence if value.islower()}
         trigger_keys = {value for value in evidence if not value.islower()}
         if any(_num(components.get(key), 0) > 0 for key in component_keys) or triggers.intersection(trigger_keys) or signals.intersection(trigger_keys):
@@ -276,7 +278,9 @@ def _catalyst_score(row: dict[str, Any]) -> tuple[float, list[str]]:
 def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     ticker = _clean_ticker(row.get("ticker"))
     price = _num(row.get("price") or row.get("last") or row.get("current_price"), 0)
-    change_pct = _pct(row.get("change_pct") or row.get("day_change_pct") or row.get("change")) or 0.0
+    raw_change = next((row[key] for key in ('change_pct', 'day_change_pct', 'change') if row.get(key) is not None), None)
+    change_pct = _pct(raw_change)
+    change_value = change_pct if change_pct is not None else 0.0
     rel_vol = _num(row.get("relative_volume") or row.get("rel_volume") or row.get("rvol"), 0)
     volume = _parse_volume(row.get("volume"))
     float_proxy = _num(row.get("float") or row.get("float_shares") or row.get("shares_outstanding") or row.get("float_proxy"), 0)
@@ -284,7 +288,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     low = _num(row.get("day_low") or row.get("low"), 0)
     close_position = ((price - low) / (high - low)) if price and high > low else None
 
-    gap_surge = _component_score(change_pct, [(40, 20), (25, 17), (15, 13), (10, 9), (5, 4)])
+    gap_surge = _component_score(change_value, [(40, 20), (25, 17), (15, 13), (10, 9), (5, 4)])
     rvol_score = _component_score(rel_vol, [(15, 15), (10, 12), (5, 9), (2, 4)])
     if rel_vol <= 0 and volume >= 2_000_000:
         rvol_score = 5
@@ -351,7 +355,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     penalty_total = sum(p["points"] for p in penalties)
     score = max(0.0, min(100.0, raw - penalty_total))
     triggers = []
-    if change_pct >= 10:
+    if change_value >= 10:
         triggers.append("GAP/SURGE")
     if rel_vol >= 5:
         triggers.append("RVOL")
@@ -371,7 +375,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
         "company": row.get("company") or row.get("name") or ticker,
         "sector": row.get("sector") or "-",
         "price": round(price, 4) if price else None,
-        "change_pct": round(change_pct, 2),
+        "change_pct": round(change_pct, 2) if change_pct is not None else None,
         "volume": int(volume) if volume else None,
         "relative_volume": round(rel_vol, 2) if rel_vol else None,
         "float_proxy": int(float_proxy) if float_proxy else None,
@@ -382,6 +386,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
         "score": round(score, 1),
         "tier": tier_for(score),
         "components": components,
+        "catalyst_is_attention_proxy": bool(catalyst_chips and set(catalyst_chips) == {'ATTENTION'}),
         "penalties": penalties,
         "triggers": list(dict.fromkeys(triggers)),
         "source": row.get("source") or "scanner_or_lottery_universe",

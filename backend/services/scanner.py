@@ -62,7 +62,10 @@ def _aggregate_market_signals(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
         x = by_ticker.setdefault(t, {"ticker": t, "signals": []})
         if "high_short_interest" not in x["signals"]:
             x["signals"].append("high_short_interest")
-        x["short_summary"] = {"short_float_pct": s.get("short_float_pct")}
+        x["short_summary"] = {key: s.get(key) for key in (
+            'short_float_pct', 'short_ratio', 'float_shares', 'average_volume',
+            'source', 'discovery_fetched_at', 'short_float_membership_bound',
+        )}
 
     for e in raw.get("upcoming_earnings", []):
         t = e["ticker"]
@@ -121,6 +124,17 @@ def _short_pct(x: dict) -> float | None:
     if isinstance(s, (int, float)):
         return float(s)
     return None
+
+
+def _squeeze_inputs(fund: dict, short_summary: dict) -> dict:
+    """Carry observed short-source fields together without substituting SO for float."""
+    inputs = dict(fund)
+    for source_key, target_key in (('short_ratio', 'short_ratio'), ('float_shares', 'float_shares'), ('average_volume', 'avg_volume')):
+        if short_summary.get(source_key) is not None:
+            inputs[target_key] = short_summary[source_key]
+    inputs['short_source'] = short_summary.get('source')
+    inputs['short_source_fetched_at'] = short_summary.get('discovery_fetched_at')
+    return inputs
 
 
 _STRATEGY_DEFAULT_NAMES = {
@@ -247,7 +261,7 @@ async def run_scan(
             short_pct=short_pct_val, insider_buys=_insider_buys(c),
         )
         targets = risk_target.compute_targets(fund, c["signals"], gov_summary)
-        sq = await squeeze_mod.compute_squeeze(ticker, short_pct_val, fund)
+        sq = await squeeze_mod.compute_squeeze(ticker, short_pct_val, _squeeze_inputs(fund, c.get('short_summary') or {}))
         tt = time_target.compute_time_target(c["signals"], "")
 
         c["fundamentals"] = fund
