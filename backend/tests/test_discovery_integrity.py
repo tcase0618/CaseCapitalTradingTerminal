@@ -183,3 +183,33 @@ def test_finviz_rate_limit_retry_is_bounded(monkeypatch):
     assert result.status_code==429
     assert len(calls)==2
     assert max(sleeps)<=10
+
+
+def test_high_short_source_cannot_invent_attention_or_erase_rvol(monkeypatch):
+    async def short_rows(**kwargs):
+        return [{'ticker':'TEST','short_float_pct':25,'price':4,'volume':500000}]
+    monkeypatch.setattr(scrapers,'fetch_finviz_high_short_interest',short_rows)
+    row=asyncio.run(lottery._short_interest_candidates())[0]
+    assert row['signals']==['HIGH_SHORT_INTEREST']
+    assert row['relative_volume'] is None
+    merged=finviz_discovery.merge_observations({'relative_volume':8},row)
+    assert merged['relative_volume']==8
+    scored=lottery._score_candidate(row,set())
+    assert scored['components']['attention']==0
+
+
+def test_attention_and_pharma_sources_cannot_invent_volume(monkeypatch):
+    from services import x_factor,pharma
+    async def trending():return {'TEST'}
+    async def unusual():return set()
+    async def catalysts(**kwargs):return [{'ticker':'TEST','price':4}]
+    monkeypatch.setattr(x_factor,'yahoo_trending_set',trending)
+    monkeypatch.setattr(x_factor,'barchart_unusual_set',unusual)
+    monkeypatch.setattr(pharma,'get_pdufa_within_days',catalysts)
+    attention=asyncio.run(lottery._attention_candidates())[0]
+    calendar=asyncio.run(lottery._pharma_catalyst_candidates())[0]
+    assert attention['relative_volume'] is None
+    assert calendar['relative_volume'] is None
+    assert 'ATTENTION' not in calendar['signals']
+    assert lottery._score_candidate(attention,set())['components']['rvol']==0
+    assert lottery._score_candidate(calendar,set())['components']['rvol']==0
