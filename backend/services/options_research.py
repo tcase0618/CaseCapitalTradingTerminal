@@ -169,7 +169,7 @@ async def weekly_review() -> dict:
                 except Exception as exc:
                     error = exc.__class__.__name__
             for row in records:
-                mark = review_mark(row, quotes.get(row.get("symbol")), now)
+                mark = review_mark(row, quotes.get(row.get("symbol")), datetime.now(timezone.utc))
                 mark["provider_error_type"] = error
                 await get_db().options_research_approvals.update_one({"_id": row["_id"]}, {"$set": {"review": mark}})
                 available += mark["status"] == "QUOTED_NOT_REALIZED"
