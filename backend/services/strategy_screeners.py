@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import get_db, stamped
+from .finviz_discovery import merge_observations
 from . import strategy_ideology
 
 SCREENER_VERSION = "strategy-screeners-v1.1-options-badges"
@@ -162,6 +163,11 @@ def _base_row(
         "company": row.get("company") or row.get("name") or ticker,
         "sector": row.get("sector") or row.get("industry") or "Unknown",
         "price": round(px, 4) if px > 0 else None,
+        "price_source": row.get("price_source"),
+        "price_timestamp": row.get("price_timestamp"),
+        "price_age_seconds": row.get("quote_age_seconds"),
+        "discovery_parse_mode": row.get("finviz_parse_mode"),
+        "discovery_fetched_at": row.get("discovery_fetched_at"),
         "signal_score": round(score / 10.0, 2),
         "trade_score": round(score / 2.5, 2),
         "learning_score": row.get("learning_score") or 0,
@@ -317,8 +323,7 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
         existing = by_ticker.get(t) or {"ticker": t, "signals": [], "evidence_signals": [], "sources": [], "option_lanes": [], "option_screeners": []}
         merged_signals = list(dict.fromkeys([*(existing.get("evidence_signals") or []), *(signals or [])]))
         by_ticker[t] = {
-            **existing,
-            **(row or {}),
+            **merge_observations(existing, row or {}),
             "ticker": t,
             "source": source,
             "sources": list(dict.fromkeys([*(existing.get("sources") or []), source])),
@@ -410,7 +415,7 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
     except Exception:
         pass
 
-    rows = list(by_ticker.values())[:limit]
+    rows = sorted(by_ticker.values(), key=lambda row: (-_num(row.get("score")), str(row["ticker"])))[:limit]
     try:
         from . import pricer
 
@@ -421,6 +426,7 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
                 row["price"] = meta.get("price")
                 row["quote_age_seconds"] = meta.get("age_seconds")
                 row["price_source"] = meta.get("source")
+                row["price_timestamp"] = meta.get("provider_ts")
     except Exception:
         pass
 

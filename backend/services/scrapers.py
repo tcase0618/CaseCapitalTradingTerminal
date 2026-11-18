@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from .finviz_discovery import fetch_page, grid_rows
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +37,11 @@ def _soup(text: str) -> BeautifulSoup:
 def _finviz_anchor_ticker(a) -> str | None:
     href = a.get("href") or ""
     parsed = urlparse(href)
-    if not parsed.path.endswith(("quote.ashx", "stock.ashx")) and parsed.path not in {"quote", "stock"}:
+    if not parsed.path.endswith(("quote.ashx", "stock.ashx")) and parsed.path not in {"quote", "stock", "/quote", "/stock"}:
         return None
     ticker = (parse_qs(parsed.query).get("t") or [""])[0].upper().strip()
-    label = a.get_text(strip=True).upper()
-    if not ticker or ticker != label or not TICKER_RE.match(ticker):
+    label = a.get_text(' ', strip=True).upper().split()
+    if not ticker or not label or ticker != label[-1] or not TICKER_RE.fullmatch(ticker):
         return None
     return ticker
 
@@ -131,7 +132,7 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
     """Finviz screener pre-filtered for short_float>10%. Paginates."""
     base = (
         "https://finviz.com/screener.ashx?"
-        "v=111&f=sh_short_o10,sh_avgvol_o100&o=-shortinterestshare"
+        "v=131&f=sh_short_o10,sh_avgvol_o100&o=-shortinterestshare"
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -145,7 +146,7 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                 resp_text = None
                 for attempt in range(2):
                     try:
-                        r = await client.get(url)
+                        r = await fetch_page(client, url)
                         if r.status_code == 200:
                             resp_text = r.text
                             break
@@ -156,6 +157,17 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                     break
                 soup = _soup(resp_text)
                 added = 0
+                for row in grid_rows(soup, 'FINVIZ_HIGH_SHORT'):
+                    t = row['ticker']
+                    short_pct = row.get('short_float_pct')
+                    if t in seen or (short_pct is not None and short_pct < min_pct):
+                        continue
+                    seen.add(t)
+                    row['short_float_pct'] = short_pct if short_pct is not None else '>10'
+                    out.append(row)
+                    added += 1
+                    if len(out) >= limit:
+                        return out
                 for a in soup.find_all("a", href=True):
                     # Finviz now renders row links as stock?t=... and places
                     # a logo letter before the ticker. The old exact-label
@@ -219,7 +231,7 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                         "price": price,
                         "change_pct": cell_number(pct_index),
                         "volume": volume,
-                        "short_float_pct": short_pct if short_pct is not None else f">{min_pct:.0f}",
+                        "short_float_pct": short_pct if short_pct is not None else ">10",
                         "source": "FINVIZ_HIGH_SHORT",
                     })
                     added += 1
@@ -251,7 +263,7 @@ async def fetch_finviz_upcoming_earnings(days: str = "nextweek", limit: int = 30
             for page_start in range(1, limit + 1, 20):
                 url = f"{base}&r={page_start}&cc_refresh={int(datetime.now(timezone.utc).timestamp() * 1000)}"
                 try:
-                    r = await client.get(url)
+                    r = await fetch_page(client, url)
                     if r.status_code != 200:
                         break
                 except Exception:

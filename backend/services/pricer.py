@@ -215,20 +215,26 @@ async def live_price_meta(ticker: str) -> dict[str, Any]:
             quote = quote if isinstance(quote, dict) else {}
             price = quote.get("lastPrice") or quote.get("last") or quote.get("price") or quote.get("close")
             if price is not None and float(price) > 0:
-                provider_ts = quote.get("updatedAt") or quote.get("timestamp") or quote.get("quoteTime")
-                age_s = _age_seconds(provider_ts) if provider_ts else 0
+                # The displayed last price must use its own trade timestamp,
+                # not a newer bid/ask update or the local request time.
+                provider_ts = quote.get("lastTimestamp") or quote.get("updatedAt") or quote.get("timestamp")
+                if not provider_ts and not (quote.get("bidTimestamp") or quote.get("askTimestamp")):
+                    provider_ts = quote.get("quoteTime")
+                age_s = _age_seconds(provider_ts)
                 max_age = _live_price_max_age_seconds()
+                parsed_ts = _parse_provider_ts(provider_ts)
+                fresh = bool(parsed_ts and parsed_ts <= _now() + timedelta(seconds=2) and age_s is not None and age_s <= max_age)
                 return {
                     "ticker": ticker,
                     "price": float(price),
                     "source": "public_quote",
-                    "provider_ts": provider_ts or _now().isoformat(),
-                    "age_seconds": round(age_s, 2) if age_s is not None else 0,
-                    "fresh": bool(age_s is None or age_s <= max_age),
-                    "premarket_confirmed": True,
+                    "provider_ts": provider_ts,
+                    "age_seconds": round(age_s, 2) if age_s is not None else None,
+                    "fresh": fresh,
+                    "premarket_confirmed": fresh,
                     "delayed": False,
-                    "execution_eligible": bool(age_s is None or age_s <= max_age),
-                    "warning": None if age_s is None or age_s <= max_age else "public_quote_timestamp_stale",
+                    "execution_eligible": fresh,
+                    "warning": None if fresh else ("public_quote_timestamp_stale" if parsed_ts else "public_quote_timestamp_unverifiable"),
                     "raw": quote,
                 }
         except Exception as exc:

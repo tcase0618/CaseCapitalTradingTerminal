@@ -11,12 +11,14 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
 from .db import get_db, log_activity, stamped
+from .finviz_discovery import fetch_page, grid_rows, merge_observations
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +97,9 @@ FINVIZ_URL = (
 )
 FINVIZ_BROAD_UNIVERSE_SCREENS = {
     "finviz_lottery_under20_volume": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,sh_avgvol_o100&o=-volume",
-    "finviz_lottery_relvol": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,sh_relvol_o1.5&o=-relativevolume",
+    "finviz_lottery_relvol": "https://finviz.com/screener.ashx?v=141&f=sh_price_u20,sh_relvol_o1.5&o=-relativevolume",
     "finviz_lottery_high_short": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,sh_short_o10&o=-shortinterestshare",
-    "finviz_lottery_smallcap": "https://finviz.com/screener.ashx?v=111&f=cap_smallunder,sh_price_u20,sh_avgvol_o100&o=-change",
+    "finviz_lottery_smallcap": "https://finviz.com/screener.ashx?v=131&f=cap_smallunder,sh_price_u20,sh_avgvol_o100&o=-change",
     "finviz_lottery_top_gainers": "https://finviz.com/screener.ashx?v=111&f=sh_price_u20,ta_change_u5&o=-change",
 }
 ENTRY_HAIRCUT_PCT = 1.0
@@ -277,7 +279,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     change_pct = _pct(row.get("change_pct") or row.get("day_change_pct") or row.get("change")) or 0.0
     rel_vol = _num(row.get("relative_volume") or row.get("rel_volume") or row.get("rvol"), 0)
     volume = _parse_volume(row.get("volume"))
-    float_proxy = _num(row.get("float") or row.get("float_shares") or row.get("shares_outstanding"), 0)
+    float_proxy = _num(row.get("float") or row.get("float_shares") or row.get("shares_outstanding") or row.get("float_proxy"), 0)
     high = _num(row.get("day_high") or row.get("high"), 0)
     low = _num(row.get("day_low") or row.get("low"), 0)
     close_position = ((price - low) / (high - low)) if price and high > low else None
@@ -364,6 +366,7 @@ def _score_candidate(row: dict[str, Any], halted: set[str]) -> dict[str, Any]:
     triggers.extend(catalyst_chips)
 
     return {
+        **row,
         "ticker": ticker,
         "company": row.get("company") or row.get("name") or ticker,
         "sector": row.get("sector") or "-",
@@ -397,6 +400,8 @@ def _finviz_row_from_cells(
 ) -> dict[str, Any] | None:
     if len(cells) < 9:
         return None
+    if not headers and len(cells) == 11 and _clean_ticker(cells[1]):
+        headers = ['No', 'Ticker', 'Company', 'Sector', 'Industry', 'Country', 'Market Cap', 'P/E', 'Price', 'Change', 'Volume']
     if headers and len(headers) == len(cells):
         indexed = {_header_key(header): index for index, header in enumerate(headers)}
         ticker_idx = indexed.get("ticker")
@@ -492,18 +497,33 @@ async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[
     try:
         async with httpx.AsyncClient(timeout=18.0, headers=headers, follow_redirects=True) as client:
             pages = []
+            page_keys: set[tuple[str, ...]] = set()
             for page_start in range(1, limit + 1, 20):
                 page_url = f"{url}&r={page_start}&cc_refresh={cache_buster}"
-                response = await client.get(page_url)
+                response = await fetch_page(client, page_url)
                 if response.status_code != 200:
                     break
+                keys = tuple(row['ticker'] for row in grid_rows(BeautifulSoup(response.text, 'html.parser'), source))
+                if keys and keys in page_keys:
+                    logger.warning('Finviz discovery repeated a page: source=%s offset=%s', source, page_start)
+                    break
+                if keys:
+                    page_keys.add(keys)
                 pages.append(response.text)
-                if page_start > 1 and "screener-link-primary" not in response.text and "quote.ashx" not in response.text:
+                if page_start > 1 and not any(marker in response.text for marker in ("screener-link-primary", "quote.ashx", 'data-row-key')):
                     break
         seen: set[str] = set()
         rows: list[dict[str, Any]] = []
         for html in pages:
             soup = BeautifulSoup(html, "html.parser")
+            for parsed in grid_rows(soup, source):
+                ticker = parsed['ticker']
+                if ticker in seen:
+                    continue
+                seen.add(ticker)
+                rows.append(parsed)
+                if len(rows) >= limit:
+                    return rows
             for table_row in soup.select("table.screener_table tr, table#screener-table tr, tr.styled-row"):
                 cells = [cell.get_text(" ", strip=True) for cell in table_row.find_all("td")]
                 table = table_row.find_parent("table")
@@ -528,6 +548,8 @@ async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[
                 label = anchor.get_text(" ", strip=True).upper()
                 if not ticker or ticker in seen or ticker not in label or not re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z]{1,2})?", ticker):
                     continue
+                if not anchor.find_parent('tr') and not anchor.find_parent(class_='fv-table_row'):
+                    continue
                 seen.add(ticker)
                 rows.append({
                     "ticker": ticker,
@@ -535,6 +557,7 @@ async def _fetch_finviz_url(url: str, source: str, *, limit: int = 180) -> list[
                     "sector": "-",
                     "source": source,
                     "signals": ["FINVIZ_UNIVERSE"],
+                    "finviz_parse_mode": "ticker_only_fallback",
                 })
                 if len(rows) >= limit:
                     return rows
@@ -652,6 +675,7 @@ async def _attach_live_price_meta(rows: list[dict[str, Any]]) -> list[dict[str, 
                 "price": meta.get("price") if meta.get("price") is not None else row.get("price"),
                 "quote_age_seconds": meta.get("age_seconds"),
                 "price_source": meta.get("source"),
+                "price_timestamp": meta.get("provider_ts"),
             }
         enriched.append(row)
     return enriched
@@ -698,15 +722,15 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
         existing = by_ticker.get(ticker) or {}
         merged_signals = list(dict.fromkeys([*(existing.get("signals") or []), *(row.get("signals") or [])]))
         merged_sources = list(dict.fromkeys([*(existing.get("sources") or []), row.get("source"), *(row.get("sources") or [])]))
-        by_ticker[ticker] = {**existing, **row, "ticker": ticker, "signals": merged_signals, "sources": [s for s in merged_sources if s]}
+        by_ticker[ticker] = {**merge_observations(existing, row), "ticker": ticker, "signals": merged_signals, "sources": [s for s in merged_sources if s]}
 
     # Enrich the complete deduplicated universe before selecting the final
     # docket. Truncating by insertion order made source order decide which
     # candidates were scored and silently discarded later high-confluence names.
     universe_rows = await _attach_live_price_meta(list(by_ticker.values()))
     universe_rows = sorted(
-        (_score_candidate(row, halted) for row in universe_rows),
-        key=lambda row: (row.get("score") or 0, row.get("relative_volume") or 0),
+        universe_rows,
+        key=lambda row: (_score_candidate(row, halted)["score"], row.get("relative_volume") or 0),
         reverse=True,
     )[:220]
     candidates = []
@@ -728,6 +752,11 @@ async def run_dedicated_lottery_scan(triggered_by: str = "operator") -> dict[str
             "pharma_catalyst_lottery_screen": len(catalysts),
             "latest_scan": 0,
             "deduped": len(candidates),
+        },
+        "discovery_health": {
+            "metric_complete": sum(row.get("volume") is not None and row.get("change_pct") is not None for row in universe_rows),
+            "metric_incomplete": sum(row.get("volume") is None or row.get("change_pct") is None for row in universe_rows),
+            "parse_modes": dict(Counter(row.get("finviz_parse_mode", "non_finviz") for row in universe_rows)),
         },
         "regime": regime,
         "candidates": candidates,

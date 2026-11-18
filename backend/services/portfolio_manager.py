@@ -501,7 +501,7 @@ def evaluate_rows(
     mode = (mode or "BALANCED").upper()
     out: list[dict[str, Any]] = []
     for row in rows:
-        ticker = str(row.get("ticker") or "").upper()
+        ticker = str(row.get("ticker") or "").strip().upper()
         if not ticker:
             continue
         price = _num(row.get("price"))
@@ -853,7 +853,7 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
     """One PM row per ticker, with Core rows kept as the base when present."""
     merged: dict[str, dict[str, Any]] = {}
     for row in core_rows or []:
-        ticker = str(row.get("ticker") or "").upper()
+        ticker = str(row.get("ticker") or "").strip().upper()
         if not ticker:
             continue
         merged[ticker] = {
@@ -863,7 +863,7 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
             "strategy_views": list(row.get("strategy_views") or []),
         }
     for row in strategy_rows or []:
-        ticker = str(row.get("ticker") or "").upper()
+        ticker = str(row.get("ticker") or "").strip().upper()
         if not ticker:
             continue
         scanner = row.get("strategy_scanner") or {}
@@ -1040,6 +1040,7 @@ async def latest_portfolio_plan(
     scan: dict[str, Any] | None = None,
     strategy_payload: dict[str, Any] | None = None,
     lottery_result: dict[str, Any] | None = None,
+    persist_history: bool = False,
 ) -> dict[str, Any]:
     db = get_db()
     if scan is None:
@@ -1047,12 +1048,18 @@ async def latest_portfolio_plan(
     core_rows = (scan or {}).get("results") or []
     strategy_rows: list[dict[str, Any]] = []
     try:
+        if strategy_payload is None and isinstance((scan or {}).get("strategy_payload"), dict):
+            attached = scan["strategy_payload"]
+            strategy_payload = {
+                **attached,
+                "rows": [row for row in attached.get("candidates") or [] if row.get("pm_routable") and not row.get("read_only")],
+            }
         if strategy_payload is None:
             from . import strategy_screeners
 
             strategy_payload = await strategy_screeners.pm_rows(
                 scan=scan,
-                persist=True,
+                persist=False,
                 lottery_result=lottery_result,
             )
         strategy_payload = strategy_payload or {}
@@ -1098,7 +1105,7 @@ async def latest_portfolio_plan(
         "reason": equity_book.get("reason"),
     }
     summary["equity_execution_constraints"] = equity_execution_context
-    if scan and scan.get("finished_at"):
+    if persist_history and scan and scan.get("finished_at"):
         try:
             await db.portfolio_manager_history.update_one(
                 {"_id": f"pm:{scan['finished_at']}"},
