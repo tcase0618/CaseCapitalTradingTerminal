@@ -74,7 +74,7 @@ async def compute_squeeze(ticker: str, short_pct: float | None, fund: dict[str, 
 
     # Days-to-cover: compute from short_pct, float, and average volume when available.
     dtc = (fund or {}).get("short_ratio")
-    if not dtc and short_pct and avg_vol and float_shares:
+    if dtc is None and short_pct and avg_vol and float_shares:
         short_shares = float_shares * (short_pct / 100.0)
         dtc = short_shares / max(1, avg_vol)
 
@@ -101,7 +101,10 @@ async def compute_squeeze(ticker: str, short_pct: float | None, fund: dict[str, 
         "emoji": emoji,
         "components": {
             "short_pct": short_pct,
-            "days_to_cover": round(dtc, 1) if dtc else None,
+            "days_to_cover": round(dtc, 1) if dtc is not None else None,
+            "source": (fund or {}).get('short_source'),
+            "source_fetched_at": (fund or {}).get('short_source_fetched_at'),
+            "report_date_status": 'UNVERIFIED',
             "rate_of_change_30d": round(roc * 100, 1) if roc is not None else None,
             "borrow_score": round(borrow_score, 2),
         },

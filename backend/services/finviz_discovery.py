@@ -14,7 +14,7 @@ _last_request = 0.0
 
 
 def number(value):
-    text = str(value or '').replace(',', '').replace('%', '').strip()
+    text = str('' if value is None else value).replace(',', '').replace('%', '').strip()
     multiplier = 1
     if text[-1:].upper() in {'K', 'M', 'B'}:
         multiplier = {'K': 1e3, 'M': 1e6, 'B': 1e9}[text[-1].upper()]
@@ -42,6 +42,7 @@ def grid_rows(soup, source):
             'float_shares': number(fields.get('sharesFloat')),
             'shares_outstanding': number(fields.get('sharesOutstanding2')),
             'short_float_pct': number(fields.get('shortInterestShare')),
+            'short_ratio': number(fields.get('shortInterestRatio')),
             'average_volume': number(fields.get('averageVolume')),
             'source': source, 'signals': ['FINVIZ_UNIVERSE'],
             'finviz_parse_mode': 'column_id_grid',

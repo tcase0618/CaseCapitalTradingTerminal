@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from services import data_quality, data_truth, execution_gate, pricer, scanner, telegram_events
 
 
@@ -200,6 +202,7 @@ def test_scanner_default_includes_delayed_sip_for_free_tier_research(monkeypatch
 
 
 def test_delayed_sip_is_never_execution_eligible(monkeypatch):
+    monkeypatch.setattr(pricer, '_now', lambda: datetime(2026, 8, 24, 4, 6, tzinfo=timezone.utc))
     monkeypatch.setenv("PUBLIC_API_ENABLED", "false")
     monkeypatch.setenv("SCANNER_DELAYED_PRICE_MAX_AGE_SECONDS", "1200")
 
@@ -229,6 +232,7 @@ def test_delayed_sip_is_never_execution_eligible(monkeypatch):
 
 
 def test_live_price_meta_prefers_fresh_alpaca_feed(monkeypatch):
+    monkeypatch.setattr(pricer, '_now', lambda: datetime(2026, 8, 24, 4, 1, 12, tzinfo=timezone.utc))
     monkeypatch.setenv("PUBLIC_API_ENABLED", "false")
     calls = []
 

@@ -129,13 +129,14 @@ async def fetch_openinsider_cluster_buys(limit: int = 50) -> list[dict[str, Any]
 
 # ---------- Finviz: high short interest ----------
 async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 300) -> list[dict[str, Any]]:
-    """Finviz screener pre-filtered for short_float>10%. Paginates."""
+    """Return measured SI or explicit >10% membership, never an exact fallback."""
     base = (
         "https://finviz.com/screener.ashx?"
         "v=131&f=sh_short_o10,sh_avgvol_o100&o=-shortinterestshare"
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    membership_bound = {"operator": ">", "value": 10.0, "source_filter": "sh_short_o10"}
     try:
         headers = {**HEADERS, "Cache-Control": "no-cache, no-store", "Pragma": "no-cache"}
         refresh = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -160,45 +161,35 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                 for row in grid_rows(soup, 'FINVIZ_HIGH_SHORT'):
                     t = row['ticker']
                     short_pct = row.get('short_float_pct')
-                    if t in seen or (short_pct is not None and short_pct < min_pct):
+                    if t in seen:
                         continue
                     seen.add(t)
-                    row['short_float_pct'] = short_pct if short_pct is not None else '>10'
+                    if (short_pct is None and min_pct > 10.0) or (short_pct is not None and short_pct < min_pct):
+                        continue
+                    row['short_float_membership_bound'] = dict(membership_bound)
                     out.append(row)
                     added += 1
                     if len(out) >= limit:
                         return out
                 for a in soup.find_all("a", href=True):
-                    # Finviz now renders row links as stock?t=... and places
-                    # a logo letter before the ticker. The old exact-label
-                    # parser therefore returned no reliable row metrics.
-                    href = a.get("href") or ""
-                    parsed = urlparse(href)
-                    ticker_param = (parse_qs(parsed.query).get("t") or [""])[0].upper().strip()
-                    t = ticker_param if parsed.path in {"/stock", "stock"} and TICKER_RE.match(ticker_param) else _finviz_anchor_ticker(a)
+                    t = _finviz_anchor_ticker(a)
                     if not t or t in seen:
                         continue
-                    short_pct = None
                     tr = a.find_parent("tr")
-                    cells: list[str] = []
-                    if tr:
-                        cells = [cell.get_text(" ", strip=True) for cell in tr.find_all("td")]
-                        percent_cells = [cell.get_text(strip=True) for cell in tr.find_all("td")]
-                        percent_cells = [text for text in percent_cells if re.fullmatch(r"[+-]?[\d.]+%", text)]
-                        # The current free Finviz layout does not expose the
-                        # exact short-interest column. Never mistake the
-                        # final daily-change percentage for short interest.
-                        # The screener filter itself guarantees the lower
-                        # bound, which is safer than inventing precision.
-                        if len(percent_cells) > 1:
-                            candidate = percent_cells[0].replace("%", "")
-                            try:
-                                value = float(candidate)
-                                if value >= 0:
-                                    short_pct = value
-                            except ValueError:
-                                pass
+                    if tr is None:
+                        continue
+                    row_cells = tr.find_all("td", recursive=False)
+                    cells = [cell.get_text(" ", strip=True) for cell in row_cells]
+                    # Legacy overview rows have a rank and ticker in the first
+                    # two columns. Navigation/layout tables are not membership.
+                    if (len(cells) < 10 or not cells[0].isdigit()
+                            or a.find_parent("td") is not row_cells[1]):
+                        continue
                     seen.add(t)
+                    # Legacy percent columns have no reliable SI identity.
+                    # Membership proves only >10%, never a higher minimum.
+                    if min_pct > 10.0:
+                        continue
                     # Default Finviz row layout changes with the selected
                     # columns. Locate the final percent cell and infer the
                     # price immediately before it; any numeric cell after it
@@ -231,7 +222,8 @@ async def fetch_finviz_high_short_interest(min_pct: float = 10.0, limit: int = 3
                         "price": price,
                         "change_pct": cell_number(pct_index),
                         "volume": volume,
-                        "short_float_pct": short_pct if short_pct is not None else ">10",
+                        "short_float_pct": None,
+                        "short_float_membership_bound": dict(membership_bound),
                         "source": "FINVIZ_HIGH_SHORT",
                     })
                     added += 1

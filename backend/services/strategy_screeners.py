@@ -419,7 +419,9 @@ async def _independent_options_rows(limit: int = 55) -> list[dict[str, Any]]:
     try:
         from . import pricer
 
-        prices = await pricer.batch_live_price_meta([r["ticker"] for r in rows], concurrency=8)
+        prices = await pricer.batch_live_price_meta(
+            [r["ticker"] for r in rows], concurrency=8, max_age_seconds=_quote_age_limit_seconds(),
+        )
         for row in rows:
             meta = prices.get(row["ticker"]) or {}
             if meta.get("price") is not None:

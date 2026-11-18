@@ -122,7 +122,7 @@ def _num(v: Any, default: float = 0.0) -> float:
 
 
 def _signals(row: dict[str, Any]) -> list[str]:
-    sigs = row.get("evidence_signals") or row.get("signals") or []
+    sigs = row.get("evidence_signals") if row.get("evidence_signals") is not None else row.get("signals") or []
     if isinstance(sigs, dict):
         return sorted(str(k) for k, v in sigs.items() if v)
     return sorted(str(s) for s in sigs)
@@ -883,7 +883,15 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
         if screener_id not in sources:
             sources.append(screener_id)
         base["scanner_sources"] = sources
-        base["signals"] = list(dict.fromkeys([*(_signals(base)), *(_signals(row))]))
+        combined_evidence = list(dict.fromkeys([*(_signals(base)), *(_signals(row))]))
+        base["signals"] = combined_evidence
+        base["evidence_signals"] = combined_evidence
+        for key in ('signal_groups', 'strategy_fits'):
+            base[key] = list(dict.fromkeys([*(base.get(key) or []), *(row.get(key) or [])]))
+        if base.get('signal_groups'):
+            base['independent_signal_count'] = len(base['signal_groups'])
+        if not base.get('provenance') and row.get('provenance'):
+            base['provenance'] = dict(row['provenance'])
         base["signal_score"] = max(_num(base.get("signal_score")), _num(row.get("signal_score")))
         base["trade_score"] = max(_num(base.get("trade_score")), _num(row.get("trade_score")))
         incoming_case = row.get("strategy_case") or {}
@@ -894,6 +902,8 @@ def _merge_strategy_rows(core_rows: list[dict[str, Any]], strategy_rows: list[di
             base["strategy_confidence"] = incoming_case.get("confidence")
         if not base.get("price") and row.get("price"):
             base["price"] = row.get("price")
+            for key in ('price_source', 'price_timestamp', 'price_age_seconds', 'quote_age_seconds', 'price_fresh', 'price_meta'):
+                base[key] = row.get(key)
         if not base.get("sector") and row.get("sector"):
             base["sector"] = row.get("sector")
         base["targets"] = base.get("targets") or row.get("targets") or {}
