@@ -19,6 +19,7 @@ import httpx
 
 from .db import get_db, log_activity, stamped
 from .options_policy import get_policy
+from . import options_research
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ def paper_only() -> bool:
 
 
 def options_execution_enabled() -> bool:
-    return OPTIONS_EXECUTION_ENABLED
+    return OPTIONS_EXECUTION_ENABLED and not options_research.research_only()
 
 
 def _candidate_order_id(candidate_id: str) -> str:
@@ -1317,7 +1318,7 @@ async def build_candidates(
                 and pm_score >= OPTIONS_PM_MIN_SCORE
                 and pm_rr >= OPTIONS_PM_MIN_RR
             )
-            if should_refresh and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
+            if should_refresh and not options_research.research_only() and alpaca_refreshes < OPTIONS_ALPACA_REFRESH_LIMIT:
                 from . import options_engine
                 attempted_live_refresh = True
                 refresh_budget = _risk_budget("OPTION", pm_action, pm_score) or STANDARD_RISK_USD
@@ -1469,7 +1470,17 @@ async def build_candidates(
                 ticket["contract_selection_mode"] = "shadow_only"
         except Exception as exc:
             logger.warning("options contract learning record failed for %s: %s", ticker, exc)
+        if options_research.research_only():
+            ticket["manual_fire_ready"] = False
+            ticket["blocked_reasons"] = list(ticket["blocked_reasons"]) + ["options_research_only"]
         out.append(ticket)
+    research_archive = None
+    if persist and authoritative_pm and options_research.research_only():
+        try:
+            research_archive = await options_research.record_candidates(out)
+        except Exception as exc:
+            logger.exception("Options approval research archival failed")
+            research_archive = {"ok": False, "error_type": exc.__class__.__name__}
     out.sort(key=lambda x: (x["manual_fire_ready"], x["route"] == "BOTH", x.get("pm_score") or 0), reverse=True)
     out = out[:limit]
     if persist:
@@ -1491,6 +1502,7 @@ async def build_candidates(
         "scan_finished_at": (scan or {}).get("finished_at"),
         "cycle_id": (scan or {}).get("cycle_id") if authoritative_pm else None,
         "strategy_screeners_generated_at": strategy_payload.get("generated_at"),
+        "options_research_archive": research_archive,
         "options_equity_basis": OPTIONS_EQUITY,
         "options_data_policy": _options_data_policy(alpaca_refreshes),
         "summary": _summary(out),
@@ -1701,6 +1713,8 @@ async def execute(
 ) -> dict[str, Any]:
     from . import execution_gate, safety
 
+    if options_research.research_only():
+        return {"ok": False, "reason": "options_research_only"}
     expected_candidate = deepcopy(expected_candidate)
     db = get_db()
     enabled, safety_status = await safety.trading_enabled(scope="options")
@@ -1873,6 +1887,8 @@ async def auto_execute_latest(
     Callers must supply a cycle-attributed candidate set; cached standalone
     tickets never trigger an independent PM rebuild here.
     """
+    if options_research.research_only():
+        return {"ok": False, "reason": "options_research_only", "submitted": [], "skipped": []}
     lock = await _acquire_auto_execute_lock()
     if not lock.get("ok"):
         return {
@@ -1912,7 +1928,7 @@ async def _auto_execute_latest_locked(
             "skipped": [],
             "summary": {},
         }
-    if not OPTIONS_EXECUTION_ENABLED:
+    if not options_execution_enabled():
         return {
             "ok": False,
             "auto": True,

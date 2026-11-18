@@ -1181,6 +1181,22 @@ def start_scheduler():
     )
 
     # v5.0 - Trade Floor weekly recalibration - Sunday 03:00 ET
+    async def _options_research_review():
+        try:
+            from . import options_research
+            result = await options_research.weekly_review()
+            await log_activity("Options Sunday research review completed", "info", result)
+        except Exception as exc:
+            logger.exception("Options Sunday research review failed: %s", exc.__class__.__name__)
+            await log_activity("Options Sunday research review failed", "error",
+                               {"error_type": exc.__class__.__name__})
+    _scheduler.add_job(
+        _options_research_review,
+        CronTrigger(day_of_week="sun", hour=2, minute=50, timezone=ET),
+        id="options_research_sunday_review", replace_existing=True,
+    )
+
+    # Review is research-only and does not feed automatic coefficient updates.
     async def _tf_recal():
         try:
             from . import trade_floor_learning

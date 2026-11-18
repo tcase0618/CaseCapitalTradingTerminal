@@ -353,6 +353,7 @@ async def _fetch_public_options_data(
                 "expiration": str(item.get("expiration") or item.get("expirationDate") or best_exp)[:10],
                 "type": option_type,
                 "quoteTime": item.get("updatedAt") or item.get("quoteTime") or item.get("timestamp"),
+                "executableQuoteTime": item.get("executableQuoteTime"),
                 "dataProvider": "PUBLIC_OPTIONS",
                 "dataFeed": "public",
             })
@@ -401,6 +402,12 @@ async def get_options_data(
     for research and PM context.
     """
     ticker = ticker.upper()
+    from . import options_research
+    if options_research.research_only():
+        return await _fetch_public_options_data(
+            ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon,
+            public_client=public_client,
+        )
     if execution_preferred:
         alpaca_chain = await _fetch_alpaca_options_data(
             ticker, catalyst_date, spot_hint=spot_hint, horizon=horizon
@@ -621,6 +628,7 @@ def find_best_contract(chain_data: dict, direction: str, budget: float = 300.0) 
             "expiration": str(row.get("expiration") or chain_data.get("expiration") or ""),
             "days_to_expiration": _safe_int(row.get("days_to_exp")),
             "premium": round(premium, 2),
+            "quote_time": row.get("executableQuoteTime") if chain_data.get("data_provider") == "PUBLIC_OPTIONS" else row.get("quoteTime"),
             "bid": round(bid, 2),
             "ask": round(ask, 2),
             "iv": round(iv, 4),
