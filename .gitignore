@@ -111,3 +111,6 @@ frontend/node_modules/.cache/default-development/23.pack
 !.env.example
 !backend/.env.example
 !frontend/.env.example
+
+# Dated private options approval and performance research exports.
+backend/data/options-research/

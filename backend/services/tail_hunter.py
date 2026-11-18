@@ -448,6 +448,8 @@ async def status() -> dict[str, Any]:
 async def execute_tail(candidate_id: str) -> dict[str, Any]:
     from . import options_desk
 
+    if not options_desk.options_execution_enabled():
+        return {"ok": False, "reason": "options_execution_disabled"}
     db = get_db()
     active = await _active_tail_count()
     if active >= TAIL_MAX_CONCURRENT:
