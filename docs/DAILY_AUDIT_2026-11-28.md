@@ -19,7 +19,7 @@ Infrastructure DEGRADED · Data PARTIAL · Entries NOT VERIFIED (MED-021) · Exi
 | 06:52:43Z | 200 | 1.19 s | true | NOT_ASSESSED | same | 31 |
 | 06:53:19Z | 200 | 1.13 s | true | NOT_ASSESSED | same | 31 |
 
-Span 72 s. `db_reason=null`, `online=true`, 0 Claude calls in last scan. `last_scan_at` = Friday 18:31 ET evening scan, i.e. scans continued after Friday's 13:00 early close. No Saturday midnight scan is expected: `_stock_scan_market_day_now` returns false for weekday ≥ 5 (`backend/services/scheduler.py:117`). The skip itself is not persisted (LOW-009).
+Span 72 s. `db_reason=null`, `online=true`, 0 Claude calls in last scan. `last_scan_at` = Friday 18:31 ET evening scan, i.e. scans continued after Friday's 13:00 early close. No Saturday midnight scan is expected: `_stock_scan_market_day_now` returns false for weekday ≥ 5 (`backend/services/scheduler.py:114-115`). The skip itself is not persisted (LOW-009).
 
 ## 3. Position coverage and funnel
 
